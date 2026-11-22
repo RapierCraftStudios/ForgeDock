@@ -1742,6 +1742,8 @@ execution:
 
 **Lifecycle:** each sandbox is listed in the lane ledger (`~/.forge/ledger/<batch>/sandbox-<n>.json`, kind `sandbox`) before it starts and removed from it only after teardown succeeded: on success, failure, a lane that exits without a result, and adopt after `--resume`. A sandbox left by a killed dispatcher is reaped by `forgedock gc --apply` (scope `--sandboxes`). The container provider mounts the checkout's git dir read-only at `/src` (cloned to the container's own `/work`), `~/.forge/verify-cache` read-only at `/cache`, and the batch `lanes/` dir at `/result`.
 
+**Pool agent image hygiene** (forge#5758, keys in the pool agent config, not `forge.yaml`): after a self-update or start builds the lane image, the agent removes superseded `forgedock-lane:<version>` images and their per-repo `-t<hash>` tools variants. `keep_lane_images` (default `2`) is the number of newest versions kept, always including the running one; a tag any container (running or exited-but-kept) uses is never removed, and images outside the `forgedock-lane:` prefix (`image` overrides) are never touched. Every `build_cache_interval_s` seconds (default `21600`, 6 h) `reap()` also runs `docker builder prune --keep-storage <build_cache_keep_gb>gb` (`build_cache_keep_gb`, default `20`) and removes dangling anonymous volumes (64-hex names no container references; named `cs-work-`/`cs-cache-` volumes are not touched). Failures are logged and never fail an update or a reap.
+
 **Remote provider** (`bin/lean/sandbox-remote.mjs`, forge#4254). The sandbox is addressed by the id ForgeDock picks (`fdrsbx-<batch>-<issue>`), JSON over HTTP:
 
 | Request | Response |
@@ -2921,6 +2923,20 @@ cat ~/.forge/install-receipt.json
 There is no CLI subcommand to read it yet — `doctor()` reading the receipt to detect drift is a deliberately deferred stretch goal, not part of this feature.
 
 ---
+
+## Pool agent cache volumes
+
+Keys of the pool agent's JSON config (`forgedock pool agent`), not of `forge.yaml`. Each repo's `cs-cache-<slug>` volume holds the package caches, depcache, env snapshots, git mirror and lane work dirs. The agent labels the volumes it creates `computeshare.cache=1` (`forgedock gc` reports them and never reclaims them) and sweeps them every `cache_sweep_interval_s`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `cache_max_age_days` | number | `14` | uv/npm/pip/poetry cache files, depcache and env snapshot entries older than this are deleted by the agent sweep, with no launch needed. The pnpm store is pruned and the git mirror gets `git gc --auto`. |
+| `cache_max_gb` | number | unset (no cap) | Per-volume cap. A volume over it is shrunk oldest-first below the cap; work dirs of live sandboxes are never touched. |
+| `cache_idle_days` | number | `30` | A volume with no launch for this long and no referencing sandbox is removed. Evicted only when its last use is known (`/cache/.last-used`, written by the lane entrypoint). |
+| `cache_never_evict` | list of volume names | `[]` | Volumes (e.g. `cs-cache-marcode`) that are never swept or evicted. |
+| `cache_sweep_interval_s` | number | `3600` | Gap between cache sweeps. |
+
+A failed or timed-out sweep (10 min limit) shows as `cache_sweep_error` in the agent's `/capacity`, next to `cache_volumes` (size per volume).
 
 ## Complete Example
 

@@ -13,6 +13,7 @@ if [ -n "${CS_WORK_DIR:-}" ]; then
   rm -rf /work
   ln -s "$CS_WORK_DIR" /work
 fi
+date +%s > /cache/.last-used 2>/dev/null || true # #5757: the agent evicts cache volumes idle for cache_idle_days
 exec > >(tee -a /csout/lane.log) 2>&1
 
 export HOME=/root

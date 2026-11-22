@@ -7,6 +7,7 @@ import { laneBackendId } from "./limits.mjs";
 import { parseExperiment, assignArm } from "../experiment.mjs";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
+import { CHECKS_CLI } from "./prompts.mjs"; // #5727
 import { normaliseDecision, writeDecisionIndex } from "./decisions.mjs"; // #5338
 import { execFileSync } from "node:child_process";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync, readdirSync, chmodSync } from "node:fs";
@@ -32,6 +33,7 @@ import { makeRunTmp, wrapLaneLimits, laneCapNotice, systemdRunAvailable, makeLea
 import { retrying, ghCacheRetry, refreshAuthOnce, GH_AUTH_RE, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
 import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT, ENV_VALIDATE_PLACEMENT, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
+import { parsePagesConfig } from "./pagegate.mjs";
 import * as refactorMod from "./refactor.mjs";
 import { readAdmission, readConformanceMode, readReviewIncomplete, readEnvConfig, readContextPack } from "../engine-cli.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
@@ -945,6 +947,43 @@ describe("core work-on", () => {
     const r = await run(l, { dir: tmpDir("lean-5423b-"), ...remote });
     assert.equal(r.code, "env.tool_missing");
     assert.ok(!l.edits.some((e) => e.includes("--add-label") && e.includes("needs-human")), JSON.stringify(l.edits));
+  });
+
+  describe("#5727 frozen forgedock install paths", () => {
+    const remote = { placement: { where: "remote", reason: "mode remote" } };
+    const H41009 = "/home/dev/.local/lib/node_modules/forgedock/bin/lean/checks.mjs"; // #41009's frozen V5 names the host install
+    const STALE = existsSync(H41009) ? "/opt/absent-5727/lib/node_modules/forgedock/bin/lean/checks.mjs" : H41009; // on that host itself, an equally stale path
+    const V5 = `node ${STALE} --base origin/staging`;
+    const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V5", command: V5 }] };
+    const stale = (cmd) => (String(cmd).includes(STALE) ? { rc: 1, output: `node:internal/modules/cjs/loader\nError: Cannot find module '${STALE}'\n code: 'MODULE_NOT_FOUND'` } : { rc: 0, output: "" });
+    it("#5727 remote preflight runs a stale forgedock checks path as this install's path", async () => {
+      const w = world({ contract }); const seen = [];
+      w.io.probeCommand = async (a) => { seen.push(a.command); return stale(a.command); };
+      w.io.preflightRun = async (a) => { seen.push(a.command); return stale(a.command); };
+      const r = await run(w, { dir: tmpDir("lean-5727a-"), ...remote });
+      assert.notEqual(r.code, "env.tool_missing", r.detail);
+      assert.notEqual(r.terminalReason, "needs-human", r.detail);
+      assert.ok(builders(w).length >= 2, "the builder implements");
+      assert.ok(seen.some((c) => c.includes(CHECKS_CLI)), JSON.stringify(seen));
+      assert.ok(!seen.some((c) => c.includes(STALE)), "no runner saw the stale path");
+    });
+    it("#5727 a frozen contract carries no absolute forgedock install path", async () => {
+      const w = world({ contract });
+      await run(w, { dir: tmpDir("lean-5727b-") });
+      const posted = w.comments.find((x) => x.includes("FORGE:CONTRACT"));
+      assert.ok(posted, "contract posted");
+      assert.doesNotMatch(posted, /\/forgedock\/bin\//);
+      assert.match(posted, /\$FORGEDOCK_CHECKS_CLI --base origin\/staging/);
+    });
+    it("#5727 light-lane and precheck runners receive the resolved forgedock path", async () => {
+      const w = world({ contract }); const ran = [];
+      w.io.preflightRun = async (a) => { ran.push(a.command); return stale(a.command); }; // a local (host) placement runs it too
+      const r = await run(w, { dir: tmpDir("lean-5727c-"), placement: { where: "local", reason: "x" } });
+      assert.notEqual(r.code, "env.tool_missing", r.detail);
+      const v5 = ran.filter((c) => /--base origin\/staging/.test(c));
+      assert.ok(v5.length >= 1, JSON.stringify(ran));
+      assert.ok(v5.every((c) => c.includes(CHECKS_CLI) && !c.includes("$FORGEDOCK")), JSON.stringify(v5));
+    });
   });
 
   describe("#5652 in-sandbox recipe install", () => {
@@ -2475,7 +2514,7 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     const prev = process.env.FORGE_HOST_PARALLELISM; process.env.FORGE_HOST_PARALLELISM = "3";
     try { assert.equal((await run(w, { envSetup: "make setup", precheck: { commands: ["npm run lint"] } })).terminalReason, "merged"); }
     finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; }
-    const lane = { UV_CACHE_DIR: "/c/uv", TMPDIR: w.envs[0].TMPDIR, FORGE_HOST_PARALLELISM: "3", FORGE_LANE_WORKTREE: "1", GIT_CEILING_DIRECTORIES: w.envs[0].GIT_CEILING_DIRECTORIES, PATH: "/rt/toolchain/bin:/usr/bin" };
+    const lane = { UV_CACHE_DIR: "/c/uv", TMPDIR: w.envs[0].TMPDIR, FORGE_HOST_PARALLELISM: "3", FORGE_LANE_WORKTREE: "1", GIT_CEILING_DIRECTORIES: w.envs[0].GIT_CEILING_DIRECTORIES, FORGEDOCK_CHECKS_CLI: CHECKS_CLI, FORGEDOCK_ENTRY_CLI: FORGEDOCK_CLI, PATH: "/rt/toolchain/bin:/usr/bin" };
     assert.equal(lane.GIT_CEILING_DIRECTORIES.split(":")[0], "/wt", "#5825: lane children are ceiled at the worktree parent");
     assert.match(lane.TMPDIR, /\/runs\/7-/, "the builder ran with the run TMPDIR");
     assert.deepEqual(w.rgCalls.map((x) => x.env), [lane], "red-green gets the lane env, not the daemon's");
@@ -4044,6 +4083,16 @@ describe("base-sync (#4100)", () => {
     assert.equal(r.terminalReason, "ci-pending");
     assert.equal(w.merges.length, 0);
   });
+  it("#5794 the release fix lane (FORGE_RELEASE_FIX_LANE=1) merges past a pending release PR; other lanes stay held", async () => {
+    const w = world({ releasePrs: RELEASE_PENDING });
+    w.io.env = { ...process.env, FORGE_RELEASE_FIX_LANE: "1" };
+    assert.equal((await run(w, { ciMaxMinutes: 1 })).terminalReason, "merged");
+    assert.equal(w.merges.length, 1);
+    const h = world({ releasePrs: RELEASE_PENDING });
+    h.io.env = { ...process.env, FORGE_RELEASE_FIX_LANE: "" };
+    assert.equal((await run(h, { ciMaxMinutes: 1 })).terminalReason, "ci-pending");
+    assert.equal(h.merges.length, 0);
+  });
   it("#5709 no release PR, or the hold disabled, leaves merge behaviour unchanged", async () => {
     assert.equal((await run(world({ releasePrs: [] }))).terminalReason, "merged");
     const w = world({ releasePrs: RELEASE_PENDING });
@@ -4468,6 +4517,18 @@ describe("host admission (#4105)", () => {
     assert.equal(w.ghCalls, 0); assert.equal(w.leaseWrites.length, 0); assert.equal(w.leaseReads ?? 0, 0);
     assert.equal(w.calls.length, 0, "no git or runner calls");
     assert.deepEqual(w.labels, []);
+  });
+
+  it("ramping lanes are subtracted: deferred host.busy with the projected numbers; a passed admission is recorded (#5845)", async () => {
+    const w = withHost(world(), { ...host({ mem: 6000 }), rampingMb: () => 4096, rampingLanes: () => 2, laneFootprintMb: () => 2048 });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "host.busy");
+    assert.equal(r.detail, "host busy: projected mem 1.9G (free 5.9G − ramping 4G) < need 4G; retry in 60s");
+    assert.equal(w.ghCalls, 0);
+    let recorded = 0;
+    const ok = withHost(world(), { ...host(), recordAdmission: () => { recorded++; }, rampingMb: () => 0, rampingLanes: () => 0 });
+    assert.equal((await run(ok)).terminalReason, "merged");
+    assert.equal(recorded, 1);
   });
 
   it("low tmp space on the run TMPDIR filesystem or on /tmp is deferred host.busy", async () => {
@@ -5534,6 +5595,29 @@ describe("lane resolution in core work-on (#4125)", () => {
       const r = await run(w, extra);
       assert.deepEqual([r.terminalReason, r.code], ["lane-refused", "lane.default_branch"], JSON.stringify(extra));
       assert.deepEqual(touched(w), nothing);
+    }
+  });
+
+  it("#5846 a transient lane read in runCore defers lane.unresolved instead of lane-refused", async () => {
+    const w = leased(world({ milestone: "M1", branchesOnOrigin: ["staging", "milestone/m1"] }));
+    const gh = w.io.gh;
+    w.io.gh = async (a, opts) => { if (a[0] === "issue" && a[1] === "view" && a.includes("milestone")) throw new Error("spawn UNKNOWN"); return gh(a, opts); };
+    const r = await run(w, { lane: undefined });
+    assert.deepEqual([r.terminalReason, r.code], ["deferred", "lane.unresolved"]);
+    assert.ok(r.retryInSeconds > 0);
+    assert.match(r.detail, /cannot read the milestone of #7/);
+    assert.deepEqual(touched(w), nothing);
+  });
+
+  it("#5846 genuine lane refusals stay lane-refused with their own codes", async () => {
+    const cases = [
+      [{ milestone: "M1", branchesOnOrigin: ["staging", "milestone/m1"] }, { lane: "staging" }, "lane.mismatch"],
+      [{}, { lane: "main" }, "lane.default_branch"],
+      [{ milestone: "Not Yet" }, { lane: undefined }, "lane.branch_missing"],
+    ];
+    for (const [o, extra, code] of cases) {
+      const r = await run(leased(world(o)), extra);
+      assert.deepEqual([r.terminalReason, r.code], ["lane-refused", code]);
     }
   });
 
@@ -9400,6 +9484,31 @@ describe("design gate routing in the lane (#5330 R11, R13, R15)", () => {
   });
 });
 
+describe("spec-only page gate failures end design.spec_required (#5729)", () => {
+  const PAGE = "web/src/app/(site)/contact/page.tsx";
+  const brief = { design_spec: "FORGE:DESIGN_SPEC", seo: Object.fromEntries(["intent", "icp", "title", "h1", "meta", "structured_data", "links_in", "links_out", "gsc_baseline", "measure_by"].map((k) => [k, "x"])), geo: { surfaces: "llms.txt", agent_question: "q" } };
+  const pc = { ...CONTRACT, page_gate: brief, deliverables: [{ id: "D1", path: PAGE, change: "repoint the link", requirements: ["R1"] }] };
+  const pagesConfig = { ...parsePagesConfig(undefined, { hasAppPages: true }), require: ["design"] };
+  const link = (h, x = "") => `<Link href="${h}"${x}>Book a demo</Link>`;
+  const mk = (diff) => { const w = world({ contract: pc, changed: [PAGE, "test/foo.test.js"], reviews: [conf({}, pc, [PAGE, "test/foo.test.js"])] }); w.diffText = `+++ b/${PAGE}\n${diff}`; return w; };
+  it("spec-only precheck failures end design.spec_required with no resume for 5729", async () => {
+    const w = mk(`-${link("/contact")}\n+${link("/contact")}<Badge />\n`), r = await run(w, { pagesConfig });
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(r.code, OUTCOME_CODES.DESIGN_SPEC_REQUIRED);
+    assert.ok(w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN") && /recovery lane was spent/.test(c)));
+    assert.ok(!builders(w).some((c) => /resume|conformance\.unimplemented/i.test(c[4] ?? "")), "no builder resume");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: r.code }), "terminal", "no recovery lane");
+  });
+  it("replay of #40917 spends no resume or recovery for 5729", async () => {
+    const w = mk(`-${link("https://calendly.com/x", ' target="_self"')}\n+${link("/contact", ' target="_blank"')}\n`), r = await run(w, { pagesConfig });
+    assert.equal(r.code, OUTCOME_CODES.DESIGN_SPEC_REQUIRED); // only the screenshot row is left, and it is terminal too
+    const note = w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN")) ?? "";
+    assert.ok(!/is a public page but the issue has no approved/.test(note), "no spec row for a copy edit");
+    assert.match(note, /visual check/);
+    assert.ok(!builders(w).some((c) => /conformance\.unimplemented/i.test(c[4] ?? "")), "no builder resume");
+  });
+});
+
 describe("classification record in the plan prompt (#5557)", () => {
   it("asks only for the judgment fields and never for units or migrations", () => {
     const p = builderPlanPrompt(7);
@@ -9545,7 +9654,7 @@ describe("#5683 monorepo sub-project dependencies are not host tools", () => {
   it("#5764 forgedock (the engine CLI that runs the lane in the sandbox) is never a remote tool miss", async () => {
     const remote = { placement: { where: "remote", reason: "mode remote" } };
     const w = world({ contract: { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "forgedock check" }] } });
-    w.io.probeCommand = async (a) => ({ rc: /forgedock/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
+    w.io.probeCommand = async (a) => ({ rc: /forgedock/.test(a.command) ? 127 : 0, output: /forgedock/.test(a.command) ? "sh: 1: forgedock: not found" : "" });
     const r = await run(w, { dir: tmpDir("lean-5764d-"), ...remote });
     assert.notEqual(r.code, "env.tool_missing");
     assert.doesNotMatch(w.comments.map((c) => c.body ?? c).join("\n"), /Remote sandbox lacks/);

@@ -18,7 +18,7 @@ const RECOVERING_LABEL = "workflow:recovering";
 import { readdirSync, statSync, readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { homedir, hostname, cpus } from "node:os";
-import { localLaneCap } from "./lean/admission.mjs";
+import { localLaneCap, ADMISSION_DEFAULTS } from "./lean/admission.mjs";
 import { memAvailableMb } from "./lean/heavy.mjs";
 import { liveOverload, formatOverload, formatHostLoad } from "./lean/hostload.mjs";
 import { join, resolve as resolvePath } from "node:path";
@@ -389,7 +389,7 @@ function readLeanSetting(key, cwd = process.cwd()) {
 export function liveLaneCap(globalParallel, { cfg = readAdmission(), host = { cores: () => cpus().length, memAvailableMb } } = {}) {
   return () => {
     let derived = null;
-    try { derived = localLaneCap({ cfg, cores: host.cores(), memAvailableMb: host.memAvailableMb() }); } catch { derived = null; }
+    try { derived = localLaneCap({ cfg, cores: host.cores(), memAvailableMb: host.memAvailableMb(), rampingMb: (() => { try { return host.rampingMb?.(cfg?.ramp_s ?? ADMISSION_DEFAULTS.ramp_s) ?? 0; } catch { return 0; } })() }); } catch { derived = null; }
     return derived === null ? globalParallel : globalParallel === null ? derived : Math.min(globalParallel, derived);
   };
 }
@@ -403,6 +403,7 @@ export function readAdmission(cwd = process.cwd()) {
       min_free_mem_mb: num(e.min_free_mem_mb ?? e.admission_min_free_mem_mb), min_free_tmp_mb: num(e.min_free_tmp_mb ?? e.admission_min_free_tmp_mb),
       max_load_per_core: num(e.max_load_per_core ?? e.admission_max_load_per_core),
       lane_cpu_reservation: pos(e.lane_cpu_reservation ?? e.admission_lane_cpu_reservation), lane_mem_mb: pos(e.lane_mem_mb ?? e.admission_lane_mem_mb),
+      ramp_s: pos(e.ramp_s ?? e.admission_ramp_s), max_new_per_ramp: num(e.max_new_per_ramp ?? e.admission_max_new_per_ramp), // #5845: 0 = no rate limit
       overload_load_per_core: num(e.overload_load_per_core ?? e.admission_overload_load_per_core) }; // #5174: hostload.mjs overload hold
 
   } catch { return {}; }
@@ -502,6 +503,23 @@ export function readExecution(cwd = process.cwd()) {
     const sec = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.execution;
     return sec && typeof sec === "object" ? parseExecution(sec) : undefined;
   } catch { return undefined; }
+}
+/** #5748: forge.yaml sets a valid `execution.mode` (even `local`): the explicit opt-out from the public-repo default. */
+export function executionModeExplicit(cwd = process.cwd()) {
+  try { return ["local", "remote", "hybrid"].includes(String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.execution?.mode ?? "").trim()); } catch { return false; }
+}
+/** #5748: `exec` with the public-repo default (actions provider) applied; visibility is read once per repo and fails closed to private. */
+const visibilityCache = new Map();
+export async function withPublicDefault(exec, { repo, gh, deps = {}, cwd = process.cwd() } = {}) {
+  if (executionModeExplicit(cwd)) return exec;
+  const execMod = await import("./lean/execution.mjs");
+  const key = String(repo ?? "");
+  let isPublic = deps.repoPublic;
+  if (isPublic === undefined) {
+    if (!visibilityCache.has(key)) visibilityCache.set(key, await execMod.repoIsPublic({ repo, gh }));
+    isPublic = visibilityCache.get(key);
+  }
+  return execMod.resolveDefaultExecution(exec, { isPublic });
 }
 /**
  * forge.yaml `learned.test_commands` (#4240): the repo's declared check commands, run by the core path in the lane
@@ -1017,8 +1035,9 @@ export async function runFromCli(argv, deps = {}) {
   // #5542: placement. A lane already placed (--placement, a batch lane, --adopt, --recover) or forced local runs here; otherwise a
   // remote or hybrid `execution:` hands the single issue to the same batch placement `orchestrate` uses.
   if (enginePath !== "full") {
-    const exec = deps.execution !== undefined ? deps.execution : readExecution();
     const placed = placementWhere || argv.includes("--adopt") || recover || (deps.env ?? process.env).FORGEDOCK_BATCH_ID;
+    const exec0 = deps.execution !== undefined ? deps.execution : readExecution();
+    const exec = deps.execution === undefined && !placed && !argv.includes("--local") ? await withPublicDefault(exec0, { repo, gh: (a) => io.gh(a), deps }) : exec0; // #5748: no visibility lookup for a lane already placed
     const wantsRemote = exec && (exec.mode === "remote" || (exec.mode === "hybrid" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1));
     if (argv.includes("--local")) console.log("placement: local (--local)");
     else if (!placed && wantsRemote) {
@@ -1977,7 +1996,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       return l.runOne(n, ln, ctx);
     }, adopt: l.adopt });
     const execMod = await import("./lean/execution.mjs");
-    const exec = deps.execution !== undefined ? deps.execution : readExecution(cwd);
+    const exec = deps.execution !== undefined ? deps.execution : await withPublicDefault(readExecution(cwd), { cwd, repo, gh: (a) => leanIo.gh(a, { cwd }), deps }); // #5748
     execForNeeds = exec ?? null;
     hybrid = exec?.mode === "hybrid" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1;
     let remoteStop = null; // #4612: the sandbox provider's checkpoint stop, used only when the cancel asks for it
@@ -1985,7 +2004,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       // #4253: lanes run in sandboxes, ledger-tracked per lane, admitted against max_remote instead of the host cap.
       let gitDir = null;
       try { gitDir = resolvePath(cwd, String(await leanIo.git(["rev-parse", "--git-common-dir"], { cwd })).trim()); } catch { gitDir = null; }
-      const provider = deps.sandboxProvider ?? execMod.providerByName(exec.provider, { batch, repo, cwd, image: exec.image, gitDir, script: laneScript, bin: deps.laneBin, exec, env, prefetch: (n) => prefetchOf.get(n) ?? [], ...(deps.sandboxFetch ? { fetchFn: deps.sandboxFetch } : {}) });
+      const provider = deps.sandboxProvider ?? execMod.providerByName(exec.provider, { batch, repo, cwd, ...(deps.actionsApi ? { actionsApi: deps.actionsApi } : {}), image: exec.image, gitDir, script: laneScript, bin: deps.laneBin, exec, env, prefetch: (n) => prefetchOf.get(n) ?? [], ...(deps.sandboxFetch ? { fetchFn: deps.sandboxFetch } : {}) });
       const { makeLedger } = await import("./lean/ledger.mjs");
       const ledgerFor = deps.sandboxLedger ?? ((n) => makeLedger({ batch: batch.id, lane: `sandbox-${n}`, owner: `orch_${process.pid}`, issue: n }));
       const bud = exec.budget ?? {};
@@ -2221,6 +2240,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     alert: (text, health) => batchHealth.deliverAlert({ text, batchId: batch.id, health, sink, gh: (a) => leanIo.gh(a), repo, config: healthConf, epics: epicsOf(argv), ...(deps.notify ? { notify: deps.notify } : {}) }) });
   let healthTimers = { cancel: () => {} };
   try { healthTimers = batchHealth.scheduleChecks({ batch, created: healthCreated, config: healthConf, now: healthNow, ...(deps.healthTimer ? { setTimer: deps.healthTimer.set, clearTimer: deps.healthTimer.clear } : {}), check: healthCheck }); } catch { /* health is advisory */ }
+  let rampProbe = {};
+  try { rampProbe = (deps.host ?? (await import("./lean/effects.mjs")).makeHostProbe()); } catch { rampProbe = {}; } // #5845: the live cap subtracts lanes still ramping
   try {
     rows = await orchestrate({
       ...(estimate ? { estimate } : {}),
@@ -2232,7 +2253,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       ...(autoMod.addsEpicChildren(autoChildren.mode) ? { getChildren: async () => ({ list: await autoMod.readChildList({ gh: (a) => leanIo.gh(a), repo, fields: childFields ??= await autoMod.hostListFields((a) => leanIo.gh(a)) }), elsewhere: autoMod.liveElsewhere({ batchMod, root, self: batch.id, repo }) }) } : {}),
       issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, expireHolds: batch.expireHolds, getHoldInfo: batch.readHoldInfo, getGates: batch.readGates, baseWait: baseWaits.size ? baseWaitOf(baseWaits, { io, leanIo, cwd }) : null, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(Number.isInteger(orch.transientRetries) ? { transientRetries: orch.transientRetries } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, rotator, batchId: batch.id, drift, lifecycle, integration,
-      ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd) }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
+      ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd), host: { cores: () => cpus().length, memAvailableMb, rampingMb: rampProbe.rampingMb } }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       // #5174: hold new local admissions while loadavg/cores is above engine.overload_load_per_core (host-wide batches only)
       ...(overload ? { overload } : {}),
       ...(remote ? { remote } : {}),

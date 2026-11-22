@@ -64,6 +64,7 @@ import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { validateLaneTools } from "../pool/lane-tools.mjs";
 import { resolveCredential, memoKeychain, defaultKeychain } from "./credentials.mjs";
 import { httpTransport, isActionsEndpoint, remoteProvider } from "./sandbox-remote.mjs";
+import { actionsProvider, laneCap } from "./sandbox-actions.mjs";
 import { ADMISSION_DEFAULTS } from "./admission.mjs";
 import { classifyStep, heavyConfig, memAvailableMb } from "./heavy.mjs";
 import { detectPins } from "./toolchain.mjs";
@@ -72,7 +73,7 @@ import { parseRelayCommands } from "./relay.mjs";
 import { detectUsageLimit, parseSessionLimitResetEpochMs } from "../runner.mjs";
 
 export const EXECUTION_MODES = Object.freeze(["local", "remote", "hybrid"]);
-export const SANDBOX_PROVIDERS = Object.freeze(["local", "container", "remote", "pool"]);
+export const SANDBOX_PROVIDERS = Object.freeze(["local", "container", "remote", "pool", "actions"]);
 const NAME_RE = /^[a-z][a-z0-9-]*$/;
 const CAPABILITY_RE = /^[a-z][a-z0-9_-]*$/;
 const safeRegExp = (src) => { try { return new RegExp(src, "i"); } catch { return null; } };
@@ -146,7 +147,13 @@ export function parseExecution(sec = {}) {
   // #5094: rotator.mjs reads its per-account quota state; #5205: off/none/false disables auto-detection, anything else is unset (auto)
   const rot = str(s.account_rotator).toLowerCase(), accountRotator = rot === "tokenbaton" ? "tokenbaton" : ["off", "none", "false"].includes(rot) ? "off" : null;
   const unreachableWindowMin = str(s.unreachable_window_min) !== "" && Number.isFinite(uw) && uw >= 0 ? uw : null; // unset: providerLanes defaults to 5
-  return { mode, maxRemote, provider, image, secrets, budget, ...(hostFallback !== null ? { hostFallback } : {}), ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(accountRotator ? { accountRotator } : {}), ...(lt.tools.length ? { laneTools: lt.tools } : {}), ...(lt.errors.length ? { laneToolsErrors: lt.errors } : {}) };
+  // #5748: the `actions` provider's plan (concurrent-job limit), explicit job_limit, CI reserve and dispatcher identity
+  const jl = Number(str(s.job_limit)), cr = Number(str(s.ci_reserve));
+  const jobLimit = str(s.job_limit) !== "" && Number.isInteger(jl) && jl > 0 ? jl : null;
+  const ciReserve = str(s.ci_reserve) !== "" && Number.isInteger(cr) && cr >= 0 ? cr : null;
+  const plan = ["free", "pro", "team", "enterprise"].includes(str(s.plan).toLowerCase()) ? str(s.plan).toLowerCase() : null;
+  const dispatcher = /^[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?$/.test(str(s.dispatcher)) ? str(s.dispatcher) : null;
+  return { mode, maxRemote, provider, image, secrets, budget, ...(jobLimit ? { jobLimit } : {}), ...(ciReserve !== null ? { ciReserve } : {}), ...(plan ? { plan } : {}), ...(dispatcher ? { dispatcher } : {}), ...(hostFallback !== null ? { hostFallback } : {}), ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(accountRotator ? { accountRotator } : {}), ...(lt.tools.length ? { laneTools: lt.tools } : {}), ...(lt.errors.length ? { laneToolsErrors: lt.errors } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -213,6 +220,25 @@ export function openExecutionBudget({ budget = {}, file = executionBudgetFile(),
       return { ok: true };
     },
   };
+}
+
+/**
+ * #5748: the product default. An `execution.mode` that forge.yaml does not set (`exec.modeExplicit` unset) on a public repo
+ * places lanes on GitHub-hosted runners (`provider: actions`, free minutes), capped at the plan's job limit minus a CI reserve.
+ * A private repo, an unknown visibility (`isPublic` not true: fails closed) and any explicit mode, `local` included, keep
+ * `exec` as is.
+ */
+export function resolveDefaultExecution(exec, { isPublic = false } = {}) {
+  if (exec?.modeExplicit || isPublic !== true) return exec;
+  const base = exec ?? parseExecution({});
+  const cap = laneCap({ jobLimit: base.jobLimit ?? null, plan: base.plan ?? null, ciReserve: base.ciReserve });
+  return { ...base, mode: "remote", provider: "actions", maxRemote: cap, defaultedActions: true };
+}
+
+/** #5748: whether `repo` is public, from `gh api repos/<repo>`; any failure is false (private: today's default). */
+export async function repoIsPublic({ repo, gh }) {
+  if (!repo || typeof gh !== "function") return false;
+  try { return JSON.parse(await gh(["api", `repos/${repo}`]))?.private === false; } catch { return false; }
 }
 
 /** Where a `mode: remote` lane runs: remote only with `max_remote >= 1`. Hybrid is placed per lane by `placeLane` (#4256). */
@@ -439,7 +465,8 @@ export function hostHeadroom({ cfg = {}, heavyCfg = {}, host = { memAvailableMb,
   if (c.enabled === false) return { ok: true, detail: "" };
   const reasons = [];
   const need = c.min_free_mem_mb + h.step_mem_mb, mem = probe(host?.memAvailableMb);
-  if (mem !== null && mem < need) reasons.push(`mem ${mem} MB < ${need} MB`);
+  const ramping = mem === null ? 0 : Math.max(0, probe(() => host?.rampingMb?.(c.ramp_s)) ?? 0); // #5845: lanes admitted within the ramp window have not grown yet
+  if (mem !== null && mem - ramping < need) reasons.push(ramping > 0 ? `mem ${mem} MB − ramping ${ramping} MB < ${need} MB` : `mem ${mem} MB < ${need} MB`);
   const maxLoad = typeof c.max_load_per_core === "number" && Number.isFinite(c.max_load_per_core) ? c.max_load_per_core : null;
   if (maxLoad !== null) {
     const load = probe(host?.loadAvg1), cores = probe(host?.cores);
@@ -602,6 +629,7 @@ export function poolRouterConfig({ env = process.env, path = env.COMPUTESHARE_CO
 export function providerByName(name, opts) {
   if (name === "local") return localProvider(opts);
   if (name === "container") return containerProvider(opts);
+  if (name === "actions") return actionsProvider({ batch: opts.batch, repo: opts.repo, settings: opts.exec ?? {}, env: opts?.env ?? process.env, ...(opts?.transport ? { transport: opts.transport } : {}), ...(opts?.actionsApi ? { api: opts.actionsApi } : {}), ...(opts?.now ? { now: opts.now } : {}) });
   if (name === "remote" || name === "pool") {
     const env = opts?.env ?? process.env;
     const exec = opts?.exec ?? {};

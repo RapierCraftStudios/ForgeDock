@@ -13,8 +13,9 @@ import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
 import { repoRoot, versionOf, laneImageTag, laneBuildArgs } from "./version.mjs";
 import { jsonStore } from "./store.mjs";
 import { makeWarm } from "./warm.mjs";
-import { resolveLaneImage, laneImageNow, laneToolsTag } from "./lane-tools.mjs";
+import { resolveLaneImage, laneImageNow, laneToolsTag, isLaneToolsTagOf } from "./lane-tools.mjs";
 import { hostDiskFree } from "./health.mjs";
+import { planIdleEviction, CACHE_LABEL } from "./cache-sweep.mjs";
 
 const LABEL = "computeshare=1";
 const LOG_CHUNK = 256 * 1024;
@@ -122,6 +123,11 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   // #5535: disk figures for the router inventory; optional, omitted when unreadable. Sandbox dirs are walked at most every 60s.
   let diskCache = { at: 0, mb: {} };
   let lastWorkSweep = -Infinity;
+  let lastCachePrune = -Infinity;
+  // #5757: cache volume hygiene state: per-volume sweep error/size/last use (last use also from launches in this process).
+  let lastCacheSweep = -Infinity;
+  const cacheErr = new Map(), cacheInfo = new Map(), cacheUsed = new Map();
+  const sweepFail = (v, what, e) => { const m = `${what} ${v}: ${String(e.stderr || e.message).slice(0, 200)}`; cacheErr.set(`${what}:${v}`, m); log.warn?.(m); };
   const dirMb = (d) => { let n = 0, seen = 0; const walk = (x) => { if (seen++ > 200000) return; let st; try { st = lstatSync(x); } catch { return; } n += st.size; if (st.isDirectory()) { try { for (const e of readdirSync(x)) walk(join(x, e)); } catch { /* unreadable */ } } }; walk(d); return Math.round(n / 1048576); };
   function diskView() {
     const out = {};
@@ -147,10 +153,83 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     if (!hd || !Number.isFinite(hd.gb)) return {};
     return { host_disk_free_gb: hd.gb, host_disk_low: hostDiskLow(hd.gb, active) };
   }
+  // #5856: priority classes. `reserved` sandboxes are admitted up to a named reservation (cfg.reservations) and may reclaim
+  // capacity from `borrow` ones (throttle first, then SIGTERM so the lane checkpoints and reports run.interrupted);
+  // `normal` stays out of reserved space; `borrow` may use reserved-but-idle space. Without reservations/idle_only: flat, as before.
+  const PRIORITIES = ["reserved", "normal", "borrow"];
+  const reservations = () => (Array.isArray(cfg.reservations) ? cfg.reservations.filter((r) => r && typeof r.name === "string" && r.cpus > 0 && r.mem_gb > 0) : []);
+  const prioOf = (r) => r.priority ?? "normal";
+  const activeRecs = () => Object.values(sb()).filter((s) => s.state !== "exited");
+  const sumRecs = (rs) => rs.reduce((a, s) => ({ cpus: a.cpus + s.cpus, mem: a.mem + s.mem_gb }), { cpus: 0, mem: 0 });
+  const weighted = () => reservations().length > 0 || Boolean(cfg.idle_only);
+  const SHARES = () => ({ reserved: 4096, normal: 1024, borrow: 128, throttled: 2, ...(cfg.cpu_shares ?? {}) });
+  /** Admission headroom per class: free = physical, unreserved_free = space outside every reservation, borrowable = what `borrow` may take. */
+  function tiers() {
+    const act = activeRecs(), rs = reservations();
+    const tot = rs.reduce((a, r) => ({ cpus: a.cpus + r.cpus, mem: a.mem + r.mem_gb }), { cpus: 0, mem: 0 });
+    const u = sumRecs(act), nonRes = sumRecs(act.filter((s) => prioOf(s) !== "reserved"));
+    const free = { cpus: cfg.allow_cpus - u.cpus, mem: cfg.allow_mem_gb - u.mem };
+    return { act, rs, tot, free, unreserved: { cpus: Math.max(0, Math.min(free.cpus, cfg.allow_cpus - tot.cpus - nonRes.cpus)), mem: Math.max(0, Math.min(free.mem, cfg.allow_mem_gb - tot.mem - nonRes.mem)) } };
+  }
+  /** Owner load per core with this agent's own sandboxes subtracted (the box's primary workload), or null when unknown. */
+  function ownerLoad(h) {
+    if (!Number.isFinite(h?.load_per_core)) return null;
+    const cores = cfg.cores ?? (cpus().length || 1);
+    const own = activeRecs().reduce((a, r) => a + (r.cpu_now ?? 0), 0);
+    return Math.max(0, h.load_per_core - own / cores);
+  }
+  /** idle_only: the reason the host is not idle enough to run borrowed lanes, or null. */
+  function notIdle(h) {
+    if (!cfg.idle_only) return null;
+    const load = ownerLoad(h), maxLoad = cfg.idle_max_owner_load_per_core ?? 0.5, minMem = cfg.idle_min_free_mem_gb ?? 4;
+    if (load !== null && load > maxLoad) return `owner load ${load.toFixed(2)}/core (> ${maxLoad})`;
+    if (Number.isFinite(h?.mem_available_gb) && h.mem_available_gb < minMem) return `only ${h.mem_available_gb} GB available (< ${minMem})`;
+    return null;
+  }
+  // Throttle = low cpu weight + a halved soft memory limit (`--memory-reservation`: under host memory pressure the kernel reclaims from containers over it first; the docker CLI has no memory.high).
+  const throttle = async (r, shares) => { const memMb = Math.round(r.mem_gb * (shares === SHARES().throttled ? 512 : 1024)); for (const n of r.docker ? [r.name, dindName(r.name)] : [r.name]) { try { await docker.update?.(n, { cpuShares: shares, memoryReservationMb: memMb }); } catch (e) { log.warn?.(`throttle ${n}: ${String(e.stderr || e.message).slice(0, 160)}`); } } r.throttled = shares === SHARES().throttled; };
+  /** SIGTERM (the lane checkpoints and reports run.interrupted), wait out the grace, then SIGKILL; the router/dispatcher reschedules the lane. */
+  async function drainOne(r, why) {
+    for (const n of r.docker ? [r.name, dindName(r.name)] : [r.name]) { try { await docker.kill(n, "TERM"); } catch { /* gone */ } }
+    for (let i = 0, max = Math.ceil((cfg.drain_grace_s ?? 20) * 2); i < max; i++) { const st = await docker.inspect(r.name).catch(() => null); if (!st?.running) break; await new Promise((res) => setTimeout(res, 500)); }
+    try { await docker.kill(r.name, "KILL"); } catch { /* already exited */ }
+    if (r.docker) { try { await docker.remove(dindName(r.name)); } catch { /* destroy retries */ } }
+    r.state = "exited"; r.finishedAt = now(); r.drained = why;
+    log.info?.(`drained borrowed sandbox ${r.id} (${why})`);
+  }
+  /** Admission by class: `{ victims }` (borrow sandboxes to reclaim, reserved only) or `{ refuse }` (a 503/400 body). */
+  function admit({ prio, cpus: c, mem_gb: m, reservation, h }) {
+    const t = tiers();
+    if (!t.rs.length && !(cfg.idle_only && prio === "borrow")) return c > t.free.cpus || m > t.free.mem ? { refuse: { status: 503 } } : { victims: [] };
+    if (prio === "borrow") {
+      const why = notIdle(h);
+      if (why) return { refuse: { status: 503, error: `host not idle: ${why}`, code: "pool.not_idle" } };
+      return c > t.free.cpus || m > t.free.mem ? { refuse: { status: 503 } } : { victims: [] };
+    }
+    if (prio === "normal") return c > t.unreserved.cpus || m > t.unreserved.mem ? { refuse: { status: 503 } } : { victims: [] };
+    const rv = t.rs.find((r) => r.name === reservation);
+    if (!rv) return { refuse: { status: 400, error: `unknown reservation ${reservation ?? "(none)"}` } };
+    const inRes = sumRecs(t.act.filter((s) => prioOf(s) === "reserved" && s.reservation === rv.name));
+    if (inRes.cpus + c > rv.cpus || inRes.mem + m > rv.mem_gb) return { refuse: { status: 503, error: `reservation ${rv.name} exceeded`, code: "pool.reservation_full" } };
+    let needC = c - t.free.cpus, needM = m - t.free.mem;
+    const victims = [];
+    for (const v of t.act.filter((s) => prioOf(s) === "borrow").sort((a, b) => b.startedAt - a.startedAt)) {
+      if (needC <= 0 && needM <= 0) break;
+      victims.push(v); needC -= v.cpus; needM -= v.mem_gb;
+    }
+    return needC > 0 || needM > 0 ? { refuse: { status: 503 } } : { victims };
+  }
+  /** #5856: reserved vs borrowable headroom for the router (only when reservations or idle_only are configured). */
+  function priorityView() {
+    if (!weighted()) return {};
+    const t = tiers();
+    return { cpus_free_unreserved: t.unreserved.cpus, mem_free_unreserved_gb: t.unreserved.mem, cpus_borrowable: Math.max(0, t.free.cpus), mem_borrowable_gb: Math.max(0, t.free.mem), ...(cfg.idle_only ? { idle_only: true } : {}),
+      reservations: t.rs.map((r) => { const u = sumRecs(t.act.filter((s) => prioOf(s) === "reserved" && s.reservation === r.name)); return { name: r.name, cpus: r.cpus, mem_gb: r.mem_gb, cpus_used: u.cpus, mem_used_gb: u.mem, cpus_free: r.cpus - u.cpus, mem_free_gb: r.mem_gb - u.mem }; }) };
+  }
   function capacity() {
     const u = used();
     const active = Object.values(sb()).filter((s) => s.state !== "exited").length;
-    return { host: cfg.name ?? hostname(), ...running, vm: vmSize(), ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), cpus_total: cfg.allow_cpus, mem_total_gb: cfg.allow_mem_gb, cpus_free: cfg.allow_cpus - u.cpus, mem_free_gb: cfg.allow_mem_gb - u.mem, active, ...diskView(), ...hostDiskView(active), paused: Boolean(cfg.paused), live: live(cfg), usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
+    return { host: cfg.name ?? hostname(), ...running, vm: vmSize(), ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10 }])) } : {}), cpus_total: cfg.allow_cpus, mem_total_gb: cfg.allow_mem_gb, cpus_free: cfg.allow_cpus - u.cpus, mem_free_gb: cfg.allow_mem_gb - u.mem, active, ...priorityView(), ...diskView(), ...hostDiskView(active), paused: Boolean(cfg.paused), live: live(cfg), usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
   }
 
   /** The image a spec's lanes run (the per-repo lane_tools tag when tools are listed), without building it. */
@@ -167,16 +246,33 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     return Promise.resolve().then(() => docker.run(args)).then(() => log.info?.(`env snapshot helper started for ${spec.repo.slug}`), (e) => log.warn?.(`env snapshot helper: ${String(e.stderr || e.message).slice(0, 200)}`));
   }
 
+  /** cgroup cpu weight per class (docker --cpu-shares); a borrowed lane yields to a reserved one under contention. */
+  const sharesArgs = (prio) => (weighted() ? ["--cpu-shares", String(SHARES()[prio])] : []);
+
   async function launch({ spec, cpus, mem_gb, limit = null }) {
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id) || !Array.isArray(spec.command) || !spec.command.length) throw Object.assign(new Error("spec.id ([A-Za-z0-9._-], max 128) and spec.command are required"), { status: 400 });
-    const existing = own(spec.id);
+    let existing = own(spec.id);
+    if (existing?.drained && existing.state === "exited") { await destroy(existing.id, "drained: relaunch"); existing = null; } // #5856: the router/dispatcher rescheduled a drained lane under the same id
     if (existing) { existing.lease = now(); store.save(); return { status: 200, body: view(existing) }; }
     if (Number.isInteger(spec.warm)) warm.configure({ spec, cpus, mem_gb, limit, n: spec.warm }); // #4912: the lane's execution.warm_sandboxes sizes the repo's pool
+    const prio = spec.priority ?? "normal";
+    if (!PRIORITIES.includes(prio)) throw Object.assign(new Error(`spec.priority must be one of ${PRIORITIES.join(", ")}`), { status: 400 });
+    const reservation = prio === "reserved" ? (spec.reservation ?? (reservations().length === 1 ? reservations()[0].name : null)) : null;
     const c = capacity();
-    if (c.paused || c.cpus_free < cpus || c.mem_free_gb < mem_gb) return { status: 503, body: { error: "no capacity", capacity: c }, retryAfter: 60 };
-    // Burst model: reservations are small, so also refuse when the VM is genuinely short of memory or overloaded right now.
     const h = live(cfg);
-    if (!h.ok) return { status: 503, body: { error: `host busy: ${h.reason}`, live: h }, retryAfter: 60 };
+    const adm = admit({ prio, cpus, mem_gb, reservation, h });
+    if (c.paused || adm.refuse) {
+      const f = adm.refuse ?? {};
+      if (f.status === 400) return { status: 400, body: { error: f.error } };
+      return { status: 503, body: { error: f.error ?? "no capacity", ...(f.code ? { code: f.code } : {}), capacity: c }, retryAfter: 60 };
+    }
+    // Burst model: reservations are small, so also refuse when the VM is genuinely short of memory or overloaded right now.
+    // A reserved launch skips the load gate: it must never be refused because lanes are busy (they are throttled/drained below).
+    if (!h.ok && prio !== "reserved") return { status: 503, body: { error: `host busy: ${h.reason}`, live: h }, retryAfter: 60 };
+    if (prio === "reserved") {
+      for (const r of tiers().act.filter((s) => prioOf(s) === "borrow")) await throttle(r, SHARES().throttled); // throttle every borrower first,
+      for (const v of adm.victims) await drainOne(v, `reserved ${reservation} arrived`); // then stop only as many as the reservation needs
+    }
     if (c.host_disk_low) { // #5733: before any mkdir or docker run; the lane defers on the 503 (SANDBOX_CAPACITY)
       const floor = cfg.min_host_disk_free_gb ?? 25;
       return { status: 503, body: { error: `host disk low: ${c.host_disk_free_gb} GB free, floor ${floor} GB with ${c.active} running`, code: "pool.disk_low", host_disk_free_gb: c.host_disk_free_gb, floor_gb: floor }, retryAfter: cfg.disk_low_retry_after_s ?? 300 };
@@ -198,12 +294,14 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const env = { ...(spec.env ?? {}), ...(withDocker ? { DOCKER_HOST: "tcp://127.0.0.1:2375" } : {}), CS_CRED_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/creds`, CS_RELAY_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/relay`, CS_CRED_TOKEN: credToken, CS_SANDBOX_ID: spec.id, CS_REPO_SLUG: spec.repo?.slug ?? "", CS_REPO_URL: spec.repo?.url ?? "", CS_REPO_REF: spec.repo?.ref ?? "", CS_RESULT_FILE: spec.result_file ?? "", CS_WORK_DIR: workDirOf(name),
       ...(spec.env_snapshots?.enabled ? { FORGE_ENV_IMAGE: envImageOf(spec) } : {}) }; // the image is part of the snapshot key
     writeFileSync(envFile, Object.entries(env).map(([k, v]) => envLine(k, v)).join("\n") + "\n", { mode: 0o600 });
-    const rec = { id: spec.id, name, dir, issue: spec.issue ?? null, batch: spec.batch ?? null, cpus, mem_gb, result_file: spec.result_file ?? null, state: "starting", startedAt: now(), finishedAt: null, lease: now(), credToken, docker: withDocker };
+    const rec = { id: spec.id, name, dir, issue: spec.issue ?? null, batch: spec.batch ?? null, cpus, mem_gb, result_file: spec.result_file ?? null, state: "starting", startedAt: now(), finishedAt: null, lease: now(), credToken, docker: withDocker, ...(weighted() || spec.priority ? { priority: prio, ...(reservation ? { reservation } : {}) } : {}) };
     sb()[spec.id] = rec;
     store.save();
     const cacheKey = String(spec.cache?.key ?? spec.repo?.slug ?? "default").toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
     rec.cacheVolume = `cs-cache-${cacheKey}`;
     rec.workDir = workDirOf(name);
+    cacheUsed.set(rec.cacheVolume, now());
+    try { await docker.createVolume?.(rec.cacheVolume, [CACHE_LABEL]); } catch (e) { log.warn?.(`label ${rec.cacheVolume}: ${String(e.stderr || e.message).slice(0, 200)}`); } // an unlabelled volume still works
     // Public resolvers: host resolvers like Tailscale MagicDNS are not reachable from the container network.
     const netArgs = ["--add-host", "host.docker.internal:host-gateway", ...(cfg.dns ?? ["1.1.1.1", "8.8.8.8"]).flatMap((d) => ["--dns", String(d)])];
     let laneCpus = cpus, laneMem = mem_gb, laneNet = netArgs, work = [];
@@ -222,7 +320,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
         work = cacheMount; // the daemon sees the checkout at the same /cache/work path as the lane
         await docker.run([
           "--name", dindName(name), "--label", LABEL, "--label", `computeshare.id=${spec.id}`, "--label", "computeshare.role=dind",
-          "--privileged", "--cpus", String(dCpus), "--memory", mb(dMem), "--memory-swap", mb(dMem + swapFor(limit?.dind_swap_gb)),
+          "--privileged", "--cpus", String(dCpus), ...sharesArgs(prio), "--memory", mb(dMem), "--memory-swap", mb(dMem + swapFor(limit?.dind_swap_gb)),
           ...netArgs, ...work,
           // Bypass dockerd-entrypoint: it adds tcp://0.0.0.0:2375 (reachable from other sandboxes on the bridge).
           // #5738: the lane's /work is a symlink to its work dir (entrypoint.sh), so give the daemon the same symlink:
@@ -237,7 +335,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
         "--name", name, "--label", LABEL, "--label", `computeshare.id=${spec.id}`,
         // Hard burst cap per container; the (smaller) reservation is only what placement counts.
         // --memory-swap above --memory lets a rare spike page out instead of being OOM-killed (swap deal).
-        "--cpus", String(laneCpus), "--memory", mb(laneMem), "--memory-swap", mb(laneMem + swapFor(limit?.lane_swap_gb)), "--pids-limit", "4096",
+        "--cpus", String(laneCpus), ...sharesArgs(prio), "--memory", mb(laneMem), "--memory-swap", mb(laneMem + swapFor(limit?.lane_swap_gb)), "--pids-limit", "4096",
         "--env-file", envFile, ...laneNet, ...work,
         ...(spec.claim_dir ? ["-v", `${join(dir, "claim")}:/claim`] : []), // #4912: warm sandboxes receive their lane here
         ...(withDocker ? [] : cacheMount), "-v", `${join(dir, "result")}:/result`, "-v", `${join(dir, "out")}:/csout`,
@@ -294,7 +392,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const history = r.usage?.samples ? JSON.stringify({ at: new Date(now()).toISOString(), id: r.id, issue: r.issue, docker: Boolean(r.docker), minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10, ...usageView(r) }) : null;
     await docker.remove(r.name);
     if (r.docker) await docker.remove(dindName(r.name));
-    if (r.workDir) { try { await docker.removeWorkDir(r.cacheVolume, image, r.workDir); } catch (e) { log.warn?.(`work dir ${r.workDir}: ${String(e.stderr || e.message).slice(0, 200)}`); } }
+    if (r.workDir) { try { await docker.removeWorkDir(r.cacheVolume, image, r.workDir); } catch (e) { sweepFail(r.cacheVolume, "work dir", e); } }
     else if (r.docker) await docker.removeVolume(workVolume(r.name)); // sandbox launched before #5696
     try { await docker.wipe(r.dir, image); } catch (e) { log.warn?.(`wipe ${r.name}: ${String(e.stderr || e.message).slice(0, 200)}`); }
     rmSync(r.dir, { recursive: true, force: true });
@@ -304,6 +402,76 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     if (history) { try { appendFileSync(join(stateDir, "usage-history.jsonl"), history + "\n"); } catch { /* best effort */ } }
     log.info?.(`destroyed ${id} (${why})`);
     return true;
+  }
+
+  /** Version order of `forgedock-lane:<version>` bases, newest first (numeric segments, then plain text). */
+  const newerFirst = (a, b) => b.localeCompare(a, "en", { numeric: true });
+  /**
+   * Removes superseded `forgedock-lane:` images: keeps the newest cfg.keep_lane_images (default 2) versions with their
+   * tools variants, the running one and `alsoKeep`, and any tag a container (running or exited) still uses. Never throws.
+   */
+  async function pruneLaneImages(alsoKeep = []) {
+    if (!docker.listImages || !docker.removeImage) return;
+    try {
+      const prefix = laneImageTag("");
+      const tags = await docker.listImages(prefix);
+      const inUse = new Set(await (docker.listContainerImages?.() ?? []));
+      const baseOf = (t) => t.replace(/-t[0-9a-f]{12}$/, "");
+      const bases = [...new Set(tags.map(baseOf))].sort(newerFirst);
+      const keepN = Math.max(1, Number(cfg.keep_lane_images ?? 2) || 2);
+      const keep = [...bases.slice(0, keepN), laneImageTag(running.version), image, ...alsoKeep];
+      for (const t of tags) {
+        if (keep.some((b) => isLaneToolsTagOf(t, b)) || inUse.has(t)) continue;
+        try { await docker.removeImage(t); log.info?.(`removed superseded lane image ${t}`); } catch (e) { log.warn?.(`rmi ${t}: ${String(e.stderr || e.message).slice(0, 200)}`); }
+      }
+    } catch (e) { log.warn?.(`lane image prune: ${String(e.stderr || e.message).slice(0, 200)}`); }
+  }
+  /** Interval-gated build cache trim and sweep of dangling anonymous volumes (64-hex names); errors are logged only. */
+  async function sweepBuildCache(t) {
+    if (t - lastCachePrune < (cfg.build_cache_interval_s ?? 6 * 3600) * 1000) return;
+    lastCachePrune = t;
+    try { await docker.builderPrune?.(cfg.build_cache_keep_gb ?? 20); } catch (e) { log.warn?.(`builder prune: ${String(e.stderr || e.message).slice(0, 200)}`); }
+    try {
+      for (const v of (await docker.listDanglingVolumes?.()) ?? []) {
+        if (!/^[0-9a-f]{64}$/.test(v)) continue;
+        try { await docker.removeVolume(v); log.info?.(`removed anonymous volume ${v.slice(0, 12)}`); } catch (e) { log.warn?.(`rm volume ${v.slice(0, 12)}: ${String(e.stderr || e.message).slice(0, 200)}`); }
+      }
+    } catch (e) { log.warn?.(`anonymous volume sweep: ${String(e.stderr || e.message).slice(0, 200)}`); }
+  }
+
+  /** #5757: age-out / size cap inside each cache volume, then idle eviction. Never-evict volumes are left alone; failures go to /capacity. */
+  async function cacheSweep(t) {
+    const never = cfg.cache_never_evict ?? [];
+    const keep = Object.values(sb()).map((r) => r.workDir).filter(Boolean);
+    const volumes = [];
+    for (const v of await docker.listVolumes("cs-cache-")) {
+      if (never.includes(v)) continue;
+      try {
+        const r = await docker.sweepCache(v, image, { maxAgeDays: cfg.cache_max_age_days ?? 14, maxGb: cfg.cache_max_gb ?? null, keep, now: t });
+        cacheInfo.set(v, r); cacheErr.delete(`cache sweep:${v}`);
+        if (r.errors?.length) cacheErr.set(`cache sweep:${v}`, `cache sweep ${v}: ${r.errors[0]}`);
+        volumes.push({ name: v, lastUsedMs: Math.max(r.last_used_ms ?? -Infinity, cacheUsed.get(v) ?? -Infinity) });
+      } catch (e) { sweepFail(v, "cache sweep", e); }
+    }
+    const referenced = new Set(Object.values(sb()).map((r) => r.cacheVolume).filter(Boolean));
+    for (const v of planIdleEviction({ volumes: volumes.map((x) => ({ ...x, lastUsedMs: Number.isFinite(x.lastUsedMs) ? x.lastUsedMs : null })), referenced, neverEvict: never, now: t, idleMs: (cfg.cache_idle_days ?? 30) * 86400000 })) {
+      try { await docker.removeVolume(v); cacheInfo.delete(v); cacheUsed.delete(v); log.info?.(`evicted idle cache volume ${v}`); } catch (e) { sweepFail(v, "cache evict", e); }
+    }
+  }
+
+  /** Each reap: lift the throttle once no reserved sandbox runs; under idle_only, throttle borrowed lanes when the owner's load rises, then drain the newest. */
+  async function reclaimIdle() {
+    if (!weighted()) return;
+    const act = activeRecs(), borrowed = act.filter((r) => prioOf(r) === "borrow");
+    const busy = notIdle(live(cfg));
+    if (busy) {
+      const fresh = borrowed.filter((r) => !r.throttled);
+      if (fresh.length) { for (const r of fresh) await throttle(r, SHARES().throttled); return; } // throttle first,
+      const v = borrowed.sort((a, b) => b.startedAt - a.startedAt)[0];
+      if (v) await drainOne(v, `owner busy: ${busy}`); // one per pass, only if throttling was not enough
+      return;
+    }
+    if (!act.some((r) => prioOf(r) === "reserved")) for (const r of borrowed.filter((x) => x.throttled)) await throttle(r, SHARES().borrow);
   }
 
   async function reap() {
@@ -316,6 +484,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const known = new Set(Object.values(sb()).flatMap((r) => [r.name, dindName(r.name)]));
     for (const name of await docker.listLabelled(LABEL)) if (!known.has(name)) { await docker.remove(name); log.info?.(`removed orphan container ${name}`); }
     await sampleUsage();
+    await reclaimIdle();
     await warm.maintain(maxLifeMs);
     if (pendingResize && capacity().active === 0) {
       const r = await resize(pendingResize);
@@ -327,8 +496,13 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       lastWorkSweep = t;
       const keep = Object.values(sb()).map((r) => r.workDir).filter(Boolean);
       for (const v of await docker.listVolumes("cs-cache-")) {
-        try { await docker.pruneWorkDirs(v, image, keep); } catch (e) { log.warn?.(`work sweep ${v}: ${String(e.stderr || e.message).slice(0, 200)}`); }
+        try { await docker.pruneWorkDirs(v, image, keep); cacheErr.delete(`work sweep:${v}`); } catch (e) { sweepFail(v, "work sweep", e); }
       }
+    }
+    await sweepBuildCache(t);
+    if (t - lastCacheSweep >= (cfg.cache_sweep_interval_s ?? 3600) * 1000) {
+      lastCacheSweep = t;
+      await cacheSweep(t);
     }
     store.save();
   }
@@ -395,6 +569,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
         log.info?.(`rebuilding ${nextImage} (${running.version}/${running.image} -> ${want.version}/${want.image})`);
         await docker.build(join(next, "pool", "image"), nextImage, laneBuildArgs(want.version));
       }
+      await pruneLaneImages([laneImageTag(want.version)]);
       await prepullImages();
       rmSync(`${root}.old`, { recursive: true, force: true });
       await run("mv", [root, `${root}.old`]);
@@ -422,6 +597,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       const parts = [st[r.name], r.docker ? st[dindName(r.name)] : null].filter(Boolean);
       if (!parts.length) continue;
       const cpu = parts.reduce((a, x) => a + x.cpu, 0), mem = parts.reduce((a, x) => a + x.mem_gb, 0);
+      r.cpu_now = cpu;
       const u = (r.usage ??= { samples: 0, cpu_sum: 0, cpu_peak: 0, mem_sum: 0, mem_peak: 0 });
       u.samples++; u.cpu_sum += cpu; u.mem_sum += mem; u.cpu_peak = Math.max(u.cpu_peak, cpu); u.mem_peak = Math.max(u.mem_peak, mem);
     }
@@ -493,7 +669,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     [route("POST", "/warm/claim"), async (_p, body) => warm.claim(body ?? {})],
     [route("GET", "/sandboxes/:id"), async ({ id }) => { const r = own(id); if (!r) return { status: 404, body: { state: "gone" } }; await refresh(r); store.save(); return { status: 200, body: view(r) }; }],
     [route("GET", "/sandboxes/:id/logs"), async ({ id }, _b, url) => { const r = own(id); return r ? { status: 200, body: readLog(r, url.searchParams.get("cursor")) } : { status: 404, body: { text: "", cursor: 0 } }; }],
-    [route("GET", "/sandboxes/:id/result"), async ({ id }) => { const r = own(id); const x = r && readResult(r); return x ? { status: 200, body: x } : { status: 404, body: { error: "no result" } }; }],
+    [route("GET", "/sandboxes/:id/result"), async ({ id }) => { const r = own(id); const x = r && readResult(r); if (!x && r?.drained) return { status: 200, body: { drained: true, reason: r.drained } }; return x ? { status: 200, body: x } : { status: 404, body: { error: "no result" } }; }], // #5856: a drained lane without its own result is reported so the dispatcher reschedules it
     [route("GET", "/sandboxes/:id/usage"), async ({ id }) => { const r = own(id); return r ? { status: 200, body: { minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10 } } : { status: 404, body: {} }; }],
     [route("POST", "/sandboxes/:id/lease"), async ({ id }) => { const r = own(id); if (!r) return { status: 404, body: { state: "gone" } }; r.lease = now(); store.save(); return { status: 200, body: { ok: true } }; }],
     // #5274: SIGTERM the lane (PID 1) so its teardown checkpoints and reports deferred run.interrupted; the sandbox is kept, never destroyed.
@@ -541,9 +717,10 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
 
   /** Build the lane image for the running ForgeDock version when this host does not have it yet. */
   async function ensureImage() {
-    if (await docker.hasImage?.(image)) return;
+    if (await docker.hasImage?.(image)) { await pruneLaneImages(); return; }
     log.info?.(`building ${image}`);
     await docker.build(join(cfg.code_root ?? repoRoot, "pool", "image"), image, laneBuildArgs(running.version));
+    await pruneLaneImages();
   }
 
   return { handle, launch, warm, reap, destroy, capacity, refresh, store, prepullImages, ensureImage };
