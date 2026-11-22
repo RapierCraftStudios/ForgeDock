@@ -22,6 +22,8 @@ describe("page gate (#5428)", () => {
     assert.deepEqual(pageFiles(["web/app/a/page.tsx", "web/app/a/page.test.tsx", "web/app/api/x/route.ts"], cfg), ["web/app/a/page.tsx"]);
     assert.equal(pagePlanNote(null), "");
     assert.match(pagePlanNote(cfg), /page_gate/);
+    assert.match(pagePlanNote({ ...cfg, capture: "pw" }), /app\/\*\*\/page[^]*page_gate\.screenshots/);
+    assert.doesNotMatch(pagePlanNote(cfg), /engine captures/);
   });
   it("replay at contract time: a page deliverable with no design spec, ICP or GEO brief fails validateContract", () => {
     const c = { deliverables: [{ id: "D1", path: storeFiles[0], change: "x", requirements: ["R1"] }] };
