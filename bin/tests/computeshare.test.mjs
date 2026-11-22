@@ -967,6 +967,7 @@ test("#5856 a drained lane is reported to the dispatcher as deferred sandbox.cap
   assert.equal(mapped.code, "sandbox.capacity");
   // free the reserved capacity, then the same id launches again as a new container
   docker.containers.set(safeName("r1"), { running: false, exitCode: 0, finishedAt: new Date().toISOString() });
+  await agent.reap();
   const runs = docker.runs.length;
   assert.equal((await agent.launch({ spec: prio(drained.id, "borrow"), cpus: 2, mem_gb: 4 })).status, 201);
   assert.ok(docker.runs.length > runs);
