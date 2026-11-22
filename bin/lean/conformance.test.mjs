@@ -2230,6 +2230,12 @@ describe("#5773 operator decisions survive requeue and amendment replay", () => 
     assert.deepEqual(applyRequirementDecisions(out2.contract, [{ body: BOT }, dec({ requirement: "R11", disposition: "post-deploy", quote: Q })]).applied, [], "idempotent");
     assert.deepEqual(applyRequirementDecisions(c2, [{ body: BOT }, dec({ requirement: "R11", disposition: "post-deploy", quote: "no such row" })]).applied, ["R11"], "id fallback");
   });
+  it("#5786 a quote over 400 chars still matches its row by quote, not the renumbered id", () => {
+    const longQ = `${"the real run creates invoices with no customer emails and ".repeat(10)}done`;
+    const c = { requirements: [{ id: "R11", quote: "other row", disposition: "deliver" }, { id: "R12", quote: longQ, disposition: "deliver" }] };
+    const out = applyRequirementDecisions(c, [{ body: BOT }, dec({ requirement: "R11", disposition: "post-deploy", quote: longQ })]);
+    assert.deepEqual(out.applied, ["R12"]);
+  });
   it("#5773 dedupeAddRequirements keeps the last add per quote and drops one that repeats a frozen row", () => {
     const add = (id, quote, why) => ({ kind: "add-requirement", requirement: { id, quote, disposition: "post-deploy" }, why });
     const am = [{ kind: "amend-requirement", requirement: "R5", text: "dry-run only", why: "w" }, add("R11", Q, "a"), add("R11", Q, "b"), add("R12", Q6, "c")];

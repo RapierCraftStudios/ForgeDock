@@ -970,9 +970,9 @@ One row per key path of `POLICY_SCHEMA` (`bin/lean/release-config.mjs`). `<name>
 | `risk.rules[].when.contract` | boolean | none | The change touches a contract. |
 | `risk.rules[].when.rolled_units_gt` | number | none | More than this many units roll. |
 | `risk.rules[].when.diff_lines_gt` | number | none | More than this many changed lines. |
-| `risk.rules[].when.requires` | string | none | Named requirement that must hold. |
 | `risk.rules[].risk` | low\|medium\|high | none | `low`, `medium` or `high`. |
 | `risk.rules[].forces` | string | none | Pipeline the rule forces. |
+| `risk.rules[].requires` | string | none | Named requirement (for example `rollout-declaration`) reported with the risk when the rule matches. |
 | `features` | object | - | Feature wave policy (#5571). |
 | `features.flag_policy` | require\|warn\|off | none | `require` refuses a feature wave that adds no rollout key, `warn` warns, `off` does nothing; `lanes.<name>.flag_policy` wins. |
 | `plan` | object | - | The release plan. |
@@ -2921,6 +2921,20 @@ cat ~/.forge/install-receipt.json
 There is no CLI subcommand to read it yet — `doctor()` reading the receipt to detect drift is a deliberately deferred stretch goal, not part of this feature.
 
 ---
+
+## Pool agent cache volumes
+
+Keys of the pool agent's JSON config (`forgedock pool agent`), not of `forge.yaml`. Each repo's `cs-cache-<slug>` volume holds the package caches, depcache, env snapshots, git mirror and lane work dirs. The agent labels the volumes it creates `computeshare.cache=1` (`forgedock gc` reports them and never reclaims them) and sweeps them every `cache_sweep_interval_s`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `cache_max_age_days` | number | `14` | uv/npm/pip/poetry cache files, depcache and env snapshot entries older than this are deleted by the agent sweep, with no launch needed. The pnpm store is pruned and the git mirror gets `git gc --auto`. |
+| `cache_max_gb` | number | unset (no cap) | Per-volume cap. A volume over it is shrunk oldest-first below the cap; work dirs of live sandboxes are never touched. |
+| `cache_idle_days` | number | `30` | A volume with no launch for this long and no referencing sandbox is removed. Evicted only when its last use is known (`/cache/.last-used`, written by the lane entrypoint). |
+| `cache_never_evict` | list of volume names | `[]` | Volumes (e.g. `cs-cache-marcode`) that are never swept or evicted. |
+| `cache_sweep_interval_s` | number | `3600` | Gap between cache sweeps. |
+
+A failed or timed-out sweep (10 min limit) shows as `cache_sweep_error` in the agent's `/capacity`, next to `cache_volumes` (size per volume).
 
 ## Complete Example
 
