@@ -2922,6 +2922,20 @@ There is no CLI subcommand to read it yet — `doctor()` reading the receipt to 
 
 ---
 
+## Pool agent cache volumes
+
+Keys of the pool agent's JSON config (`forgedock pool agent`), not of `forge.yaml`. Each repo's `cs-cache-<slug>` volume holds the package caches, depcache, env snapshots, git mirror and lane work dirs. The agent labels the volumes it creates `computeshare.cache=1` (`forgedock gc` reports them and never reclaims them) and sweeps them every `cache_sweep_interval_s`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `cache_max_age_days` | number | `14` | uv/npm/pip/poetry cache files, depcache and env snapshot entries older than this are deleted by the agent sweep, with no launch needed. The pnpm store is pruned and the git mirror gets `git gc --auto`. |
+| `cache_max_gb` | number | unset (no cap) | Per-volume cap. A volume over it is shrunk oldest-first below the cap; work dirs of live sandboxes are never touched. |
+| `cache_idle_days` | number | `30` | A volume with no launch for this long and no referencing sandbox is removed. Evicted only when its last use is known (`/cache/.last-used`, written by the lane entrypoint). |
+| `cache_never_evict` | list of volume names | `[]` | Volumes (e.g. `cs-cache-marcode`) that are never swept or evicted. |
+| `cache_sweep_interval_s` | number | `3600` | Gap between cache sweeps. |
+
+A failed or timed-out sweep (10 min limit) shows as `cache_sweep_error` in the agent's `/capacity`, next to `cache_volumes` (size per volume).
+
 ## Complete Example
 
 See [`forge.yaml.example`](../forge.yaml.example) at the repository root for a fully annotated example covering all sections.

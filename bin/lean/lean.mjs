@@ -73,7 +73,7 @@ import { routePathsFromFiles, routeReachabilityFailures } from "./routecheck.mjs
 import { docsFailures } from "./docsgate.mjs";
 import { outcomeEvidenceFailures, rawChecksAt } from "./outcomeevidence.mjs";
 import { ciBudgetFailures, parseCiBudget } from "./ci-gate.mjs";
-import { pageFailures, designSpecApproved, designLabelApproved } from "./pagegate.mjs"; // #5428
+import { pageFailures, designSpecApproved, designLabelApproved, specOnlyFailures, pageFiles, designOnlyFiles } from "./pagegate.mjs"; // #5428
 import { changedRoutes, captureVisualCheck, publishToRef, visualMarkdown } from "./page-capture.mjs"; // #5770
 import { uiBuildRule, uiIssue, uiChanged } from "./ui-quality.mjs"; // #5330
 import { designGate, designGateNote, designFailures, specApproved as designSpecOk } from "./design-gate.mjs"; // #5330
@@ -3466,9 +3466,10 @@ export async function runCore(o) {
         const headSha = String(await git(["rev-parse", "HEAD"]).catch(() => "")).trim(), capDir = join(osTmpdir(), `forge-visual-${runId}`) /* outside the worktree: the lane commits .forge-lean */, runIn = ({ command, env }) => io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: { ...laneEnv(), ...env } });
         if (pageVisual?.sha !== headSha || pageVisual.errors.length) pageVisual = { sha: headSha, ...(await captureVisualCheck({ cfg: pagesConfig, routes: pageRoutes, dir: capDir, run: runIn, read: (p) => { try { return readFileSync(p); } catch { return null; } }, publish: (fs_) => publishToRef({ run: runIn, dir: capDir, files: fs_, slug: repo, runId }) })) };
       }
-      const pageFail = pagesConfig ? await pageFailures({ cfg: pagesConfig, files, result, captures: pageVisual, exists: (p) => existsSync(join(wt, p)), added: addedNow, diff: String(await git(["diff", "-U0", `${base}...HEAD`]).catch(() => "")), tracked: String(await git(["ls-files"]).catch(() => "")).split("\n").filter(Boolean), readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } }, designApproved: designLabelApproved(iss?.labels) || designSpecApproved((iss?.comments ?? []).filter(isTrustedIssueComment)), run: io.runCommand ? async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } : null }) : [];
+      const bugFixIssue = (iss?.labels ?? []).some((l) => /^(?:type:)?bug$|^(?:priority:)?p[01]$/i.test(typeof l === "string" ? l : l?.name ?? "")); // #5729: a bug fix is not forced through design for attribute edits
+      const pageFail = pagesConfig ? await pageFailures({ cfg: pagesConfig, files, result, captures: pageVisual, exists: (p) => existsSync(join(wt, p)), added: addedNow, bugFix: bugFixIssue, remoteNoCapture: o.placement?.where === "remote" && !pagesConfig?.capture, diff: String(await git(["diff", "-U0", `${base}...HEAD`]).catch(() => "")), tracked: String(await git(["ls-files"]).catch(() => "")).split("\n").filter(Boolean), readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } }, designApproved: designLabelApproved(iss?.labels) || designSpecApproved((iss?.comments ?? []).filter(isTrustedIssueComment)), run: io.runCommand ? async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } : null }) : [];
       // #5330: forge.yaml design.routes (opt-in, blocking only): a user-visible page needs an approved spec and passes the deterministic visual critique
-      const designFail = designFailures({ cfg: designConfig, files, added: addedNow, diff: String(await git(["diff", "-U0", `${base}...HEAD`]).catch(() => "")), specs: designSpecOk({ comments: (iss?.comments ?? []).filter(isTrustedIssueComment), labels: iss?.labels, cfg: designConfig }), readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } } });
+      const designFail = designFailures({ cfg: designConfig, files, added: addedNow, bugFix: bugFixIssue, covered: pagesConfig?.require?.includes("design") ? [...pageFiles(files, pagesConfig, { readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } } }), ...designOnlyFiles(files, pagesConfig)] : [], diff: String(await git(["diff", "-U0", `${base}...HEAD`]).catch(() => "")), specs: designSpecOk({ comments: (iss?.comments ?? []).filter(isTrustedIssueComment), labels: iss?.labels, cfg: designConfig }), readFile: (p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } } });
       // #5284: forge.yaml topology.prod_parity: declared production-only surfaces this diff touches need a check result or a justification
       const parityRules = parseProdParity(prodParity);
       const prodParityFailures = parityRules.length && io.runCommand ? await prodParityOf({ rules: parityRules, changedFiles: files, result, run: async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } }) : [];
@@ -3560,6 +3561,8 @@ export async function runCore(o) {
       if (pre.length) ev({ event: "PRECHECK", failures: pre.map((f) => f.code) });
       // #5080: the repro already passes on the base and the diff changes no source: the fix is on the base, not missing
       if (alreadyFixedOnBase(pre, files, IGNORE)) return { state: "already-fixed", by: "precheck", failures: pre };
+      // #5729: a missing /design spec or visual evidence is not a builder fix: end design.spec_required before any resume or recovery lane
+      if (pre.length && !recording() && specOnlyFailures(pre)) return { state: "spec-only", by: "precheck", failures: pre };
       if (pre.length && !recording()) return { state: "nonconforming", by: "precheck", failures: pre };
       // shadow: the builder's own failed checks block before any reviewer tokens are spent (#4160)
       const hard = recording() ? blockingOf(pre, SHADOW_PRE_BLOCKS).block : [];
@@ -3675,6 +3678,7 @@ export async function runCore(o) {
         const explained = explainFailures(outcome.failures, effective); // #4265: name the unmet requirement, not only the code
         const list = explained.slice(0, 15).map((f) => `- ${f.code}: ${f.detail}`).join("\n");
         if (outcome.state === "environment") return await envNeedsHuman(outcome.failures);
+        if (outcome.state === "spec-only") return await needsHuman(`The page gate needs an approved FORGE:DESIGN_SPEC (run /design) or visual evidence a builder resume cannot produce, so no resume or recovery lane was spent:\n\n${list}`, OUTCOME_CODES.DESIGN_SPEC_REQUIRED, { ask: `Run /design for #${issue}` });
         // #5371: a remote sandbox is a different environment from the host: its failed frozen validate is rerun once in a local recovery lane before it counts
         // #5732: so is a repro head failure whose output carries no assertion text (an env error of the sandbox, not a red test)
         if (o.placement?.where === "remote" && !recover && outcome.failures?.length && outcome.failures.every((f) => f?.kind === "validate_failed" || (f?.kind === "repro_red_green" && f.head === "FAILED" && f.assertion === false))) {
