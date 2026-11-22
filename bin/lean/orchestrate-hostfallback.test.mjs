@@ -63,4 +63,18 @@ describe("#5808 dispatch on lane exit", () => {
     await p;
     assert.deepEqual(log, ["start 1", "start 2", "postRun 1 done"]); // the batch waited for it
   });
+  it("orchestrate: a pass runs on lane exit, with no scheduler tick (sleep never fires) (#5808)", async () => {
+    const log = [];
+    const never = () => new Promise(() => {}); // a tick that never arrives: only the lane exit can wake the loop
+    let free;
+    const gate = new Promise((res) => { free = res; });
+    const p = orchestrate({ issues: [1, 2], parallel: 1, pollMs: 1e9, sleep: never, readBody: async (n) => (n === 2 ? "Depends on #1" : ""),
+      runOne: async (n) => { log.push(`start ${n}`); if (n === 1) await gate; return { terminalReason: "merged", pr: n }; } });
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(log, ["start 1"]); // K=1: the dependent is held while the slot is taken
+    free();
+    const rows = await p; // would hang if the next pass waited for a tick
+    assert.deepEqual(log, ["start 1", "start 2"]);
+    assert.deepEqual(rows.map((x) => x.outcome), ["merged", "merged"]);
+  });
 });
