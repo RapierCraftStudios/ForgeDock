@@ -40,6 +40,8 @@ describe("#5749 yaml recipe", () => {
   it("#5749 yaml has a lane_tools recipe", () => {
     assert.ok(hasRecipe("yaml"));
     assert.match(installCommands("yaml")[0], /apt-get install .*python3-yaml/);
-    assert.ok(!hasRecipe("vite") && !hasRecipe("forgedock"), "vite and forgedock are project deps, not recipes");
+    assert.ok(hasRecipe("shellcheck") && hasRecipe("vite"));
+    assert.ok(!hasRecipe("forgedock"), "the base lane image already ships the forgedock CLI");
+    assert.match(installCommands("vite@5.4.0")[0], /^npm install -g vite@5\.4\.0/);
   });
 });
