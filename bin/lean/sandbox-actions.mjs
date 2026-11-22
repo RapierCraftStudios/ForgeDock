@@ -119,4 +119,3 @@ export function actionsProvider({ batch, repo, settings = {}, api = ghApi(), env
   const t = transport ?? actionsTransport({ repo, settings, api, ...(now ? { now } : {}) });
   return remoteProvider({ batch, repo, settings, name: "actions", env, transport: t, ...(credentials ? { credentials } : {}), ...(now ? { now } : {}), ...rest });
 }
-export { redact };
