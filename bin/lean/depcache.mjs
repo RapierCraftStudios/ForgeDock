@@ -39,6 +39,7 @@ const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e)
  * stream leads, then the last lines of stderr and stdout; the message only when both streams are empty.
  */
 /** #5731: an install failure that means "these pins do not build under this interpreter" (retried under the next candidate). */
+const NEG_TTL_MS = 6 * 3600 * 1000; // #5731: how long a failed (lock, interpreter) install is remembered
 const PY_BUILD_RE = /build requirements are incompatible|incompatible with your operating system|_finalize_license_expression|Failed building wheel|No matching distribution|no matching wheel|Could not find a version that satisfies/i;
 /** #5592: poetry cannot install the project itself (not package-mode: no package dir, no `package-mode = false`). */
 const NO_ROOT_RE = /--no-root|current project could not be installed|No file\/folder found for package|does not contain any element/i;
@@ -566,6 +567,15 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     }
     fs.mkdirSync(keyRoot, { recursive: true, mode: 0o700 });
 
+    // #5731: a negative result is cached per key (lock hash + interpreter version): the same failing build is not re-run by this lane or the next.
+    const negFile = join(keyRoot, `${d.eco}-${key}.failed.json`);
+    if (PY.has(d.eco) && !present(join(snap, "manifest.json"))) {
+      try {
+        const neg = JSON.parse(String(fs.readFileSync(negFile)));
+        if (now() - neg.at < NEG_TTL_MS) return { ...done("failed", { key, reason: `${neg.reason} (cached negative result)` }), pyMinor: neg.minor, retryMinor: neg.minor };
+      } catch { /* none cached */ }
+    }
+
     // #5592: `poetry install` fails on a project that is not package-mode (root package not installable): retry once with --no-root (dependencies only).
     const runList = async (list) => {
       for (const [c, a] of list) {
@@ -599,7 +609,10 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
         const f = done("failed", { key, reason: `${e?.code === "ENOENT" ? "tool not found" : "install failed"}: ${msg(e)}${py ? ` (under ${py.cmd} ${py.version})` : ""}` });
         const minor = py ? `${py.v[0]}.${py.v[1]}` : found.minor;
         if (PY.has(d.eco) && minor) f.pyMinor = minor;
-        if (PY.has(d.eco) && minor && PY_BUILD_RE.test(`${msg(e)}\n${e?.stderr ?? ""}\n${e?.stdout ?? ""}`)) f.retryMinor = minor; // #5731
+        if (PY.has(d.eco) && minor && PY_BUILD_RE.test(`${msg(e)}\n${e?.stderr ?? ""}\n${e?.stdout ?? ""}`)) {
+          f.retryMinor = minor; // #5731
+          try { fs.writeFileSync(negFile, JSON.stringify({ reason: f.reason, minor, at: now() })); } catch { /* best effort */ }
+        }
         return { failed: f };
       }
       return { trees: treesOf(wt, d, pkgs) };

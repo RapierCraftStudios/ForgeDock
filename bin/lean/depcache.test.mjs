@@ -764,6 +764,21 @@ describe("depcache (#5731): hint without a range, and retry under the next inter
     assert.match(r.reason, /interpreters used: 3\.11, 3\.14/);
     assert.match(r.reason, /in-range alternatives not tried: none/);
   });
+  it("#5731 a failing install is cached per (lock, interpreter): the second prepare does not re-run it", async () => {
+    const f = fakeExec({ pythons: { python3: "3.11.8" } });
+    const { base, wt } = project("3.11", "3.11");
+    let n = 0;
+    const installs = () => n;
+    const w = wrap(f, ["python3"]);
+    const dc = () => makeDepCache({ root: join(base, "cache"), exec: async (c, a, o) => { if (c === "poetry" && a[0] === "install" && !a.includes("--no-root")) n++; return w(c, a, o); }, env: {}, pollMs: 5 });
+    const [r1] = await dc().prepare({ wt, repoKey: "repo-5731i" });
+    const n1 = installs();
+    const [r2] = await dc().prepare({ wt, repoKey: "repo-5731i" });
+    assert.equal(r1.status, "failed", JSON.stringify(r1));
+    assert.equal(r2.status, "failed", JSON.stringify(r2));
+    assert.ok(n1 >= 1 && installs() === n1, `installs ${n1} then ${installs()}`);
+    assert.match(r2.reason, /cached negative result/);
+  });
   it("#5731 a failed install is env.setup_failed naming the interpreter used and the in-range alternatives not tried", async () => {
     const f = fakeExec({ pythons: { python3: "3.14.0", "python3.11": "3.11.8", "python3.12": "3.12.3" } });
     const { base, wt } = project("^3.11", "3.11");
