@@ -453,6 +453,33 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const envSig = (code, d) => (code === OUTCOME_CODES.ENV_TOOL_MISSING ? toolsOf(d) : null) ?? sigOf(d);
   const ENV_ALL_CODES = [...REPEAT_ENV_CODES, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE]; // #5755
   const envKey = (code, d) => `${code}|${code === OUTCOME_CODES.ENV_TOOL_MISSING && toolsOf(d) ? toolsOf(d) : failureSignature(code, d).split("|").slice(1).join("|")}`;
+  const maxFor = (cls) => (cls === "mechanical" ? mechMax : recoveryMax);
+  const classUsed = toMap(saved?.recoveryClasses); // `${issue}:${class}` -> recovery lanes launched in that class
+  const recoveries = toMap(saved?.recoveries); // issue -> recovery lanes launched (#4267)
+  const recovering = toMap(saved?.recovering); // issue -> {code, attempt, detail, outcome, ...} of the recovery lane queued or running
+  const requeueApplied = new Set(saved?.requeueApplied ?? []); // #4550: `--requeue` entries already applied (batch `requeue` file)
+  const requeuedInfo = toMap(saved?.requeued); // #4550: issue -> {reason, by, at, prior: [earlier rows]}
+  const everRelabelled = new Set(saved?.relabelled ?? []); // #4656: issues the runner already relabelled; never parked on top
+  const relabelled = new Set(saved?.relabelled ?? []); // #4315: queued recoveries relabelled needs-human when a batch stopped
+  // #4267: decisions are recorded, never awaited: a failing or slow recorder cannot block the batch.
+  const decided = (d) => { try { Promise.resolve(decide?.(d)).catch(() => {}); } catch { /* best effort */ } };
+  const firstLine = (x) => String(x ?? "").split("\n")[0].slice(0, 300);
+
+  let setup = null; // #4963: {read, total} while the initial per-issue reads run; written with phase "setup" so a slow start is visible
+  let halted = false; // #4454: stopped by `signal`; the batch's state is no longer this process's to write
+  const save = () => {
+    if (!store || halted) return;
+    store.save({ v: 1, ...(setup ? { phase: "setup", setup: { ...setup } } : {}), engineVersion: version, order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
+      pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors), ...(transients.size ? { transientRetries: toObj(transients) } : {}), ...(quota.size ? { quota: toObj(quota) } : {}), ...(limitedAccounts.size ? { limitedAccounts: toObj(limitedAccounts) } : {}), ...(capDefers.size ? { capDeferrals: toObj(capDefers) } : {}),
+      prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
+      ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
+      ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering), recoveryClasses: toObj(classUsed) } : {}),
+      ...(requeueApplied.size ? { requeueApplied: [...requeueApplied], requeued: toObj(requeuedInfo) } : {}),
+      ...(relabelled.size ? { relabelled: [...relabelled] } : {}), ...(cancelled ? { cancelled } : {}),
+      ...(estimate ? { estimates: toObj(estimates), enqueued: toObj(enqueued) } : {}), ...(heads.size ? { heads: [...heads] } : {}),
+      ...(engineSigs.size ? { engineSigs: toObj(engineSigs) } : {}), ...(deterministic.size ? { deterministicSigs: [...deterministic] } : {}), ...(toolReadmits.size ? { toolReadmits: [...toolReadmits] } : {}), ...(envSigs.size ? { envSigs: toObj(envSigs) } : {}) });
+  };
+  const update = (row) => { store?.log?.(row); onUpdate(row); };
   /** #5755: records `issue` on its signature and files or updates the one env issue (seam `envIssue.ensure`); the issue number, or null when none could be filed. */
   const fileEnvIssue = async ({ sig, code, issue, tools, evidence }) => {
     const e = envSigs.get(sig) ?? { issues: [], number: null };
@@ -497,33 +524,6 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       }
     }
   };
-  const maxFor = (cls) => (cls === "mechanical" ? mechMax : recoveryMax);
-  const classUsed = toMap(saved?.recoveryClasses); // `${issue}:${class}` -> recovery lanes launched in that class
-  const recoveries = toMap(saved?.recoveries); // issue -> recovery lanes launched (#4267)
-  const recovering = toMap(saved?.recovering); // issue -> {code, attempt, detail, outcome, ...} of the recovery lane queued or running
-  const requeueApplied = new Set(saved?.requeueApplied ?? []); // #4550: `--requeue` entries already applied (batch `requeue` file)
-  const requeuedInfo = toMap(saved?.requeued); // #4550: issue -> {reason, by, at, prior: [earlier rows]}
-  const everRelabelled = new Set(saved?.relabelled ?? []); // #4656: issues the runner already relabelled; never parked on top
-  const relabelled = new Set(saved?.relabelled ?? []); // #4315: queued recoveries relabelled needs-human when a batch stopped
-  // #4267: decisions are recorded, never awaited: a failing or slow recorder cannot block the batch.
-  const decided = (d) => { try { Promise.resolve(decide?.(d)).catch(() => {}); } catch { /* best effort */ } };
-  const firstLine = (x) => String(x ?? "").split("\n")[0].slice(0, 300);
-
-  let setup = null; // #4963: {read, total} while the initial per-issue reads run; written with phase "setup" so a slow start is visible
-  let halted = false; // #4454: stopped by `signal`; the batch's state is no longer this process's to write
-  const save = () => {
-    if (!store || halted) return;
-    store.save({ v: 1, ...(setup ? { phase: "setup", setup: { ...setup } } : {}), engineVersion: version, order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
-      pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors), ...(transients.size ? { transientRetries: toObj(transients) } : {}), ...(quota.size ? { quota: toObj(quota) } : {}), ...(limitedAccounts.size ? { limitedAccounts: toObj(limitedAccounts) } : {}), ...(capDefers.size ? { capDeferrals: toObj(capDefers) } : {}),
-      prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
-      ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
-      ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering), recoveryClasses: toObj(classUsed) } : {}),
-      ...(requeueApplied.size ? { requeueApplied: [...requeueApplied], requeued: toObj(requeuedInfo) } : {}),
-      ...(relabelled.size ? { relabelled: [...relabelled] } : {}), ...(cancelled ? { cancelled } : {}),
-      ...(estimate ? { estimates: toObj(estimates), enqueued: toObj(enqueued) } : {}), ...(heads.size ? { heads: [...heads] } : {}),
-      ...(engineSigs.size ? { engineSigs: toObj(engineSigs) } : {}), ...(deterministic.size ? { deterministicSigs: [...deterministic] } : {}), ...(toolReadmits.size ? { toolReadmits: [...toolReadmits] } : {}), ...(envSigs.size ? { envSigs: toObj(envSigs) } : {}) });
-  };
-  const update = (row) => { store?.log?.(row); onUpdate(row); };
   const classifyOne = async (n) => {
     if (!budget) return;
     let c = null;
