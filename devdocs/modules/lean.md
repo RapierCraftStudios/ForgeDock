@@ -3534,3 +3534,8 @@ In `runCore`'s lane step, a `resolveLane` result with `transient: true` (a faile
 ## Entry 2026-11-22 — FORGE:DECISION quote clipped without an ellipsis (#5786)
 
 `parseRequirementDecision` (`decisions.mjs`) clips an optional `quote` over 400 chars to its first 400 chars with no trailing `…` (`one(v, max, ellipsis)`), so the clipped quote stays a prefix of the row quote and `applyRequirementDecisions` still matches the row by contained quote instead of falling back to a renumbered id. Short quotes, a missing quote and the 200-char ellipsis clipping of `why` are unchanged. Cost: 0 LLM calls.
+
+## Entry 2026-11-22 — Plan lanes and `planned` reuse (#5831, epic #5822)
+
+`runCore({plan: true})` (`run-issue --plan`) skips the `dependency-open` refusal, takes no light/fast-forward build, never labels `workflow:building`, stops right after the contract freezes and ends `planned` with `{contractHash, baseSha}` (outcome code `COMPLETED`); teardown does no checkpoint commit or push. An adopted PR or a refactor:split has nothing to plan ahead and ends `deferred` `plan.unsupported`. `runCore({planned})` (`--planned <hash>:<sha>`) reads the frozen contract like a recovery (`readFrozenContract`, `CONTRACT_REUSED`) and re-plans (`CONTRACT_STALE`) unless `reuseStale` (scope, lane) and `stacking.mjs` `planStale` pass: same hash, the plan's base still an ancestor of the lane, and `git diff --name-only <baseSha>..<base>` (the dependency's merge) touching no deliverable path.
+Cite: #5831.

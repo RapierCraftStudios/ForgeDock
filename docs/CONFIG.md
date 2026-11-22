@@ -318,6 +318,16 @@ orchestration:
   # shrink cascade queue growth.
   max_concurrent: 12
 
+  # Stacked lanes, phase 1 (#5831). off (default): a dependent waits for its dependency to
+  # merge before any work. plan: while a dependency is still pending or running, a dependent
+  # is planned in an idle slot (after every ready issue): one plan lane per issue per batch
+  # investigates and freezes the contract, never builds, commits or pushes, and ends `planned`.
+  # Its build lane starts after the dependency merged and reuses that contract unless it is
+  # stale (changed scope or lane, or the dependency's merged diff touches a deliverable path).
+  # full behaves as plan until phase 2. A plan lane's other ends do not count toward the
+  # breaker, relaunch or requeue budgets.
+  stacking: off
+
   # Age (hours since the issue last updated) after which a predecessor still at
   # `workflow:remediating` or `workflow:engine-error` is classified GATED
   # (stalled, needs a human) instead of IN_PROGRESS. Default: 48.

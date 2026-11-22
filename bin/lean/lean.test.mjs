@@ -1064,6 +1064,73 @@ describe("core work-on", () => {
     assert.equal(w.calls.filter((c) => c[1] === "worktree").length, 0);
   });
 
+  describe("stacked plan lanes (#5831)", () => {
+    const openDep = (w) => {
+      const gh = w.io.gh;
+      w.io.gh = async (a) => {
+        if (a[0] === "api" && /issues\/7$/.test(a[1])) return JSON.stringify({ body: "**Depends on**: #3", user: { login: "x" }, author_association: "OWNER" });
+        if (a[0] === "api" && /issues\/3$/.test(a[1])) return JSON.stringify({ state: "open" });
+        return gh(a);
+      };
+      return w;
+    };
+    /** The fake git has no merge-base: the plan's base is an ancestor of the lane and `diff` lists `changed`. */
+    const onLane = (w, { ancestor = true, changed = "" } = {}) => {
+      const git = w.io.git;
+      w.io.git = async (a, opts) => {
+        if (a[0] === "merge-base") { if (!ancestor) throw new Error("not an ancestor"); return ""; }
+        if (a[0] === "diff" && /\.\./.test(a[2] ?? "") && a[1] === "--name-only" && !String(a[2]).includes("...")) return changed;
+        return git(a, opts);
+      };
+      return w;
+    };
+    it("plan: true skips the dependency-open refusal, freezes the contract and ends planned with {contractHash, baseSha}: no building label, no commit, push, PR or merge", async () => {
+      const w = openDep(world());
+      const r = await run(w, { plan: true });
+      assert.equal(r.terminalReason, "planned", r.detail);
+      assert.match(r.planned.contractHash, /^[0-9a-f]{12}$/);
+      assert.ok(r.planned.baseSha.length >= 7);
+      assert.ok(w.comments.some((c) => c.startsWith("<!-- FORGE:CONTRACT -->")), "the contract froze");
+      assert.equal(w.labels.some((l) => /workflow:building/.test(JSON.stringify(l))), false);
+      assert.equal(builders(w).length, 1, "only the plan session ran; no builder");
+      assert.equal(w.calls.some((c) => c[0] === "git" && ["commit", "push"].includes(c[1])), false);
+      assert.equal(w.prs.length, 0); assert.equal(w.merges.length, 0);
+    });
+    it("without plan an open dependency still refuses (preserved)", async () => {
+      const r = await run(openDep(world()));
+      assert.ok(["dependency-open", "dependency-unreadable"].includes(r.terminalReason));
+    });
+    it("planned: the build lane reuses the plan's frozen contract instead of re-planning", async () => {
+      const first = await (async () => { const w = openDep(world()); const r = await run(w, { plan: true }); return { w, r }; })();
+      const comments = first.w.comments.filter((c) => c.startsWith("<!-- FORGE:CONTRACT -->")).map((body) => ({ body, author_association: "OWNER", user: { type: "Bot", login: "forge[bot]" } }));
+      const w = world({ issueComments: comments });
+      const r = await run(onLane(w), { planned: first.r.planned });
+      assert.equal(r.terminalReason, "merged", r.detail);
+      assert.equal(w.comments.filter((c) => c.startsWith("<!-- FORGE:CONTRACT -->")).length, 0, "no second contract was frozen");
+    });
+    for (const [name, opt] of [["the lane moved (plan base not an ancestor)", { ancestor: false }], ["the dependency's merged diff touches a deliverable path", { changed: "bin/lean/foo.mjs\nsrc/foo.mjs\n" }]]) {
+      it(`planned: ${name} makes the plan stale and the lane re-plans`, async () => {
+        const first = await (async () => { const w = openDep(world()); const r = await run(w, { plan: true }); return { w, r }; })();
+        const frozen = first.w.comments.find((c) => c.startsWith("<!-- FORGE:CONTRACT -->"));
+        const paths = (frozen.match(/"path":\s*"([^"]+)"/g) ?? []).map((m) => m.replace(/.*"([^"]+)"$/, "$1"));
+        const changed = opt.changed ? `${paths.join("\n")}\n` : "";
+        const comments = [{ body: frozen, author_association: "OWNER", user: { type: "Bot", login: "forge[bot]" } }];
+        const w = world({ issueComments: comments });
+        const r = await run(onLane(w, { ...opt, changed }), { planned: first.r.planned });
+        assert.equal(r.terminalReason, "merged", r.detail);
+        assert.ok(w.comments.some((c) => c.startsWith("<!-- FORGE:CONTRACT -->")), "re-planned: a new contract froze");
+      });
+    }
+    it("planned: a different contract hash makes the plan stale and the lane re-plans", async () => {
+      const first = await (async () => { const w = openDep(world()); const r = await run(w, { plan: true }); return { w, r }; })();
+      const comments = first.w.comments.filter((c) => c.startsWith("<!-- FORGE:CONTRACT -->")).map((body) => ({ body, author_association: "OWNER", user: { type: "Bot", login: "forge[bot]" } }));
+      const w = world({ issueComments: comments });
+      const r = await run(onLane(w), { planned: { ...first.r.planned, contractHash: "ffffffffffff" } });
+      assert.equal(r.terminalReason, "merged", r.detail);
+      assert.ok(w.comments.some((c) => c.startsWith("<!-- FORGE:CONTRACT -->")), "re-planned: a new contract froze");
+    });
+  });
+
   it("an open PR / remote branch without a frozen contract re-plans, then verifies the existing commits; no second PR", async () => {
     const w = world({ prList: [{ number: 77, headRefOid: "x" }], remote: "abc\trefs/heads/feat/issue-7-lean" });
     const r = await run(w);
