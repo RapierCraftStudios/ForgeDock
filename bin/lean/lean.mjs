@@ -756,7 +756,7 @@ export async function runCore(o) {
       if (deferTail) { postRun.add("lane-facts", postLaneFacts); postRun.add("trajectory", postTrajectory); } else await postTrajectory();
     }
     if (deferTail) postRun.add("teardown", () => teardown(reason, extra)); // last: the structure delta and guard read the worktree
-    if (reason === "merged" || reason === "invalid") await clearPipelineLabels({ gh: ghc, repo, issue }); // #5592: a merged or closed issue keeps no needs-human / parked:* / remediation-queue
+    if (reason === "merged" || reason === "invalid") await clearPipelineLabels({ gh: ghc, repo, issue, onFail: (n, e) => T.anomalies.push(`pipeline labels not cleared${n.length ? `: ${n.join(", ")}` : ""} (${String(e?.message ?? e).slice(0, 120)})`) }); // #5592/#5759: a merged or closed issue keeps no needs-human / parked:* / remediation-queue
     await releaseLease(reason, code, extra.mergedTo ?? null);
     done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0, model_ms: modelMs, phases: phaseLedger.snapshot(),
       ...(laneHead && reason !== "merged" ? { laneHead: { ...laneHead } } : {}), light, ...(lightVerdict ? { light_eligibility: lightVerdict } : {}), ...(lightUpgrade ? { light_upgrade: lightUpgrade } : {}), // #4453
@@ -1547,7 +1547,7 @@ export async function runCore(o) {
     await step("claim", async () => {
     await label("investigating");
     // #5592: a live lane is not parked: needs-human, needs-human:*, parked:* and remediation-queue from an earlier run come off (a later park puts them back)
-    await clearPipelineLabels({ gh: ghc, repo, issue, labels: iss.labels });
+    await clearPipelineLabels({ gh: ghc, repo, issue, labels: iss.labels, onFail: (n, e) => T.anomalies.push(`pipeline labels not cleared${n.length ? `: ${n.join(", ")}` : ""} (${String(e?.message ?? e).slice(0, 120)})`) });
     await post("FORGE:STARTED", `Started work on #${issue} (base \`${lane}\`).`);
     if (recover) {
       // #4267: the batch decided to recover this issue itself; the label goes so the issue is live again.

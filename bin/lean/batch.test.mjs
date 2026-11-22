@@ -384,6 +384,31 @@ describe("#4318: the batch dispatcher's signal relabel and the needs-human relab
         assert.deepEqual(h.calls, ["view"]);
       }
     });
+    it("relabel skips an open issue whose fix PR merged on a non-lean head", async () => {
+      const calls = [];
+      const gh = async (a) => {
+        calls.push(a.slice(0, 2).join(" "));
+        if (a[1] === "view" && a[0] === "issue") return JSON.stringify({ state: "OPEN", body: "", labels: [], closedByPullRequestsReferences: [{ number: 41 }] });
+        if (a[0] === "pr") return JSON.stringify({ state: "MERGED", mergedAt: "2026-11-17T15:43:35Z" });
+        return "";
+      };
+      for (const parked of [null, { code: "env.validate_timeout" }]) assert.equal(await makeRelabelNeedsHuman({ gh, repo: "o/r", now: () => 1000 })({ issue: 7, evidence: "why", parked }), "skipped");
+      assert.ok(!calls.includes("issue edit"));
+      const labelled = async (a) => (a[0] === "issue" && a[1] === "view" ? JSON.stringify({ state: "OPEN", body: "", labels: [{ name: "workflow:merged" }] }) : "");
+      assert.equal(await makeRelabelNeedsHuman({ gh: labelled, repo: "o/r", now: () => 1000 })({ issue: 7, evidence: "why" }), "skipped");
+    });
+    it("relabel still parks an issue reopened after merge", async () => {
+      const calls = [];
+      const gh = async (a) => {
+        calls.push(a.slice(0, 2).join(" "));
+        if (a[0] === "issue" && a[1] === "view") return JSON.stringify({ state: "OPEN", body: "", labels: [], closedByPullRequestsReferences: [{ number: 41 }] });
+        if (a[0] === "pr") return JSON.stringify({ state: "MERGED", mergedAt: "2026-11-17T15:43:35Z" });
+        if (a[0] === "api" && a[1].endsWith("/events")) return "reopened\t2026-11-18T00:00:00.000Z\t";
+        return "";
+      };
+      assert.equal(await makeRelabelNeedsHuman({ gh, repo: "o/r", now: () => 1000 })({ issue: 7, evidence: "why" }), true);
+      assert.ok(calls.includes("issue edit"));
+    });
     it("an expired lease relabels: the label first, then the comment", async () => {
       const h = hook({ state: "OPEN", body: LIVE(500) });
       assert.equal(await h.run(), true);

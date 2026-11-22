@@ -2421,18 +2421,21 @@ export function makeDispatchCheck({ gh, repo, owner: batchOwner = null, batchId 
 }
 
 /**
- * #4318: the batch runner's needs-human relabel. Re-reads the issue first: closed, or a live FORGE:STATE lease (the runner
- * never holds one, so it is another actor's) → "skipped". Label first: a failed label add → "failed" with no comment (a
+ * #4318: the batch runner's needs-human relabel. Re-reads the issue first: closed, a live FORGE:STATE lease (the runner
+ * never holds one, so it is another actor's), or a merged fix not reopened since (#5759) → "skipped". Label first: a failed label add → "failed" with no comment (a
  * resume retries); then the capped FORGE:NEEDS_HUMAN comment, whose failure keeps the label → true.
  */
 export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
   return async ({ issue, evidence, parked = null }) => {
     const { stateOf } = await import("./lean/context.mjs");
     try {
-      const v = JSON.parse(await gh(["issue", "view", String(issue), "-R", repo, "--json", "state,body"]));
+      const v = JSON.parse(await gh(["issue", "view", String(issue), "-R", repo, "--json", "state,body,labels,closedByPullRequestsReferences"]));
       if (String(v?.state ?? "").toUpperCase() === "CLOSED") return "skipped";
       const lease = stateOf(v?.body)?.lease;
       if (lease && Number(lease.until) > now()) return "skipped";
+      // #5759: a fix that already merged (any head) is not parked; an issue reopened after the merge still is
+      const { mergedEvidence } = await import("./lean/merged-park.mjs");
+      if (await mergedEvidence({ gh, repo, issue, view: v })) return "skipped";
     } catch { /* unreadable: relabel as before */ }
     // #4656: a mechanical park carries its code and PR on `parked:<code>` and joins the remediation queue, not the human queue.
     if (parked?.code) {
