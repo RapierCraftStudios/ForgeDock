@@ -3469,7 +3469,7 @@ Measurement. Baseline: pre-gate 23.7 min of a 77 min clean deploy; largest image
 - `ci_budget_unannotated`: an added workflow, an added job, or an added single-test-file step outside `ci.budget.shared_regression_job` (a job id, or a dir when it contains `/`) with no `# FORGE:CI_BUDGET trigger= minutes= why=` comment. The comment may be anywhere in a new file; for a job or step it goes inside the job or on the comment lines above its id.
 - `ci_budget_annotation_invalid`: a field is missing.
 - `ci_budget_exceeded`: `max_workflows`/`max_ci_jobs` are exceeded and the diff does not remove as many as it adds.
-- `ci_hygiene`: a new workflow or job lacks `concurrency`, `timeout-minutes`, `paths` on push/pull_request, or a job-level `if:` on issue/comment events.
+- `ci_hygiene`: a new workflow or job lacks `concurrency`, `timeout-minutes`, `paths` on push/pull_request, or a job-level `if:` on issue/comment events. A tag-only `push` (no `branches`) is exempt from path scoping, and `# FORGE:CI_PATHS_EXEMPT why=<text>` opts a workflow out (#5792).
 
 The gate is on without config; the caps apply only when set. `bin/engine-cli.mjs` `readEnvConfig` passes `ciBudget` when any of the four keys is present. The forge.yaml parser flattens `ci`, so `ci.budget.monthly_minutes` is #5278's `ci.monthly_minutes` (one key). `scripts/review-staging-pre.sh scope` runs `ci-gate.mjs net` and prints `CI_NET:` (also `ci_net` in `<N>_scope.json`). `commands/review-pr-agents/infra.md` 1d makes the hygiene gaps blocking review findings.
 
