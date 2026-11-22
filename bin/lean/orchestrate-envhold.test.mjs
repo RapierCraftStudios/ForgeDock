@@ -166,3 +166,52 @@ describe("#5805 probes", () => {
     assert.equal(envFingerprint(undefined), envFingerprint({}));
   });
 });
+
+describe("#5755 one env issue per signature", () => {
+  const seam = (closed = () => false) => {
+    const calls = [];
+    return { calls, ensure: async (a) => { calls.push(a); return 900; }, isClosed: async () => closed() };
+  };
+  const timeout = (extra = {}) => ({ terminalReason: "needs-human", code: "env.validate_timeout", detail: "validate V1 timed out after 900s on host 1234", ...extra });
+
+  it("two issues with the same env signature share one env issue and are held, never needs-human", async () => {
+    const e = seam();
+    const { byIssue, calls } = await harness({ script: { 1: [miss("html2text")], 2: [miss("html2text")] }, envHold: null, extra: { envIssue: e } });
+    assert.equal(byIssue[1].outcome, "held");
+    assert.equal(byIssue[2].outcome, "held");
+    assert.equal(byIssue[1].envHold.envIssue, 900);
+    assert.deepEqual(e.calls.map((c) => c.sig), ["env.tool_missing|html2text", "env.tool_missing|html2text"]);
+    assert.deepEqual(e.calls[1].issues, [1, 2]);
+    assert.equal(calls.length, 2, "no recovery lane is launched");
+  });
+
+  it("after 2 issues hit a signature a pending issue whose body names the tool is not admitted", async () => {
+    const e = seam();
+    const bodies = { 3: "needs html2text to validate", 4: "unrelated" };
+    const { byIssue, calls } = await harness({ script: { 1: [miss("html2text")], 2: [miss("html2text")], 3: [MERGED], 4: [MERGED] }, envHold: null, extra: { envIssue: e, readBody: async (n) => bodies[n] ?? "" } });
+    assert.equal(byIssue[3].outcome, "held");
+    assert.equal(byIssue[3].envHold.envIssue, 900);
+    assert.equal(byIssue[4].outcome, "merged");
+    assert.equal(calls.some((c) => c.n === 3), false);
+  });
+
+  it("env.validate_timeout and env.capability_remote are held on an env issue, not needs-human", async () => {
+    const e = seam();
+    const { byIssue } = await harness({ script: { 1: [timeout()], 2: [{ terminalReason: "needs-human", code: "env.capability_remote", detail: "capability sops is host-only" }] }, envHold: null, extra: { envIssue: e } });
+    assert.equal(byIssue[1].outcome, "held");
+    assert.equal(byIssue[2].outcome, "held");
+  });
+
+  it("held issues are requeued when the env issue closes", async () => {
+    let closed = false;
+    const e = seam(() => closed);
+    const { byIssue } = await harness({ script: { 1: [miss("html2text"), MERGED] }, envHold: null,
+      onRow: (r) => { if (r.issue === 1 && r.outcome === "held") closed = true; }, extra: { envIssue: e } });
+    assert.equal(byIssue[1].outcome, "merged");
+  });
+
+  it("without the seam the env.validate_timeout flow is unchanged (needs-human)", async () => {
+    const { byIssue } = await harness({ script: { 1: [timeout()] }, envHold: null });
+    assert.notEqual(byIssue[1].outcome, "held");
+  });
+});

@@ -13,6 +13,7 @@ import { execFileSync } from "node:child_process";
 import { mapLimit } from "./lean/pmap.mjs";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
+import { createHash } from "node:crypto";
 const RECOVERING_LABEL = "workflow:recovering";
 import { readdirSync, statSync, readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -2253,6 +2254,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       // #5805: engine/env-caused failures that would repeat are held and re-admitted on an install version change, a --set-env, or the
       // missing tool appearing on the lanes' PATH (the batch's pinned env over the daemon's); off under the test seams
       ...(envHold ? { envHold } : {}),
+      // #5755: one env issue per env.* signature; the affected product issues wait on it (off under the test seams)
+      ...((deps.envIssue !== undefined ? deps.envIssue : testDeps ? null : makeEnvIssue({ gh: (a) => leanIo.gh(a), repo })) ? { envIssue: deps.envIssue !== undefined ? deps.envIssue : makeEnvIssue({ gh: (a) => leanIo.gh(a), repo }) } : {}),
       // #5204: an interrupted, requeued lane runs nothing until it is dispatched again: workflow:building comes off (best effort)
       onInterrupted: deps.onInterrupted ?? (async (n) => leanIo.gh(["issue", "edit", String(n), "-R", repo, "--remove-label", "workflow:building"]).catch(() => {})),
       // #4387: an out-of-set dependency labelled needs-human is not pulled into the batch
@@ -2493,6 +2496,35 @@ export function makeMarkRecovering({ gh, repo }) {
       await postUpsert({ gh, repo, issue, markers: ["FORGE:RECOVERING"], cap: capComment, body: `## Recovering (attempt ${attempt}/${max})\nrecovering (${code}), attempt ${attempt}/${max}: the watchdog is rebuilding this issue; \`needs-human\` appears only if recovery is exhausted.` });
     } catch { /* best effort */ }
     return true;
+  };
+}
+
+/**
+ * #5755: one env issue per failure signature. `ensure` finds the open issue carrying the signature marker (or files it) and comments the
+ * newly affected product issues, which get `waiting-dependency`; `isClosed` reads its state. Best effort per call; ensure returns the number or throws.
+ */
+export function makeEnvIssue({ gh, repo }) {
+  const mark = (sig) => `<!-- FORGE:ENVSIG ${createHash("sha256").update(sig).digest("hex").slice(0, 16)} -->`;
+  const list = (issues) => issues.map((i) => `#${i}`).join(", ");
+  return {
+    ensure: async ({ sig, code, issues = [], evidence = "", number = null }) => {
+      const m = mark(sig);
+      let no = Number.isInteger(number) ? number : null;
+      if (!no) {
+        const found = JSON.parse(await gh(["issue", "list", "-R", repo, "--state", "open", "--search", `"${m.slice(5, -4).trim()}" in:body`, "--json", "number,body", "--limit", "10"]) || "[]");
+        no = found.find((x) => String(x.body ?? "").includes(m))?.number ?? null;
+      }
+      if (!no) {
+        const out = await gh(["issue", "create", "-R", repo, "--title", `fix(env): ${code} (${sig.split("|")[1] ?? ""})`.slice(0, 120),
+          "--body", `Environment defect \`${code}\` (engine/env, not product code). Affected: ${list(issues)}. They wait on this issue and are requeued when it closes.\n\n\`\`\`\n${String(evidence).slice(0, 3000)}\n\`\`\`\n\n${m}`]);
+        no = Number(/\/issues\/(\d+)/.exec(String(out))?.[1]) || null;
+      } else {
+        try { await gh(["issue", "comment", String(no), "-R", repo, "--body", `Affects ${list(issues)}.`]); } catch { /* best effort */ }
+      }
+      for (const i of issues) { try { await gh(["issue", "edit", String(i), "-R", repo, "--add-label", "waiting-dependency"]); } catch { /* best effort */ } }
+      return no;
+    },
+    isClosed: async (number) => JSON.parse(await gh(["issue", "view", String(number), "-R", repo, "--json", "state"]))?.state === "CLOSED",
   };
 }
 

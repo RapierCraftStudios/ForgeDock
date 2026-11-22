@@ -125,7 +125,7 @@
  * the queue order except that decomposed sub-issues go first. A settled row carries `est_minutes` (estimated vs. actual).
  */
 import { parseDependsOn } from "../engine/phases.mjs";
-import { classifyNeedsHuman, recoveryCodeOf, recoveryClassOf, OUTCOME_CODES, ENV_VALIDATE_PLACEMENT, MECHANICAL_CODES } from "../engine/outcome-codes.mjs";
+import { classifyNeedsHuman, recoveryCodeOf, recoveryClassOf, OUTCOME_CODES, ENV_VALIDATE_PLACEMENT, ENV_VALIDATE_TIMEOUT, MECHANICAL_CODES } from "../engine/outcome-codes.mjs";
 import { detectGateDeadlock, formatGateDeadlock } from "./gatewatch.mjs";
 import { recoveryEvidence } from "./render.mjs";
 import { renderAlerts } from "../stats/render.mjs";
@@ -329,7 +329,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
-  getChildren = null, autoChildren = null, baseWait = null, rotator = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null, envHold = null, logicalDeps = null }) {
+  getChildren = null, autoChildren = null, baseWait = null, rotator = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null, envHold = null, envIssue = null, logicalDeps = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -351,7 +351,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #5805: engine/env holds (off unless `envHold` is passed). `engineSigs`: issue -> signature of its relaunched engine-error;
   // `deterministic`: `version|signature` seen twice (never relaunched again on that version); `toolReadmits`: `issue|signature`
   // already re-admitted because the probe found the tool (a lane that still misses it waits for an engine or env change instead).
-  const ehOn = !!envHold;
+  const ehOn = !!envHold || !!envIssue;
+  // #5755: env.* failures are one engine/env defect per signature: `envSigs` signature -> {issues, number} (the env issue the `envIssue` seam
+  // filed or updated); affected product issues are held on it (never needs-human) and 2+ issues on a signature stop admitting lanes that need it.
+  const envSigs = toMap(saved?.envSigs);
   const engineSigs = toMap(saved?.engineSigs);
   const deterministic = new Set(saved?.deterministicSigs ?? []);
   const toolReadmits = new Set(saved?.toolReadmits ?? []);
@@ -448,6 +451,52 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #5592: env.tool_missing repeats are the same defect when the same tools are missing, whatever else the detail says (probe lines, ids, paths vary per run)
   const toolsOf = (d) => { const m = /(?:host|sandbox) is missing ([^\n]+?), so validate command/i.exec(String(d ?? "")); return m ? m[1].split(/\s*,\s*/).sort().join(",") : null; };
   const envSig = (code, d) => (code === OUTCOME_CODES.ENV_TOOL_MISSING ? toolsOf(d) : null) ?? sigOf(d);
+  const ENV_ALL_CODES = [...REPEAT_ENV_CODES, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE]; // #5755
+  const envKey = (code, d) => `${code}|${code === OUTCOME_CODES.ENV_TOOL_MISSING && toolsOf(d) ? toolsOf(d) : failureSignature(code, d).split("|").slice(1).join("|")}`;
+  /** #5755: records `issue` on its signature and files or updates the one env issue (seam `envIssue.ensure`); the issue number, or null when none could be filed. */
+  const fileEnvIssue = async ({ sig, code, issue, tools, evidence }) => {
+    const e = envSigs.get(sig) ?? { issues: [], number: null };
+    if (!e.issues.includes(issue)) e.issues.push(issue);
+    envSigs.set(sig, e);
+    try {
+      const r = await envIssue.ensure({ sig, code, issues: [...e.issues], tools, evidence, number: e.number });
+      const no = Number.isInteger(r) ? r : r?.number;
+      if (Number.isInteger(no) && no > 0) e.number = no;
+    } catch { /* best effort: without an env issue the existing flow applies */ }
+    save();
+    return e.number;
+  };
+  const envBodies = new Map();
+  /** #5755: once 2 issues hit one env signature, a pending issue whose contract needs it is held on the env issue instead of admitted (seam `envIssue.needs(n, sig)`, else its body names a missing tool). */
+  const gateEnvSigs = async () => {
+    if (!envIssue || tripped || cancelled) return;
+    const gated = [...envSigs].filter(([, e]) => e.issues.length >= 2 && e.number);
+    if (!gated.length) return;
+    for (const n of [...pending]) {
+      if (results.has(n) || running.has(n)) continue;
+      for (const [sig, e] of gated) {
+        let need = false;
+        try {
+          if (typeof envIssue.needs === "function") need = (await envIssue.needs(n, sig, e)) === true;
+          else if (sig.startsWith(`${OUTCOME_CODES.ENV_TOOL_MISSING}|`)) {
+            if (!envBodies.has(n)) envBodies.set(n, String(await readBody(n) ?? ""));
+            const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            need = sig.split("|")[1].split(",").some((t) => t && new RegExp(`(^|[^\\w-])${esc(t)}($|[^\\w-])`).test(envBodies.get(n)));
+          }
+        } catch { need = false; }
+        if (!need) continue;
+        pending.splice(pending.indexOf(n), 1);
+        const tools = sig.startsWith(`${OUTCOME_CODES.ENV_TOOL_MISSING}|`) ? sig.split("|")[1].split(",") : null;
+        if (!e.issues.includes(n)) e.issues.push(n);
+        const final = { issue: n, outcome: "held", cost_usd: 0, minutes: 0, detail: `waiting on env issue #${e.number}: ${sig.split("|")[0]} hit ${e.issues.length - 1} issues; admitted again when it closes`,
+          envHold: { kind: tools ? "tool" : "env", sig, from: "pending", version: curVersion(), env: curEnv(), ...(tools ? { tools } : {}), envIssue: e.number, since: now() }, waiting: true };
+        results.set(n, final); save();
+        decided({ issue: n, what: `held: not admitted, its contract needs the env that env issue #${e.number} tracks (${sig})`, why: `${e.issues.length} issues hit the same signature`, alternative: "admit it into the same env failure" });
+        update(final);
+        break;
+      }
+    }
+  };
   const maxFor = (cls) => (cls === "mechanical" ? mechMax : recoveryMax);
   const classUsed = toMap(saved?.recoveryClasses); // `${issue}:${class}` -> recovery lanes launched in that class
   const recoveries = toMap(saved?.recoveries); // issue -> recovery lanes launched (#4267)
@@ -472,7 +521,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       ...(requeueApplied.size ? { requeueApplied: [...requeueApplied], requeued: toObj(requeuedInfo) } : {}),
       ...(relabelled.size ? { relabelled: [...relabelled] } : {}), ...(cancelled ? { cancelled } : {}),
       ...(estimate ? { estimates: toObj(estimates), enqueued: toObj(enqueued) } : {}), ...(heads.size ? { heads: [...heads] } : {}),
-      ...(engineSigs.size ? { engineSigs: toObj(engineSigs) } : {}), ...(deterministic.size ? { deterministicSigs: [...deterministic] } : {}), ...(toolReadmits.size ? { toolReadmits: [...toolReadmits] } : {}) });
+      ...(engineSigs.size ? { engineSigs: toObj(engineSigs) } : {}), ...(deterministic.size ? { deterministicSigs: [...deterministic] } : {}), ...(toolReadmits.size ? { toolReadmits: [...toolReadmits] } : {}), ...(envSigs.size ? { envSigs: toObj(envSigs) } : {}) });
   };
   const update = (row) => { store?.log?.(row); onUpdate(row); };
   const classifyOne = async (n) => {
@@ -814,16 +863,16 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (sandboxUse.has(n)) row.sandbox = { ...sandboxUse.get(n), ...(sandboxUse.get(n).by_agent ? { by_agent: { ...sandboxUse.get(n).by_agent } } : {}) };
     const done = () => { running.delete(n); runRecs.delete(n); releaseSlot(n); endRemote(n); };
     // #5805: an engine/env-caused end that would repeat as-is: held with its signature, re-admitted by watchEnvHolds, never terminal.
-    const holdEnv = ({ kind, sig, tools = null, why }) => {
+    const holdEnv = ({ kind, sig, tools = null, why, envIssueNo = null }) => {
       const p = recovering.get(n);
       if (p) { // a recovery lane that hit an engine-error: its earlier attempts' cost stays on the row
         recovering.delete(n);
         row.cost_usd = Math.round(((Number(row.cost_usd) || 0) + (Number(p.cost_usd) || 0)) * 1e6) / 1e6;
         row.minutes = Math.round(((Number(row.minutes) || 0) + (Number(p.minutes) || 0)) * 10) / 10;
       }
-      const triggers = ["an engine upgrade", ...(envHold?.envFingerprint ? ["a --set-env"] : []), ...(tools?.length && envHold?.missingTools ? [`${tools.join(", ")} found on the host`] : [])];
+      const triggers = [...(envIssueNo ? [`env issue #${envIssueNo} closing`] : []), "an engine upgrade", ...(envHold?.envFingerprint ? ["a --set-env"] : []), ...(tools?.length && envHold?.missingTools ? [`${tools.join(", ")} found on the host`] : [])];
       const final = { ...row, outcome: "held", detail: `waiting on engine/env change: ${why}; re-admitted on ${triggers.join(" or ")}\n${String(row.detail ?? "")}`,
-        envHold: { kind, sig, from: row.outcome, version: curVersion(), env: curEnv(), ...(tools?.length ? { tools } : {}), since: now() }, waiting: true };
+        envHold: { kind, sig, from: row.outcome, version: curVersion(), env: curEnv(), ...(tools?.length ? { tools } : {}), ...(envIssueNo ? { envIssue: envIssueNo } : {}), since: now() }, waiting: true };
       results.set(n, final); done(); save();
       decided({ issue: n, what: `held: waiting on engine/env change (${why})`, why: firstLine(row.detail) || row.outcome,
         alternative: kind === "engine" ? "relaunch into the same engine-error, or end engine-error and wait for a manual --requeue" : "launch a recovery that fails the same way, or end needs-human and wait for a manual --requeue" });
@@ -981,6 +1030,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       }
     }
     // #5526: the hold is re-read here (it is only read once per pass): a held issue's terminal outcome starts no recovery lane.
+    // #5755: an env.* needs-human end is the engine's defect: one env issue per signature, the product issue held on it (waiting-dependency), no needs-human.
+    if (envIssue && row.outcome === "needs-human" && ENV_ALL_CODES.includes(row.code)) {
+      const tools = row.code === OUTCOME_CODES.ENV_TOOL_MISSING ? toolsOf(row.detail) : null;
+      const sig = envKey(row.code, row.detail);
+      const no = await fileEnvIssue({ sig, code: row.code, issue: n, tools: tools ? tools.split(",") : null, evidence: String(row.detail ?? "") });
+      if (no) return holdEnv({ kind: tools ? "tool" : "env", sig, tools: tools ? tools.split(",") : null, envIssueNo: no, why: `${row.code}: env issue #${no} owns the fix` });
+    }
     const heldNow = recoveryMax && ["needs-human", "ci-pending", "budget-exceeded"].includes(row.outcome) && (refreshHeld(), opHeld.has(n));
     if (heldNow) decided({ issue: n, what: `no recovery lane for #${n}: ${heldByOperator(n)}`, why: firstLine(row.detail) || row.outcome, alternative: "recover while the operator holds it" });
     if (recoveryMax && !heldNow && ["needs-human", "ci-pending", "budget-exceeded"].includes(row.outcome)) {
@@ -1505,8 +1561,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         }
       }
       let why = null;
-      if (v && h.version && v !== h.version) why = `engine version changed v${h.version} → v${v}`;
-      else if (fp && h.env && fp !== h.env) why = "batch env changed (--set-env)";
+      if (h.envIssue && typeof envIssue?.isClosed === "function") { let c = false; try { c = (await envIssue.isClosed(h.envIssue)) === true; } catch { c = false; } if (c) why = `env issue #${h.envIssue} closed`; }
+      if (!why && v && h.version && v !== h.version) why = `engine version changed v${h.version} → v${v}`;
+      if (why) { /* env issue closed */ } else if (fp && h.env && fp !== h.env) why = "batch env changed (--set-env)";
       else if (h.tools?.length && !toolReadmits.has(`${n}|${h.sig}`) && (await missingTools(h.tools))?.length === 0) { why = `${h.tools.join(", ")} now found on the host`; toolReadmits.add(`${n}|${h.sig}`); }
       if (why) { engineSigs.delete(n); releaseHeld(n, true, `re-admitted: ${why}`); continue; }
       if (now() - (Number(h.since) || 0) >= ehMaxMs && !/no engine\/env change within/.test(r.detail ?? "")) { // the wait is over: the row stays held (resumable, --requeue), the batch may end
@@ -1638,6 +1695,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         if (pfNoted.size && !keys.size) update({ issue: null, outcome: "preflight", detail: "preflight cleared; admissions resumed" });
         pfNoted = keys;
       }
+      await gateEnvSigs(); // #5755
       const isReady = (n) => {
         if (pfAll || (pfRemote && isRemote(n))) return false;
         if (opHeld.has(n)) { opHeldHit.add(n); return false; }
