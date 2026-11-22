@@ -3,7 +3,9 @@
 // #5758: superseded lane images, the build cache and anonymous volumes are collected by the pool agent.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { Readable } from "node:stream";
 import { join } from "node:path";
 import { createAgent } from "../pool/agent.mjs";
 import { dockerCli } from "../pool/docker.mjs";
@@ -98,4 +100,40 @@ test("tools tag helper groups variants with their base tag", () => {
   assert.ok(isLaneToolsTagOf(base, base) && isLaneToolsTagOf(laneToolsTag(base, ["x"]), base));
   assert.ok(!isLaneToolsTagOf(laneToolsTag(laneImageTag("1.2.30"), ["x"]), base));
   assert.ok(!isLaneToolsTagOf(`${base}-tnothex`, base));
+});
+
+/** A code tree the agent can run from: package.json plus the two hashed dirs (versionOf reads them). */
+function codeTree(dir, version) {
+  mkdirSync(join(dir, "bin", "pool"), { recursive: true }); mkdirSync(join(dir, "pool", "image"), { recursive: true });
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ version }));
+  writeFileSync(join(dir, "pool", "image", "Dockerfile"), `FROM scratch # ${version}\n`);
+}
+/** Drives a real selfUpdate (POST /admin/update); only the bundle download and process exit are replaced. */
+async function updateTo(from, to, images) {
+  const work = tmpDir("cs-gc-upd-"), root = join(work, "code"), src = join(work, "src");
+  codeTree(root, from); codeTree(src, to);
+  const tgz = join(work, "bundle.tgz"); execFileSync("tar", ["-czf", tgz, "-C", src, "."]);
+  const docker = fakeDocker({ images });
+  docker.build = async (_dir, tag) => { for (const t of [tag, laneToolsTag(tag, ["a"]), laneToolsTag(tag, ["b"])]) docker.images.add(t); };
+  const agent = agentOf(docker, { code_root: root });
+  const oldFetch = globalThis.fetch, oldExit = process.exit;
+  const exited = new Promise((resolve) => { process.exit = () => resolve(); });
+  globalThis.fetch = async () => new Response(readFileSync(tgz));
+  try {
+    const req = Object.assign(Readable.from([]), { method: "POST", url: "/admin/update", headers: { authorization: "Bearer t" }, socket: { remoteAddress: "127.0.0.1" } });
+    await agent.handle(req, { writeHead() {}, setHeader() {}, write() {}, end() {} });
+    await exited;
+  } finally { globalThis.fetch = oldFetch; process.exit = oldExit; }
+  return docker;
+}
+
+test("selfUpdate keeps the new image and the running one and drops older versions with their tools tags", async () => {
+  const docker = await updateTo("0.0.4", "0.0.5", [...family("0.0.2"), ...family("0.0.3"), ...family("0.0.4")]);
+  assert.deepEqual([...docker.images].sort(), [...family("0.0.4"), ...family("0.0.5")].sort());
+});
+
+test("selfUpdate never removes the image it just built, even when it is older than the kept versions", async () => {
+  const docker = await updateTo("0.0.4", "0.0.1", [...family("0.0.2"), ...family("0.0.3"), ...family("0.0.4")]);
+  assert.ok(docker.images.has(laneImageTag("0.0.1")), "rollback image survives the prune");
+  assert.ok(docker.images.has(laneImageTag("0.0.4")), "running image survives");
 });
