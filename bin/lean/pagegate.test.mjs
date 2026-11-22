@@ -200,4 +200,16 @@ describe("attribute-only page edits and spec-only failures (#5729)", () => {
     assert.equal(specOnlyFailures([{ kind: "page_design_missing" }, { kind: "page_metadata_missing" }]), false);
     assert.equal(specOnlyFailures([]), false);
   });
+  it("a bug-labelled issue treats a className edit as copy, but never an added tag", () => {
+    const cls = d([link("/a")], [link("/a").replace("btn", "btn-lg")]);
+    assert.equal(pageChange(page, o(cls)), "rewrite");
+    assert.equal(pageChange(page, { ...o(cls), bugFix: true }), "copy");
+    assert.equal(pageChange(page, { ...o(d([link("/a")], [`${link("/a")}\n      <Badge />`])), bugFix: true }), "rewrite");
+  });
+  it("a remote sandbox with no engine capture does not demand a builder screenshot claim; a failed capture still fails", async () => {
+    const diff = d([link("/a")], [link("/b")]), a = { cfg, files: [page], diff, readFile: body, tracked: [page], added: [], designApproved: true };
+    assert.ok((await pageFailures(a)).some((x) => x.kind === "page_visual_missing"));
+    assert.ok(!(await pageFailures({ ...a, remoteNoCapture: true })).some((x) => x.kind === "page_visual_missing"));
+    assert.ok((await pageFailures({ ...a, remoteNoCapture: true, captures: { screenshots: [], errors: [{ route: "/contact", error: "blank" }] } })).some((x) => x.kind === "page_visual_failed"));
+  });
 });

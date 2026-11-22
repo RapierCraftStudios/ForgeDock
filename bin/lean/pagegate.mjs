@@ -97,10 +97,12 @@ function signedByFile(diff) {
 const VALUE_ATTR_RE = /\b(href|src|alt|target|rel|title|aria-[\w-]+)\s*=\s*(?:"[^"]*"|'[^']*'|\{[^{}]*\})/g;
 const skeleton = (l) => l.replace(VALUE_ATTR_RE, "$1=_").replace(/\s+/g, " ").trim();
 /** #5729: true when every markup line changed only the VALUE of an href/src/alt/target/rel/title/aria-* attribute (same tags, same classes, no import/export). */
-function attributeValueOnly(c) {
+const tagsOf = (l) => (l.match(/<\/?[A-Za-z][\w.]*|\/>/g) ?? []).join(" ");
+/** `bugFix` (the issue is labelled bug/P0/P1): any attribute edit, class and style included, counts while no tag is added or removed. */
+function attributeValueOnly(c, bugFix = false) {
   const a = (c?.add ?? []).filter((l) => MARKUP_RE.test(l)), d = (c?.del ?? []).filter((l) => MARKUP_RE.test(l));
   if (!a.length || a.length !== d.length || [...a, ...d].some((l) => /^\s*(?:import|export)\b/.test(l))) return false;
-  return a.every((l, i) => skeleton(l) === skeleton(d[i]));
+  return a.every((l, i) => (bugFix ? tagsOf(l) === tagsOf(d[i]) : skeleton(l) === skeleton(d[i])));
 }
 
 /** #5729: true when every row is a spec or visual-evidence row a builder resume cannot satisfy (needs /design or a browser the builder may not install). */
@@ -114,7 +116,7 @@ export function specOnlyFailures(rows) {
  * "new" (added, or unknown: no `added` list or no diff for the file fails closed), "rewrite" (a markup/style/import change, or churn at
  * or over `threshold` of the file) or "copy" (only text or data lines changed: takes the visual-check path, no design spec).
  */
-export function pageChange(file, { added = null, diff = "", threshold = 0.6, generated = [], readFile = null } = {}) {
+export function pageChange(file, { added = null, diff = "", threshold = 0.6, generated = [], readFile = null, bugFix = false } = {}) {
   const f = norm(file);
   if (GENERATED_RE.test(f) || anyGlob(generated ?? [], f)) return "generated";
   let src = "";
@@ -123,7 +125,7 @@ export function pageChange(file, { added = null, diff = "", threshold = 0.6, gen
   if (!Array.isArray(added) || added.map(norm).includes(f)) return "new";
   const lines = changedByFile(diff)[f];
   if (!lines?.length) return "new";
-  if (lines.some((l) => MARKUP_RE.test(l)) && !attributeValueOnly(signedByFile(diff)[f])) return "rewrite"; // #5729: an href/prop value edit keeps the tag skeleton: copy
+  if (lines.some((l) => MARKUP_RE.test(l)) && !attributeValueOnly(signedByFile(diff)[f], bugFix)) return "rewrite"; // #5729: an href/prop value edit keeps the tag skeleton: copy
   const total = src ? src.split("\n").length : 0;
   return total && lines.length / total >= threshold ? "rewrite" : "copy";
 }
@@ -198,9 +200,9 @@ const LINK_RE = /href\s*=\s*\{?\s*["'`](\/[^"'`#?\s{}$]*)/g;
  * Blocking failures (conformance.unimplemented) for the pages a diff adds or changes. `readFile(path)` returns worktree content or "";
  * `tracked` the repo's files; `designApproved` true/false/null (unknown skips); `run({command})` -> {rc, output} for `pages.lint`.
  */
-export async function pageFailures({ cfg, files = [], diff = "", result = null, readFile = () => "", tracked = null, designApproved = null, run = null, added = null, captures = null, exists = null }) {
+export async function pageFailures({ cfg, files = [], diff = "", result = null, readFile = () => "", tracked = null, designApproved = null, run = null, added = null, captures = null, exists = null, bugFix = false, remoteNoCapture = false }) {
   // #5648: generated pages are exempt; a modified copy-only page takes the visual-check path (no spec, no new-page briefs)
-  const kind = (f) => pageChange(f, { added, diff, threshold: cfg?.rewrite_threshold, generated: cfg?.generated, readFile });
+  const kind = (f) => pageChange(f, { added, diff, threshold: cfg?.rewrite_threshold, generated: cfg?.generated, readFile, bugFix });
   const pages = pageFiles(files, cfg, { readFile }).filter((f) => kind(f) !== "generated"), dOnly = designOnlyFiles(files, cfg).filter((f) => kind(f) !== "generated"), uiFiles = [...pages, ...dOnly];
   if (!cfg || !uiFiles.length) return [];
   const specFiles = uiFiles.filter((f) => kind(f) !== "copy"), briefPages = pages.filter((f) => kind(f) !== "copy");
@@ -211,7 +213,8 @@ export async function pageFailures({ cfg, files = [], diff = "", result = null, 
     // #5770: the engine's capture (screenshots it produced and uploaded) counts like builder evidence; entries must be links or existing paths
     const vps = cfg.viewports?.length ? cfg.viewports : [390, 1440], shots = [...list(j.screenshots), ...list(captures?.screenshots)];
     if (captures?.errors?.length) row("page_visual_failed", `${uiFiles.slice(0, 3).join(", ")}: the engine's visual capture failed: ${captures.errors.slice(0, 5).map((e) => `${e.route ?? "?"}${e.viewport ? `@${e.viewport}` : ""}: ${e.error}`).join("; ")}`);
-    else if (viewportsMissing(shots, vps, exists).length) row("page_visual_missing", `${uiFiles.slice(0, 3).join(", ")}: page_gate.screenshots must be links or existing paths to a ${vps.join("px and a ")}px visual check attached to the PR (free text does not count)`);
+    // #5729: a remote sandbox with no engine capture cannot render (builders may not install browsers): the shots are the CI/staging render's (`ci` evidence), not a builder claim
+    else if (viewportsMissing(shots, vps, exists).length && !(remoteNoCapture && !captures)) row("page_visual_missing", `${uiFiles.slice(0, 3).join(", ")}: page_gate.screenshots must be links or existing paths to a ${vps.join("px and a ")}px visual check attached to the PR (free text does not count)`);
   }
   const all = [...new Set([...(tracked ?? []), ...files].map(norm))];
   if (briefPages.length && cfg.require.includes("seo_intent")) {
