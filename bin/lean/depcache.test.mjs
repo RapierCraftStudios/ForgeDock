@@ -760,6 +760,23 @@ describe("depcache (#5731): hint without a range, and retry under the next inter
     assert.equal(r.status, "failed", JSON.stringify(r));
     assert.match(r.reason, /3\.11/);
     assert.match(r.reason, /tried/);
+    assert.equal(r.code, "env.setup_failed");
+    assert.match(r.reason, /interpreters used: 3\.11, 3\.14/);
+    assert.match(r.reason, /in-range alternatives not tried: none/);
+  });
+  it("#5731 a failed install is env.setup_failed naming the interpreter used and the in-range alternatives not tried", async () => {
+    const f = fakeExec({ pythons: { python3: "3.14.0", "python3.11": "3.11.8", "python3.12": "3.12.3" } });
+    const { base, wt } = project("^3.11", "3.11");
+    const exec = async (cmd, args, o) => {
+      const rest = cmd === "poetry" ? args : args.slice(2);
+      if (cmd === "python3.11" && rest[0] === "install" && !args.includes("--no-root")) throw Object.assign(new Error("install failed"), { stderr: "boom" });
+      return f.exec(cmd, args, o);
+    };
+    const [r] = await makeDepCache({ root: join(base, "cache"), exec, env: {}, pollMs: 5 }).prepare({ wt, repoKey: "repo-5731h" });
+    assert.equal(r.status, "failed", JSON.stringify(r));
+    assert.equal(r.code, "env.setup_failed");
+    assert.match(r.reason, /interpreters used: 3\.11/);
+    assert.match(r.reason, /in-range alternatives not tried: .*python3\.12/);
   });
 });
 

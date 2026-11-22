@@ -498,14 +498,37 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
   const failedRun = (r) => r.status === "failed" || r.status === "materialize-fallback" || (r.published === false && /^(publish failed|cache is on another filesystem)/.test(String(r.reason ?? "")));
 
   /** #5731: an install that fails with a build/wheel incompatibility is retried once per remaining in-range interpreter; the last failure names every one tried. */
+  /** #5731: the in-range minors on PATH that were not used (`python3.X`), for the final failure to name. */
+  async function untriedAlternatives(wt, d, exclude) {
+    let range = null;
+    try { range = pyRange(String(fs.readFileSync(join(wt, "pyproject.toml"))), d.eco); } catch { /* no pyproject */ }
+    const out = [];
+    for (const x of [14, 13, 12, 11, 10, 9, 8]) {
+      if (exclude.includes(`3.${x}`)) continue;
+      try {
+        const v = /(\d+)\.(\d+)\.(\d+)/.exec(String(await exec(`python3.${x}`, ["--version"], { timeoutMs: 30000 })));
+        if (v && (!range || pySatisfies(range, v.slice(1, 4).map(Number)))) out.push(`python3.${x}`);
+      } catch { /* not installed */ }
+    }
+    return out;
+  }
+
+  /** #5731: an install that fails with a build/wheel incompatibility is retried once per remaining in-range interpreter; the final env.setup_failed names the interpreters used and the in-range alternatives not tried. */
   async function prepareOne(wt, keyRoot, d, laneEnv, publishSnap = true) {
     const tried = [];
     let last = null;
+    const finish = async (r, retryMinor) => {
+      const { pyMinor, ...rest } = r;
+      if (rest.status !== "failed" || !pyMinor) return rest;
+      const used = [...tried, pyMinor].filter((m, i, a) => a.indexOf(m) === i);
+      const alts = await untriedAlternatives(wt, d, [...used, retryMinor].filter(Boolean));
+      return { ...rest, code: "env.setup_failed", reason: `${rest.reason} (interpreters used: ${used.join(", ")}; in-range alternatives not tried: ${alts.join(", ") || "none"})` };
+    };
     for (;;) {
       const r = await prepareWith(wt, keyRoot, d, laneEnv, publishSnap, tried);
-      if (last && r.status === "failed" && r.code === "env.tool_missing") return { ...last, reason: `${last.reason}; no further in-range interpreter to retry (tried ${tried.join(", ")})` };
+      if (last && r.status === "failed" && r.code === "env.tool_missing") return finish({ ...last, reason: `${last.reason}; no further in-range interpreter to retry` });
       const { retryMinor, ...rest } = r;
-      if (!retryMinor || tried.length >= 3) return last && rest.status === "failed" ? { ...rest, reason: `${rest.reason} (interpreters tried: ${[...tried, retryMinor].filter(Boolean).join(", ")})` } : rest;
+      if (!retryMinor || tried.length >= 3) return finish(rest, retryMinor);
       tried.push(retryMinor);
       last = rest;
     }
@@ -575,6 +598,7 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
         rmTrees(wt, expected);
         const f = done("failed", { key, reason: `${e?.code === "ENOENT" ? "tool not found" : "install failed"}: ${msg(e)}${py ? ` (under ${py.cmd} ${py.version})` : ""}` });
         const minor = py ? `${py.v[0]}.${py.v[1]}` : found.minor;
+        if (PY.has(d.eco) && minor) f.pyMinor = minor;
         if (PY.has(d.eco) && minor && PY_BUILD_RE.test(`${msg(e)}\n${e?.stderr ?? ""}\n${e?.stdout ?? ""}`)) f.retryMinor = minor; // #5731
         return { failed: f };
       }
