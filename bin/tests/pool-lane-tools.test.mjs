@@ -19,7 +19,7 @@ function fakeDocker({ have = [], failBuild = false, hang = false } = {}) {
     async inspect(n) { return containers.get(n) ?? null; }, async remove() {}, async listLabelled() { return []; }, async wipe() {}, async removeWorkDir() {}, async pruneWorkDirs() {}, async listVolumes() { return []; }, async removeVolume() {} };
 }
 const spec = (id, extra = {}) => ({ id, issue: 7, repo: { slug: "o/r", url: "u", ref: "main" }, env: {}, command: ["true"], ...extra });
-const agentWith = (docker) => createAgent({ name: "a", listen: { host: "127.0.0.1", port: 7712 }, router_url: "http://r:1", state_dir: tmpDir("lt-"), allow_cpus: 8, allow_mem_gb: 16, token: "t" }, { docker, log: quiet, live: () => ({ ok: true }) });
+const agentWith = (docker) => createAgent({ name: "a", listen: { host: "127.0.0.1", port: 7712 }, router_url: "http://r:1", state_dir: tmpDir("lt-"), allow_cpus: 8, allow_mem_gb: 16, token: "t" }, { docker, log: quiet, live: () => ({ ok: true }), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
 const SIZE = { cpus: 2, mem_gb: 3 };
 
 describe("lane_tools validation", () => {

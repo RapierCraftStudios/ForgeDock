@@ -85,7 +85,7 @@ const envLine = (k, v) => `${k}=${String(v).replace(/\r?\n/g, " ")}`;
  * Host agent: runs each sandbox as one docker container inside a fixed reservation (allow_cpus / allow_mem_gb).
  * A sandbox lives only while its lease is renewed; the reaper removes expired, over-age and orphaned containers.
  */
-export function createAgent(cfg, { docker, now = () => Date.now(), log = console, live = liveHeadroom, hostDisk = null } = {}) {
+export function createAgent(cfg, { docker, now = () => Date.now(), log = console, live = liveHeadroom, hostDisk = null, vm = vmSize } = {}) {
   const stateDir = cfg.state_dir;
   const store = jsonStore(join(stateDir, "state.json"), { sandboxes: {} });
   const sb = () => store.data.sandboxes;
@@ -122,6 +122,34 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       prepull.error = String(e.stderr || e.message).slice(0, 300);
       log.warn?.(`prepull ${dindImage}: ${prepull.error}`);
     } finally { rmSync(file, { force: true }); }
+  }
+  // #5858: advertised capacity is the configured allowance clamped to the measured VM minus a host reserve, less what
+  // non-sandbox containers use; admission projects each repo's measured per-sandbox peak, not only the configured slice.
+  const r1 = (x) => Math.round(x * 10) / 10, r2 = (x) => Math.round(x * 100) / 100;
+  let clampWarned = false;
+  let coTenant = { cpus: 0, mem_gb: 0 };
+  function effectiveCapacity() {
+    let v = {}; try { v = vm() ?? {}; } catch { /* unknown VM: no clamp */ }
+    const reserve = cfg.host_reserve_mem_gb ?? Math.max(1, (v.mem_gb ?? 0) * 0.1);
+    const cpusEff = v.cpus > 0 ? Math.min(cfg.allow_cpus, v.cpus) : cfg.allow_cpus;
+    const memEff = v.mem_gb > 0 ? Math.min(cfg.allow_mem_gb, Math.max(1, r1(v.mem_gb - reserve))) : cfg.allow_mem_gb;
+    const clamped = cpusEff < cfg.allow_cpus || memEff < cfg.allow_mem_gb;
+    if (clamped && !clampWarned) { clampWarned = true; log.warn?.(`configured capacity ${cfg.allow_cpus} cpus / ${cfg.allow_mem_gb} GB exceeds the VM (${v.cpus} cpus / ${v.mem_gb} GB minus ${r1(reserve)} GB reserve); advertising ${cpusEff} cpus / ${memEff} GB`); }
+    return { cpus: cpusEff, mem: memEff, clamped, vm: v };
+  }
+  const slugOf = (spec) => (spec?.repo?.slug ? String(spec.repo.slug).toLowerCase() : null);
+  let histRows = null;
+  function usageRows() {
+    if (histRows) return histRows;
+    try { histRows = readFileSync(join(stateDir, "usage-history.jsonl"), "utf8").split("\n").filter(Boolean).slice(-500).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean); } catch { histRows = []; }
+    return histRows;
+  }
+  const pct = (xs, p) => { const a = [...xs].sort((x, y) => x - y); return a[Math.min(a.length - 1, Math.ceil(p * a.length) - 1)]; };
+  /** Per-sandbox projection for a repo: p90 mem_peak_gb / p75 cpu_avg over the last N finished sandboxes, never below the slice. */
+  function estimateFor(repo, slice) {
+    const rows = repo ? usageRows().filter((x) => x.repo === repo && Number.isFinite(x.mem_peak_gb) && Number.isFinite(x.cpu_avg)).slice(-(cfg.estimate_window ?? 20)) : [];
+    if (rows.length < (cfg.estimate_min_samples ?? 3)) return { cpus: slice.cpus, mem: slice.mem, samples: rows.length };
+    return { cpus: Math.max(slice.cpus, pct(rows.map((x) => x.cpu_avg), 0.75)), mem: Math.max(slice.mem, pct(rows.map((x) => x.mem_peak_gb), 0.9)), samples: rows.length };
   }
   const used = () => Object.values(sb()).filter((s) => s.state !== "exited").reduce((a, s) => ({ cpus: a.cpus + s.cpus, mem: a.mem + s.mem_gb }), { cpus: 0, mem: 0 });
   // #5535: disk figures for the router inventory; optional, omitted when unreadable. Sandbox dirs are walked at most every 60s.
@@ -164,6 +192,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const reservations = () => (Array.isArray(cfg.reservations) ? cfg.reservations.filter((r) => r && typeof r.name === "string" && r.cpus > 0 && r.mem_gb > 0) : []);
   const prioOf = (r) => r.priority ?? "normal";
   const activeRecs = () => Object.values(sb()).filter((s) => s.state !== "exited");
+  const projectedUse = () => activeRecs().reduce((a, r) => { const e = estimateFor(r.repo ?? null, { cpus: r.cpus, mem: r.mem_gb }); return { cpus: a.cpus + Math.max(r.cpus, e.cpus), mem: a.mem + Math.max(r.mem_gb, e.mem) }; }, { cpus: 0, mem: 0 });
   const sumRecs = (rs) => rs.reduce((a, s) => ({ cpus: a.cpus + s.cpus, mem: a.mem + s.mem_gb }), { cpus: 0, mem: 0 });
   const weighted = () => reservations().length > 0 || Boolean(cfg.idle_only);
   const SHARES = () => ({ reserved: 4096, normal: 1024, borrow: 128, throttled: 2, ...(cfg.cpu_shares ?? {}) });
@@ -172,8 +201,9 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const act = activeRecs(), rs = reservations();
     const tot = rs.reduce((a, r) => ({ cpus: a.cpus + r.cpus, mem: a.mem + r.mem_gb }), { cpus: 0, mem: 0 });
     const u = sumRecs(act), nonRes = sumRecs(act.filter((s) => prioOf(s) !== "reserved"));
-    const free = { cpus: cfg.allow_cpus - u.cpus, mem: cfg.allow_mem_gb - u.mem };
-    return { act, rs, tot, free, unreserved: { cpus: Math.max(0, Math.min(free.cpus, cfg.allow_cpus - tot.cpus - nonRes.cpus)), mem: Math.max(0, Math.min(free.mem, cfg.allow_mem_gb - tot.mem - nonRes.mem)) } };
+    const e = effectiveCapacity();
+    const free = { cpus: e.cpus - u.cpus - coTenant.cpus, mem: e.mem - u.mem - coTenant.mem_gb };
+    return { act, rs, tot, free, unreserved: { cpus: Math.max(0, Math.min(free.cpus, e.cpus - tot.cpus - nonRes.cpus)), mem: Math.max(0, Math.min(free.mem, e.mem - tot.mem - nonRes.mem)) } };
   }
   /** Owner load per core with this agent's own sandboxes subtracted (the box's primary workload), or null when unknown. */
   function ownerLoad(h) {
@@ -233,7 +263,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   function capacity() {
     const u = used();
     const active = Object.values(sb()).filter((s) => s.state !== "exited").length;
-    return { host: cfg.name ?? hostname(), ...running, vm: vmSize(), ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10 }])) } : {}), cpus_total: cfg.allow_cpus, mem_total_gb: cfg.allow_mem_gb, cpus_free: cfg.allow_cpus - u.cpus, mem_free_gb: cfg.allow_mem_gb - u.mem, active, ...priorityView(), ...diskView(), ...hostDiskView(active), paused: Boolean(cfg.paused), live: live(cfg), usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
+    const e = effectiveCapacity();
+    return { host: cfg.name ?? hostname(), ...running, vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10 }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...diskView(), ...hostDiskView(active), paused: Boolean(cfg.paused), live: live(cfg), usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
   }
 
   /** The image a spec's lanes run (the per-repo lane_tools tag when tools are listed), without building it. */
@@ -272,6 +303,11 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     }
     // Burst model: reservations are small, so also refuse when the VM is genuinely short of memory or overloaded right now.
     // A reserved launch skips the load gate: it must never be refused because lanes are busy (they are throttled/drained below).
+    if (prio !== "reserved") { // #5858: ramp-aware: the admitted lanes' projected peaks plus this one must fit, however low the load is right now
+      const e = effectiveCapacity(), pu = projectedUse(), est = estimateFor(slugOf(spec), { cpus, mem: mem_gb }), nm = Math.max(mem_gb, est.mem), nc = Math.max(cpus, est.cpus);
+      const availMem = e.mem - coTenant.mem_gb, availCpus = e.cpus - coTenant.cpus;
+      if (pu.mem + nm > availMem + 1e-9 || pu.cpus + nc > availCpus + 1e-9) return { status: 503, body: { error: `projected peak ${r1(pu.mem + nm)} GB / ${r1(pu.cpus + nc)} cpus exceeds capacity ${r1(availMem)} GB / ${r1(availCpus)} cpus`, code: "pool.projected_peak", capacity: c }, retryAfter: 60 };
+    }
     if (!h.ok && prio !== "reserved") return { status: 503, body: { error: `host busy: ${h.reason}`, live: h }, retryAfter: 60 };
     if (prio === "reserved") {
       for (const r of tiers().act.filter((s) => prioOf(s) === "borrow")) await throttle(r, SHARES().throttled); // throttle every borrower first,
@@ -298,7 +334,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const env = { ...(spec.env ?? {}), ...(withDocker ? { DOCKER_HOST: "tcp://127.0.0.1:2375" } : {}), CS_CRED_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/creds`, CS_RELAY_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/relay`, CS_CRED_TOKEN: credToken, CS_SANDBOX_ID: spec.id, CS_REPO_SLUG: spec.repo?.slug ?? "", CS_REPO_URL: spec.repo?.url ?? "", CS_REPO_REF: spec.repo?.ref ?? "", CS_RESULT_FILE: spec.result_file ?? "", CS_WORK_DIR: workDirOf(name),
       ...(spec.env_snapshots?.enabled ? { FORGE_ENV_IMAGE: envImageOf(spec) } : {}) }; // the image is part of the snapshot key
     writeFileSync(envFile, Object.entries(env).map(([k, v]) => envLine(k, v)).join("\n") + "\n", { mode: 0o600 });
-    const rec = { id: spec.id, name, dir, issue: spec.issue ?? null, batch: spec.batch ?? null, cpus, mem_gb, result_file: spec.result_file ?? null, state: "starting", startedAt: now(), finishedAt: null, lease: now(), credToken, docker: withDocker, ...(weighted() || spec.priority ? { priority: prio, ...(reservation ? { reservation } : {}) } : {}) };
+    const rec = { id: spec.id, name, dir, issue: spec.issue ?? null, batch: spec.batch ?? null, cpus, mem_gb, repo: slugOf(spec), result_file: spec.result_file ?? null, state: "starting", startedAt: now(), finishedAt: null, lease: now(), credToken, docker: withDocker, ...(weighted() || spec.priority ? { priority: prio, ...(reservation ? { reservation } : {}) } : {}) };
     sb()[spec.id] = rec;
     store.save();
     const cacheKey = String(spec.cache?.key ?? spec.repo?.slug ?? "default").toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
@@ -394,7 +430,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   async function destroy(id, why) {
     const r = own(id);
     if (!r) return false;
-    const history = r.usage?.samples ? JSON.stringify({ at: new Date(now()).toISOString(), id: r.id, issue: r.issue, docker: Boolean(r.docker), minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10, ...usageView(r) }) : null;
+    const history = r.usage?.samples ? JSON.stringify({ at: new Date(now()).toISOString(), id: r.id, issue: r.issue, repo: r.repo ?? null, docker: Boolean(r.docker), minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10, ...usageView(r) }) : null;
     await docker.remove(r.name);
     if (r.docker) await docker.remove(dindName(r.name));
     if (r.workDir) { try { await docker.removeWorkDir(r.cacheVolume, image, r.workDir); } catch (e) { sweepFail(r.cacheVolume, "work dir", e); } }
@@ -404,7 +440,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     delete sb()[r.id];
     store.save();
     // Written once, after the sandbox is really gone (a teardown that throws and is retried must not log it twice).
-    if (history) { try { appendFileSync(join(stateDir, "usage-history.jsonl"), history + "\n"); } catch { /* best effort */ } }
+    if (history) { try { appendFileSync(join(stateDir, "usage-history.jsonl"), history + "\n"); } catch { /* best effort */ } if (histRows) histRows.push(JSON.parse(history)); }
     log.info?.(`destroyed ${id} (${why})`);
     return true;
   }
@@ -606,6 +642,14 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     let st;
     try { st = await docker.stats?.(OWN); } catch { return; }
     if (!st) return;
+    try { // #5858: containers that are not this agent's sandboxes (all containers minus the labelled ones and known sandboxes)
+      const all = await docker.stats?.([]);
+      if (all) {
+        const mine = new Set([...Object.keys(st), ...Object.values(sb()).flatMap((r) => [r.name, dindName(r.name)])]);
+        const others = Object.entries(all).filter(([n]) => !mine.has(n)).map(([, x]) => x);
+        coTenant = { cpus: others.reduce((a, x) => a + (x.cpu || 0), 0), mem_gb: others.reduce((a, x) => a + (x.mem_gb || 0), 0) };
+      }
+    } catch { /* keep the last reading */ }
     for (const r of Object.values(sb())) {
       if (r.state === "exited") continue;
       const parts = [st[r.name], r.docker ? st[dindName(r.name)] : null].filter(Boolean);

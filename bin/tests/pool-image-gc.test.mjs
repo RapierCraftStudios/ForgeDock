@@ -33,7 +33,7 @@ function fakeDocker({ images = [], containers = [], volumes = [], dangling = [] 
   return d;
 }
 function agentOf(docker, opts = {}, clock = { t: 1_000_000 }) {
-  return createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: tmpDir("cs-gc-"), allow_cpus: 4, allow_mem_gb: 8, token: "t", ...opts }, { docker, now: () => clock.t, log: quiet, live: () => ({ ok: true }) });
+  return createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: tmpDir("cs-gc-"), allow_cpus: 4, allow_mem_gb: 8, token: "t", ...opts }, { docker, now: () => clock.t, log: quiet, live: () => ({ ok: true }), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
 }
 const family = (v) => [laneImageTag(v), tools(v), tools(v, "b")];
 
