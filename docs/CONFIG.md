@@ -324,8 +324,11 @@ orchestration:
   # investigates and freezes the contract, never builds, commits or pushes, and ends `planned`.
   # Its build lane starts after the dependency merged and reuses that contract unless it is
   # stale (changed scope or lane, or the dependency's merged diff touches a deliverable path).
-  # full behaves as plan until phase 2. A plan lane's other ends do not count toward the
-  # breaker, relaunch or requeue budgets.
+  # full = plan plus stacked builds (#5832): a dependent whose one unmerged in-batch dependency
+  # is PR-ready (review passed, precheck green) builds on that lane head and opens a stacked PR
+  # on the dependency's branch. The merge step (guard merge.stacked_base) refuses while the PR
+  # base is not the lane or the dependency is unmerged; after it merged the PR moves onto the lane.
+  # A plan lane's other ends do not count toward the breaker, relaunch or requeue budgets.
   stacking: off
 
   # Age (hours since the issue last updated) after which a predecessor still at

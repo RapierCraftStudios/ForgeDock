@@ -63,3 +63,60 @@ describe("orchestrate stacking (#5831)", () => {
     assert.deepEqual(saved.planned[2], { contractHash: HASH, baseSha: SHA });
   });
 });
+
+describe("orchestrate stacked builds, phase 2 (#5832)", () => {
+  const RD = { pr: 9, branch: "feat/issue-1-lean", sha: "a".repeat(40) };
+  /** #1 runs until released; #2 depends on it. `ready` says whether #1's lane has published prReady. */
+  const full = ({ stacking = "full", ready = () => RD, extra = {} } = {}) => {
+    const calls = [], updates = [], events = [];
+    let release1; const gate1 = new Promise((r) => { release1 = r; });
+    const runOne = async (n, lane, ctx = {}) => {
+      calls.push({ n, ctx });
+      if (n === 1) { await gate1; return { terminalReason: "merged", cost_usd: 0 }; }
+      if (ctx.plan) return { terminalReason: "planned", planned: { contractHash: HASH, baseSha: SHA } };
+      if (ctx.stackedOn) release1(); // the stacked build ends only after the dependency merged
+      return { terminalReason: "merged", cost_usd: 0 };
+    };
+    const store = { load: () => null, save: () => {}, log: (r) => events.push(r) };
+    const run = () => orchestrate({ issues: [1, 2], parallel: 2, readBody: body, runOne, stacking, readPrReady: async () => ready(), store, onUpdate: (r) => updates.push(r), maxDeferrals: 1, ...extra });
+    return { calls, updates, events, run, release1: () => release1() };
+  };
+  it("full: a dependent builds on the dependency's head once its PR is ready; STACK_BUILD_START and a stacked row record it", async () => {
+    const h = full();
+    await h.run();
+    const b = h.calls.filter((c) => c.n === 2 && !c.ctx.plan);
+    assert.equal(b.length, 1);
+    assert.deepEqual(b[0].ctx.stackedOn, { dependency: 1, branch: RD.branch, sha: RD.sha });
+    const ev = h.events.find((e) => e.event === "STACK_BUILD_START");
+    assert.equal(ev.issue, 2); assert.equal(ev.stacked, true);
+    const row = h.updates.find((u) => u.issue === 2 && u.outcome === "merged");
+    assert.equal(row.stacked, true); assert.equal(row.stackedOn.dependency, 1);
+  });
+  it("full: nothing is stacked before the dependency is PR-ready (it falls back to waiting for the merge)", async () => {
+    let ready = false;
+    const h = full({ ready: () => (ready ? RD : null) });
+    const p = h.run();
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(h.calls.some((c) => c.n === 2 && c.ctx.stackedOn), false);
+    h.release1(); await p;
+    assert.equal(h.calls.some((c) => c.n === 2 && c.ctx.stackedOn), false, "built after the merge as a normal lane");
+    assert.equal(h.events.some((e) => e.event === "STACK_BUILD_START"), false);
+  });
+  it("plan and off never stack, even when the dependency is PR-ready", async () => {
+    for (const stacking of ["plan", "off"]) {
+      const h = full({ stacking });
+      const p = h.run();
+      await new Promise((r) => setTimeout(r, 100));
+      h.release1(); await p;
+      assert.equal(h.calls.some((c) => c.ctx.stackedOn), false, stacking);
+    }
+  });
+  it("full: stacked/stackedTried persist for --resume", async () => {
+    let saved = null;
+    const store = { load: () => null, save: (st) => { if (st.stackedTried) saved = st; }, log: () => {} };
+    await full({ extra: { store } }).run();
+    assert.deepEqual(saved.stackedTried, [2]);
+    assert.equal(saved.stacked[2].dependency, 1);
+  });
+});
+

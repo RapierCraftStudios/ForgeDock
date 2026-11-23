@@ -124,7 +124,7 @@ import { reconcileCheckpoints } from "./checkpoint-reconcile.mjs";
 import { guardStagedDeletions, deletionEvidence, maxForeignDeletions } from "./delguard.mjs";
 import { createLedger, flattenPhases } from "./phaseledger.mjs";
 import { DEFAULT_CATALOG_SOURCES, deriveCatalog, mergeRecipes, rewriteMissed, isDriftFailure, rewriteSubprojectVenv } from "./validate-catalog.mjs";
-import { planStale } from "./stacking.mjs";
+import { planStale, stackedBaseBlock, validStackedOn } from "./stacking.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
 
 /**
@@ -373,6 +373,8 @@ export async function runCore(o) {
   // #5831 stacked lanes: `plan` plans a dependent (contract frozen, no build, no checkpoint); `stackPlanned` ({contractHash, baseSha}) is the plan a build lane reuses.
   const planOnly = o.plan === true;
   const stackPlanned = o.planned && typeof o.planned.contractHash === "string" && typeof o.planned.baseSha === "string" ? o.planned : null;
+  // #5832 stacked lanes phase 2: `stackedOn` ({dependency, branch, sha}) builds on the dependency's PR-ready lane head and opens the PR on its branch.
+  let stackedOn = planOnly ? null : validStackedOn(o.stackedOn);
   const withLink = (body) => `${issuePrMarker(issue)}\n${body}`; // #5505: the issue → PR link GitHub does not record for a staging PR
   const closeBlockers = (reason, exceptPr = null) => openPrBlockingClose({ repo, io: { gh: ghw }, issue, reason, exceptPr }).catch(() => []); // #5505: fail open
   let branch = `feat/issue-${issue}-lean`; // #5469: an adopted PR's own head branch replaces it
@@ -1482,6 +1484,12 @@ export async function runCore(o) {
   const laneGuard = (target, what) => {
     if (isDefaultLane(target, defaults)) throw Object.assign(new Error(`refusing to ${what} into the default branch ${target}`), { laneCode: OUTCOME_CODES.LANE_DEFAULT_BRANCH });
   };
+  if (stackedOn) { // #5832: the build base is the dependency's lane head; an unreachable branch falls back to a normal lane (the Depends-on refusal then applies)
+    let ok = false;
+    try { await io.git(["fetch", "origin", stackedOn.branch], { cwd }); ok = Boolean(String(await io.git(["rev-parse", "--verify", "--quiet", `origin/${stackedOn.branch}`], { cwd })).trim()); } catch { ok = false; }
+    if (ok) { base = `origin/${stackedOn.branch}`; T.decisions.push(`Stacked lane: building on #${stackedOn.dependency}'s head ${stackedOn.sha.slice(0, 12)} (${stackedOn.branch}); the PR targets that branch`); ev({ event: "STACK_BUILD_BASE", dependency: stackedOn.dependency, branch: stackedOn.branch, sha: stackedOn.sha }); }
+    else { T.decisions.push(`Stacked lane: ${stackedOn.branch} is not reachable; building as a normal lane`); stackedOn = null; }
+  }
   // ---- admission: Depends-on refusal, then lease ----
   {
     let dep = null;
@@ -1492,7 +1500,9 @@ export async function runCore(o) {
       T.decisions.push(`Dependency satisfied by lane merge: ${names}`);
       try { await post("FORGE:DEPENDENCY", `## Dependency satisfied\n${names} merged into ${lane}; the issue stays open until promotion, so the **Depends on** edge is met.`); } catch { /* best effort */ }
     }
-    if (dep?.open?.length && planOnly) { // #5831: a plan lane runs while its in-batch dependency is open
+    if (dep?.open?.length && stackedOn && dep.open.every((n) => n === stackedOn.dependency)) { // #5832: only the stacked dependency is open; the merge guard holds the PR
+      T.decisions.push(`Stacked lane: dependency #${stackedOn.dependency} still open; the merge waits for it`);
+    } else if (dep?.open?.length && planOnly) { // #5831: a plan lane runs while its in-batch dependency is open
       T.decisions.push(`Plan lane: dependency ${dep.open.map((n) => `#${n}`).join(", ")} still open; planning only`);
     } else if (dep?.open?.length) {
       return { terminalReason: "dependency-open", code: OUTCOME_CODES.DEPENDENCY_OPEN, dependencies: dep.open,
@@ -1509,7 +1519,7 @@ export async function runCore(o) {
       return { terminalReason: "deferred", code: "lease-held", detail: `issue ${issue} leased by ${st.lease.by} until ${new Date(st.lease.until).toISOString()}`, branch, worktree: wt };
     }
     leaseState = { ...(st ?? { v: 1, run: `core_${issue}`, issue, lane, committed: [], phase: null, branch: null, pr: null, terminalReason: null }), terminal: false,
-      ...(o.placement ? { placement: o.placement } : {}) }; // #4256: the latest placement replaces an earlier run's
+      ...(o.placement ? { placement: o.placement } : {}), ...(stackedOn ? { stackedOn } : {}) }; // #4256 (#5832: stackedOn in the lane's FORGE:STATE): the latest placement replaces an earlier run's
     try { await writeLease(leaseObj()); } catch { /* best effort */ }
     try { // #4920: read it back; a lane that wrote at the same moment and won leaves its id here, so this one defers
       const back = await io.projector.readState(issue);
@@ -3799,7 +3809,7 @@ export async function runCore(o) {
     files = await changedFiles();
     await gitPush(["push", "-u", "origin", branch]);
     laneGuard(lane, "open a PR");
-    const prOut = resumed?.pr ? `/pull/${resumed.pr}` : String(await ghw(["pr", "create", "-R", repo, "--base", lane, "--head", branch,
+    const prOut = resumed?.pr ? `/pull/${resumed.pr}` : String(await ghw(["pr", "create", "-R", repo, "--base", stackedOn?.branch ?? lane, "--head", branch,
       "--title", `${iss.title} (#${issue})`, "--body", withLink(isSplit ? (o.refactorModule ?? (await import("./refactor.mjs"))).renderSplitPrBody({ issue, ...split })
         : renderPrBody({ issue, investigation: await readStage(STAGES[0]), contract: effective, implementation: await readStage(STAGES[1]), result, gitFiles: files, tracked: closing.tracked, visual: visualMarkdown(pageVisual, pagesConfig?.viewports) }))])).trim();
     const pr = Number(/\/pull\/(\d+)/.exec(prOut)?.[1] ?? /(\d+)\s*$/.exec(prOut)?.[1]);
@@ -4127,6 +4137,24 @@ export async function runCore(o) {
 
     // ---- 7. (sync) wait per policy, (sync) merge at the reviewed head ----
     let lastStates = null; // the last required-check poll, reused by the DCO gate (#4651)
+    // #5832: review passed and precheck green: this head is PR-ready (FORGE:STATE `prReady`, read by the orchestrator's stacked admission).
+    try { if (finishing) throw new Error("finishing"); leaseState = { ...leaseState, prReady: { pr, branch, sha: localHead } }; await writeLease(leaseObj()); ev({ event: "PR_READY", pr, branch, sha: localHead }); } catch { /* best effort */ }
+    const stackedState = stackedOn ?? validStackedOn(leaseState?.stackedOn);
+    const depMerged = async () => { // the dependency's lane PR merged (any PR from its branch in MERGED state)
+      try { return JSON.parse(String(await ghc(["pr", "list", "-R", repo, "--head", stackedState.branch, "--state", "all", "--json", "number,state"])) || "[]").some((x) => x?.state === "MERGED"); } catch { return false; }
+    };
+    if (stackedState) { // wait for the dependency to merge, then move the PR onto the lane (merge.stacked_base never merges it before)
+      const since = now();
+      while (!(await depMerged())) {
+        if (now() - since >= ciMaxMinutes * 60000) return await finish("ci-pending", `stacked PR #${pr} waited ${ciMaxMinutes} min for dependency #${stackedState.dependency} to merge; rerun resumes the PR`, { pr });
+        onProgress({ event: "phase_paused", phase: "merge", detail: `merge.stacked_base: waiting for #${stackedState.dependency} to merge` });
+        await sleep(30000);
+        await renew();
+      }
+      try { await ghw(["pr", "edit", String(pr), "-R", repo, "--base", lane]); ev({ event: "STACK_RETARGET", pr, from: stackedState.branch, to: lane }); }
+      catch (e) { return await finish("deferred", `stacked PR #${pr}: retarget to ${lane} failed: ${String(e?.message ?? e).slice(0, 200)}`, { pr }); }
+      const r0 = await baseSync("stacked PR moved onto the lane"); if (r0) return r0;
+    }
     // A rerun on an existing PR goes through the same conflict check, so a conflicting PR from an earlier run recovers.
     for (;;) {
       const c0 = await prConflicting();
@@ -4249,6 +4277,12 @@ export async function runCore(o) {
         onProgress({ event: "phase_paused", phase: "merge", detail: `merge.held_release: ${hold.reason}` });
         await sleep(30000);
         await renew();
+      }
+      if (stackedState) { // #5832 engine guard merge.stacked_base: a stacked PR never merges while its base is not the lane or its dependency is unmerged
+        let prBase = "";
+        try { prBase = JSON.parse(String(await ghc(["pr", "view", String(pr), "-R", repo, "--json", "baseRefName"])) || "{}").baseRefName ?? ""; } catch { /* unknown base: refused below */ }
+        const why = stackedBaseBlock({ prBase, lane, stackedBranch: stackedState.branch, dependencyMerged: await depMerged() });
+        if (why) { T.merge = [policyText, "merge.stacked_base"]; T.decisions.push(`${why}; PR #${pr} not merged`); ev({ event: "MERGE_STACKED_BASE_REFUSED", pr, base: prBase, lane }); return await finish("deferred", `${why}; PR #${pr} stays open`, { pr, code: "merge.stacked_base" }); }
       }
       T.merge = [policyText, `merged at ${localHead.slice(0, 12)}`];
       laneGuard(resumed?.base ?? lane, "merge");
