@@ -101,37 +101,21 @@
  ],
  "amendments": [
   {
-   "kind": "decision",
-   "decision": {
-    "choice": "Add npm recipes for forgedock in lane-tools.mjs (R5 quote names it)",
-    "anchors": [
-     "bin/pool/lane-tools.mjs"
-    ],
-    "supersedes": "K1"
-   },
-   "why": "R5 is a deliver requirement quoting 'forgedock (#5727)' as a lane_tools recipe; an owned dep is still skipped by notOwned, so placement is unchanged"
+   "kind": "amend-requirement",
+   "requirement": "R5",
+   "text": "lane_tools recipes for `shellcheck`, `yaml` and `vite` (shellcheck existed; yaml and vite added). `forgedock` gets no recipe: it is an owned dep (lean.mjs ownedDep) and a recipe would change toolNoRecipe re-placement (#5727).",
+   "why": "Frozen contract D1/D6/K1 keep forgedock recipe-less; #5727 is fixed by resolving the frozen checks path"
   },
   {
-   "kind": "decision",
-   "decision": {
-    "choice": "Add npm recipe for vite in lane-tools.mjs (R5 quote names it)",
-    "anchors": [
-     "bin/pool/lane-tools.mjs"
-    ],
-    "supersedes": "K2"
-   },
-   "why": "R5 quotes 'vite (#5747)'; a manifest dep is still prepared by the lane and skipped by notOwned, so placement is unchanged"
-  },
-  {
-   "kind": "post-deploy",
+   "kind": "defer",
    "requirement": "R4",
-   "why": "Replaying six AlterLab issues needs the AlterLab repo and lane logs; per-class tests (yaml recipe, repro_test probe, host-only rule) ship here",
+   "why": "Replaying six AlterLab issues needs the AlterLab repo and lane logs; per-class tests ship here",
    "check": "R4-alterlab-replay"
   },
   {
-   "kind": "post-deploy",
+   "kind": "defer",
    "requirement": "R12",
-   "why": "Recovery share is measurable only over a real AlterLab batch of 30+ issues after release; no in-repo job computes it",
+   "why": "Recovery share is measurable only over a real 30+ issue AlterLab batch after release; no in-repo job computes it",
    "check": "R12-recovery-share"
   }
  ]
