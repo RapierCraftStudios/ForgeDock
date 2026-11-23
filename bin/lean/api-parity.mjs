@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /**
  * #5821: replay one stored reviewer prompt through the CLI and the Messages API runner and compare the blocking findings.
- * Usage: node bin/lean/api-parity.mjs <prompt-file>   (needs ANTHROPIC_API_KEY and the claude CLI; run by an operator, not CI)
+ * Usage: node bin/lean/api-parity.mjs <prompt-file|dir>...   (a sample of past PRs: one stored prompt per file; needs ANTHROPIC_API_KEY and the claude CLI; run by an operator, not CI)
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { REVIEWER_SYSTEM, splitCacheablePrefix } from "./prompts.mjs";
 import { runApiCall, apiKeyPresent } from "./api-runner.mjs";
@@ -30,13 +31,26 @@ export async function replay({ prompt, runCli, runApi = (p) => runApiCall({ syst
   return { ...compareFindings(cli?.text, api?.text), cliCost: cli?.costUsd ?? null, apiCost: api?.costUsd ?? null };
 }
 
+/** Replay every sample; {total, matched, rate, results:[{name,match,onlyCli,onlyApi}]}. */
+export async function replaySample({ samples, runCli, runApi }) {
+  const results = [];
+  for (const { name, prompt } of samples) results.push({ name, ...(await replay({ prompt, runCli, runApi })) });
+  const matched = results.filter((r) => r.match).length;
+  return { total: results.length, matched, rate: results.length ? matched / results.length : null, results };
+}
+
+/** Expand files and directories (their regular files) into {name, prompt} samples. */
+export function loadSamples(paths) {
+  return paths.flatMap((p) => statSync(p).isDirectory() ? readdirSync(p).sort().map((f) => join(p, f)).filter((f) => statSync(f).isFile()) : [p]).map((f) => ({ name: f, prompt: readFileSync(f, "utf8") }));
+}
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const file = process.argv[2];
-  if (!file) { console.error("usage: api-parity.mjs <prompt-file>"); process.exit(2); }
+  const paths = process.argv.slice(2);
+  if (!paths.length) { console.error("usage: api-parity.mjs <prompt-file|dir>..."); process.exit(2); }
   if (!apiKeyPresent()) { console.error("api-parity: ANTHROPIC_API_KEY is not set; the live parity run needs an API key"); process.exit(2); }
   const { makeLeanRunner } = await import("./effects.mjs");
   const runner = makeLeanRunner();
-  const out = await replay({ prompt: readFileSync(file, "utf8"), runCli: (prompt) => runner({ role: "reviewer", issue: 0, cwd: process.cwd(), model: null, resume: null, system: REVIEWER_SYSTEM, readOnly: true, prompt }) });
+  const out = await replaySample({ samples: loadSamples(paths), runCli: (prompt) => runner({ role: "reviewer", issue: 0, cwd: process.cwd(), model: null, resume: null, system: REVIEWER_SYSTEM, readOnly: true, prompt }) });
   console.log(JSON.stringify(out));
-  process.exit(out.match ? 0 : 1);
+  process.exit(out.total && out.matched === out.total ? 0 : 1);
 }

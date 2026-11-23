@@ -22,7 +22,7 @@ import { parseVerify } from "./verify.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, renderAmendments, parseAmendmentsComment, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs";
-import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens as rawTokens, FORGEDOCK_CLI, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, investigationVerdict, decisionNote, hotspotPlanNote, hotspotBuildRule, reproPlanNote } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, REVIEW_DIFF_MAX_BYTES, REVIEW_RUBRIC, approxTokens as rawTokens, FORGEDOCK_CLI, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, investigationVerdict, decisionNote, hotspotPlanNote, hotspotBuildRule, reproPlanNote } from "./prompts.mjs";
 import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, scopeText, DECISION_SOURCES } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog as readRepoLog } from "../engine/runlog.mjs";
@@ -9671,6 +9671,31 @@ describe("#5821 api route eligibility at the reviewer and verifier call sites", 
     assert.deepEqual(seen.find((c) => c.role === "reviewer").apiRoles, ["reviewer"]);
     assert.equal(seen.find((c) => c.role === "reviewer").apiFallback, "fail");
     assert.ok(readLog(dir, 7).some((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.route === "api"));
+  });
+});
+
+describe("#5821 api eligibility bounds at the reviewer and verifier call sites", () => {
+  const rescue = "diff --git a/src/foo.js b/src/foo.js\n@@ -1,0 +5,1 @@\n+  if (looksThin(page)) return true; // rescue\n";
+  const negTest = "diff --git a/test/foo.test.js b/test/foo.test.js\n@@ -1,0 +1,1 @@\n+  assert.equal(isBenign(cookieChallenge), false);\n";
+  const big = Array.from({ length: 8 }, (_, i) => `diff --git a/corpus/f${i}.txt b/corpus/f${i}.txt\n--- a/corpus/f${i}.txt\n+++ b/corpus/f${i}.txt\n@@ -0,0 +1 @@\n+${"golden - ".repeat(4700)}\n`).join("");
+  const spy = (w) => { const seen = [], orig = w.io.runner; w.io.runner = async (c) => { seen.push({ role: c.role, apiEligible: c.apiEligible ?? false }); return orig(c); }; return seen; };
+  it("an oversize diff keeps the reviewer and the verifier on the CLI", async () => {
+    assert.ok(Buffer.byteLength(big) > REVIEW_DIFF_MAX_BYTES);
+    const w = world(); const g = w.io.git; w.io.git = async (a, o) => (a[0] === "diff" && a[1] === "--stat=200") ? " corpus/f0.txt | 1 +\n 8 files changed" : (a[0] === "diff" && a.length === 2) ? big : g(a, o);
+    const seen = spy(w);
+    await run(w, { dir: tmpDir("core-api-big-"), apiRoles: ["reviewer", "verifier"], verifier: { mode: "enforce" } });
+    const calls = seen.filter((c) => c.role === "reviewer" || c.role === "verifier");
+    assert.ok(calls.some((c) => c.role === "reviewer"));
+    for (const c of calls) assert.equal(c.apiEligible, false, c.role);
+  });
+  it("a relaxed risk path keeps the reviewer and the verifier on the CLI; the same lane without it is eligible", async () => {
+    const mk = (diffText) => { const w = world({ contract: { ...CONTRACT, preserve: [] }, reviews: [conf(), conf()] }); w.diffText = diffText; return w; };
+    const w = mk(rescue + negTest), seen = spy(w);
+    const r = await run(w, { dir: tmpDir("core-api-rx-"), apiRoles: ["reviewer", "verifier"], reviewTrigger: { mode: "shadow", riskPaths: ["src/**"] } });
+    assert.equal(r.terminalReason, "merged");
+    const calls = seen.filter((c) => c.role === "reviewer" || c.role === "verifier");
+    assert.ok(calls.some((c) => c.role === "verifier"), "the verifier ran");
+    for (const c of calls) assert.equal(c.apiEligible, false, c.role);
   });
 });
 

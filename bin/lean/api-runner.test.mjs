@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runApiCall, buildApiRequest, apiCostUsd, ApiRunnerError } from "./api-runner.mjs";
 import { summarizeApiRoute, compare, formatApiReport } from "./api-report.mjs";
-import { compareFindings, replay } from "./api-parity.mjs";
+import { compareFindings, replay, replaySample, loadSamples } from "./api-parity.mjs";
 import { splitCacheablePrefix } from "./prompts.mjs";
 
 const okFetch = (body, seen = []) => async (url, init) => { seen.push({ url, init }); return { ok: true, status: 200, json: async () => body }; };
@@ -76,5 +76,13 @@ describe("#5821 api report and parity", () => {
     assert.deepEqual(compareFindings(t("R1", "R2"), t("R1")).onlyCli, ["R2"]);
     const r = await replay({ prompt: "p", runCli: async () => ({ text: t("R1"), costUsd: 1 }), runApi: async () => ({ text: t("R1"), costUsd: 0.2 }) });
     assert.equal(r.match, true); assert.equal(r.apiCost, 0.2);
+  });
+  it("parity sample: replays a directory of past-PR prompts and reports the match rate", async () => {
+    const t = (...ids) => JSON.stringify({ rows: ids.map((id) => ({ id, status: "fail" })) });
+    const d = mkdtempSync(join(tmpdir(), "par-")); writeFileSync(join(d, "pr1.txt"), "same"); writeFileSync(join(d, "pr2.txt"), "differs");
+    const samples = loadSamples([d]); assert.equal(samples.length, 2);
+    const out = await replaySample({ samples, runCli: async (p) => ({ text: t("R1") }), runApi: async (p) => ({ text: p === "differs" ? t("R1", "R2") : t("R1") }) });
+    assert.equal(out.total, 2); assert.equal(out.matched, 1); assert.equal(out.rate, 0.5);
+    assert.deepEqual(out.results.find((x) => !x.match).onlyApi, ["R2"]);
   });
 });
