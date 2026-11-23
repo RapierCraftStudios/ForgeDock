@@ -197,17 +197,34 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
 
   /** #5053: an agent's 401 reaches the dispatcher through this router; tag it so it is not mistaken for a router auth failure. */
   const agentBody = (r, name) => (r.status === 401 ? { ...(r.data && typeof r.data === "object" ? r.data : {}), error: "unauthorized", hop: "agent", agent: name, reason: typeof r.data?.reason === "string" ? r.data.reason : "agent auth: router token rejected by agent" } : r.data ?? {});
+  // #5856: placement by priority. Agents that report no reservations/borrowable fields are flat (cpus_free), as before.
+  // reserved: a host holding that reservation with room left (the agent reclaims from borrowed lanes itself);
+  // normal: unreserved headroom; borrow: any physical headroom, preferring hosts with free non-reserved capacity.
+  const fitsPriority = (c, spec, size) => {
+    const prio = spec?.priority;
+    if (prio === "reserved" && Array.isArray(c.reservations)) {
+      const r = c.reservations.find((x) => x.name === spec.reservation) ?? (spec.reservation ? null : c.reservations.length === 1 ? c.reservations[0] : null);
+      return Boolean(r) && r.cpus_free >= size.cpus && r.mem_free_gb >= size.mem_gb;
+    }
+    const cpusFree = prio === "normal" && Number.isFinite(c.cpus_free_unreserved) ? c.cpus_free_unreserved : c.cpus_free;
+    const memFree = prio === "normal" && Number.isFinite(c.mem_free_unreserved_gb) ? c.mem_free_unreserved_gb : c.mem_free_gb;
+    return cpusFree >= size.cpus && memFree >= size.mem_gb;
+  };
+  const headroom = (c, spec) => (spec?.priority === "borrow" && Number.isFinite(c.cpus_free_unreserved) ? c.cpus_free_unreserved : 0);
   async function launch(spec) {
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id)) return { status: 400, body: { error: "spec.id required ([A-Za-z0-9._-], max 128)" } };
     const known = own(sbx(), spec.id);
     if (known && own(agents(), known.agent)) {
       known.touched = now(); store.save();
       const r = await agentCall(own(agents(), known.agent), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...sizeFor(spec) });
-      return { status: r.status, body: agentBody(r, known.agent), retryAfter: r.retryAfter };
+      // #5856: a drained borrow lane whose host is now full (reserved work took it) is placed on another host, not refused.
+      if (!(r.status === 503 && spec.priority === "borrow")) return { status: r.status, body: agentBody(r, known.agent), retryAfter: r.retryAfter };
+      delete sbx()[spec.id]; store.save();
     }
     const size = sizeFor(spec);
-    const fits = (await capacities()).filter((c) => c.ok && !c.paused && c.cpus_free >= size.cpus && c.mem_free_gb >= size.mem_gb)
-      .sort((a, b) => b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
+    const sized = (await capacities()).filter((c) => c.ok && !c.paused && fitsPriority(c, spec, size));
+    const diskLow = sized.filter((c) => c.host_disk_low === true).map((c) => c.name); // #5733: never POST to a host whose drive is short
+    const fits = sized.filter((c) => c.host_disk_low !== true).sort((a, b) => headroom(b, spec) - headroom(a, spec) || b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
     let busy = null; // the last agent 503 (e.g. lane_tools image building): its body and Retry-After are passed back
     for (const c of fits) {
       const r = await agentCall(own(agents(), c.name), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...size }, 120000);
@@ -216,6 +233,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       return { status: r.status, body: { ...agentBody(r, c.name), agent: c.name } };
     }
     if (busy) return { status: 503, body: { ...agentBody(busy.r, busy.name), agent: busy.name }, retryAfter: busy.r.retryAfter ?? cfg.retry_after_s ?? 60 };
+    if (diskLow.length) return { status: 503, body: { error: "no host has free disk", code: "pool.disk_low", agents: diskLow }, retryAfter: cfg.disk_low_retry_after_s ?? 300 }; // a capacity deferral, not a failure
     return { status: 503, body: { error: "no host has a free reservation", lane: size }, retryAfter: cfg.retry_after_s ?? 60 };
   }
 

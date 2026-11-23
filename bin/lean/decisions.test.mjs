@@ -97,4 +97,15 @@ describe("#5547 requirement decisions", () => {
     assert.equal(parseRequirementDecision('<!-- FORGE:DECISION {"choice":"x","anchors":["a.js"]} -->'), null);
     assert.equal(parseRequirementDecision("FORGE:DECISION prose"), null);
   });
+  it("#5786 a quote over 400 chars is clipped without an ellipsis, so it stays a prefix of the row quote", () => {
+    const long = `${"word ".repeat(100)}end`;
+    const q = parseRequirementDecision(`<!-- FORGE:DECISION ${JSON.stringify({ requirement: "R2", disposition: "post-deploy", quote: long })} -->`).quote;
+    assert.ok(q.length >= 399 && q.length <= 400);
+    assert.equal(q.includes("…"), false);
+    assert.ok(long.startsWith(q));
+  });
+  it("#5773 an optional quote is returned; without it the decision parses as before", () => {
+    assert.deepEqual(parseRequirementDecision('<!-- FORGE:DECISION {"requirement":"R12","disposition":"post-deploy","quote":"  the real run   creates invoices "} -->'), { requirement: "R12", disposition: "post-deploy", why: "", quote: "the real run creates invoices" });
+    assert.equal("quote" in parseRequirementDecision('<!-- FORGE:DECISION {"requirement":"R2","disposition":"post-deploy"} -->'), false);
+  });
 });

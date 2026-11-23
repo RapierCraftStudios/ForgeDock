@@ -289,6 +289,28 @@ export function depInstallFailures({ results = [], changedFiles = [] } = {}) {
 }
 
 /**
+ * #5804: the failed installs of `results` that could not start because the host lacks a tool (depcache's ENOENT
+ * `tool not found: ...` reason, or a row coded env.tool_missing, #5651). Each is {tool, label}: the binary named in
+ * `spawn <tool> ENOENT` when present, else the ecosystem. Knowable before any session; a retry on this host cannot fix it.
+ * Scoped to what the change may need: the root (primary) install always counts; a sub-project install (`dir` other than
+ * ".") only when one of `files` (issue-named paths, frozen deliverables) is under its dir. The rest stay with the gate. Pure.
+ */
+export function toolMissingInstalls(results = [], { files = [] } = {}) {
+  const out = [];
+  const paths = (Array.isArray(files) ? files : []).map((f) => String(f ?? "").replace(/^\.\//, "")).filter(Boolean);
+  for (const r of Array.isArray(results) ? results : []) {
+    if (r?.status !== "failed") continue;
+    const reason = String(r.reason ?? "");
+    if (!/^tool not found\b/i.test(reason) && r.code !== "env.tool_missing") continue;
+    const sub = r.dir && r.dir !== "." ? String(r.dir).replace(/^\.\//, "").replace(/\/+$/, "") : null;
+    if (sub && !paths.some((f) => underDir(sub, f))) continue; // #5804: a sub-project the change does not place itself in
+    const tool = /\bspawn\s+(\S+)\s+ENOENT\b/.exec(reason)?.[1] ?? r.eco ?? "python";
+    out.push({ tool, label: `${r.eco ?? "dependencies"}${r.dir && r.dir !== "." ? ` in ${r.dir}` : ""}: ${reason || "tool not found"}` });
+  }
+  return out;
+}
+
+/**
  * #5447: declared vs ran for the FORGE:TRAJECTORY Tests row. Declared: each validate plus the repro_test. Skipped: a
  * declared id named by an env/missing/timeout failure of `failures` (reason = its kind). redGreen: repro BASE=FAILED HEAD=RAN.
  */

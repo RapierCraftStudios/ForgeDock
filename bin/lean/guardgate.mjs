@@ -13,6 +13,7 @@ import { dirname, extname, join } from "node:path";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { collectGuards, guardsIndexPath, readIndex, writeIndex } from "./guards.mjs";
 import { isTestPath } from "./enumerating.mjs";
+import { isWeakGuardTest } from "./weakguard.mjs";
 
 export const GUARD_CAP_MS = 120000;
 export const INDEX_MAX_AGE_MS = 6 * 3600000;
@@ -178,6 +179,7 @@ export async function runGuards({ selected, mergeBase, contract, guardCommand, g
   const materialize = async (j) => {
     let body;
     try { body = await git(["show", `${mergeBase}:${j.path}`]); } catch { skipped.push(`#${j.guard.issue} ${j.path}: not on base`); return false; }
+    j.weak = isWeakGuardTest(body, j.path); // #5752: only asserts literals exist in file text: a review note, never a park
     const abs = join(cwd, j.copy);
     try { fs.mkdirSync(dirname(abs), { recursive: true }); fs.writeFileSync(abs, body); made.push(abs); return true; } catch (e) { skipped.push(`#${j.guard.issue} ${j.path}: ${String(e?.message ?? e).slice(0, 80)}`); return false; }
   };
@@ -203,7 +205,7 @@ export async function runGuards({ selected, mergeBase, contract, guardCommand, g
       try { r = await runCommand({ command, cwd, timeoutMs: capMs - (now() - t0), env }); } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
       if (r?.rc !== 0) return;
       batches++;
-      for (const j of ready) { settled.add(j); runs.push({ issue: j.guard.issue, why: j.guard.why, test: j.path, command, rc: 0, output: String(r?.output ?? ""), failed: null }); }
+      for (const j of ready) { settled.add(j); runs.push({ issue: j.guard.issue, why: j.guard.why, test: j.path, command, rc: 0, output: String(r?.output ?? ""), failed: null, weak: Boolean(j.weak) }); }
     }));
     return settled;
   };
@@ -226,7 +228,7 @@ export async function runGuards({ selected, mergeBase, contract, guardCommand, g
           if (v.skip) { skipped.push(`guard #${j.guard.issue} ${j.path}: ${v.skip}`); continue; }
           if (v.fresh) failed = v.fresh;
         }
-        runs.push({ issue: j.guard.issue, why: j.guard.why, test: j.path, command: j.command, rc, output, failed });
+        runs.push({ issue: j.guard.issue, why: j.guard.why, test: j.path, command: j.command, rc, output, failed, weak: Boolean(j.weak) });
       }
     };
     await Promise.all(Array.from({ length: Math.max(1, Math.min(parallelism, queue.length)) }, work));
@@ -245,19 +247,40 @@ export async function runGuards({ selected, mergeBase, contract, guardCommand, g
 /** The only override of a guard_broken failure, named for the builder (#4883); leads the detail so the resume prompt's truncation keeps it. */
 const supersedesHint = (guard) => `If this change intentionally changes the guarded behaviour (e.g. adding a code to an enum an exhaustiveness test enumerates), add {"kind":"supersedes","guard":"${guard}","why":"..."} to the amendments in the result file; the reviewer judges it.`;
 
-/** conformance.guard_broken rows (one per failing guard test): the guard's issue, its one-line why, the failing test and its output tail. */
+/** conformance.guard_broken rows (one per failing strong guard test): the guard's issue, its one-line why, the failing test and its output tail. #5752: weak runs are notes (weakGuardNotes). */
 export function guardFailures(runs) {
-  return (runs ?? []).filter((r) => r.rc !== 0).map((r) => ({
+  return (runs ?? []).filter((r) => r.rc !== 0 && !r.weak).map((r) => ({
     code: OUTCOME_CODES.CONFORMANCE_GUARD_BROKEN, kind: "guard_broken", guard: `#${r.issue}`, test: r.test,
     detail: `${supersedesHint(`#${r.issue}`)} guard #${r.issue} broken (${String(r.why ?? "").slice(0, 200)}): base test ${r.test} fails against your tree (\`${r.command}\`, exit ${r.rc})${r.failed?.length ? `; failing tests: ${r.failed.slice(0, 20).join(" | ")}` : ""}:\n${tailOf(r.output)}`,
+  }));
+}
+
+/** #5752: review notes for failing weak guards (tests that only assert a literal exists in file text): recorded for the reviewer, never a precheck failure. */
+export function weakGuardNotes(runs) {
+  return (runs ?? []).filter((r) => r.rc !== 0 && r.weak).map((r) => ({
+    guard: `#${r.issue}`, test: r.test,
+    note: `Weak guard #${r.issue} broken (review note, not a park): base test ${r.test} only asserts that literal text exists in a file (${String(r.why ?? "").slice(0, 160)}); confirm the removed text is intentional`,
   }));
 }
 
 /** The comment the engine posts on a guarded issue once its guard is superseded. */
 export const supersessionComment = ({ guard, pr, why }) => `The fix guard from ${guard} was superseded by PR #${pr}: ${String(why ?? "").trim()}\n\nThe lane's contract carried a \`supersedes\` amendment the reviewer accepted; this guard's test no longer describes current behaviour.`;
 
-/** Guard ids the effective contract's accepted supersedes amendments retire, limited to guards the gate selected. */
-export function supersededIds(contract, selected) {
+/**
+ * Guard ids the effective contract's accepted supersedes amendments retire, limited to guards the gate selected.
+ * #5752: with a mechanism amendment (contract.mechanisms), also each selected guard whose test files the lane deleted (`removedPaths`).
+ */
+export function supersededIds(contract, selected, removedPaths = []) {
   const sel = new Set((selected ?? []).map((s) => `#${s.guard.issue}`));
-  return (contract?.supersedes ?? []).filter((s) => sel.has(s.guard));
+  const out = (contract?.supersedes ?? []).filter((s) => sel.has(s.guard));
+  const mech = contract?.mechanisms ?? [];
+  if (!mech.length || !removedPaths?.length) return out;
+  const gone = new Set(removedPaths.map(norm)), seen = new Set(out.map((s) => s.guard));
+  const why = mech.map((m) => `mechanism ${m.mechanism} removed: ${m.why}`).join("; ");
+  for (const { guard } of selected ?? []) {
+    const id = `#${guard.issue}`, tests = (guard.tests ?? []).map((t) => norm(t.path));
+    if (seen.has(id) || !tests.length || !tests.every((t) => gone.has(t))) continue;
+    seen.add(id); out.push({ guard: id, why, mechanism: mech.map((m) => m.mechanism).join(", ") });
+  }
+  return out;
 }

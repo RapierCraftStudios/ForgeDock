@@ -3,7 +3,7 @@
 // #5542: `run-issue` follows forge.yaml `execution:` like `orchestrate`, and `--local` keeps the lane on this host.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { parseExecution, openExecutionBudget } from "./execution.mjs";
@@ -80,3 +80,32 @@ describe("run-issue placement (#5542)", () => {
     assert.match(String(r.pr), /8$/);
   });
 });
+
+describe("run-issue public-repo default placement (#5748)", () => {
+  const inEmptyDir = async (fn) => { const prev = process.cwd(); process.chdir(tmpDir("nocfg-")); try { return await fn(); } finally { process.chdir(prev); } };
+  it("a public repo with no execution config places the lane on the actions provider", async () => {
+    const prov = fakeProvider((n) => ({ terminalReason: "merged", pr: 100 + n, cost_usd: 0 }));
+    const { deps } = setup("pubdef", prov, { execution: undefined, repoPublic: true });
+    const { res, out } = await inEmptyDir(() => logs(() => runFromCli(["7", "--repo", "o/r", "--no-prefilter"], deps)));
+    assert.deepEqual(prov.calls.filter((c) => c[0] === "start").map((c) => c[1]), [7]);
+    assert.equal(res.res?.terminalReason ?? res.terminalReason, "merged");
+    assert.ok(out.some((l) => /^placement: remote execution \(actions\)/.test(l)), out.join("\n"));
+  });
+  it("an explicit execution.mode: local in forge.yaml opts a public repo out", async () => {
+    const prov = fakeProvider(() => ({ terminalReason: "merged" }));
+    const { deps, ran } = setup("explicit", prov, { execution: undefined, repoPublic: true });
+    const dir = tmpDir("cfg-"); writeFileSync(join(dir, "forge.yaml"), "execution:\n  mode: local\n");
+    const prev = process.cwd(); process.chdir(dir);
+    try { await logs(() => runFromCli(["7", "--repo", "o/r", "--lane", "staging"], { ...deps, leanModule: core(ran) })); } finally { process.chdir(prev); }
+    assert.equal(ran.length, 1); assert.deepEqual(prov.calls, []);
+  });
+  it("a private repo, or a failed visibility lookup, keeps the local default", async () => {
+    for (const repoPublic of [false, undefined]) {
+      const prov = fakeProvider(() => ({ terminalReason: "merged" }));
+      const { deps, ran } = setup(`privdef-${repoPublic}`, prov, { execution: undefined, ...(repoPublic === undefined ? {} : { repoPublic }) });
+      await inEmptyDir(() => logs(() => runFromCli(["7", "--repo", "o/r", "--lane", "staging"], { ...deps, leanModule: core(ran) })));
+      assert.equal(ran.length, 1); assert.deepEqual(prov.calls, []);
+    }
+  });
+});
+

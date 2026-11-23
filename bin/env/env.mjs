@@ -136,9 +136,10 @@ const STALE_TMP_MS = 6 * 3600 * 1000;
 
 /**
  * Local-directory store. `linkTree(src, dst)` and `readOnly(dir)` are depcache's (hardlink, copy on EXDEV, writable
- * copies of package-manager state files).
+ * copies of package-manager state files). `safeRm(path, protect)` is depcache's too (#5819: never through a link, never a worktree
+ * path outside a dependency tree); without it a plain recursive rm.
  */
-export function makeEnvStore({ root = envRoot(), fs = nodeFs, now = () => Date.now(), pid = process.pid, linkTree, readOnly } = {}) {
+export function makeEnvStore({ root = envRoot(), fs = nodeFs, now = () => Date.now(), pid = process.pid, linkTree, readOnly, safeRm = null } = {}) {
   const dirOf = (key) => { if (!KEY_RE.test(String(key))) throw new Error(`invalid env key ${JSON.stringify(key)}`); return join(root, key); };
   const present = (p) => { try { fs.lstatSync(p); return true; } catch { return false; } };
   const names = (d) => { try { return fs.readdirSync(d); } catch { return []; } };
@@ -191,6 +192,7 @@ export function makeEnvStore({ root = envRoot(), fs = nodeFs, now = () => Date.n
     const t0 = now(), man = manifest(key);
     if (!man || !Array.isArray(man.trees) || !man.trees.length) return null;
     if (man.trees.some((t) => present(join(wt, t)))) return null;
+    if (man.trees.some((t) => !String(t).split("/").some((x) => x === "node_modules" || x === ".venv"))) return null; // #5819: only dependency trees enter (or leave) a worktree
     if (man.prefix !== wt) {
       // The trees name man.prefix in absolute paths: it must resolve to this worktree.
       if (!prefix || prefix !== man.prefix) return null;
@@ -206,7 +208,7 @@ export function makeEnvStore({ root = envRoot(), fs = nodeFs, now = () => Date.n
     const dir = dirOf(key);
     const dev = (p) => { try { return fs.statSync(p).dev; } catch { return undefined; } };
     const plan = planClaim({ storeDev: dev(dir), worktreeDev: dev(wt), ready: readyIds(key).length });
-    const undo = () => { for (const t of man.trees) { try { fs.rmSync(join(wt, t), { recursive: true, force: true }); } catch { /* best effort */ } } };
+    const undo = () => { for (const t of man.trees) { try { if (safeRm) safeRm(join(wt, t), wt); else fs.rmSync(join(wt, t), { recursive: true, force: true }); } catch { /* best effort */ } } };
     if (plan.mode === "rename") {
       for (const id of readyIds(key)) {
         const mine = join(dir, `.claim-${pid}-${id}`);
@@ -287,7 +289,7 @@ export async function claimForLane({ wt, deps, fs = nodeFs, env = process.env, n
   const t0 = now();
   const desc = await describeEnv({ wt, deps, fs, laneTools: String(env.FORGE_ENV_LANE_TOOLS ?? "").split(",").filter(Boolean), image: env.FORGE_ENV_IMAGE ?? "" });
   if (!desc.components.length) return null;
-  const store = makeEnvStore({ root: envRoot(env), fs, now, linkTree: deps.linkTree, readOnly: deps.readOnly });
+  const store = makeEnvStore({ root: envRoot(env), fs, now, linkTree: deps.linkTree, readOnly: deps.readOnly, safeRm: deps.safeRm });
   const got = store.claim({ key: desc.key, wt, prefix: String(env.FORGE_ENV_PREFIX ?? "").trim() || null });
   return got ? { key: desc.key, mode: got.mode, ms: now() - t0 } : null;
 }

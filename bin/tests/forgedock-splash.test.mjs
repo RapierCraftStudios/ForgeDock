@@ -37,7 +37,7 @@ describe("forgedock-splash parity with bin/cinema.mjs", () => {
 
 describe("forgedock-splash scene", () => {
   it("every frame fits 56x9 and uses only common glyphs, on both themes", () => {
-    const allowed = /^[\x20-\x7e▀▄█▌▐▛▜▙▟▖▗▘▝░▒▓·•*✦✧»←→↑↓╱╲─│]*$/u;
+    const allowed = /^[\x20-\x7e▀▄█▌▐▛▜▙▟▖▗▘▝░▒▓·•*✦✧»←→↑↓╱╲─│♥]*$/u; // ♥ is CP437 and in every common monospace font
     for (const light of [false, true]) {
       setTheme(light);
       for (let f = 0; f <= LAST; f++) {

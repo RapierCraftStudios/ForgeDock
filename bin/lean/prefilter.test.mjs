@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { prefilterIssue, flakyReason, makePrefilter, postDeployGate, postDeployOnly, deferredFrom, formatParkedLine, lazyDefaultBranch, ownLogins, resolveOwnLogins, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, isTrustedIssueComment, DEFAULT_PREFILTER_MODEL, parseMinAge, itemWindowsMs, landedAt, itemDueMs, hasDecisionItem, deferredFromAll, itemDueAnchors } from "./prefilter.mjs";
+import { prefilterIssue, flakyReason, prodFailureSignal, makePrefilter, postDeployGate, postDeployOnly, deferredFrom, formatParkedLine, lazyDefaultBranch, ownLogins, resolveOwnLogins, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, isTrustedIssueComment, DEFAULT_PREFILTER_MODEL, parseMinAge, itemWindowsMs, landedAt, itemDueMs, hasDecisionItem, deferredFromAll, itemDueAnchors } from "./prefilter.mjs";
 import { writeFileSync } from "node:fs";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { execFileSync } from "node:child_process";
@@ -89,6 +89,36 @@ describe("pre-filter (#4123)", () => {
       verdict: { verdict: "ALREADY-FIXED", summary: "guard added", evidence: ["src/foo.js:3"] } });
     const r = await pf(w, 12);
     assert.equal(r.closed, false); assert.match(r.detail, /acceptance probe failed after promotion/);
+    assert.equal(w.runner.length, 0); assert.deepEqual(w.closed, []); assert.deepEqual(w.comments, []);
+  });
+
+  it("#5734 a trusted decision recording the merged fix failing in prod blocks the already-fixed close (AlterLab#40650 sequence)", async () => {
+    const bot = { author: { login: "rapiercraft-forgedock" }, authorAssociation: "CONTRIBUTOR" };
+    const owner = { author: { login: "op" }, authorAssociation: "OWNER" };
+    const decision = { ...owner, url: "https://github.com/o/r/issues/12#issuecomment-3",
+      body: "<!-- FORGE:DECISION -->\n## Requeue\nPR #90 went live, but Reddit success is still ~0% in production; verified failing in prod. Requeue for a real fix." };
+    const verified = (text) => ({ ...bot, body: `<!-- FORGE:VERIFIED abc1234 -->\n${text}` });
+    const probe = (result) => ({ ...bot, body: `<!-- FORGE:PROBE -->\n## Acceptance probe: ${result}\n${JSON.stringify({ fix: "abc1234", default_sha: "d", result, exit: result === "pass" ? 0 : 1, ms: 5 })}` });
+    // the AlterLab#40650 comment sequence: trajectory of the merged fix, then the requeue decision recording 0% prod success
+    const comments = [{ ...bot, body: "<!-- FORGE:TRAJECTORY -->\nmerged at `abc1234`" }, decision];
+    const sig = prodFailureSignal(comments);
+    assert.ok(sig); assert.match(sig.why, /FORGE:DECISION comment by op records the fix failing in production/); assert.equal(sig.url, decision.url); assert.match(sig.excerpt, /0%/);
+    assert.equal(flakyReason({ comments }).reason, "prod-failed");
+    // cleared by a later FORGE:VERIFIED or a passing probe; an untrusted author is ignored; a non-failure decision is no signal
+    assert.equal(prodFailureSignal([...comments, verified("Deployed probe passed in production.")]), null);
+    assert.equal(prodFailureSignal([...comments, probe("pass")]), null);
+    assert.ok(prodFailureSignal([...comments, verified("ok"), verified("verified failing in production again")]));
+    assert.ok(prodFailureSignal([probe("fail")]));
+    assert.equal(prodFailureSignal([{ ...decision, author: { login: "rando" }, authorAssociation: "NONE" }]), null);
+    assert.ok(prodFailureSignal([{ ...decision, author: { login: "me" }, authorAssociation: "NONE" }], ["me"]), "an own login is trusted");
+    assert.equal(prodFailureSignal([{ ...owner, body: "<!-- FORGE:DECISION -->\nKeep the retry budget at 3." }]), null);
+    assert.equal(prodFailureSignal([{ ...owner, body: "Verified failing in prod" }]), null, "no marker, no signal");
+    assert.equal(prodFailureSignal([{ ...owner, body: "<!-- FORGE:DECISION -->\nThe fix holds in production; no longer failing." }]), null);
+    const w = world({ issues: { 12: { title: "reddit scrape success rate", body: "Acceptance: Reddit success rate above 90% in prod", comments } },
+      prs: [{ number: 90, title: "fix: reddit fetch", body: "Fixes #12", url: "https://github.com/o/r/pull/90" }],
+      verdict: { verdict: "ALREADY-FIXED", summary: "PR #90 is an ancestor", evidence: ["src/reddit.js:3"] } });
+    const r = await pf(w, 12);
+    assert.equal(r.closed, false); assert.match(r.detail, /production failure recorded after the fix .*: no already-fixed close; lane/);
     assert.equal(w.runner.length, 0); assert.deepEqual(w.closed, []); assert.deepEqual(w.comments, []);
   });
 

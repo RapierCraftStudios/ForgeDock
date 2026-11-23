@@ -6,6 +6,7 @@ import { readFileSync, appendFileSync, mkdirSync, mkdtempSync, statSync, existsS
 import { homedir, hostname, freemem, loadavg, cpus, tmpdir } from "node:os";
 import { promises as fsp } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
+import { resolveSpawn } from "./winspawn.mjs";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { runCliBackendAsync, resolveClaudeCliBinary, getClaudeCliCapabilities, buildLeanSessionFlags, buildReadOnlyToolFlags, sanitizeCliModel } from "../runner.mjs";
@@ -14,7 +15,9 @@ import { makeProjector } from "../engine/projector.mjs";
 import { makeLedger, countLiveLanes, ledgerRoot } from "./ledger.mjs";
 import { makeDepCache } from "./depcache.mjs";
 import { makeHeavyIo } from "./heavy.mjs";
-import { diskLow } from "./admission.mjs";
+import { diskLow, ADMISSION_DEFAULTS } from "./admission.mjs";
+import { writeAtomic } from "./batch.mjs";
+import { schedDir } from "./sched.mjs";
 import { gatherContextFacts } from "./context.mjs";
 import { makePitfallStore } from "./pitfalls.mjs";
 import { enumeratingTests, missingEntries } from "./enumerating.mjs";
@@ -29,6 +32,7 @@ import { parseVersioned } from "./seqversioned.mjs";
 import { followupMap } from "./conformance.mjs";
 import { toolStats } from "./toolstats.mjs";
 import { detectApiShape } from "./apishape.mjs";
+import { verifyLaneWorktree, quarantineDir } from "./laneconfine.mjs";
 
 /** #5531: children started by this process's gh/script helpers still running; the schedd kills them on close so none outlives the daemon. */
 const liveChildren = new Set();
@@ -39,7 +43,8 @@ export function killTrackedChildren(signal = "SIGKILL") {
   return n;
 }
 export const trackedChildCount = () => liveChildren.size;
-const pexec = (bin, args, opts) => new Promise((res, rej) => {
+const pexec = (bin0, args0, opts) => new Promise((res, rej) => {
+  const { bin, args } = resolveSpawn(bin0, args0, { env: opts?.env ?? process.env }); // #5799: npm .cmd shims on Windows
   const child = execFile(bin, args, opts, (err, stdout, stderr) => {
     liveChildren.delete(child);
     if (err) { err.stdout = stdout; err.stderr = stderr; rej(err); } else res({ stdout, stderr });
@@ -132,7 +137,7 @@ export const leanSettingsFlags = ({ subagentModel = null, reread = false, guard 
 export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable, subagentModel = null, sandboxed = inSandbox() } = {}) {
   return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, rereadNudge = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, session = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null, bin: pinnedBin = null, fullSession = false }) => {
     // #5205: a rotation relaunch pins the real claude past the tokenbaton shim; absent, the usual resolution
-    const bin = pinnedBin || resolveClaudeCliBinary(cwd) || "claude";
+    const bin = pinnedBin || resolveClaudeCliBinary(cwd) || resolveSpawn("claude", []).bin; // win32: a probe miss must not fall back to a bare name (spawn ENOENT)
     const caps = getClaudeCliCapabilities(cwd);
     // #4391: custom subagents (the explorer) for the builder session; null leaves argv unchanged
     // #5516: fullSession keeps slash commands/Skill/Task (the release test gate invokes /test-gate); otherwise the lean minimal group
@@ -146,7 +151,8 @@ export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRun
       idleMs, maxMs, stream: idleMs > 0, control, onSpawn, session, busy, busyMs, onIdleExtend, ...(contextMax > 0 ? { contextMax } : {}), ...(turnMax > 0 ? { turnMax } : {}), wrap: probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
     // #4395: a resumed session's first turn carries the prior history, so only a fresh session reports a baseline.
     return { text: r.text, sessionId: r.sessionId, usage: r.usage, costUsd: r.costUsd, durationMs: r.durationMs, turns: r.turns, model: r.cliModel ?? "default",
-      baselineTokens: resume ? null : (r.baselineTokens ?? null), tools: toolStats(r.toolUses) }; // #4410: tool calls per turn, re-reads
+      baselineTokens: resume ? null : (r.baselineTokens ?? null), tools: toolStats(r.toolUses), // #4410: tool calls per turn, re-reads
+      endTokens: r.endTokens ?? null, toolUses: Array.isArray(r.toolUses) ? r.toolUses : null }; // #5812: the route hand-off sizes the plan session and lists what it read
   };
 }
 
@@ -261,9 +267,54 @@ export function guardHeavyDisk(heavy, { host, minFreeGb = () => null, gc = async
   };
 }
 
+/**
+ * Lane ramp stamps (#5845): lanes are separate processes, so the lanes admitted within the ramp window are files in
+ * `schedDir()/lane-ramp/` (one `<pid>.json` per lane, `{pid, at, mb}`, so concurrent lanes never overwrite each other),
+ * plus `peaks.json` (recent peak RSS in MB, newest last). Every read fails open to null/0 and drops dead or expired stamps.
+ */
+const PEAKS_KEPT = 20;
+export function makeRampStore({ dir = join(schedDir(), "lane-ramp"), now = () => Date.now(), pid = process.pid, defaultMb = ADMISSION_DEFAULTS.lane_mem_mb } = {}) {
+  const live = (rampS) => {
+    const out = [];
+    for (const f of readdirSync(dir)) {
+      if (!/^\d+\.json$/.test(f)) continue;
+      const file = join(dir, f);
+      try {
+        const st = JSON.parse(readFileSync(file, "utf8"));
+        const stale = now() - st.at >= Math.max(rampS, 1) * 1000 * 2; // kept for one extra window so a slightly longer ramp still sees it
+        if (stale || !pidAlive(st.pid)) { rmSync(file, { force: true }); continue; }
+        if (now() - st.at < rampS * 1000) out.push(st);
+      } catch { /* unreadable stamp: ignore */ }
+    }
+    return out;
+  };
+  const peaks = () => { try { return (JSON.parse(readFileSync(join(dir, "peaks.json"), "utf8")).peaks ?? []).filter(Number.isFinite); } catch { return []; } };
+  const footprint = () => {
+    const p = peaks();
+    if (!p.length) return defaultMb;
+    const sorted = [...p].sort((a, b) => a - b);
+    return Math.max(defaultMb, Math.ceil(sorted[Math.floor(sorted.length / 2)]), Math.ceil(sorted[sorted.length - 1] * 0.9)); // conservative: near the max, never under the default
+  };
+  const guard = (fn, fallback) => (...a) => { try { return fn(...a); } catch { return fallback; } };
+  return {
+    rampingMb: guard((rampS) => live(rampS).reduce((t, st) => t + (Number(st.mb) > 0 ? Number(st.mb) : defaultMb), 0), null),
+    rampingLanes: guard((rampS) => live(rampS).length, null),
+    laneFootprintMb: guard(footprint, null),
+    /** Called once this lane passed admission: it will grow for the next ramp window. */
+    recordAdmission: guard((mb = footprint()) => { writeAtomic(join(dir, `${pid}.json`), JSON.stringify({ pid, at: now(), mb })); return true; }, false),
+    /** Called at lane end with the lane's peak RSS in MB. */
+    recordPeakRss: guard((mb) => {
+      if (!(Number(mb) > 0)) return false;
+      writeAtomic(join(dir, "peaks.json"), JSON.stringify({ peaks: [...peaks(), Math.ceil(Number(mb))].slice(-PEAKS_KEPT) }));
+      return true;
+    }, false),
+  };
+}
+
 /** Real host probes for admission (#4105). MemAvailable from /proc/meminfo (fallback os.freemem), statfs for tmp. */
 export function makeHostProbe() {
   return {
+    ...makeRampStore(),
     memAvailableMb() {
       try {
         const m = /^MemAvailable:\s+(\d+)\s+kB/m.exec(readFileSync("/proc/meminfo", "utf8"));
@@ -446,6 +497,21 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
     deps: makeDepCache({ exec: async (cmd, args, { cwd, env, timeoutMs } = {}) => String((await pexec(cmd, args, { cwd, env: { ...process.env, ...(env ?? {}) }, timeout: timeoutMs ?? 0, maxBuffer: 100 * 1024 * 1024 })).stdout) }),
     /** Names of the checks the base branch requires: classic protection plus rulesets (#4158). [] when neither has any. */
     async requiredChecks(lane) { return requiredChecksFor({ gh: run("gh"), repo, lane }); },
+    /**
+     * #5820: the scripts/ci-local plan of the lane's change (CI definitions from the base ref plus the lane's edits, change
+     * scoped), in a child process so the yq calls never block the lane. Rejects with ci-local's DEGRADED reason (no yq).
+     */
+    async ciLocalPlan({ repo: wt, base, baseBranch, files = [] }) {
+      const list = join(wt, ".forge-lean", "ci-precheck", "files.txt");
+      mkdirSync(dirname(list), { recursive: true }); writeFileSync(list, `${files.join("\n")}\n`);
+      try {
+        const { stdout } = await pexec(process.execPath, [script("ci-local/cli.mjs"), "plan", "--repo", wt, "--base", base, "--base-branch", baseBranch, "--files-from", list, "--json"], { cwd: wt, timeout: 120000, maxBuffer: 64 * 1024 * 1024 });
+        return JSON.parse(String(stdout));
+      } catch (e) {
+        const why = /CI_LOCAL_RESULT: DEGRADED reason=(.*)/.exec(String(e?.stdout ?? ""))?.[1] ?? String(e?.stderr || e?.message || e).split("\n")[0];
+        throw new Error(why);
+      }
+    },
     /** [{name, state: success|failure|pending, url, head}] for the PR's checks; `head` is the PR head the rollup belongs to (#4240). */
     async checkStates(pr) {
       const j = JSON.parse(await run("gh")(["pr", "view", String(pr), "-R", repo, "--json", "statusCheckRollup,headRefOid"]));
@@ -646,6 +712,8 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
         return { ok: false, output: `${e.stdout ?? ""}${e.stderr ?? ""}`.slice(0, 6000) };
       }
     },
+    /** #5825: is the lane folder a worktree of this repo (toplevel + common dir), and moving aside a folder that is not. */
+    confine: { verify: ({ wt, cwd }) => verifyLaneWorktree({ git: run("git"), exists: async (p) => existsSync(p), wt, cwd }), quarantine: async ({ wt }) => quarantineDir(wt) },
     /** #4162: processes left running inside a lane worktree (Linux /proc). */
     proc: { inDir: async (dir) => procsInDir(dir), alive: pidAlive, kill: (pid, sig) => { try { process.kill(pid, sig); } catch { /* already gone */ } } },
     fs: {

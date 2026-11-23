@@ -63,7 +63,7 @@ test("spec.warm N: the agent keeps N warm sandboxes; a ready one is claimed, its
   assert.ok(warmIds.includes(c.body.id), "the warm sandbox keeps its id");
   const rec = agent.store.data.sandboxes[c.body.id];
   const file = join(rec.dir, "claim", "claim.json");
-  assert.equal(statSync(file).mode & 0o777, 0o600);
+  if (process.platform !== "win32") assert.equal(statSync(file).mode & 0o777, 0o600); // win32 has no POSIX file modes
   assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { env: { GH_TOKEN: "lane-secret" }, command: ["forgedock", "run-issue", "7"], ref: "staging" });
   assert.ok(!docker.runs.some((a) => a.join(" ").includes("lane-secret")), "lane env never reaches docker argv");
   // The lane id answers for the claimed sandbox; a repeat claim is idempotent.
@@ -127,14 +127,15 @@ test("warm-refresh.sh: incremental fetch to the lane's base ref, installed files
   assert.ok(existsSync(join(work, "node_modules", "dep")), "dependencies stay installed");
 });
 
-test("entrypoint claim loader: lane env, argv and ref load verbatim, quotes included", () => {
-  const sh = readFileSync(join(IMG, "entrypoint.sh"), "utf8");
+// The loader runs in the Linux lane container; on win32, Git Bash passing argv to native node.exe drops the \x27 escapes' backslashes.
+test("entrypoint claim loader: lane env, argv and ref load verbatim, quotes included", { skip: process.platform === "win32" && "bash -> native node.exe argv drops backslashes (loader runs on Linux only)" }, () => {
+  const sh = readFileSync(join(IMG, "entrypoint.sh"), "utf8").replace(/\r\n/g, "\n"); // a CRLF checkout reads as LF
   const m = /eval "\$\(node -e '([\s\S]*?)'\n?\s*\)"/.exec(sh);
   assert.ok(m, "claim loader present");
   const dir = tmpDir("claim-");
   const claim = join(dir, "claim.json");
   writeFileSync(claim, JSON.stringify({ env: { GH_TOKEN: "it's a 'secret'", "bad-key": "x" }, command: ["forgedock", "run-issue", "7", "--note", "a b'c"], ref: "staging" }));
-  const script = m[1].replace("/claim/claim.json", claim);
+  const script = m[1].replace("/claim/claim.json", claim.replace(/\\/g, "/")); // a win32 path's backslashes would be JS escapes
   const out = spawnSync("bash", ["-c", `eval "$(node -e '${script.replace(/'/g, `'\\''`)}')"; printf '%s|%s|%s|%s' "$GH_TOKEN" "$CS_CLAIM_REF" "$#" "$5"`], { encoding: "utf8" });
   assert.equal(out.status, 0, out.stderr);
   assert.equal(out.stdout, "it's a 'secret'|staging|5|a b'c");

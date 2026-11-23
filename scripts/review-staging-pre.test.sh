@@ -170,6 +170,8 @@ jq -e '.deploy_wiring_files | index(".github/workflows/ci.yml")' "$J" >/dev/null
 jq -e '.reviewed_pr_count == 1' "$J" >/dev/null 2>&1 && ok || bad "reviewed_pr_count must be 1"
 grep -q '^SCOPE_MODE=scoped$' "$TMP/sd/9_scope.env" && grep -q '^5 a.js$' "$TMP/sd/9_bundle-pr-files.txt" && ok || bad "scope.env and bundle-pr-files.txt keep the spec's format"
 case "$OUT" in *"SCOPE_MODE=scoped reviewed_prs=1"*) ok ;; *) bad "scope must print the one-line summary" ;; esac
+case "$OUT" in *"CI_NET: workflows "*) ok ;; *) bad "scope must print the CI_NET line (forge#5760; got $OUT)" ;; esac
+jq -e '.ci_net | startswith("CI_NET: workflows ")' "$J" >/dev/null 2>&1 && ok || bad "scope.json must carry ci_net (got $(jq -c .ci_net "$J" 2>/dev/null))"
 newfix scopefail
 run scope --repo o/r --default main --staging staging --pr 9 --prs-file "$TMP/prs" --sd "$TMP/sd" >/dev/null 2>&1
 J="$TMP/sd/9_scope.json"

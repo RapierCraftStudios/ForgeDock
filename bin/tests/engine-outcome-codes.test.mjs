@@ -67,7 +67,7 @@ const COVERAGE = {
   "build.cohesive": "reserved", "remediate.no_marker": "remediate.detectOutcome",
   "remediate.deferred_live_run": "remediate.detectOutcome", "remediate.re_escalated": "remediate.detectOutcome",
   "remediate.unfixable": "remediate.detectOutcome", "remediate.inpr_requested": "remediate.detectOutcome", "infra.cli_spawn_transient": "engine", "cli.timeout": "engine", "contract.invalid_command": "lean", "cli.host_killed": "lean", "cli.spawn_failed": "lean", "env.setup_failed": "lean", "env.lane_limit": "lean", "env.tool_missing": "lean", "env.repro_unrunnable": "lean", "env.capability_remote": "lean", "budget.exceeded": "lean", "sandbox.start_failed": "execution", "sandbox.capacity": "execution", "sandbox.transient": "execution", "sandbox.auth": "execution", "sandbox.unreachable": "execution", "ci.red": "reserved", "ci.dco": "lean", "engine.dco_rewrite": "lean", "ci.timeout": "reserved",
-  "base.conflict": "reserved", "base.red": "lean", "rate_limited": "engine", "backend.auth": "lean", "quota.exhausted": "lean", "host.busy": "lean", "gh.unavailable": "engine", "gh.auth": "lean", "merge.transient": "lean", "push.transient": "lean", "engine.push_diverged": "lean", "cli.idle": "lean", "run.interrupted": "lean", "path.switch_conflict": "engine", "engine.error": "engine", "infra.disk_quota": "engine", "lease.held": "engine",
+  "base.conflict": "reserved", "base.red": "lean", "rate_limited": "engine", "backend.auth": "lean", "backend.cli_failed": "lean", "quota.exhausted": "lean", "host.busy": "lean", "gh.unavailable": "engine", "gh.auth": "lean", "merge.transient": "lean", "push.transient": "lean", "engine.push_diverged": "lean", "cli.idle": "lean", "run.interrupted": "lean", "path.switch_conflict": "engine", "engine.error": "engine", "infra.disk_quota": "engine", "lease.held": "engine",
   "dependency.open": "engine", "design.invalidated": "lean", "design.spec_required": "lean", "dependency.unreadable": "engine", "dependency.blocked": "lean",
   "lane.mismatch": "lean", "lane.default_branch": "lean", "lane.branch_missing": "lean", "lane.unresolved": "lean",
   "invalid": "engine", "decomposed": "investigate.detectOutcome", "completed": "engine",
@@ -76,7 +76,7 @@ const COVERAGE = {
   "split.unsupported": "lean", "split.plan_invalid": "lean", "split.verify_failed": "lean",
   "contract.invalid": "lean", "review.incomplete": "lean", "review.inconsistent": "lean", "conformance.omission": "lean",
   "conformance.unimplemented": "lean", "conformance.scope_creep": "lean", "conformance.untracked_deferral": "lean", "conformance.e2e_unverified": "lean", "conformance.unjustified_deferral": "lean",
-  "conformance.preserve_violated": "lean", "conformance.regression": "lean", "conformance.guard_broken": "lean", "engine.validate_result_lost": "lean", "structure.undeclared_edge": "lean", "docs.stale": "lean", "maintenance.hotspot_growth": "lean", "followup.unavailable": "lean",
+  "conformance.preserve_violated": "lean", "conformance.regression": "lean", "conformance.guard_broken": "lean", "engine.validate_result_lost": "lean", "structure.undeclared_edge": "lean", "docs.stale": "lean", "maintenance.hotspot_growth": "lean", "maintenance.counter_growth": "lean", "recurrence.design_missing": "lean", "followup.unavailable": "lean",
   "awaiting_merge": "codeForTerminalReason", "unclassified": "engine",
 };
 
@@ -100,6 +100,8 @@ describe("outcome-codes module", () => {
       assert.equal(codeForRunnerError({ code, message: "rate limit hit" }), "engine.error");
     assert.equal(codeForRunnerError({ code: "CLI_BACKEND_FAILED", usageLimit: true }), "rate_limited");
     assert.equal(codeForRunnerError({ code: "CLI_BACKEND_FAILED", resetAtEpochMs: 5 }), "rate_limited");
+    assert.equal(codeForRunnerError({ code: "CLI_BACKEND_FAILED", cliFailed: true }), "backend.cli_failed"); // #5762
+    assert.equal(codeForRunnerError({ code: "CLI_BACKEND_FAILED", cliFailed: true, authFailure: true }), "backend.auth"); // #5762: login text wins
     assert.equal(codeForRunnerError({ code: "CLI_BACKEND_FAILED", authFailure: true }), "backend.auth"); // #5168
     assert.equal(codeForRunnerError({ code: "CLI_BACKEND_FAILED", authFailure: true, usageLimit: true }), "rate_limited"); // #5168: usage limit wins
     assert.equal(codeForRunnerError({ code: "CLI_SPAWN_FAILED", spawnErrno: "E2BIG" }), "cli.spawn_failed");

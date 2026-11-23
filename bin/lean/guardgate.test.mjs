@@ -6,7 +6,7 @@ import * as nodeFs from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { oldRanges, selectGuards, runGuards, commandFor, basePathOf, failingNames, guardFailures, supersessionComment, supersededIds, loadGuards } from "./guardgate.mjs";
+import { oldRanges, selectGuards, runGuards, commandFor, basePathOf, failingNames, guardFailures, supersessionComment, supersededIds, loadGuards, weakGuardNotes } from "./guardgate.mjs";
 import { applyAmendments, precheck } from "./conformance.mjs";
 import { builderImplementPrompt, conformanceResumePrompt } from "./prompts.mjs";
 import { tmpDir } from "../tests/_tmp.mjs";
@@ -333,4 +333,47 @@ test("a template that repeats the path is never batched", async () => {
   const calls = [];
   await runGuards({ selected: [{ guard: guard(1, "a.test.mjs"), reason: "r" }, { guard: guard(2, "b.test.mjs"), reason: "r" }], mergeBase: "b", contract: {}, guardCommand: { ".mjs": "run {path} {path}" }, git: async () => "x", fs, cwd: "/w", env: {}, runCommand: async (a) => { calls.push(a.command); return { rc: 0, output: "" }; } });
   assert.ok(calls.every((c) => !c.includes("a.test__guardbase.mjs") || !c.includes("b.test__guardbase.mjs")), "no single invocation spans both files");
+});
+
+const WEAK_SRC = `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { readFileSync } from "node:fs";\nconst src = readFileSync("src/a.mjs", "utf8");\ntest("price literal", () => assert.match(src, /return 2;/));\n`;
+
+test("#5752: a broken weak guard (literal-presence test) is a review note, never guard_broken", async () => {
+  const { d, guard } = fixture(WEAK_SRC);
+  put(d, "src/a.mjs", "export function price() {\n  return 3;\n}\n");
+  commit(d, "change");
+  const { r } = await gate(d, guard);
+  assert.equal(r.runs.length, 1, JSON.stringify(r.skipped));
+  assert.equal(r.runs[0].weak, true);
+  assert.notEqual(r.runs[0].rc, 0);
+  assert.deepEqual(r.failures, [], "weak guards never park");
+  const notes = weakGuardNotes(r.runs);
+  assert.deepEqual(notes.map((n) => [n.guard, n.test]), [["#7", "src/a.test.mjs"]]);
+  assert.match(notes[0].note, /review note, not a park/);
+  const pc = precheck({ contract: { requirements: [], deliverables: [{ id: "D1", path: "src/a.mjs" }], validate: [] }, result: {}, changedFiles: ["src/a.mjs"], guardFailures: r.failures });
+  assert.equal(pc.ok, true, JSON.stringify(pc.failures));
+});
+
+test("#5752: a broken behavioural guard stays strong: guard_broken and no weak note", async () => {
+  const { d, guard } = fixture();
+  put(d, "src/a.mjs", "export function price() {\n  return 3;\n}\n");
+  commit(d, "change");
+  const { r } = await gate(d, guard);
+  assert.equal(r.runs[0].weak, false);
+  assert.deepEqual(r.failures.map((f) => f.kind), ["guard_broken"]);
+  assert.deepEqual(weakGuardNotes(r.runs), []);
+  assert.deepEqual(guardFailures([{ issue: 1, test: "t", rc: 1, weak: true, output: "" }]), [], "guardFailures excludes weak runs");
+});
+
+test("#5752: a mechanism amendment reaches supersededIds only for guards whose test files the lane deleted", () => {
+  const sel = [
+    { guard: { issue: 7, tests: [{ path: "src/a.test.mjs" }] } },
+    { guard: { issue: 8, tests: [{ path: "src/b.test.mjs" }, { path: "src/c.test.mjs" }] } },
+    { guard: { issue: 9, tests: [{ path: "src/d.test.mjs" }] } },
+  ];
+  const contract = { mechanisms: [{ mechanism: "keyword triage", why: "replaced by the scorer" }], supersedes: [{ guard: "#9", why: "own" }] };
+  const ids = supersededIds(contract, sel, ["src/a.test.mjs", "src/b.test.mjs", "src/d.test.mjs"]);
+  assert.deepEqual(ids.map((s) => s.guard), ["#9", "#7"], "#8 keeps a surviving test; #9 is listed once");
+  assert.match(ids[1].why, /mechanism keyword triage removed: replaced by the scorer/);
+  assert.deepEqual(supersededIds({ supersedes: [] }, sel, ["src/a.test.mjs"]), [], "no mechanism: deleted tests retire nothing");
+  assert.deepEqual(supersededIds(contract, sel).map((s) => s.guard), ["#9"], "no removed paths: per-guard rows only");
 });

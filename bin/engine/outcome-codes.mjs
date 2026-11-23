@@ -37,6 +37,7 @@ export const OUTCOME_CODES = Object.freeze({
   BASE_CONFLICT: "base.conflict",
   RATE_LIMITED: "rate_limited",
   BACKEND_AUTH: "backend.auth", // forge#5168: the claude CLI login failed ("Failed to authenticate"); deferred under the account hold, never engine-error, never the breaker
+  BACKEND_CLI_FAILED: "backend.cli_failed", // forge#5762: the claude CLI exited 1 without reaching the API and it was no login failure; a transient retry, never the account hold
   QUOTA_EXHAUSTED: "quota.exhausted", // forge#5236: no account has capacity (every login at its ceiling); deferred until the earliest reset, never backend.auth
   HOST_BUSY: "host.busy",
   GH_UNAVAILABLE: "gh.unavailable", // forge#4157: `gh` unreachable after retries during the --repo identity check; run deferred, nothing posted
@@ -104,6 +105,8 @@ export const OUTCOME_CODES = Object.freeze({
   STRUCTURE_UNDECLARED_EDGE: "structure.undeclared_edge", // forge#4159: a workspace package.json edge the contract does not name
   DOCS_STALE: "docs.stale", // the target repo's devdocs freshness rule still fails after one builder resume
   MAINTENANCE_HOTSPOT_GROWTH: "maintenance.hotspot_growth", // forge#4195: an over-threshold file grew past growth_lines without hotspot-exempt
+  MAINTENANCE_COUNTER_GROWTH: "maintenance.counter_growth", // forge#5751: a forge.yaml recurrence.counters count grew without a "counter-ok: <name>" decision
+  RECURRENCE_DESIGN_MISSING: "recurrence.design_missing", // forge#5751: a recurring issue's design lane contract lacks why_failed, delete/replace and a measurable outcome
   FOLLOWUP_UNAVAILABLE: "followup.unavailable",
   MERGE_HEAD_MISMATCH: "merge.head_mismatch",
   // refactor:split lane (forge#4211): deterministic refusals and the move proof; every one leaves no edit behind.
@@ -156,6 +159,7 @@ export function codeForRunnerError(err) {
   if (err.usageLimit === true || (typeof err.resetAtEpochMs === "number" && Number.isFinite(err.resetAtEpochMs)))
     return OUTCOME_CODES.RATE_LIMITED;
   if (err.authFailure === true) return OUTCOME_CODES.BACKEND_AUTH; // forge#5168
+  if (err.cliFailed === true) return OUTCOME_CODES.BACKEND_CLI_FAILED; // forge#5762
   switch (err.code) {
     case "CLI_SPAWN_TRANSIENT":
       return OUTCOME_CODES.INFRA_CLI_SPAWN_TRANSIENT;

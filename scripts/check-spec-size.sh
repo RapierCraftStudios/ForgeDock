@@ -29,7 +29,9 @@ BASE="${1:-${BASE_REF:-origin/staging}}"
 PCT_NUM=2            # 2%
 ABS_MAX=4096         # bytes; also the size cap for a new spec
 # Per-file hard ceilings, one path:max_bytes per line (a spec converted to a script stub stays small).
-CEILINGS="commands/issue.md:15360"
+# #5824: orchestrate.md capped at its size before the DAG moved to code (bin/lean/dag.mjs): it never regrows past it.
+CEILINGS="commands/issue.md:15360
+commands/orchestrate.md:17399"
 
 SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
 out() { printf '%s\n' "$*" >> "$SUMMARY"; }

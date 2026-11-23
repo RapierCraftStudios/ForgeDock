@@ -1370,7 +1370,37 @@ const AUTH_FAILURE_RE = /Failed to authenticate|authentication_error|OAuth token
 export function detectAuthFailure(stdout, output = "") {
   const env = parseCliEnvelope(stdout);
   if (env) return env.is_error === true && typeof env.result === "string" && AUTH_FAILURE_RE.test(env.result);
+  // forge#5762: a JSON envelope cut off before `result` is not evidence of a login failure.
+  if (typeof stdout === "string" && stdout.trimStart().startsWith("{")) return false;
   return typeof output === "string" && AUTH_FAILURE_RE.test(output);
+}
+
+const MAX_CLI_RESULT_LEN = 500;
+/** forge#5762: masks credential-looking tokens before CLI text is stored in a lane or run log. */
+export function redactCliText(text) {
+  return String(text)
+    .replace(/\b(?:sk|pk)-[A-Za-z0-9_-]{8,}/g, "[redacted]")
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]{8,}/gi, "$1 [redacted]")
+    .replace(/\b((?:access|refresh|oauth|api)[_-]?(?:token|key)|authorization)(["']?\s*[:=]\s*["']?)[^\s"',}]{6,}/gi, "$1$2[redacted]");
+}
+
+/**
+ * forge#5762: the facts a failed CLI run reports: `result` and `is_error` (redacted, capped) and whether the CLI never
+ * reached the API (`duration_api_ms` 0, read from the raw text when the envelope is cut off). Never throws.
+ * @returns {{cliResult?:string, cliIsError?:boolean, cliApiMs?:number}}
+ */
+export function cliFailureFacts(stdout) {
+  const env = parseCliEnvelope(stdout);
+  const facts = {};
+  if (env) {
+    if (typeof env.result === "string") facts.cliResult = sanitizeAndCap(redactCliText(env.result), MAX_CLI_RESULT_LEN);
+    if (typeof env.is_error === "boolean") facts.cliIsError = env.is_error;
+    if (typeof env.duration_api_ms === "number") facts.cliApiMs = env.duration_api_ms;
+  } else if (typeof stdout === "string") {
+    const m = /"duration_api_ms"\s*:\s*(\d+)/.exec(stdout.slice(0, 4096));
+    if (m) facts.cliApiMs = Number(m[1]);
+  }
+  return facts;
 }
 
 /**
@@ -1873,6 +1903,9 @@ export function runCliBackend({
       // forge#5168: a failed login (never when the usage limit already matched,
       // which keeps precedence) lets the lane defer as `backend.auth`.
       else if (detectAuthFailure(stdout, output)) err.authFailure = true;
+      // forge#5762: keep the CLI's own result text; an exit that never reached the API and is no login or limit is transient.
+      Object.assign(err, cliFailureFacts(stdout));
+      if (!err.usageLimit && !err.authFailure && err.cliApiMs === 0 && result.status === 1) err.cliFailed = true;
       if (resetAt) {
         err.resetAt = resetAt;
         // forge#2524: also attach a machine-usable epoch-ms timestamp so
@@ -2082,6 +2115,7 @@ const CONTEXT_HARD_CAP = 1.25;
  * heavy step, test or lint child) the kill waits until idleMs + `busyMs` of silence, `onIdleExtend(info)` is told once per
  * idle stretch, and a later kill carries `extended: true` and `heavyQueue` (info.heavyQueue).
  * #4395: a stream result carries `baselineTokens`, the first assistant turn's context; absent when no message was seen.
+ * #5812: and `endTokens`, the last assistant turn's context (what a `--resume` of the session starts from).
  * #4410: a stream result (and a CLI_TURNS / CLI_CONTEXT error) carries `toolUses`, [{msg, name, path, cmd}] per tool_use
  * (deduped by tool_use id, capped at TOOL_USES_MAX), for bin/lean/toolstats.mjs; absent on the non-stream path.
  * #5334: every stream kill (CLI_IDLE, CLI_TIMEOUT, a host kill's CLI_BACKEND_FAILED) carries the usage, `turns` and `toolUses`
@@ -2259,6 +2293,9 @@ export async function runCliBackendAsync(opts) {
   const first = msgUsage.values().next().value;
   if (stream && toolUses.size && r && typeof r === "object") r.toolUses = [...toolUses.values()];
   if (first && r && typeof r === "object") r.baselineTokens = toFiniteUsageNumber(first.input_tokens) + toFiniteUsageNumber(first.cache_read_input_tokens) + toFiniteUsageNumber(first.cache_creation_input_tokens);
+  // #5812: the last assistant turn's context: what a resume of this session starts from
+  const last = [...msgUsage.values()].pop();
+  if (last && r && typeof r === "object") r.endTokens = toFiniteUsageNumber(last.input_tokens) + toFiniteUsageNumber(last.cache_read_input_tokens) + toFiniteUsageNumber(last.cache_creation_input_tokens);
   return r;
 }
 

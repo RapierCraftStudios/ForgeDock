@@ -552,6 +552,20 @@ describe("pre-tool-use hook — subprocess", () => {
     assert.equal(exitCode, 0);
   });
 
+  // #5709: a snapshot release branch is a deploy head; other non-staging heads stay blocked.
+  it("allows --head release/<id> --base main (#5709)", () => {
+    const { exitCode } = runHook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "gh pr create --head release/20261115-1 --base main --title r" } });
+    assert.equal(exitCode, 0);
+  });
+
+  it("still blocks feature heads and release-lookalikes against main (#5709)", () => {
+    for (const head of ["feat/x", "release", "myrelease/x", "release/../x"]) {
+      const { exitCode, stderr } = runHook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: `gh pr create --head ${head} --base main --title r` } });
+      assert.equal(exitCode, 2, head);
+      assert.match(stderr, /BLOCKED/);
+    }
+  });
+
   // -------------------------------------------------------------------------
   // Regression tests for issue #1519 — extractFlag() must not misread
   // flag-shaped text embedded inside a quoted --title/--body value as a
@@ -2155,7 +2169,7 @@ describe("main-checkout mutation guard (issue #3650)", () => {
       input: JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command } }),
       encoding: "utf-8",
       timeout: 10000,
-      env: { ...process.env, NODE_OPTIONS: "", FORGE_ALLOW_MAIN_CHECKOUT_GIT: "", FORGE_ENFORCE_MAIN_CHECKOUT_GIT: "1", ...extraEnv },
+      env: { ...process.env, NODE_OPTIONS: "", FORGE_ALLOW_MAIN_CHECKOUT_GIT: "", FORGE_ENFORCE_MAIN_CHECKOUT_GIT: "1", FORGE_LANE_WORKTREE: "", ...extraEnv },
       cwd,
     });
     return { exitCode: r.status ?? -1, stderr: r.stderr || "" };

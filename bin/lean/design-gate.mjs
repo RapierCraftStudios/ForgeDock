@@ -111,11 +111,11 @@ export function visualGate({ cfg = null, files = [], specs = false, sources = {}
   // #5648: `changes` {file: pageChange class}: generated files are exempt, a copy-only edit needs the visual check but no spec
   const routeFiles = designFiles(files, cfg).filter((f) => changes[f] !== "generated");
   const routes = routeFiles.map((file) => ({ file, route: routeOf(file), page: PAGE_ENTRY_RE.test(file) }));
-  const rows = [], add = (kind, route, detail) => rows.push({ kind, route, detail });
+  const rows = [], add = (kind, route, detail, file) => rows.push({ kind, route, detail, file });
   for (const r of routes) {
     const spec = typeof specs === "object" && specs !== null ? Boolean(specs[r.route] ?? specs[r.file]) : Boolean(specs);
     const copy = changes[r.file] === "copy";
-    if (r.page && !spec && !copy) add("design_spec_missing", r.route, `${r.file} has no approved FORGE:DESIGN_SPEC (label ${cfg.specLabel}): run /design first`);
+    if (r.page && !spec && !copy) add("design_spec_missing", r.route, `${r.file} has no approved FORGE:DESIGN_SPEC (label ${cfg.specLabel}): run /design first`, r.file);
     if (r.page && !copy && sources[r.file] != null) {
       for (const f of critiqueMarkup(sources[r.file])) if (f.severity === "block") add("visual_critique_failed", r.route, `${r.file}: ${f.id}: ${f.detail}`);
     }
@@ -133,12 +133,12 @@ export function visualGate({ cfg = null, files = [], specs = false, sources = {}
 }
 
 /** Lane precheck rows (conformance.unimplemented) for the diff's user-visible routes; [] unless design.routes is set and gate is blocking. */
-export function designFailures({ cfg = null, files = [], specs = false, readFile = () => "", added = null, diff = "" } = {}) {
+export function designFailures({ cfg = null, files = [], specs = false, readFile = () => "", added = null, diff = "", covered = [], bugFix = false } = {}) {
   if (!designOn(cfg) || cfg.gate !== "blocking") return [];
   const sources = {}, changes = {};
-  for (const f of designFiles(files, cfg)) changes[f] = pageChange(f, { added, diff, readFile }); // no added list: "new", fail closed
+  for (const f of designFiles(files, cfg)) changes[f] = pageChange(f, { added, diff, readFile, bugFix }); // no added list: "new", fail closed
   for (const f of designPages(files, cfg)) sources[f] = String(readFile(f) ?? "");
-  return visualGate({ cfg, files, specs, sources, changes }).rows.map((r) => ({ code: OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, kind: r.kind, detail: r.detail }));
+  return visualGate({ cfg, files, specs, sources, changes }).rows.filter((r) => !(r.kind === "design_spec_missing" && covered.includes(r.file))).map((r) => ({ code: OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, kind: r.kind, detail: r.detail })); // #5729: `covered`: files the page gate already reports page_design_missing for
 }
 
 /** Markdown for the FORGE:VISUAL_GATE comment (review-pr-staging). Rendered screenshots are listed by path. */

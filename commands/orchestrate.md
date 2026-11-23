@@ -19,9 +19,9 @@ issue yourself.
 If the input contains `--path full`, stop: read `${CLAUDE_PLUGIN_ROOT}/commands/orchestrate/legacy.md`
 and follow it instead (the previous multi-phase orchestrator).
 
-## 2. Resolve, triage and build the DAG
+## 2. Resolve and triage
 
-Do this yourself from issue text and the code. Spawn no sub-agents here.
+Do this yourself. Spawn no sub-agents here.
 
 1. **Resolve.**
    - Explicit numbers (`#12 13 14`) are used as given.
@@ -43,29 +43,20 @@ Do this yourself from issue text and the code. Spawn no sub-agents here.
    those issues. This is the only pre-filter in this command: lanes run `forgedock run-issue`, which does not
    pre-filter again. Keep its
    `pre-filter:` line for the report.
-3. **Triage.** For each issue, read it once (`gh issue view N --json title,body,labels`) and record:
-   - **Ready / skip.** Skip when it is labelled `needs-human` or `workflow:merged`, or an open PR already
-     closes it (`gh pr list --search "Closes #N" --state open`). Say why.
-   - **Files.** The files or areas it will likely touch: paths named in the issue, or a quick
-     `git grep` of the symbols it names. Keep this to a few greps per issue, not an investigation.
-   - **Size.** S, M or L, from the scope the issue describes.
-4. **Build the DAG.** Edge X → N means N waits until X merges:
-   - **Explicit:** `Depends on #X` / `Blocked by #X` where X is in the set. Match it case-insensitively and
-     also in bold or list form (`**Depends on** #X`, `- Depends on: #X, #Y`). An open X outside the set
-     means N is skipped as blocked.
-   - **Logical:** one issue's fix is needed by another (for example, it adds the helper the other uses).
-
-   These are the only edges. File overlap is **never** an edge: two issues that touch the same file or
-   function still run in parallel, because each lane merges `origin/<lane>` into a conflicting PR and
-   resolves the conflict itself. Note the overlap in the plan table as a warning only.
-
-   If you find a cycle, break it at the weakest (logical) edge and say so.
-5. **Show the plan** as one table: issue, title, size, likely files, waits-on (explicit/logical only),
-   overlaps (warning). There are no waves. Then proceed without asking.
+3. **Skip** an issue labelled `needs-human` or `workflow:merged`, or one an open PR already closes
+   (`gh pr list --search "Closes #N" --state open`). Say why.
+4. **The DAG and the plan table are code** (`bin/lean/dag.mjs`, #5824): `forgedock orchestrate` prints
+   `plan:` and one row per issue (title, waits on, likely files, overlap warning) before the first lane. Do not
+   build or print a DAG yourself. Edge X → N (N waits until X merges) comes only from a trusted `Depends on #X` /
+   `Blocked by #X` line (any case, bold, list, `:`, comma/`and` lists), or, logically, when X's frozen contract
+   delivers a new file N's body names. File overlap is **never** an edge: overlapping issues run in parallel and
+   each lane merges its base and resolves the conflict; the table shows the overlap as a warning. A logical edge
+   that closes a cycle is dropped. An edge you believe is missing goes on the dependent as a `Depends on #X` line
+   before launching. The report's `false holds:` line counts planned edges an operator removed. Without
+   `forgedock` (agent lanes), apply the same edge rules yourself and show the same table.
 
 `K` = `--parallel` if given, otherwise `orchestration.max_concurrent` from the repo's `forge.yaml`
-(`yq '.orchestration.max_concurrent' forge.yaml`), otherwise 3. State the value of K and where it came
-from in the plan.
+(`yq '.orchestration.max_concurrent' forge.yaml`), otherwise 3.
 
 **Lanes (base branches).** Each issue has its own lane, and ForgeDock works it out: an issue with a milestone
 goes to forge.yaml `branches.feature_pattern` (`milestone/<slug>`, which must exist on origin), any other issue
@@ -112,10 +103,9 @@ remaining maintenance once no feature is pending; otherwise the rest ends `held 
   deferrals stop after `orchestration.max_deferrals`), relaunches an `engine-error` once, and stops admitting after
   `orchestration.breaker` engine-errors (`errors` within `window_min`; held issues continue on `--resume`). Lanes are
   capped host-wide (`orchestration.global_parallel`, `forgedock sched cap N|show`), highest priority first; within a
-  priority, slots are shared across repos by weight (`forgedock sched weight <owner/repo> N`, default equal). Logical
-  edges you found in step 2.4 must be written to the dependent issue as a `Depends on #X` line before launching. The
+  priority, slots are shared across repos by weight (`forgedock sched weight <owner/repo> N`, default equal). The
   last lines are the report table.
-  Issue-level readiness (#4773): a trusted author's `Blocked by #N` / `Depends on #N` line is a DAG edge, and `--add` prints the edges it created; an issue labelled `blocked` (`orchestration.blocked_label`) is admitted but not dispatched until the label is removed.
+  Issue-level readiness (#4773): `--add` prints the edges it created; an issue labelled `blocked` (`orchestration.blocked_label`) is admitted but not dispatched until the label is removed.
 - **Agent lane (only when the `forgedock` CLI is unavailable).** Spawn one background agent per issue.
   The prompt is:
 
@@ -174,13 +164,14 @@ When a lane finishes (agent lanes; the batch runner applies the same rules itsel
   `contract.invalid` without a mid-run issue edit): the runner does not recover it and it is not an escalation. The
   batch report lists it as `unrecovered: #N (<code>: <detail>)`, like a recovery that did not merge. Mark its dependents
   skipped and leave the issue for a later run once its cause is fixed.
-- `engine-error`: relaunch it once.
+- `engine-error`: relaunch it once. A repeat of the same error, or an `env.tool_missing` the host still has, ends `held` (waiting on engine/env change): an engine upgrade, `--set-env` or the tool appearing re-admits it. Do not `--requeue` it.
 - `ci-pending` (PR not conflicting) or `deferred`: leave it. A later `/orchestrate` resumes it.
 
 **Operational decisions are yours.** Decide them without asking and keep going. Record each one as a
 `<!-- FORGE:DECISION -->` comment (what, why, alternative) on the issue, or on the batch for batch-wide choices. The
 runner posts its own decisions (recovery, relaunch, dependency requeue, sub-issues added). The decisions you take
 yourself:
+- **Requirement tracked post-deploy:** `<!-- FORGE:DECISION {"requirement":"R5","disposition":"post-deploy","quote":"<row quote>"} -->`; `quote` survives renumbering. Never add a check id.
 - **Recovery and retries:** relaunch, resume, fix-ci, base-sync, and stopping and relaunching a stuck lane.
 - **Scheduling:** K changes under host pressure, ordering, adding logical `Depends on` edges, and adding newly filed or
   decomposed sub-issues to the running batch.

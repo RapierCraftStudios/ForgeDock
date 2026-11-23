@@ -1042,6 +1042,14 @@ describe("readPrecheckCommands (#4240)", () => {
     writeFileSync(join(d, "forge.yaml"), "env:\n  setup: x\n");
     assert.equal("sparseMaxKb" in readEnvConfig(d), false);
   });
+
+  it("#5760 readEnvConfig reads forge.yaml ci.budget into ciBudget; absent block = no key", () => {
+    const d = tmpDir("env-cibudget-");
+    writeFileSync(join(d, "forge.yaml"), "ci:\n  budget:\n    max_workflows: 12\n    shared_regression_job: regression\n");
+    assert.deepEqual(readEnvConfig(d).ciBudget, { maxWorkflows: 12, maxCiJobs: null, monthlyMinutes: null, sharedJob: "regression" });
+    writeFileSync(join(d, "forge.yaml"), "ci:\n  mode: auto\n");
+    assert.equal("ciBudget" in readEnvConfig(d), false);
+  });
 });
 
 describe("readReproTest (#4271)", () => {

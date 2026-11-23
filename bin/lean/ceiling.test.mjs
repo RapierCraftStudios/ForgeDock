@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseCeilingBySize, ceilingFor, predictRestart, handoffFacts, firstEditTurn, HANDOFF_FILES_MAX } from "./ceiling.mjs";
-import { contextRestartPrompt } from "./prompts.mjs";
+import { parseCeilingBySize, ceilingFor, predictRestart, handoffFacts, firstEditTurn, HANDOFF_FILES_MAX, routeHandoff, buildReadsOf, ROUTE_DIGEST_MAX_BYTES } from "./ceiling.mjs";
+import { contextRestartPrompt, routeDigestPrompt } from "./prompts.mjs";
 import { toolStats } from "./toolstats.mjs";
 
 describe("context ceiling helpers (#5346)", () => {
@@ -50,5 +50,36 @@ describe("context ceiling helpers (#5346)", () => {
     assert.match(p, /<established>\nFiles it read[^\n]*\n- src\/a\.js\nIts last tool call: Read i/);
     assert.match(p, /<diff_stat base="origin\/x">/);
     assert.match(p, /Last validate result/);
+  });
+});
+
+describe("route hand-off (#5812)", () => {
+  it("routeHandoff digests a planning session above the bound, capped at half the ceiling; unknown or 0 resumes", () => {
+    assert.equal(routeHandoff({ planTokens: 96000, bound: 40000, ceiling: 120000 }).digest, true);
+    assert.equal(routeHandoff({ planTokens: 30000, bound: 40000, ceiling: 120000 }).digest, false);
+    assert.deepEqual([routeHandoff({ planTokens: 35000, bound: 40000, ceiling: 60000 }).digest, routeHandoff({ planTokens: 35000, bound: 40000, ceiling: 60000 }).bound], [true, 30000]);
+    assert.equal(routeHandoff({ planTokens: null, bound: 40000, ceiling: 120000 }).digest, false);
+    assert.equal(routeHandoff({ planTokens: 500000, bound: 0, ceiling: 120000 }).digest, false);
+    assert.equal(routeHandoff({ planTokens: 96000, bound: 40000 }).digestBytes, ROUTE_DIGEST_MAX_BYTES);
+    assert.equal(routeHandoff({ planTokens: 96000, bound: 10000 }).digestBytes, 10000);
+  });
+  it("buildReadsOf takes the plan reply's last Build reads list", () => {
+    assert.equal(buildReadsOf("x\nBuild reads: a.js:1-9\n- grep foo"), "a.js:1-9\n- grep foo");
+    assert.equal(buildReadsOf("no list"), "");
+    assert.equal(buildReadsOf(null), "");
+  });
+  it("routeDigestPrompt carries deliverables, decisions, open rows and reads, and stays within maxBytes", () => {
+    const contract = { requirements: [{ id: "R1", quote: "do it", disposition: "deliver" }, { id: "R2", quote: "later", disposition: "defer" }],
+      deliverables: [{ id: "D1", path: "src/a.js", change: "fix" }], decisions: [{ id: "K1", choice: "reuse b", justification: "b.js:3" }] };
+    const p = routeDigestPrompt({ contract, read: ["src/b.js", "src/b.js"], buildReads: "src/a.js:1-5", planTokens: 96000 });
+    assert.match(p, /Deliverables:\n- src\/a\.js: fix/);
+    assert.match(p, /Decisions:\n- K1 reuse b \(b\.js:3\)/);
+    assert.match(p, /Open \(not delivered in this lane; do not implement\):\n- R2 defer: later/);
+    assert.doesNotMatch(p, /R1 deliver/);
+    assert.equal(p.match(/- src\/b\.js/g).length, 1, "reads deduped");
+    assert.doesNotMatch(p, /Branch state/, "no branch section without changes");
+    const huge = routeDigestPrompt({ contract, read: Array.from({ length: 500 }, (_, i) => `src/${"x".repeat(80)}${i}.js`), stat: "a | 1", diff: "d".repeat(200000), maxBytes: 4096 });
+    assert.ok(Buffer.byteLength(huge) <= 4096, `digest is ${Buffer.byteLength(huge)} bytes`);
+    assert.match(huge, /<\/route_digest>$/);
   });
 });

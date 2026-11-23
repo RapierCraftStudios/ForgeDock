@@ -3,7 +3,8 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { testPlanProblems, proofEchoesDeliverable, outputTail, removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, reproQualityFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, envProvisioningCommand, assertionFailure, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered, mockedDeliverable, proofEchoDetail, contractRuleCounts, onlyTestPlanProblems } from "./conformance.mjs";
+import { toolMisses } from "./toolplace.mjs";
+import { FORGEDOCK_CHECKS_VAR, FORGEDOCK_ENTRY_VAR, portableForgedockPaths, resolvingIo, testPlanProblems, proofEchoesDeliverable, outputTail, removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, reproQualityFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, envProvisioningCommand, assertionFailure, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered, mockedDeliverable, proofEchoDetail, contractRuleCounts, onlyTestPlanProblems } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -153,6 +154,12 @@ describe("#4574 amendment slips", () => {
 
 describe("precheck (deterministic, no reviewer)", () => {
   const res = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
+  it("#5760 ciBudgetFailures surface as precheck failures", () => {
+    const f = { code: "conformance.unimplemented", kind: "ci_budget_unannotated", detail: "x" };
+    const r = precheck({ contract: C, result: res, changedFiles: files, ciBudgetFailures: [f] });
+    assert.equal(r.ok, false);
+    assert.deepEqual(r.failures, [f]);
+  });
   it("passes a complete, validated, in-scope change", () => assert.deepEqual(precheck({ contract: C, result: res, changedFiles: files }), { ok: true, failures: [], superseded: [], ciCovered: [], equivalent: [] }));
   it("unauthorized file -> scope_creep; tests and ignored paths are always allowed", () => {
     assert.deepEqual(codes(precheck({ contract: C, result: res, changedFiles: [...files, "src/billing.js", ".forge-lean/x", "tests/test_x.py", "pkg/foo_test.go"], ignore: [".forge-lean/"] })), ["conformance.scope_creep"]);
@@ -387,7 +394,7 @@ describe("precheck (deterministic, no reviewer)", () => {
   });
   it("#5005 a missing forgedock install is env.tool_missing, not conformance; other absolute paths stay code defects", () => {
     const out = "node:internal/modules/cjs/loader\nError: Cannot find module '/opt/node/lib/node_modules/forgedock/bin/lean/checks.mjs'\n code: 'MODULE_NOT_FOUND'";
-    assert.deepEqual(missingTool({ rc: 1, output: out }), { tool: "forgedock", kind: "command" });
+    assert.deepEqual(missingTool({ rc: 1, output: out }), { tool: "forgedock", kind: "forgedock-path" }); // #5727: a path mismatch, not a tool
     assert.equal(missingTool({ rc: 1, output: "Error: Cannot find module '/repo/forgedock/src/x.mjs'" }), null);
     const contract = { requirements: [], deliverables: [], validate: [{ id: "V2", command: "node /opt/node/lib/node_modules/forgedock/bin/lean/checks.mjs --base origin/staging" }] };
     const result = { validation: [{ id: "V2", command: "", exit: 1 }] };
@@ -400,6 +407,39 @@ describe("precheck (deterministic, no reviewer)", () => {
     assert.equal(resolveForgedockPaths(cmd, { ...o, exists: () => false }), "node /h/forgedock/bin/lean/checks.mjs --base origin/staging && node /h/forgedock/bin/forgedock.mjs check");
     assert.equal(resolveForgedockPaths(cmd, { ...o, exists: () => true }), cmd);
     assert.equal(resolveForgedockPaths("node bin/x.mjs", { ...o, exists: () => false }), "node bin/x.mjs");
+  });
+  it("#5727 missingTool: a forgedock entry path is not a tool miss", () => {
+    const out = "Error: Cannot find module '/home/dev/.local/lib/node_modules/forgedock/bin/lean/checks.mjs'\n code: 'MODULE_NOT_FOUND'";
+    const miss = missingTool({ rc: 1, output: out });
+    assert.equal(miss.kind, "forgedock-path");
+    assert.deepEqual(toolMisses([{ ...miss, ids: ["V5"], source: "run" }]), { tools: [], ids: [] });
+    assert.deepEqual(missingTool({ rc: 1, output: "Error: Cannot find module 'left-pad'" }), { tool: "left-pad", kind: "node-module" });
+  });
+  it("#5727 resolveForgedockPaths expands the portable placeholders", () => {
+    const o = { checksCli: "/h/forgedock/bin/lean/checks.mjs", forgedockCli: "/h/forgedock/bin/forgedock.mjs", exists: () => true };
+    assert.equal(resolveForgedockPaths('node $FORGEDOCK_CHECKS_CLI --base origin/staging && node "${FORGEDOCK_ENTRY_CLI}" check', o), 'node /h/forgedock/bin/lean/checks.mjs --base origin/staging && node "/h/forgedock/bin/forgedock.mjs" check');
+    assert.equal(resolveForgedockPaths("echo $FORGEDOCK_CHECKS_CLIX", o), "echo $FORGEDOCK_CHECKS_CLIX");
+    assert.equal(resolveForgedockPaths("node /usr/lib/node_modules/forgedock/bin/lean/checks.mjs", o), "node /usr/lib/node_modules/forgedock/bin/lean/checks.mjs");
+    assert.equal(resolveForgedockPaths("node $FORGEDOCK_CHECKS_CLI", {}), "node $FORGEDOCK_CHECKS_CLI");
+  });
+  it("#5727 portableForgedockPaths rewrites entry tokens to placeholders", () => {
+    const cmd = "node /home/dev/.local/lib/node_modules/forgedock/bin/lean/checks.mjs --base origin/staging && node /opt/node/lib/node_modules/forgedock/bin/forgedock.mjs check";
+    assert.equal(portableForgedockPaths(cmd), "node $FORGEDOCK_CHECKS_CLI --base origin/staging && node $FORGEDOCK_ENTRY_CLI check");
+    assert.ok(portableForgedockPaths(cmd).includes(`$${FORGEDOCK_CHECKS_VAR}`) && portableForgedockPaths(cmd).includes(`$${FORGEDOCK_ENTRY_VAR}`));
+    assert.equal(portableForgedockPaths("node bin/lean/checks.mjs && node /repo/src/x.mjs"), "node bin/lean/checks.mjs && node /repo/src/x.mjs");
+    assert.equal(resolveForgedockPaths(portableForgedockPaths(cmd), { checksCli: "/c.mjs", forgedockCli: "/f.mjs" }), "node /c.mjs --base origin/staging && node /f.mjs check");
+  });
+  it("#5727 resolvingIo wraps only the command runners", async () => {
+    const seen = [], fs = { read: () => "" };
+    const io = { fs, runCommand: async (a) => { seen.push(["run", a.command, a.cwd]); return { rc: 0 }; }, probeCommand: async (a) => { seen.push(["probe", a.command]); return { rc: 0 }; },
+      preflightRun: async (a) => { seen.push(["pre", a.command]); return { rc: 0 }; }, redGreen: async (a) => { seen.push(["rg", a.command]); return {}; }, git: async (args) => args };
+    const w = resolvingIo(io, { checksCli: "/c.mjs", forgedockCli: "/f.mjs", exists: () => false });
+    await w.runCommand({ command: "node /x/forgedock/bin/lean/checks.mjs", cwd: "/wt" }); await w.probeCommand({ command: "node $FORGEDOCK_CHECKS_CLI" });
+    await w.preflightRun({ command: "node /x/forgedock/bin/forgedock.mjs check" }); await w.redGreen({ command: "node --test a.mjs" });
+    assert.deepEqual(seen, [["run", "node /c.mjs", "/wt"], ["probe", "node /c.mjs"], ["pre", "node /f.mjs check"], ["rg", "node --test a.mjs"]]);
+    assert.equal(w.fs, fs); assert.deepEqual(await w.git(["status"]), ["status"]);
+    io.later = 1; assert.equal(w.later, 1, "a member set on io later is seen");
+    assert.equal(resolvingIo(null), null);
   });
   it("a deliver requirement reported deferred without an amendment -> untracked_deferral; partial -> unimplemented", () => {
     const r = { ...res, requirements: [{ id: "R1", status: "deferred" }, { id: "R2", status: "partial" }] };
@@ -1471,7 +1511,7 @@ describe("mutation check (#4913)", () => {
     const { tmpDir } = await import("../tests/_tmp.mjs");
     const d = tmpDir("mut-");
     const g = (...a) => execFileSync("git", ["-C", d, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8" });
-    g("init", "-q", "-b", "main"); writeFileSync(join(d, "a.js"), "a1\n"); writeFileSync(join(d, "b.js"), "b\n"); g("add", "."); g("commit", "-qm", "base");
+    g("init", "-q", "-b", "main"); g("config", "core.autocrlf", "false"); writeFileSync(join(d, "a.js"), "a1\n"); writeFileSync(join(d, "b.js"), "b\n"); g("add", "."); g("commit", "-qm", "base"); // #5751: autocrlf off, else a host autocrlf restores CRLF
     g("checkout", "-qb", "lane"); writeFileSync(join(d, "a.js"), "a2\n"); g("rm", "-q", "b.js"); g("add", "a.js"); g("commit", "-qm", "change");
     const r = await runMutationCheck({ targets: [{ id: "R1", commands: [{ id: "V1", command: "t" }] }], files: ["a.js", "b.js"], base: "main",
       git: async (a) => g(...a), runCommand: async () => ({ rc: 1 }), cwd: d, tmp: d });
@@ -2186,5 +2226,117 @@ describe("#5732 repro commands and failures", () => {
     assert.equal(reproFailures(t, { base: "SKIPPED", head: "FAILED", headOutput: "Could not find the python executable python3.11" })[0].assertion, false);
     assert.equal(reproFailures(t, { base: "SKIPPED", head: "FAILED", headOutput: "E   AssertionError" })[0].assertion, true);
     assert.deepEqual(missingTool({ rc: 1, output: "Could not find the python executable python3.11" }), { tool: "Python interpreter", kind: "environment" });
+  });
+});
+
+import { dedupeAddRequirements } from "./conformance.mjs";
+describe("#5773 operator decisions survive requeue and amendment replay", () => {
+  const Q5 = "Backfill dry-run lists all affected historical charges with counts; the real run creates invoices with no customer emails [type:manual]";
+  const Q = "the real run creates invoices with no customer emails";
+  const Q6 = "Post-deploy: one live quick deposit as the production test identity yields a downloadable invoice in the dashboard";
+  const ISS = `## Acceptance\n- ${Q5}\n- ${Q6}`;
+  const frozen = { requirements: [{ id: "R5", quote: Q5, disposition: "deliver" }, { id: "R6", quote: Q6, disposition: "deliver" }], deliverables: [{ id: "D1", path: "scripts/backfill.py", requirements: ["R5", "R6"] }], preserve: [], validate: [] };
+  const dec = (j) => ({ body: `<!-- FORGE:DECISION ${JSON.stringify(j)} -->\n**tracked post-deploy**` });
+  const BOT = "<!-- FORGE:CONTRACT -->\n{}";
+  it("#5773 a structured decision comment does not change the issue scope (the frozen contract is not stale)", () => {
+    const iss = { title: "t", body: ISS };
+    assert.equal(scopeText(iss, [{ body: BOT }, dec({ requirement: "R5", disposition: "post-deploy" })]), scopeText(iss, [{ body: BOT }]));
+  });
+  it("#5773 a decision matches by quote over a stale id, and the decided row is checkless", () => {
+    const c = { ...frozen, requirements: [...frozen.requirements, { id: "R11", quote: "other row", disposition: "deliver" }, { id: "R12", quote: Q, disposition: "post-deploy", check: "made-up-check" }] };
+    const out = applyRequirementDecisions(c, [{ body: BOT }, dec({ requirement: "R11", disposition: "post-deploy", quote: Q })]);
+    assert.deepEqual(out.applied, [], "a post-deploy row is not a deliver/defer row");
+    const c2 = { ...c, requirements: c.requirements.map((r) => (r.id === "R12" ? { ...r, disposition: "deliver" } : r)) };
+    const out2 = applyRequirementDecisions(c2, [{ body: BOT }, dec({ requirement: "R11", disposition: "post-deploy", quote: Q })]);
+    assert.deepEqual(out2.applied, ["R12"], "the quote wins over the renumbered id");
+    const r12 = out2.contract.requirements.find((r) => r.id === "R12");
+    assert.equal(r12.check, undefined); assert.equal(r12.engine_check, undefined);
+    assert.deepEqual(applyRequirementDecisions(out2.contract, [{ body: BOT }, dec({ requirement: "R11", disposition: "post-deploy", quote: Q })]).applied, [], "idempotent");
+    assert.deepEqual(applyRequirementDecisions(c2, [{ body: BOT }, dec({ requirement: "R11", disposition: "post-deploy", quote: "no such row" })]).applied, ["R11"], "id fallback");
+  });
+  it("#5786 a quote over 400 chars still matches its row by quote, not the renumbered id", () => {
+    const longQ = `${"the real run creates invoices with no customer emails and ".repeat(10)}done`;
+    const c = { requirements: [{ id: "R11", quote: "other row", disposition: "deliver" }, { id: "R12", quote: longQ, disposition: "deliver" }] };
+    const out = applyRequirementDecisions(c, [{ body: BOT }, dec({ requirement: "R11", disposition: "post-deploy", quote: longQ })]);
+    assert.deepEqual(out.applied, ["R12"]);
+  });
+  it("#5773 dedupeAddRequirements keeps the last add per quote and drops one that repeats a frozen row", () => {
+    const add = (id, quote, why) => ({ kind: "add-requirement", requirement: { id, quote, disposition: "post-deploy" }, why });
+    const am = [{ kind: "amend-requirement", requirement: "R5", text: "dry-run only", why: "w" }, add("R11", Q, "a"), add("R11", Q, "b"), add("R12", Q6, "c")];
+    const d = dedupeAddRequirements(frozen, am);
+    assert.deepEqual(d.amendments.map((a) => a.why ?? a.kind), ["w", "b"]);
+    assert.deepEqual(d.dropped.map((x) => x.id), ["R11", "R12"]);
+  });
+  it("#5773 the #41245 replay: decision -> requeue -> rows keep their ids, stay tracked post-deploy and pass the check-id gate", () => {
+    const add = (id, quote, why) => ({ kind: "add-requirement", requirement: { id, quote, disposition: "post-deploy" }, why });
+    const replay = [{ kind: "amend-requirement", requirement: "R5", text: "Backfill dry-run lists all affected historical charges with counts", why: "real run moves to R11" }, add("R11", Q, "live Stripe run"), add("R11", Q, "no-email guarantee in code"), add("R12", Q6, "binding decision R6")];
+    const comments = [{ body: BOT }, dec({ requirement: "R5", disposition: "post-deploy" }), dec({ requirement: "R6", disposition: "post-deploy" }), dec({ requirement: "R12", disposition: "post-deploy", quote: Q })];
+    for (let run = 0; run < 3; run++) {
+      const a = applyAmendments(frozen, dedupeAddRequirements(frozen, replay).amendments, ISS);
+      assert.deepEqual(a.problems, []);
+      const ad = applyRequirementDecisions(a.contract, comments);
+      const eff = deferChecklessPostDeploy(ad.contract).contract;
+      assert.deepEqual(eff.requirements.map((r) => r.id), ["R5", "R6", "R11"], "no renumbered R12+");
+      for (const r of eff.requirements) { assert.equal(r.disposition, "defer", r.id); assert.equal(r.bucket, ORCHESTRATOR_BUCKET, r.id); assert.equal(r.check, undefined, r.id); }
+      const pc = precheck({ contract: eff, result: { requirements: [], validation: [] }, changedFiles: ["scripts/backfill.py"], checkIds: new Set() });
+      assert.ok(!pc.failures.some((f) => f.kind === "check_unknown"), JSON.stringify(pc.failures));
+    }
+  });
+});
+
+describe("#5752 mechanism supersedes", () => {
+  const K = { requirements: [], deliverables: [{ id: "D1", path: "src/triage.mjs" }], validate: [] };
+  const broken = (guard, test) => ({ code: "conformance.guard_broken", kind: "guard_broken", guard, test, detail: `guard ${guard} broken` });
+  it("validates {mechanism, why} and stores it as contract.mechanisms; per-guard supersedes keeps working", () => {
+    const a = applyAmendments(K, [{ kind: "supersedes", mechanism: "keyword triage", why: "replaced by the scorer" }, { kind: "supersedes", guard: "#12", why: "own" }]);
+    assert.deepEqual(a.problems, []);
+    assert.deepEqual(a.contract.mechanisms, [{ mechanism: "keyword triage", why: "replaced by the scorer" }]);
+    assert.deepEqual(a.contract.supersedes, [{ guard: "#12", why: "own" }]);
+    assert.deepEqual(a.applied.map((x) => x.target), ["mechanism keyword triage", "#12"]);
+    assert.match(applyAmendments(K, [{ kind: "supersedes", mechanism: "  ", why: "x" }]).problems[0], /needs guard: "#N".*or mechanism/);
+    assert.match(applyAmendments(K, [{ kind: "supersedes", mechanism: "m" }]).problems[0], /without why/);
+  });
+  it("one amendment retires every guard_broken whose test the lane deleted; a strong guard with a surviving test still fails", () => {
+    const contract = applyAmendments(K, [{ kind: "supersedes", mechanism: "keyword triage", why: "removed" }]).contract;
+    const guardFailures = [broken("#7", "src/kw.test.mjs"), broken("#8", "src/kw2.test.mjs"), broken("#9", "src/score.test.mjs")];
+    const pc = precheck({ contract, result: {}, changedFiles: ["src/triage.mjs"], guardFailures, removedPaths: ["src/kw.test.mjs", "src/kw2.test.mjs"] });
+    assert.deepEqual(pc.failures.filter((f) => f.kind === "guard_broken").map((f) => f.guard), ["#9"]);
+    const none = precheck({ contract: K, result: {}, changedFiles: ["src/triage.mjs"], guardFailures, removedPaths: ["src/kw.test.mjs", "src/kw2.test.mjs"] });
+    assert.deepEqual(none.failures.filter((f) => f.kind === "guard_broken").map((f) => f.guard), ["#7", "#8", "#9"], "deleting a guard's test without a mechanism amendment retires nothing");
+    const unread = precheck({ contract, result: {}, changedFiles: ["src/triage.mjs"], guardFailures, removedPaths: null });
+    assert.equal(unread.failures.filter((f) => f.kind === "guard_broken").length, 3, "unreadable removed paths fail closed");
+  });
+  it("precheck pushes outcome-evidence failures", () => {
+    const pc = precheck({ contract: K, result: {}, changedFiles: ["src/triage.mjs"], outcomeEvidenceFailures: [{ code: "conformance.unimplemented", kind: "outcome_evidence_missing", detail: "x" }] });
+    assert.equal(pc.ok, false);
+    assert.deepEqual(pc.failures.map((f) => f.kind), ["outcome_evidence_missing"]);
+  });
+});
+
+describe("recurrence counters and design lane precheck (#5751)", () => {
+  const result = { validation: [{ id: "V1", exit: 0 }], requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }] };
+  const run = (extra, contract = C) => precheck({ contract, result, changedFiles: files, ...extra });
+  const rec = { recurs: true, count: 2, threshold: 2, evidence: [], reason: "r" };
+  const design = { why_failed: "#1 and #2 patched the symptom", disposition: "replace", outcome: { metric: "retries per day", target: "0" } };
+
+  it("a counter that grew without a counter-ok decision fails with maintenance.counter_growth", () => {
+    const pc = run({ counters: { before: { exports: 3 }, after: { exports: 4 } } });
+    assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["maintenance.counter_growth", "counter_growth"]]);
+    assert.match(pc.failures[0].detail, /counter exports grew from 3 to 4/);
+  });
+  it("a counter-ok decision, an unchanged or shrinking counter, and no counters all pass", () => {
+    const ok = { ...C, decisions: [{ id: "K1", choice: "counter-ok: exports the new parser needs one entry point", justification: "" }] };
+    assert.equal(run({ counters: { before: { exports: 3 }, after: { exports: 4 } } }, ok).ok, true);
+    assert.equal(run({ counters: { before: { exports: 3 }, after: { exports: 3 } } }).ok, true);
+    assert.equal(run({ counters: { before: { exports: 3 }, after: { exports: 1 } } }).ok, true);
+    assert.equal(run({}).ok, true);
+  });
+  it("a recurring issue's contract without a complete design block fails with recurrence.design_missing", () => {
+    const pc = run({ recurrence: rec });
+    assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["recurrence.design_missing", "design_missing"]]);
+    const partial = run({ recurrence: rec }, { ...C, design: { ...design, disposition: "patch", outcome: { metric: "x" } } });
+    assert.match(partial.failures[0].detail, /disposition.*; design\.outcome needs a metric and a target/);
+    assert.equal(run({ recurrence: rec }, { ...C, design }).ok, true);
+    assert.equal(run({ recurrence: { ...rec, recurs: false } }).ok, true, "no recurrence: no design check");
   });
 });

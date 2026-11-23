@@ -17,6 +17,7 @@
  */
 import { appendFileSync, chmodSync, closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { homedir, hostname } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { sanitizeOverride, validateExecutionPatch } from "./live-execution.mjs";
@@ -77,6 +78,13 @@ export function scrubEnv(env) {
   if (!env || typeof env !== "object") return { env, names: [] };
   const names = Object.keys(env).filter((k) => SECRET_ENV.test(k)).sort();
   return { env: names.length ? Object.fromEntries(Object.entries(env).filter(([k]) => !SECRET_ENV.test(k))) : env, names };
+}
+
+/** #5805: stable fingerprint of a batch's pinned env (plan.json `env`, set by --set-env); a change re-admits engine/env holds. */
+export function envFingerprint(env) {
+  const e = env && typeof env === "object" ? env : {};
+  const text = JSON.stringify(Object.keys(e).sort().map((k) => [k, String(e[k])]));
+  return createHash("sha256").update(text).digest("hex").slice(0, 16);
 }
 
 const readJson = (file) => { try { return JSON.parse(readFileSync(file, "utf8")); } catch { return null; } };

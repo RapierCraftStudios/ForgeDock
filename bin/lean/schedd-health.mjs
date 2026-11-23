@@ -49,10 +49,22 @@ export function tickText(c) {
   return c.status === "stalled" ? `${s} (STALLED)` : s;
 }
 
-/** Signal a stalled live daemon: SIGTERM, then SIGKILL after `graceMs` if it is still alive. @returns the check, plus `killed` */
+/**
+ * Signal a stalled live daemon: SIGTERM, then SIGKILL after `graceMs` if it is still alive. #5806: a daemon that is down while
+ * `unfinished()` names daemon batches still waiting is started again (`start()`), so a dead schedd never leaves a batch parked.
+ * @returns the check, plus `killed` (and `started` when it started one)
+ */
 export async function watchdog({ dir = schedDir(), stallMs = STALL_MS, now = () => Date.now(), alive = pidAlive, kill = (p, s) => process.kill(p, s),
-  sleep = (ms) => new Promise((r) => setTimeout(r, ms)), graceMs = KILL_GRACE_MS, log = (m) => console.log(m) } = {}) {
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)), graceMs = KILL_GRACE_MS, log = (m) => console.log(m), unfinished = () => [], start = null } = {}) {
   const c = stallCheck({ dir, stallMs, now, alive });
+  if (c.status === "down" && start) {
+    let ids = [];
+    try { ids = unfinished() ?? []; } catch { ids = []; }
+    if (!ids.length) return { ...c, killed: null };
+    log(`schedd watchdog: FORGE:DECISION daemon down with ${ids.length} unfinished batch(es) (${ids.slice(0, 3).join(" ")}${ids.length > 3 ? " …" : ""}); starting it (it resumes them)`);
+    try { await start(); } catch (e) { log(`schedd watchdog: start failed: ${e?.message ?? e}`); return { ...c, killed: null, started: false }; }
+    return { ...c, killed: null, started: true };
+  }
   if (c.status !== "stalled") return { ...c, killed: null };
   log(`schedd watchdog: pid ${c.pid} silent for ${Math.round(c.ageMs / 1000)} s (limit ${Math.round(stallMs / 1000)} s), sending SIGTERM`);
   try { kill(c.pid, "SIGTERM"); } catch { return { ...c, killed: null }; }

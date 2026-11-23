@@ -30,7 +30,7 @@ export const FORGEDOCK_CLI = fileURLToPath(new URL("../forgedock.mjs", import.me
 /** #5347: every turn re-sends the whole session context, so independent read-only calls go out together, not one per turn. */
 const BATCH_RULE = `One turn, many calls: when several reads, greps, git show/log/blame or gh calls do not depend on each other, issue them all in the same turn as parallel tool calls (or one shell call). One call per turn re-sends the whole context each time.`;
 
-const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare with git show or git diff origin/<base>. Never install browsers. Keep scratch files under $TMPDIR. Cap verification workers at $FORGE_HOST_PARALLELISM when set: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo). For any typecheck, lint or test you run, first run \`node ${CHECKS_CLI} --base origin/<base>\` after your edits and run the scoped commands it prints instead of the full tsc/eslint/test scripts (it widens itself when impact is unknown: lockfile, tsconfig, CI config); once they pass, rerun it with --publish to share the incremental caches. Lint changed packages only, never dependents (turbo ...[base], nx affected). node_modules/.venv may be hardlinked read-only from a shared cache: after changing a lockfile, or when an install fails with EACCES, delete that dir first (rm -rf is safe), then install; never chmod or edit files inside it.
+const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare with git show or git diff origin/<base>. Never install browsers. Keep scratch files under $TMPDIR. Cap verification workers at $FORGE_HOST_PARALLELISM when set: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo). For any typecheck, lint or test you run, first run \`node "$FORGEDOCK_CHECKS_CLI" --base origin/<base>\` after your edits and run the scoped commands it prints instead of the full tsc/eslint/test scripts (it widens itself when impact is unknown: lockfile, tsconfig, CI config); once they pass, rerun it with --publish to share the incremental caches. Lint changed packages only, never dependents (turbo ...[base], nx affected). node_modules/.venv may be hardlinked read-only from a shared cache: after changing a lockfile, or when an install fails with EACCES, delete that dir first (rm -rf is safe), then install; never chmod or edit files inside it.
 Quiet output (tool results are re-read every later turn): run tests quietly (-q or a dot/summary reporter); on failure read \`tail -40\` plus the failing test ids (grep FAILED / not ok / FAIL), never the whole log. Send output over 8 KB to a $TMPDIR file; tail or grep it. Read each file's ranges once (sed -n a,bp or Read offset/limit, never a whole large file) and keep notes; don't re-read it.
 Never use git stash (push, pop, apply, drop): the stash stack is shared by every lane of this repo and a pop can apply another lane's files. To set work aside, make a WIP commit (git commit -m wip) instead; git stash list and show stay allowed.
 ${BATCH_RULE}`;
@@ -123,6 +123,39 @@ ${d || "(no changes yet)"}
 ${est}Last validate result (${LEAN_DIR}/self-check.json, from \`forgedock check\`): ${c ? `\n${c.length > 4000 ? `${c.slice(0, 4000)}\n[truncated]` : c}` : "none recorded; run the validate commands."}`;
 }
 
+/**
+ * #5812: the routed builder's opening digest. A build that starts fresh after BUILDER_ROUTE (instead of resuming the
+ * planning session) gets the plan's outcome, not its transcript: the frozen contract's deliverables and decisions, its
+ * open (non-deliver) requirements, the files planning read, its "Build reads:" list and the branch state. At most
+ * `maxBytes`; the contract and the investigation stay on disk as the authority.
+ */
+export function routeDigestPrompt({ contract = null, read = [], buildReads = "", planTokens = null, stat = "", diff = "", base = "", check = "", maxBytes = 32 * 1024 } = {}) {
+  const c = contract && typeof contract === "object" ? contract : {};
+  const one = (s, n) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, n);
+  const list = (xs, max) => `${xs.slice(0, max).map((x) => `- ${x}`).join("\n")}${xs.length > max ? `\n- (+${xs.length - max} more)` : ""}\n`;
+  const rows = (x) => (Array.isArray(x) ? x.filter((v) => v && typeof v === "object") : []);
+  const deliverables = rows(c.deliverables).map((d) => `${d.path ?? "?"}${d.change ? `: ${one(d.change, 160)}` : ""}`);
+  const decisions = rows(c.decisions).map((k) => `${k.id ?? "K?"} ${one(k.choice, 200)}${k.justification ? ` (${one(k.justification, 160)})` : ""}`);
+  const open = rows(c.requirements).filter((r) => r.disposition && r.disposition !== "deliver").map((r) => `${r.id ?? "R?"} ${r.disposition}: ${one(r.quote, 160)}`);
+  const reads = [...new Set((Array.isArray(read) ? read : []).filter((p) => typeof p === "string" && p))];
+  const budget = Math.max(2048, Number(maxBytes) || 0);
+  const st = String(stat ?? "").trim(), br = String(buildReads ?? "").trim().slice(0, 3000), ck = String(check ?? "").trim().slice(0, 2000);
+  const d = st ? boundDiff(String(diff ?? ""), { stat, base, maxBytes: Math.floor(budget / 3) }).trim() : "";
+  const sections = [
+    deliverables.length ? `Deliverables:\n${list(deliverables, 40)}` : "",
+    decisions.length ? `Decisions:\n${list(decisions, 20)}` : "",
+    open.length ? `Open (not delivered in this lane; do not implement):\n${list(open, 20)}` : "",
+    reads.length ? `Files planning read (already understood; re-read only what you edit):\n${list(reads, 40)}` : "",
+    br ? `Planning's build reads:\n${br}\n` : "",
+    st ? `Branch state (git diff --stat ${base}...HEAD):\n${st.slice(0, 3000)}\n${d ? `\n${d}\n` : ""}` : "",
+    ck ? `Last validate result (${LEAN_DIR}/self-check.json):\n${ck}\n` : "",
+  ].join("");
+  const head = `\n\nRoute hand-off: planning ran in a separate session${planTokens ? ` (it ended at about ${planTokens} context tokens)` : ""} that this session does not inherit. Its outcome is on disk: ${CONTRACT_FILE} is the frozen authority and ${INVESTIGATION_FILE} holds the root cause, affected files and test plan; read both first. The digest below is what planning established; do not survey it again.\n\n<route_digest>\n`;
+  const room = budget - Buffer.byteLength(head) - 40;
+  const fitted = Buffer.byteLength(sections) <= room ? sections : `${Buffer.from(sections).subarray(0, Math.max(0, room)).toString().replace(/�+$/, "")}\n[digest truncated]\n`;
+  return `${head}${fitted}</route_digest>`;
+}
+
 /** #4392: the implement turn budget is spent; one bounded fresh session either finishes or stops with a typed digest. */
 export function turnBudgetWrapupPrompt({ size = "?", budget = 0, used = 0, grant = 5, stat = "", diff = "", base = "", check = "" } = {}) {
   const d = boundDiff(String(diff ?? ""), { stat, base, maxBytes: RESTART_DIFF_MAX_BYTES }).trim();
@@ -178,6 +211,7 @@ ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}
 ### Test plan   (bug issues: per deliver requirement, see the contract test_plan)
 ${LEAN_DIR}/classification.json{type,severity,exists_in,flag,exists_in_evidence:{cite,repro:{command,red_on_live,green_after}}}
 
+A trusted comment recording a prod failure after the merged fix overrides ancestry: never report already-fixed for an outcome criterion from ancestry alone.
 If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"already-fixed|invalid","summary":"one line","evidence":["file:line ..."]} and stop. A feature already reachable (another name, or a stdlib or wrapped dependency function) is a duplicate: INVALID, naming the equivalent and its path; its deprecation counts against an alias. If it is blocked, write {"status":"blocked","summary":"",...} with a typed "block" (rules below) and stop.
 
 2. Otherwise write ${CONTRACT_FILE}, the frozen hand-off: a developer who never saw the issue must be able to implement and verify from this file alone.
@@ -232,12 +266,15 @@ The contract changes only through typed amendments in ${RESULT_FILE}, each with 
 - {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: a missed requirement.
 - {"kind":"defer|post-deploy","requirement":"R#","why":"","check":"<id>"}: separate work or a post-deploy check, filed as a follow-up. Not "type"; unknown kinds are rejected. One requirement id per row. An impossible deliverable is a defer, not a new kind.
 - {"kind":"amend-requirement","requirement":"R#","text":"<revised wording>","why":""}: reworded.
-- {"kind":"supersedes","guard":"#N","why":""}: overrides a guard_broken failure.
+- {"kind":"supersedes","guard":"#N","why":""}: overrides a guard_broken failure; {"kind":"supersedes","mechanism":"<name>","why":""} retires every guard whose test this lane deletes.
 - {"kind":"decision","decision":{"choice":"","anchors":["<base path>"],"supersedes":"<id>"},"why":""}: supersedes changes an H-row.
 New keys: translate, never copy English; status entries in place.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
 Never name or number migration files by hand; use the generator.
+New CI (#5760): join ci.budget.shared_regression_job, else annotate \`# FORGE:CI_BUDGET trigger= minutes= why=\`; a new workflow/job needs concurrency, timeout-minutes, paths, event if:.
 A [type:e2e] requirement needs a validate that runs a real e2e check (repo e2e set, Playwright, live stack), not a stubbed unit test; else post-deploy.
+A new keyword/regex classifier ships negative examples (inputs it must not match).
+A forge.yaml outcome_evidence area change needs result outcome_evidence [{area,metric,corpus,before,after,better}] measured on recorded real inputs; its post-deploy checks get a numeric baseline.
 A new workspace-package dependency in a package.json no deliverable names is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
 If scripts/check-devdocs-freshness.sh exists, a behaviour change under its paths must update the matching dossier (devdocs/modules/*.md, per devdocs/index.yaml) in the same change; run it against the base first.
 
@@ -303,7 +340,7 @@ export function docsPlanNote(cfg) {
 /** #5428: the page_gate rule for the planner; "" when forge.yaml pages is off. */
 export function pagePlanNote(cfg) {
   if (!cfg?.require?.length) return "";
-  return `\n\nThis repo gates public pages (forge.yaml pages.require: ${cfg.require.join(", ")}). When the issue adds or changes a public page, ${CONTRACT_FILE} must carry "page_gate":{"design_spec":"<approved FORGE:DESIGN_SPEC ref, from /design>","seo":{"intent":"<target query>","icp":"<named ICP${cfg.icp_doc ? ` from ${cfg.icp_doc}` : ""}>","title":"","h1":"","meta":"","structured_data":"<schema.org type>","links_in":[],"links_out":[],"gsc_baseline":"","measure_by":"YYYY-MM-DD"},"geo":{"surfaces":["llms.txt","llms-full","markdown mirror","ai-catalog","MCP tool description"],"agent_question":"<natural-language question that must resolve to the page>"}}, plus a sitemap entry, metadata, canonical and structured data in the page, and the result file must list page_gate.screenshots (390 and 1440 wide). Never render raw JSON first or null samples on a public page.`;
+  return `\n\nThis repo gates public pages (forge.yaml pages.require: ${cfg.require.join(", ")}). When the issue adds or changes a public page, ${CONTRACT_FILE} must carry "page_gate":{"design_spec":"<approved FORGE:DESIGN_SPEC ref, from /design>","seo":{"intent":"<target query>","icp":"<named ICP${cfg.icp_doc ? ` from ${cfg.icp_doc}` : ""}>","title":"","h1":"","meta":"","structured_data":"<schema.org type>","links_in":[],"links_out":[],"gsc_baseline":"","measure_by":"YYYY-MM-DD"},"geo":{"surfaces":["llms.txt","llms-full","markdown mirror","ai-catalog","MCP tool description"],"agent_question":"<natural-language question that must resolve to the page>"}}, plus a sitemap entry, metadata, canonical and structured data in the page, ${cfg.capture ? "and the engine captures the 390/1440 visual check itself for app/**/page.* routes (do not install anything for screenshots); any other page file still needs page_gate.screenshots as links or image paths (390 and 1440 wide)" : "and the result file must list page_gate.screenshots as links or image paths (390 and 1440 wide)"}. Never render raw JSON first or null samples on a public page.`;
 }
 
 export function reproPlanNote(on) {

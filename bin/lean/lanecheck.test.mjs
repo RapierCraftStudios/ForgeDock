@@ -6,7 +6,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { checkPoolAuth, checkPoolVersion, checkPathLoop, checkGhFields, availableFields, runLaneChecks, formatLaneChecks, UPGRADE_COMMAND } from "./lanecheck.mjs";
+import { checkPoolAuth, checkPoolVersion, checkPathLoop, checkGhFields, availableFields, runLaneChecks, formatLaneChecks, UPGRADE_COMMAND, probeBatchEnv } from "./lanecheck.mjs";
+import { which } from "./toolchain.mjs";
 import { findShimLoops, heavyShimScript } from "./heavy.mjs";
 import { orchestrate, deferPolicy } from "./orchestrate.mjs";
 import { providerLanes, isCloneFailure } from "./execution.mjs";
@@ -55,11 +56,24 @@ describe("pool_auth shared resolver (#5131)", () => {
 });
 
 describe("pool_version", () => {
-  it("reports the agent, image version, CLI version and upgrade command", () => {
-    const c = checkPoolVersion({ exec: pool, cliVersion: "1.39.0", agents: [{ name: "a1", ok: true, version: "1.37.0" }, { name: "a2", ok: true, version: "1.39.0" }] });
+  const ver = (agentVersion, cli = "1.39.0") => checkPoolVersion({ exec: pool, cliVersion: cli, agents: [{ name: "a1", ok: true, version: agentVersion }, { name: "a2", ok: true, version: cli }] });
+  it("a different major fails, naming the agent, image version, CLI version and upgrade command", () => {
+    const c = ver("0.37.0", "1.39.0");
     assert.equal(c.ok, false); assert.equal(c.code, "preflight.pool_version");
-    assert.match(c.detail, /a1/); assert.match(c.detail, /1\.37\.0/); assert.match(c.detail, /1\.39\.0/); assert.ok(c.detail.includes(UPGRADE_COMMAND)); assert.ok(!/a2/.test(c.detail));
-    assert.equal(checkPoolVersion({ exec: pool, cliVersion: "1.39.0", agents: [{ name: "a", ok: true, version: "1.39.0" }] }).ok, true);
+    assert.match(c.detail, /a1/); assert.match(c.detail, /0\.37\.0/); assert.match(c.detail, /1\.39\.0/); assert.ok(c.detail.includes(UPGRADE_COMMAND)); assert.ok(!/a2/.test(c.detail));
+  });
+  it("#5745: minor and patch skew within the same major passes and notes the skew", () => {
+    for (const [agent, cli] of [["1.60.1", "1.61.1"], ["1.61.0", "1.61.1"], ["v1.61.1-rc.1", "1.61.1"]]) {
+      const c = ver(agent, cli);
+      assert.equal(c.ok, true, `${agent} vs ${cli}`); assert.equal(c.code, "preflight.pool_version"); assert.equal(c.scope, "remote");
+      assert.match(c.detail, /compatible, same major/); assert.ok(c.detail.includes(UPGRADE_COMMAND));
+    }
+  });
+  it("#5745: an unparseable differing version fails; an exact match is unchanged", () => {
+    assert.equal(ver("latest", "1.61.1").ok, false);
+    assert.equal(ver("1.61.1", "dev").ok, false);
+    const c = checkPoolVersion({ exec: pool, cliVersion: "1.39.0", agents: [{ name: "a", ok: true, version: "1.39.0" }] });
+    assert.equal(c.ok, true); assert.equal(c.detail, "1 agent(s) at 1.39.0");
   });
 });
 
@@ -101,6 +115,34 @@ describe("gh_fields", () => {
   it("parses the available list and passes on unparseable output", async () => {
     assert.deepEqual(availableFields("Available fields:\n  a\n  b\n"), ["a", "b"]);
     assert.equal((await checkGhFields({ exec: async () => ({ stdout: "gh version 2.1.0\n", stderr: "boom" }) })).ok, true);
+  });
+});
+
+describe("#5806 batch env probe", () => {
+  const exe = (dir, name) => { mkdirSync(dir, { recursive: true }); const p = join(dir, name); writeFileSync(p, "#!/bin/sh\n"); chmodSync(p, 0o755); return p; };
+
+  it("resolves gh, git and node on the env's own PATH (no shell); a PATH reduced to one bogus entry names every missing tool", () => {
+    const d = tmpDir("envprobe-"), bin = join(d, "bin");
+    const names = process.platform === "win32" ? ["gh.exe", "git.exe", "node.cmd"] : ["gh", "git", "node"];
+    for (const n of names) exe(bin, n);
+    const ok = probeBatchEnv({ PATH: bin, PATHEXT: ".EXE;.CMD" });
+    assert.deepEqual([ok.ok, ok.missing], [true, []]);
+    const bad = probeBatchEnv({ PATH: join(d, "bogus") });
+    assert.deepEqual([bad.ok, bad.missing], [false, ["gh", "git", "node"]]);
+    assert.match(bad.detail, /^gh, git, node not resolvable on the batch env PATH \(1 entry: /);
+    assert.match(probeBatchEnv({}).detail, /\(empty\)$/);
+  });
+
+  it("win32: `;`-separated PATH and PATHEXT extensions (.exe/.cmd); an extensionless file does not count", () => {
+    const files = new Set(["C:\\tools\\gh.exe", "D:\\git\\cmd\\git.cmd", "D:\\node\\node"]);
+    const access = (p) => { if (!files.has(p)) throw new Error("ENOENT"); };
+    const path = "C:\\tools;D:\\git\\cmd;D:\\node";
+    assert.equal(which("gh", path, [], { platform: "win32", pathext: ".COM;.EXE;.BAT;.CMD", access }), "C:\\tools\\gh.exe");
+    assert.equal(which("git", path, [], { platform: "win32", pathext: ".COM;.EXE;.BAT;.CMD", access }), "D:\\git\\cmd\\git.cmd");
+    const r = probeBatchEnv({ PATH: path, PATHEXT: ".EXE;.CMD" }, { platform: "win32", access });
+    assert.deepEqual(r.missing, ["node"], "D:\\node\\node has no PATHEXT extension");
+    assert.match(r.detail, /3 entries: C:\\tools;D:\\git\\cmd;D:\\node/);
+    assert.equal(probeBatchEnv({ Path: path }, { platform: "win32", access, tools: ["gh"] }).ok, true, "Windows' `Path` spelling");
   });
 });
 
