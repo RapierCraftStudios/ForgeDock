@@ -15,7 +15,7 @@ import { call as httpCall } from "./http.mjs";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const loadJson = (p) => JSON.parse(readFileSync(p, "utf8"));
 
-const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB] | status | upgrade [agent] | remove <agent>  [--config path]";
+const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB --agent-url URL] | status | upgrade [agent] | remove <agent>  [--config path]";
 const HELP_FLAGS = ["--help", "-h"];
 // Flags each verb accepts: `value` flags consume the next token, `bool` flags stand alone. Anything else dash-prefixed is rejected (#5008).
 const VERB_FLAGS = {
@@ -24,8 +24,8 @@ const VERB_FLAGS = {
   status: { value: ["--config"], bool: [] },
   upgrade: { value: ["--config"], bool: [] },
   remove: { value: ["--config"], bool: [] },
-  enroll: { value: ["--config", "--cpus", "--mem"], bool: [] },
-  "install-command": { value: ["--config", "--cpus", "--mem"], bool: [] },
+  enroll: { value: ["--config", "--cpus", "--mem", "--agent-url"], bool: [] },
+  "install-command": { value: ["--config", "--cpus", "--mem", "--agent-url"], bool: [] },
   resize: { value: ["--config", "--cpus", "--mem", "--vm-cpus", "--vm-mem", "--vm-swap"], bool: ["--drain"] },
 };
 
@@ -96,6 +96,14 @@ export async function runPoolCli(argv, deps = {}) {
       const r = await call(`http://${cfg.listen.host}:${cfg.listen.port}`, "POST", "/codes", { token: cfg.forgedock_token });
       if (!r.ok) throw new Error(`router refused: HTTP ${r.status}`);
       const size = `${flag("cpus") ? `&cpus=${Number(flag("cpus"))}` : ""}${flag("mem") ? `&mem=${Number(flag("mem"))}` : ""}`;
+      const agentUrl = flag("agent-url"); // #5856: a host reachable only through an SSH tunnel (no Tailscale) enrolls with its tunnel URL
+      if (agentUrl) {
+        let u; try { u = new URL(agentUrl); } catch { u = null; }
+        if (!u || !["http:", "https:"].includes(u.protocol)) throw new Error("--agent-url must be an http(s) URL, e.g. http://127.0.0.1:7711");
+        console.log(`AGENT_URL='${u.origin}' pool/install/install-agent-linux.sh --router '${cfg.public_url}' --token '${r.data.code}'${flag("cpus") ? ` --cpus ${Number(flag("cpus"))}` : ""}${flag("mem") ? ` --mem ${Number(flag("mem"))}` : ""}`);
+        console.error(`(one-time code, expires ${r.data.expires_at}; the router reaches the agent at ${u.origin})`);
+        break;
+      }
       console.log(`powershell -NoProfile -ExecutionPolicy Bypass -Command "irm '${cfg.public_url}/bootstrap/install.ps1?token=${r.data.code}${size}' | iex"`);
       console.error(`(one-time code, expires ${r.data.expires_at})`);
       break;

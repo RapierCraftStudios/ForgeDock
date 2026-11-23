@@ -102,6 +102,15 @@ describe("#5167 checkpoints, alert-once and persistence", () => {
     assert.match(one, /forgedock orchestrate --cancel b20260101-000000-1/);
   });
 
+  it("#5859 agent restart event is shown by status --batch with its requeued count, not as a health cause", () => {
+    const { root, b } = mkBatch(base({ 1: { outcome: "merged" } }, { agentRestarts: [{ agent: "legion", at: "2026-01-01T00:05:00.000Z", last: 0, lanes: [1, 2, 3], requeued: 3, closed: true }] }));
+    const lines = statusLines(root, { batch: b.id });
+    assert.ok(lines.includes("  agent legion restarted at 2026-01-01T00:05:00.000Z; 3 lanes requeued (sandbox.lost)"), lines.join("\n"));
+    assert.equal(statusLines(root).length, 0, "not an unhealthy batch");
+    const { root: r2, b: b2 } = mkBatch(base({ 1: { outcome: "merged" } }));
+    assert.ok(!statusLines(r2, { batch: b2.id }).some((l) => /restarted/.test(l)), "older state without the field");
+  });
+
   it("a healthy check records no alert, and a throwing channel never escapes", async () => {
     const { b, root } = mkBatch(base({ 1: { outcome: "merged" } }, { running: { 3: {} }, pending: [2, 4] }));
     const r = await runCheck({ batch: b, checkpoint: "T+15", alert: async () => { throw new Error("x"); } });
@@ -194,6 +203,16 @@ describe("#5314 dispatch stall and first-hour report", () => {
   const NOW = 10_000_000, MIN = 60000;
   const st = (extra = {}) => ({ order: [1, 2, 3], deps: { 3: [1] }, results: { 1: { outcome: "merged" } }, running: {}, pending: [2, 3], parallel: 2, ...extra });
   const stall = (state, o = {}) => evaluateDispatchStall(state, { lastProgressMs: NOW - 12 * MIN, now: NOW, windowMin: 10, ...o });
+
+  it("#5745: gates name the preflight check holding admission; without gates the detail is unchanged", () => {
+    const plain = stall(st());
+    assert.equal(plain.gates, undefined); assert.ok(!plain.detail.includes("admission held by"));
+    const r = stall(st(), { hosted: true, gates: [{ code: "preflight.pool_version", detail: "agent legion runs image version 2.0.0, CLI is 1.61.1" }] });
+    assert.deepEqual(r.gates, ["preflight.pool_version"]);
+    assert.ok(r.detail.startsWith(plain.detail.replace("no runner hosts the batch", "the runner is alive but not dispatching")));
+    assert.match(r.detail, /admission held by preflight\.pool_version: agent legion runs image version 2\.0\.0/);
+    assert.equal(stall(st(), { gates: [] }).detail, plain.detail);
+  });
 
   it("ready pending issues, a free lane and no progress for the window: stalled, naming the batch's ready issues and who hosts", () => {
     const r = stall(st());

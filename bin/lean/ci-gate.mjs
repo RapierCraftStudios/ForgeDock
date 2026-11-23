@@ -23,6 +23,8 @@ const PATH_EVENTS = ["push", "pull_request", "pull_request_target"];
 const RUNNER_RE = /^(?:\w+=\S*\s+)*(?:(?:npx|bunx|pnpm(?:\s+exec)?|yarn|uv\s+run|poetry\s+run|python3?\s+-m)\s+)?(?:[^\s;&|]*\/)?(?:node\s+(?:[^\s]+\s+)*--test|vitest|jest|pytest|go\s+test|playwright\s+test|mocha|bash|sh)(?=\s|$)/;
 const YAML_KEY_RE = /^["']?[A-Za-z_][\w-]*["']?\s*:(?:\s|$)/;
 const TEST_FILE_RE = /^(?:[^\s'"]*\/)?(?:[^\s/'"]+\.(?:test|spec)\.[a-z0-9]+|[^\s/'"]+_test\.[a-z0-9]+|test_[^\s/'"]+\.py)$/i;
+// `# FORGE:CI_PATHS_EXEMPT why=<text>`: opt-out of path scoping for a push that must run on every merge (#5792).
+const PATHS_EXEMPT_RE = /#\s*FORGE:CI_PATHS_EXEMPT\b.*\bwhy=\S/;
 const ANNOT_RE = /#\s*FORGE:CI_BUDGET\b(.*)$/;
 
 const posInt = (v) => { const n = Number(String(v ?? "").trim()); return String(v ?? "").trim() !== "" && Number.isInteger(n) && n >= 0 ? n : null; };
@@ -81,7 +83,9 @@ export function scanWorkflow(text) {
     if (on.value) for (const t of flow.split(",").map((x) => x.trim().replace(/^["']|["']$/g, "")).filter(Boolean)) triggers[t] = { paths: false };
     else for (const t of children(lines, on.line, 0)) {
       const e = blockEnd(lines, t.line, indentOf(lines[t.line]));
-      triggers[t.key] = { paths: lines.slice(t.line + 1, e).some((l) => /^\s*(paths|paths-ignore)\s*:/.test(l)) };
+      const body = lines.slice(t.line + 1, e);
+      const has = (re) => body.some((l) => re.test(l));
+      triggers[t.key] = { paths: has(/^\s*(paths|paths-ignore)\s*:/), tagOnly: has(/^\s*tags(-ignore)?\s*:/) && !has(/^\s*branches(-ignore)?\s*:/) };
     }
   }
   const jobs = [];
@@ -99,7 +103,8 @@ export function scanWorkflow(text) {
   }
   const annotations = [];
   lines.forEach((l, i) => { const a = parseAnnotation(l); if (a) annotations.push({ line: i, ...a }); });
-  return { lines, triggers, concurrency: top.some((t) => t.key === "concurrency"), jobs, annotations };
+  const pathsExempt = lines.some((l) => PATHS_EXEMPT_RE.test(l));
+  return { lines, triggers, pathsExempt, concurrency: top.some((t) => t.key === "concurrency"), jobs, annotations };
 }
 
 /** Lines of `head` not matched by a line of `base` (multiset on trimmed text), as indexes into head. */
@@ -144,8 +149,8 @@ function hygiene(file, scan, job, { wholeFile }) {
   const gaps = [];
   if (!scan.concurrency && !job.concurrency) gaps.push("concurrency");
   if (!job.timeout) gaps.push("timeout-minutes");
-  const pathTriggers = PATH_EVENTS.filter((e) => scan.triggers[e] && !scan.triggers[e].paths);
-  if (pathTriggers.length && (wholeFile || !job.if)) gaps.push(`path scoping (paths/paths-ignore on ${pathTriggers.join(", ")})`);
+  const pathTriggers = PATH_EVENTS.filter((e) => scan.triggers[e] && !scan.triggers[e].paths && !(e === "push" && scan.triggers[e].tagOnly) && !scan.pathsExempt);
+  if (pathTriggers.length && (wholeFile || !job.if)) gaps.push(`path scoping (paths/paths-ignore on ${pathTriggers.join(", ")}; tag-only push is exempt, or add \`# FORGE:CI_PATHS_EXEMPT why=<text>\`)`);
   if (COMMENT_EVENTS.some((e) => scan.triggers[e]) && !job.if) gaps.push("a job-level if: filter for issue/comment events");
   return gaps.length ? [fail("ci_hygiene", `${file} job \`${job.id}\` is new but has no ${gaps.join(", no ")}`)] : [];
 }

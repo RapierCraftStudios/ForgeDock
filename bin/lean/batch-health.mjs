@@ -217,6 +217,13 @@ export function batchStatusLines(root, id, { now = Date.now() } = {}) {
     const due = checkpointsOf(created, DEFAULT_HEALTH.checksMin).filter((c) => !h?.checks?.[c.label]);
     if (due.length && !b.readReport()) out.push(`  next checks: ${due.map((c) => `${c.label} ${new Date(c.at).toISOString().slice(11, 16)}Z${c.at < now ? " (due)" : ""}`).join(", ")}`);
   }
+  // #5859: an agent/VM restart is one batch event (its lanes were requeued as sandbox.lost), not a health cause
+  let st = null;
+  try { st = b.store.load(); } catch { st = null; }
+  for (const g of Array.isArray(st?.agentRestarts) ? st.agentRestarts : []) {
+    const k = Array.isArray(g?.lanes) ? g.lanes.length : Number(g?.requeued) || 0;
+    if (g?.agent) out.push(`  agent ${g.agent} restarted at ${g.at ?? "?"}; ${k} lane${k === 1 ? "" : "s"} requeued (sandbox.lost)${g.closed ? "" : ", waiting for the agent"}`);
+  }
   return out;
 }
 
@@ -304,12 +311,14 @@ export const appendBatchLog = (dir, text) => { try { appendFileSync(join(dir, BA
 export const DEFAULT_STALL_MIN = 3;
 /** #5806: auto-recoveries one batch gets in total (one per distinct ready set); past it every stall alerts. */
 export const MAX_STALL_RECOVERIES = 3;
+/** #5745: `; admission held by <code>: <detail>` for each failing preflight gate, "" when none. Pure. */
+export const holdGateDetail = (gates) => (Array.isArray(gates) ? gates : []).filter((g) => g?.code).map((g) => `; admission held by ${g.code}: ${g.detail ?? "failing"}`).join("");
 /**
  * #5314: dispatch stall. A batch with ready pending issues, free capacity and no progress for `windowMin` minutes. Ready: pending,
  * not held, no retry-at in the future, every in-batch dependency ended well. Independent of the runner (it may be dead), so the
- * schedd polls it. `hosted`: a runner is alive. @returns null (healthy) or `{code, ready, idleMin, hosted, detail}`. Pure.
+ * schedd polls it. `hosted`: a runner is alive. `gates` (#5745): the failing preflight checks `[{code, detail}]` holding admission, named in the detail. @returns null (healthy) or `{code, ready, idleMin, hosted, detail[, gates]}`. Pure.
  */
-export function evaluateDispatchStall(state, { held = [], parallel = null, hosted = false, lastProgressMs = null, now = Date.now(), windowMin = DEFAULT_STALL_MIN, cancelled = false, reported = false } = {}) {
+export function evaluateDispatchStall(state, { held = [], parallel = null, hosted = false, lastProgressMs = null, now = Date.now(), windowMin = DEFAULT_STALL_MIN, cancelled = false, reported = false, gates = [] } = {}) {
   if (!state || cancelled || reported || lastProgressMs === null) return null;
   if (state.breaker && !state.breaker.transport) return null; // an operator --resume clears it; a re-host would stop again at once
   const order = new Set((state.order ?? []).map(Number)), results = state.results ?? {}, heldSet = new Set(held.map(Number));
@@ -320,7 +329,8 @@ export function evaluateDispatchStall(state, { held = [], parallel = null, hoste
   const idleMin = Math.floor((now - lastProgressMs) / 60000);
   if (!ready.length || running >= k || idleMin < windowMin) return null;
   const setup = state.phase === "setup" ? ` (stuck in setup, ${Number(state.setup?.read) || 0}/${Number(state.setup?.total) || ready.length} issues read)` : "";
-  return { code: "dispatch-stalled", ready, idleMin, hosted, setup: !!setup, detail: `${ready.length} ready issue${ready.length === 1 ? "" : "s"} (${list(ready.slice(0, 8))}${ready.length > 8 ? ", …" : ""}) pending with ${k - running} free lane${k - running === 1 ? "" : "s"} and no ${setup ? "progress" : "dispatch"} for ${idleMin} min${setup}; ${hosted ? "the runner is alive but not dispatching" : "no runner hosts the batch"}` };
+  const gated = (Array.isArray(gates) ? gates : []).filter((g) => g?.code);
+  return { code: "dispatch-stalled", ready, idleMin, hosted, setup: !!setup, ...(gated.length ? { gates: gated.map((g) => g.code) } : {}), detail: `${ready.length} ready issue${ready.length === 1 ? "" : "s"} (${list(ready.slice(0, 8))}${ready.length > 8 ? ", …" : ""}) pending with ${k - running} free lane${k - running === 1 ? "" : "s"} and no ${setup ? "progress" : "dispatch"} for ${idleMin} min${setup}; ${hosted ? "the runner is alive but not dispatching" : "no runner hosts the batch"}${holdGateDetail(gated)}` };
 }
 
 /**

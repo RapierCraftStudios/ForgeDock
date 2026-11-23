@@ -143,6 +143,14 @@ describe("forgedock gc docker ownership (#4180)", () => {
     assert.ok(!w.calls.docker.some((c) => /sqv-postgres|user_data|lean8-fresh/.test(c) && /^(rm|volume rm)/.test(c)));
     assert.equal(w.calls.git.length, 0, "--docker scope never touches git");
   });
+  it("pool cache volumes (computeshare.cache=1) are reported by the pool-owned reason and never reclaimed (#5757)", async () => {
+    const w = world({ volumes: [{ Name: "cs-cache-o_r", Labels: "computeshare.cache=1", CreatedAt: new Date(NOW - 900 * H).toISOString() }] });
+    const r = await run(w, ["--apply", "--docker"]);
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /cs-cache-o_r/);
+    assert.match(r.out, /pool agent evicts it/);
+    assert.deepEqual(destructive(w), []);
+  });
   it("docker unavailable degrades to a note, never a failure", async () => {
     const w = setup(); w.dockerDown = true;
     const r = await run(w, ["--apply", "--docker"]);

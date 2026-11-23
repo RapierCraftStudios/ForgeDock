@@ -403,8 +403,9 @@ export function realSeam({ repo, def, env = process.env, laneStrip = [], cwd = p
     runLane: ({ issue, lane }) => new Promise((resolve) => {
       const dir = mkdtempSync(join(tmpdir(), "release-lane-"));
       const rf = join(dir, "result.json");
+      // #5794: FORGE_RELEASE_FIX_LANE marks the release job's own fix lane so its merge is not held on the release PR's CI
       // #5785: `lane` is the lane name; the child gets the sandbox env (a string env leaves it without PATH or auth)
-      const child = spawnIn(process.execPath, [join(ROOT, "bin", "forgedock.mjs"), "run-issue", String(issue), "--lane", lane, "--result-file", rf], { cwd, env: sandboxEnv, stdio: "ignore" });
+      const child = spawnIn(process.execPath, [join(ROOT, "bin", "forgedock.mjs"), "run-issue", String(issue), "--lane", lane, "--result-file", rf], { cwd, env: { ...sandboxEnv, FORGE_RELEASE_FIX_LANE: "1" }, stdio: "ignore" });
       const timer = setTimeout(() => child.kill("SIGTERM"), LANE_MS);
       const done = () => { clearTimeout(timer); let r = null; try { r = JSON.parse(readFileSync(rf, "utf8")); } catch { /* no result */ } rmSync(dir, { recursive: true, force: true }); resolve(r); };
       child.on("error", done); child.on("exit", done);

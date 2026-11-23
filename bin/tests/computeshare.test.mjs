@@ -39,7 +39,7 @@ function agentFixture(opts = {}) {
   let t = 1_000_000;
   const docker = fakeDocker();
   const dir = tmpDir("cs-agent-");
-  const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: dir, allow_cpus: 4, allow_mem_gb: 8, lease_ttl_s: 600, token: "agent-token", ...opts }, { docker, now: () => t, log: quiet, live: opts.live ?? (() => ({ ok: true })) });
+  const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: dir, allow_cpus: 4, allow_mem_gb: 8, lease_ttl_s: 600, token: "agent-token", ...opts }, { docker, now: () => t, log: quiet, live: opts.live ?? (() => ({ ok: true })), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
   return { agent, docker, dir, advance: (ms) => { t += ms; } };
 }
 
@@ -441,7 +441,7 @@ test("lane image version equals the dispatcher version (#4545)", async () => {
   assert.match(df, /^ARG FORGEDOCK_VERSION$/m, "no separate version pin in the Dockerfile");
   const dir = tmpDir("lane-image-");
   const docker = { ...fakeDocker(), builds: [], async hasImage() { return false; }, async build(d, tag, args) { this.builds.push({ tag, args }); } };
-  const agent = createAgent({ state_dir: dir, allow_cpus: 2, allow_mem_gb: 4, router_url: "http://x" }, { docker, log: quiet });
+  const agent = createAgent({ state_dir: dir, allow_cpus: 2, allow_mem_gb: 4, router_url: "http://x" }, { docker, log: quiet, vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
   await agent.ensureImage();
   assert.deepEqual(docker.builds, [{ tag: `forgedock-lane:${pkg.version}`, args: { FORGEDOCK_VERSION: pkg.version } }]);
 });
@@ -799,4 +799,239 @@ test("router /ci/events: ci token posts, only the fd token reads, long-poll answ
   assert.equal((await call("GET", "/ci/events?repo=o%2Fr", "fd")).status, 400);
   assert.equal((await call("GET", `${q}&wait=61`, "fd")).status, 400);
   assert.equal((await call("GET", "/health")).status, 200);
+});
+
+// #5856: priority classes, reservations, borrowing, idle_only.
+const prio = (id, priority, extra = {}) => spec(id, { priority, ...extra });
+const RES = [{ name: "marcode", cpus: 10, mem_gb: 20 }];
+const resFixture = (opts = {}) => agentFixture({ allow_cpus: 12, allow_mem_gb: 31, reservations: RES, drain_grace_s: 0, ...opts });
+const sharesOf = (args) => args[args.indexOf("--cpu-shares") + 1];
+
+test("#5856 borrow lanes may use the whole host while the reservation is idle, with a low cpu weight", async () => {
+  const { agent, docker } = resFixture();
+  for (let i = 0; i < 6; i++) assert.equal((await agent.launch({ spec: prio(`b${i}`, "borrow"), cpus: 2, mem_gb: 4 })).status, 201);
+  assert.equal(agent.capacity().cpus_free, 0);
+  assert.equal(sharesOf(docker.runs[0]), "128");
+});
+
+test("#5856 reserved arrives while borrow is full: borrowers are throttled, the minimum is drained, reserved is admitted", async () => {
+  const { agent, docker } = resFixture();
+  const updates = [];
+  docker.update = async (name, o) => { updates.push([name, o.cpuShares]); };
+  for (let i = 0; i < 6; i++) await agent.launch({ spec: prio(`b${i}`, "borrow"), cpus: 2, mem_gb: 4 });
+  const r = await agent.launch({ spec: prio("res1", "reserved", { reservation: "marcode" }), cpus: 4, mem_gb: 8 });
+  assert.equal(r.status, 201);
+  assert.equal(updates.length, 6, "every borrower throttled first");
+  assert.ok(updates.every(([, w]) => w === 2));
+  assert.equal(docker.kills.filter(([, s]) => s === "TERM").length, 2, "only as many as needed (4 cpus = 2 lanes) are asked to stop");
+  assert.equal(sharesOf(docker.runs.at(-1)), "4096");
+  assert.equal(Object.values(agent.store.data.sandboxes).filter((s) => s.drained).length, 2);
+});
+
+test("#5856 reserved is admitted within its reservation even when lanes use everything", async () => {
+  const { agent } = resFixture();
+  for (let i = 0; i < 6; i++) await agent.launch({ spec: prio(`b${i}`, "borrow"), cpus: 2, mem_gb: 4 });
+  assert.equal(agent.capacity().cpus_free, 0);
+  assert.equal((await agent.launch({ spec: prio("r1", "reserved"), cpus: 10, mem_gb: 20 })).status, 201);
+});
+
+test("#5856 reserved admission matrix: whole reservation, over-reservation, unknown reservation, bad priority", async () => {
+  const { agent } = resFixture();
+  for (let i = 0; i < 6; i++) await agent.launch({ spec: prio(`b${i}`, "borrow"), cpus: 2, mem_gb: 4 });
+  const whole = await agent.launch({ spec: prio("r1", "reserved"), cpus: 10, mem_gb: 20 });
+  assert.equal(whole.status, 201);
+  const over = await agent.launch({ spec: prio("r2", "reserved"), cpus: 1, mem_gb: 1 });
+  assert.equal(over.status, 503);
+  assert.equal(over.body.code, "pool.reservation_full");
+  assert.equal((await agent.launch({ spec: prio("r3", "reserved", { reservation: "nope" }), cpus: 1, mem_gb: 1 })).status, 400);
+  await assert.rejects(agent.launch({ spec: prio("r4", "urgent"), cpus: 1, mem_gb: 1 }), { status: 400 });
+});
+
+test("#5856 borrow is refused while the reservation is in use; normal stays out of reserved space", async () => {
+  const { agent } = resFixture();
+  await agent.launch({ spec: prio("r1", "reserved"), cpus: 10, mem_gb: 20 });
+  assert.equal((await agent.launch({ spec: prio("b1", "borrow"), cpus: 3, mem_gb: 4 })).status, 503); // only 2 cpus physically left
+  assert.equal((await agent.launch({ spec: prio("b2", "borrow"), cpus: 2, mem_gb: 4 })).status, 201);
+  const { agent: a2 } = resFixture();
+  assert.equal((await a2.launch({ spec: prio("n1", "normal"), cpus: 2, mem_gb: 4 })).status, 201);
+  assert.equal((await a2.launch({ spec: prio("n2", "normal"), cpus: 1, mem_gb: 1 })).status, 503); // 12 - 10 reserved = 2 unreserved
+});
+
+test("#5856 memory pressure: reclaim picks borrowers (newest first) until memory fits, never normal", async () => {
+  const { agent, docker, advance } = agentFixture({ allow_cpus: 12, allow_mem_gb: 24, reservations: [{ name: "m", cpus: 4, mem_gb: 16 }], drain_grace_s: 0 });
+  await agent.launch({ spec: prio("n1", "normal"), cpus: 1, mem_gb: 2 });
+  advance(1000); await agent.launch({ spec: prio("old", "borrow"), cpus: 1, mem_gb: 11 });
+  advance(1000); await agent.launch({ spec: prio("new", "borrow"), cpus: 1, mem_gb: 11 });
+  const r = await agent.launch({ spec: prio("res", "reserved"), cpus: 1, mem_gb: 12 });
+  assert.equal(r.status, 201);
+  assert.deepEqual(docker.kills.filter(([, s]) => s === "TERM").map(([n]) => n), [safeName("new"), safeName("old")]);
+  assert.equal(agent.store.data.sandboxes.n1.state, "running");
+});
+
+test("#5856 weights return once no reserved sandbox runs", async () => {
+  const { agent, docker } = resFixture();
+  const updates = [];
+  docker.update = async (name, o) => { updates.push(o.cpuShares); };
+  await agent.launch({ spec: prio("b1", "borrow"), cpus: 2, mem_gb: 4 });
+  await agent.launch({ spec: prio("r1", "reserved"), cpus: 10, mem_gb: 20 });
+  assert.deepEqual(updates, [2]);
+  docker.containers.set(safeName("r1"), { running: false, exitCode: 0, finishedAt: new Date().toISOString() });
+  await agent.reap();
+  assert.deepEqual(updates, [2, 128]);
+});
+
+test("#5856 idle_only agent without reservations: borrow admitted only above the headroom floor, drained when owner load rises", async () => {
+  let h = { ok: true, load_per_core: 0.1, mem_available_gb: 20 };
+  const { agent, docker } = agentFixture({ idle_only: true, cores: 8, drain_grace_s: 0, live: () => h });
+  assert.equal((await agent.launch({ spec: prio("b1", "borrow"), cpus: 1, mem_gb: 1 })).status, 201);
+  assert.equal(sharesOf(docker.runs[0]), "128");
+  h = { ok: true, load_per_core: 0.1, mem_available_gb: 1 };
+  const low = await agent.launch({ spec: prio("b2", "borrow"), cpus: 1, mem_gb: 1 });
+  assert.equal(low.status, 503);
+  assert.equal(low.body.code, "pool.not_idle");
+  h = { ok: true, load_per_core: 0.9, mem_available_gb: 20 };
+  assert.equal((await agent.launch({ spec: prio("b3", "borrow"), cpus: 1, mem_gb: 1 })).status, 503);
+  const updates = [];
+  docker.update = async (n, o) => { updates.push(o.cpuShares); };
+  await agent.reap();
+  assert.deepEqual(updates, [2], "throttled first");
+  assert.equal(docker.kills.length, 0);
+  await agent.reap();
+  assert.equal(docker.kills.filter(([, s]) => s === "TERM").length, 1, "drained when throttling was not enough");
+  assert.equal(agent.store.data.sandboxes.b1.state, "exited");
+});
+
+test("#5856 capacity reports reserved vs borrowable headroom; flat agents add no fields", async () => {
+  const { agent } = resFixture();
+  await agent.launch({ spec: prio("b1", "borrow"), cpus: 2, mem_gb: 4 });
+  await agent.launch({ spec: prio("r1", "reserved"), cpus: 4, mem_gb: 8 });
+  const c = agent.capacity();
+  assert.equal(c.cpus_borrowable, 6);
+  assert.equal(c.cpus_free_unreserved, 0);
+  assert.deepEqual(c.reservations[0], { name: "marcode", cpus: 10, mem_gb: 20, cpus_used: 4, mem_used_gb: 8, cpus_free: 6, mem_free_gb: 12 });
+  const flat = agentFixture().agent.capacity();
+  assert.equal(flat.reservations, undefined);
+  assert.equal(flat.cpus_borrowable, undefined);
+});
+
+test("#5856 flat agent ignores priority for admission and adds no cpu weight", async () => {
+  const { agent, docker } = agentFixture();
+  assert.equal((await agent.launch({ spec: prio("b1", "borrow"), cpus: 4, mem_gb: 8 })).status, 201);
+  assert.ok(!docker.runs[0].includes("--cpu-shares"));
+  assert.equal((await agent.launch({ spec: prio("b2", "borrow"), cpus: 1, mem_gb: 1 })).status, 503);
+});
+
+test("#5856 router places borrow on the host with free non-reserved capacity and reserved on the host holding the reservation", async () => {
+  const caps = {
+    a: { cpus_free: 8, mem_free_gb: 16, cpus_free_unreserved: 0, mem_free_unreserved_gb: 0, reservations: [{ name: "marcode", cpus: 8, mem_gb: 16, cpus_free: 8, mem_free_gb: 16 }] },
+    b: { cpus_free: 6, mem_free_gb: 12, cpus_free_unreserved: 6, mem_free_unreserved_gb: 12 },
+  };
+  const { router } = routerFixture(caps);
+  assert.equal((await router.launch(spec("pb1", { priority: "borrow" }))).body.agent, "b");
+  assert.equal((await router.launch(spec("pr1", { priority: "reserved", reservation: "marcode" }))).body.agent, "a");
+  assert.equal((await router.launch(spec("pn1", { priority: "normal" }))).body.agent, "b");
+});
+
+test("#5856 lanes launch with priority borrow", async () => {
+  const sent = [];
+  const t = httpTransport({ url: "http://r", token: "t", fetchFn: async (u, o) => { sent.push(JSON.parse(o.body)); return { status: 201, ok: true, headers: { get: () => null }, json: async () => ({}), text: async () => "{}" }; } });
+  await t.launch({ id: "x", priority: "borrow" });
+  assert.equal(sent[0].priority, "borrow");
+});
+
+test("#5856 throttle sets a low cpu weight and a halved soft memory limit, restored afterwards", async () => {
+  const { agent, docker } = resFixture();
+  const updates = [];
+  docker.update = async (name, o) => { updates.push(o); };
+  await agent.launch({ spec: prio("b1", "borrow"), cpus: 2, mem_gb: 4 });
+  await agent.launch({ spec: prio("r1", "reserved"), cpus: 10, mem_gb: 20 });
+  docker.containers.set(safeName("r1"), { running: false, exitCode: 0, finishedAt: new Date().toISOString() });
+  await agent.reap();
+  assert.deepEqual(updates, [{ cpuShares: 2, memoryReservationMb: 2048 }, { cpuShares: 128, memoryReservationMb: 4096 }]);
+});
+
+test("#5856 a drained lane is reported to the dispatcher as deferred sandbox.capacity and relaunches fresh under the same id", async () => {
+  const { agent, docker } = resFixture();
+  for (let i = 0; i < 6; i++) await agent.launch({ spec: prio(`b${i}`, "borrow"), cpus: 2, mem_gb: 4 });
+  await agent.launch({ spec: prio("r1", "reserved"), cpus: 4, mem_gb: 8 });
+  const drained = Object.values(agent.store.data.sandboxes).find((s) => s.drained);
+  assert.ok(drained);
+  const get = (url) => new Promise((resolve) => agent.handle({ method: "GET", url, headers: { authorization: "Bearer agent-token" }, socket: {} }, { writeHead(st) { this.s = st; }, setHeader() {}, end(b) { resolve({ s: this.s, b: JSON.parse(String(b || "{}")) }); } }));
+  const res = await get(`/sandboxes/${drained.id}/result`);
+  assert.equal(res.s, 200);
+  assert.equal(res.b.drained, true);
+  // the dispatcher maps it to a retryable deferral
+  const t = httpTransport({ url: "http://r", token: "t", fetchFn: async () => ({ status: 200, ok: true, headers: { get: () => null }, json: async () => res.b, text: async () => JSON.stringify(res.b) }) });
+  const mapped = await t.result(drained.id);
+  assert.equal(mapped.terminalReason, "deferred");
+  assert.equal(mapped.code, "sandbox.capacity");
+  // free the reserved capacity, then the same id launches again as a new container
+  docker.containers.set(safeName("r1"), { running: false, exitCode: 0, finishedAt: new Date().toISOString() });
+  await agent.reap();
+  const runs = docker.runs.length;
+  assert.equal((await agent.launch({ spec: prio(drained.id, "borrow"), cpus: 2, mem_gb: 4 })).status, 201);
+  assert.ok(docker.runs.length > runs);
+  assert.equal(agent.store.data.sandboxes[drained.id].drained, undefined);
+});
+
+test("#5856 router places a borrow lane on another host when its previous host is now full", async () => {
+  const caps = { a: { cpus_free: 8, mem_free_gb: 16 }, b: { cpus_free: 4, mem_free_gb: 8 } };
+  const { router } = routerFixture(caps);
+  assert.equal((await router.launch(spec("rs1", { priority: "borrow" }))).body.agent, "a");
+  caps.a.building = true; // stands in for an agent 503 (reserved work took the host)
+  const again = await router.launch(spec("rs1", { priority: "borrow" }));
+  assert.equal(again.status, 201);
+  assert.equal(again.body.agent, "b");
+  assert.equal(router.store.data.sandboxes.rs1.agent, "b");
+});
+
+// #5881: a label-aware fake daemon shared by two agents and a foreign workload.
+function sharedDaemon() {
+  const labelsOf = new Map(); // container or volume name -> labels
+  const d = fakeDocker();
+  const has = (n, want) => [].concat(want).every((l) => (labelsOf.get(n) ?? []).includes(l));
+  const run = d.run.bind(d);
+  d.run = async function (args) {
+    const ls = args.flatMap((a, i) => (args[i - 1] === "--label" ? [a] : []));
+    labelsOf.set(args[args.indexOf("--name") + 1], ls);
+    return run(args);
+  };
+  d.listLabelled = async (want) => [...d.containers.keys()].filter((n) => has(n, want));
+  d.listVolumes = async (prefix, want = []) => [...d.volumes].filter((v) => v.startsWith(prefix) && has(v, want));
+  d.createVolume = async (n, l) => { d.volumes.add(n); labelsOf.set(n, l); };
+  d.foreign = (name, labels) => { d.containers.set(name, { running: true }); labelsOf.set(name, labels); };
+  d.foreignVolume = (name, labels) => { d.volumes.add(name); labelsOf.set(name, labels); };
+  return d;
+}
+
+test("reap, orphan-volume and work sweep touch only this agent's labelled resources (#5881)", async () => {
+  const docker = sharedDaemon();
+  const mkAgent = (name) => createAgent({ name, listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: tmpDir("cs-agent-"), allow_cpus: 4, allow_mem_gb: 8, lease_ttl_s: 600, token: "t" }, { docker, now: () => 1_000_000, log: quiet, live: () => ({ ok: true }), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
+  const a = mkAgent("agent-a"), b = mkAgent("agent-b");
+  await a.launch({ spec: spec("la"), cpus: 1, mem_gb: 1 });
+  await b.launch({ spec: spec("lb"), cpus: 1, mem_gb: 1 });
+  assert.ok(docker.runs[0].includes("computeshare.agent=agent-a") && docker.runs[1].includes("computeshare.agent=agent-b"));
+  docker.foreign("legacy-cs", ["computeshare=1"]);
+  docker.foreign("someone-elses", ["app=db"]);
+  docker.foreign("cs-orphan-a", ["computeshare=1", "computeshare.agent=agent-a"]);
+  docker.foreignVolume("cs-work-b", ["computeshare.agent=agent-b"]);
+  docker.foreignVolume("cs-work-foreign", []);
+  docker.foreignVolume("cs-work-a", ["computeshare.agent=agent-a"]);
+  const pruned = [];
+  docker.pruneWorkDirs = async (v) => { pruned.push(v); };
+  await a.reap();
+  assert.ok(docker.containers.has(safeName("lb")), "B's lane survives A's reap");
+  assert.ok(docker.containers.has("legacy-cs") && docker.containers.has("someone-elses"), "unlabelled and foreign containers survive");
+  assert.ok(!docker.containers.has("cs-orphan-a"), "A's own orphan is removed");
+  assert.ok(docker.volumes.has("cs-work-b") && docker.volumes.has("cs-work-foreign"), "foreign work volumes survive");
+  assert.ok(!docker.volumes.has("cs-work-a"), "A's own orphan volume is removed");
+  assert.ok(!pruned.some((v) => v === "cs-work-b"));
+});
+
+test("an explicit agent_id gives the agent its own cache volume, labelled with the agent (#5881)", async () => {
+  const { agent, docker } = agentFixture({ agent_id: "Donor.1" });
+  const created = [];
+  docker.createVolume = async (n, l) => { created.push([n, l]); };
+  await agent.launch({ spec: spec("c1"), cpus: 1, mem_gb: 1 });
+  assert.deepEqual(created[0], ["cs-cache-donor.1-o-r", ["computeshare.cache=1", "computeshare.agent=donor.1"]]);
 });
