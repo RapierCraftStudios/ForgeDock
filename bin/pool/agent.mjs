@@ -89,6 +89,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const stateDir = cfg.state_dir;
   const store = jsonStore(join(stateDir, "state.json"), { sandboxes: {} });
   const sb = () => store.data.sandboxes;
+  const activeRecs = () => Object.values(sb()).filter((s) => s.state !== "exited");
   // Sandbox ids come from requests: read own keys only, so "__proto__" or "constructor" never resolves to an inherited member (#4566).
   const own = (id) => (typeof id === "string" && Object.hasOwn(sb(), id) ? sb()[id] : warm.byAlias(id)); // #4912: a claimed warm sandbox also answers to its lane id
   const leaseTtlMs = (cfg.lease_ttl_s ?? 600) * 1000;
@@ -188,7 +189,6 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const PRIORITIES = ["reserved", "normal", "borrow"];
   const reservations = () => (Array.isArray(cfg.reservations) ? cfg.reservations.filter((r) => r && typeof r.name === "string" && r.cpus > 0 && r.mem_gb > 0) : []);
   const prioOf = (r) => r.priority ?? "normal";
-  const activeRecs = () => Object.values(sb()).filter((s) => s.state !== "exited");
   const sumRecs = (rs) => rs.reduce((a, s) => ({ cpus: a.cpus + s.cpus, mem: a.mem + s.mem_gb }), { cpus: 0, mem: 0 });
   const weighted = () => reservations().length > 0 || Boolean(cfg.idle_only);
   const SHARES = () => ({ reserved: 4096, normal: 1024, borrow: 128, throttled: 2, ...(cfg.cpu_shares ?? {}) });
