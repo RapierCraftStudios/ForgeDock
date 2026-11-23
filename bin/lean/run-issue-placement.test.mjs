@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { parseExecution, openExecutionBudget } from "./execution.mjs";
 import { makeLedger } from "./ledger.mjs";
-import { runFromCli } from "../engine-cli.mjs";
+import { runFromCli, withPublicDefault } from "../engine-cli.mjs";
 
 const logs = async (fn) => { const out = [], l = console.log; console.log = (x) => out.push(String(x)); try { return { res: await fn(), out }; } finally { console.log = l; } };
 
@@ -83,10 +83,17 @@ describe("run-issue placement (#5542)", () => {
 
 describe("run-issue public-repo default placement (#5748)", () => {
   const inEmptyDir = async (fn) => { const prev = process.cwd(); process.chdir(tmpDir("nocfg-")); try { return await fn(); } finally { process.chdir(prev); } };
-  it("a public repo with no execution config places the lane on the actions provider", async () => {
+  const inDir = async (yaml, fn) => { const prev = process.cwd(), dir = tmpDir("cfg-"); writeFileSync(join(dir, "forge.yaml"), yaml); process.chdir(dir); try { return await fn(); } finally { process.chdir(prev); } };
+  it("#5900: a public repo with no execution config keeps the local default (actions is opt-in)", async () => {
+    const prov = fakeProvider(() => ({ terminalReason: "merged" }));
+    const { deps, ran } = setup("pubdef-off", prov, { execution: undefined, repoPublic: true });
+    await inEmptyDir(() => logs(() => runFromCli(["7", "--repo", "o/r", "--lane", "staging"], { ...deps, leanModule: core(ran) })));
+    assert.equal(ran.length, 1); assert.deepEqual(prov.calls, []);
+  });
+  it("a public repo with execution.public_default: actions and no mode places the lane on the actions provider", async () => {
     const prov = fakeProvider((n) => ({ terminalReason: "merged", pr: 100 + n, cost_usd: 0 }));
     const { deps } = setup("pubdef", prov, { execution: undefined, repoPublic: true });
-    const { res, out } = await inEmptyDir(() => logs(() => runFromCli(["7", "--repo", "o/r", "--no-prefilter"], deps)));
+    const { res, out } = await inDir("execution:\n  public_default: actions\n", () => logs(() => runFromCli(["7", "--repo", "o/r", "--no-prefilter"], deps)));
     assert.deepEqual(prov.calls.filter((c) => c[0] === "start").map((c) => c[1]), [7]);
     assert.equal(res.res?.terminalReason ?? res.terminalReason, "merged");
     assert.ok(out.some((l) => /^placement: remote execution \(actions\)/.test(l)), out.join("\n"));
@@ -109,3 +116,20 @@ describe("run-issue public-repo default placement (#5748)", () => {
   });
 });
 
+
+describe("public-repo actions default is opt-in (#5900)", () => {
+  const ghThrows = async () => { throw new Error("visibility must not be read without the opt-in"); };
+  it("no execution.public_default: exec unchanged and no visibility call, public repo or not", async () => {
+    const dir = tmpDir("pubdef-");
+    writeFileSync(join(dir, "forge.yaml"), "project:\n  name: x\n");
+    assert.equal(await withPublicDefault(undefined, { repo: "o/r", gh: ghThrows, cwd: dir }), undefined);
+    const e = parseExecution({ image: "i:1" });
+    assert.equal(await withPublicDefault(e, { repo: "o/r", gh: ghThrows, cwd: dir }), e);
+  });
+  it("opted in + public + no mode: actions provider", async () => {
+    const dir = tmpDir("pubdef-");
+    writeFileSync(join(dir, "forge.yaml"), "execution:\n  public_default: actions\n");
+    const r = await withPublicDefault(parseExecution({ public_default: "actions" }), { repo: "o/r", gh: ghThrows, cwd: dir, deps: { repoPublic: true } });
+    assert.equal(r.provider, "actions");
+  });
+});
