@@ -130,7 +130,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   let lastCachePrune = -Infinity;
   // #5757: cache volume hygiene state: per-volume sweep error/size/last use (last use also from launches in this process).
   let lastCacheSweep = -Infinity;
-  const cacheErr = new Map(), cacheInfo = new Map(), cacheUsed = new Map();
+  const cacheErr = new Map(), cacheInfo = new Map(), cacheUsed = new Map(), adoptedCache = new Set(); // adoptedCache: pre-label volumes this agent mounts (labels cannot be added to an existing volume)
   const sweepFail = (v, what, e) => { const m = `${what} ${v}: ${String(e.stderr || e.message).slice(0, 200)}`; cacheErr.set(`${what}:${v}`, m); log.warn?.(m); };
   const dirMb = (d) => { let n = 0, seen = 0; const walk = (x) => { if (seen++ > 200000) return; let st; try { st = lstatSync(x); } catch { return; } n += st.size; if (st.isDirectory()) { try { for (const e of readdirSync(x)) walk(join(x, e)); } catch { /* unreadable */ } } }; walk(d); return Math.round(n / 1048576); };
   function diskView() {
@@ -306,6 +306,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     rec.workDir = workDirOf(name);
     cacheUsed.set(rec.cacheVolume, now());
     try { await docker.createVolume?.(rec.cacheVolume, [CACHE_LABEL, AGENT]); } catch (e) { log.warn?.(`label ${rec.cacheVolume}: ${String(e.stderr || e.message).slice(0, 200)}`); } // an unlabelled volume still works
+    try { if (docker.volumeLabels && (await docker.volumeLabels(rec.cacheVolume))["computeshare.agent"] !== agentId) adoptedCache.add(rec.cacheVolume); } catch { /* best effort */ }
     // Public resolvers: host resolvers like Tailscale MagicDNS are not reachable from the container network.
     const netArgs = ["--add-host", "host.docker.internal:host-gateway", ...(cfg.dns ?? ["1.1.1.1", "8.8.8.8"]).flatMap((d) => ["--dns", String(d)])];
     let laneCpus = cpus, laneMem = mem_gb, laneNet = netArgs, work = [];
@@ -443,12 +444,21 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     } catch (e) { log.warn?.(`anonymous volume sweep: ${String(e.stderr || e.message).slice(0, 200)}`); }
   }
 
+  /** Cache volumes the sweeps cover: those labelled for this agent plus pre-label ones it mounts (adopted or referenced by a sandbox record). */
+  async function ownCacheVolumes() {
+    const labelled = await docker.listVolumes("cs-cache-", AGENT);
+    const mine = new Set([...adoptedCache, ...Object.values(sb()).map((r) => r.cacheVolume).filter(Boolean)]);
+    if (!mine.size) return labelled;
+    const all = await docker.listVolumes("cs-cache-");
+    return [...new Set([...labelled, ...all.filter((v) => mine.has(v))])];
+  }
+
   /** #5757: age-out / size cap inside each cache volume, then idle eviction. Never-evict volumes are left alone; failures go to /capacity. */
   async function cacheSweep(t) {
     const never = cfg.cache_never_evict ?? [];
     const keep = Object.values(sb()).map((r) => r.workDir).filter(Boolean);
     const volumes = [];
-    for (const v of await docker.listVolumes("cs-cache-", AGENT)) {
+    for (const v of await ownCacheVolumes()) {
       if (never.includes(v)) continue;
       try {
         const r = await docker.sweepCache(v, image, { maxAgeDays: cfg.cache_max_age_days ?? 14, maxGb: cfg.cache_max_gb ?? null, keep, now: t });
@@ -499,7 +509,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     if (t - lastWorkSweep >= WORK_SWEEP_MS) {
       lastWorkSweep = t;
       const keep = Object.values(sb()).map((r) => r.workDir).filter(Boolean);
-      for (const v of await docker.listVolumes("cs-cache-", AGENT)) {
+      for (const v of await ownCacheVolumes()) {
         try { await docker.pruneWorkDirs(v, image, keep); cacheErr.delete(`work sweep:${v}`); } catch (e) { sweepFail(v, "work sweep", e); }
       }
     }

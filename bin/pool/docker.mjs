@@ -91,6 +91,10 @@ export const dockerCli = {
   },
   /** #5757: creates a volume carrying labels (idempotent: an existing volume keeps its labels). */
   async createVolume(name, labels = []) { await docker(["volume", "create", ...labels.flatMap((l) => ["--label", l]), name], { timeoutMs: 20000 }); },
+  /** Labels of an existing volume ({} when it is missing or cannot be inspected). */
+  async volumeLabels(name) {
+    try { return JSON.parse(await docker(["volume", "inspect", "--format", "{{json .Labels}}", name], { timeoutMs: 20000 })) ?? {}; } catch { return {}; }
+  },
   /** #5757: runs the in-volume cache sweep (bin/pool/cache-sweep.mjs) in a lane-image container; resolves its JSON result, rejects on failure or timeout. */
   async sweepCache(volume, image, opts) {
     const out = await docker(["run", "--rm", "--network", "none", "-v", `${volume}:/cache`, "-e", `CS_CACHE_SWEEP_OPTS=${JSON.stringify(opts)}`, "-e", `CS_CACHE_SWEEP_SRC=${readFileSync(SWEEP_SRC, "utf8")}`, "--entrypoint", "sh", image, "-c", 'printf %s "$CS_CACHE_SWEEP_SRC" > /tmp/cache-sweep.mjs && exec node /tmp/cache-sweep.mjs'], { timeoutMs: SWEEP_TIMEOUT_MS });
