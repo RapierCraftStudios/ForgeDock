@@ -120,7 +120,7 @@ describe("outbound-only agent connection (#5882)", () => {
     };
     let dispatched = 0;
     const poll = startPoll({ router_url: "http://router", token: "t", listen: { port: 1 } }, { fetchFn, dispatch: async () => { dispatched++; return { status: 200 }; }, waitS: 1, log: quiet, sleep: () => new Promise((r) => setTimeout(r, 5)) });
-    await new Promise((r) => setTimeout(r, 50));
+    for (let i = 0; i < 200 && !replies.length; i++) await new Promise((r) => setTimeout(r, 10));
     poll.stop();
     assert.equal(dispatched, 0);
     assert.equal(replies[0].status, 400);
