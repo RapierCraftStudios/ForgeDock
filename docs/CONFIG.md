@@ -2935,6 +2935,7 @@ Keys of the pool agent's JSON config (`forgedock pool agent`), not of `forge.yam
 | `cache_idle_days` | number | `30` | A volume with no launch for this long and no referencing sandbox is removed. Evicted only when its last use is known (`/cache/.last-used`, written by the lane entrypoint). |
 | `cache_never_evict` | list of volume names | `[]` | Volumes (e.g. `cs-cache-marcode`) that are never swept or evicted. |
 | `cache_sweep_interval_s` | number | `3600` | Gap between cache sweeps. |
+| `agent_id` | string | `name` | Owner label `computeshare.agent=<id>` (#5881) on every container and cache volume the agent creates. Reap, orphan-volume, cache and work sweeps touch only resources carrying it, so a co-resident agent or foreign containers are never removed; unlabelled pre-existing items are left alone. Setting it also namespaces the cache volume (`cs-cache-<id>-<key>`) so two agents never share `/cache/work`. |
 
 A failed or timed-out sweep (10 min limit) shows as `cache_sweep_error` in the agent's `/capacity`, next to `cache_volumes` (size per volume).
 

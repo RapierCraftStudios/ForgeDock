@@ -92,6 +92,6 @@ describe("agent cache sweep", () => {
     const docker = fakeDocker();
     const agent = mk(docker);
     await agent.launch({ spec: { id: "s1", repo: { slug: "o/r", url: "u" }, command: ["x"] }, cpus: 1, mem_gb: 1 });
-    assert.deepEqual(docker.labels, [["cs-cache-o-r", [CACHE_LABEL]]]);
+    assert.deepEqual(docker.labels, [["cs-cache-o-r", [CACHE_LABEL, "computeshare.agent=a1"]]]);
   });
 });
