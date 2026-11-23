@@ -242,6 +242,29 @@ describe("providerLanes: sandbox ledger and teardown on every exit path (#4253)"
     assert.equal(led.read(), null);
   });
 
+  it("#5859 lost without a result: the engine-error carries the pool agent; usage-limit and clone-failure mappings stay", async () => {
+    const lost = async (tail, agent = "legion") => {
+      const prov = fakeProvider({ finish: () => null });
+      const start = prov.start; prov.start = async (o) => ({ ...(await start(o)), agent });
+      const lanes = providerLanes({ provider: prov, laneArgs: () => [], ledgerFor: ledgerIn(tmpDir("exec-lost-")), pollMs: 1, now: () => 1000, sleep: async () => {}, logTail: async () => tail });
+      const r = await lanes.runOne(7, "staging", {});
+      await r.postRun?.();
+      return r;
+    };
+    const r = await lost("");
+    assert.equal(r.terminalReason, "engine-error");
+    assert.equal(r.agent, "legion");
+    assert.equal(r.lostWithoutResult, true);
+    assert.match(r.detail, /^sandbox fake-7 exited without a result$/, "detail text unchanged");
+    const lim = await lost("x\n[lane] deferred: usage limit hit; resets at 3:20pm (UTC)\n");
+    assert.equal(lim.terminalReason, "deferred");
+    assert.equal(lim.code, "rate_limited");
+    assert.equal(lim.lostWithoutResult, undefined);
+    const clone = await lost("git clone failed: early EOF");
+    assert.equal(clone.terminalReason, "deferred");
+    assert.equal(clone.lostWithoutResult, undefined);
+  });
+
   it("#4685 start refused with HTTP 401: deferred sandbox.auth with a long retry, never needs-human", async () => {
     const { r } = await run({ startThrows: 401 });
     assert.equal(r.terminalReason, "deferred");

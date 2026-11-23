@@ -171,6 +171,10 @@ export const MAX_REQUEUES = 2;
 export const DEFAULT_MAX_DEFERRALS = 3;
 // Relaunches of an issue whose lane ended engine-error.
 export const ENGINE_ERROR_RELAUNCHES = 1;
+// #5859: lanes of one pool agent lost without a result within the window that make it an agent restart (`sandbox.lost`), and their requeue delay
+export const AGENT_LOST_MIN = 3;
+export const AGENT_LOST_WINDOW_MS = 60000;
+export const AGENT_LOST_REQUEUE_MS = 60000;
 export const HOST_BUSY_RETRY_S = 60;
 // #4528: a busy host or a full sandbox pool is a wait, not a failure: requeued after its retry-in, never capped.
 // A lane that could not be resolved because gh/git failed (network blip) is the same kind of wait (#4791).
@@ -369,6 +373,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const enqueued = toMap(saved?.enqueued); // #4409: issue -> when it last entered the queue (starvation guard)
   const heads = new Set(saved?.heads ?? []); // #4409: decomposed sub-issues not started yet: the head of their priority band
   let errorTimes = [...(saved?.errorTimes ?? [])];
+  // #5859: agent restarts of this batch (one record each, shown by `status --batch`) and the lanes already requeued as `sandbox.lost`
+  const agentRestarts = [...(saved?.agentRestarts ?? [])];
+  const lostOnce = new Set(saved?.lostRequeued ?? []); // a lane lost again after its requeue is an ordinary engine-error
   // A legacy batch-local `holdUntil` (pre-#4190) names no account and is ignored: a same-account lane re-sets the hold.
   const holds = limits ?? memoryLimits(now);
   // #5205: accounts lanes reported limited (account -> until ms), persisted with the batch, excluded from headroom until then.
@@ -484,7 +491,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (!store || halted) return;
     store.save({ v: 1, ...(setup ? { phase: "setup", setup: { ...setup } } : {}), engineVersion: version, order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
       pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors), ...(transients.size ? { transientRetries: toObj(transients) } : {}), ...(quota.size ? { quota: toObj(quota) } : {}), ...(limitedAccounts.size ? { limitedAccounts: toObj(limitedAccounts) } : {}), ...(capDefers.size ? { capDeferrals: toObj(capDefers) } : {}),
-      prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
+      prefilter: toObj(checked), errorTimes, breaker: tripped, ...(agentRestarts.length ? { agentRestarts, lostRequeued: [...lostOnce] } : {}), ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
       ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
       ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering), recoveryClasses: toObj(classUsed) } : {}),
       ...(planned.size || planTried.size ? { planned: toObj(planned), planTried: [...planTried] } : {}),
@@ -840,6 +847,46 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       tripped = { at: t, ...(transportErrors >= errorTimes.length ? { transport: true } : {}), detail: `circuit breaker: ${errorTimes.length} engine-errors within ${breaker.window_min} min; admissions stopped` };
       update({ issue: null, outcome: "breaker", detail: tripped.detail });
     }
+    return t;
+  };
+  // #5859: sandboxes of one pool agent ending without a result in a burst (AGENT_LOST_MIN within AGENT_LOST_WINDOW_MS) are an agent/VM
+  // restart: `sandbox.lost`, requeued once (after `remote.agentHealthy(agent)` answers, when the provider has it), never counted by the
+  // breaker or the engine-error relaunch. Lanes of the burst that settled as engine-errors first are rolled back. One batch event each.
+  const lostSeen = new Map(); // agent -> [{n, at, err, ee, tr, sig}]: lost lanes settled as ordinary engine-errors in the window
+  const openRestart = (agent, t) => agentRestarts.find((g) => g.agent === agent && !g.closed && t - g.last < AGENT_LOST_WINDOW_MS);
+  const markLost = (agent, n, row, why) => {
+    lostOnce.add(n);
+    let g = openRestart(agent, now());
+    if (!g) agentRestarts.push(g = { agent, at: new Date(now()).toISOString(), last: now(), lanes: [] });
+    if (!g.lanes.includes(n)) g.lanes.push(n);
+    g.last = now(); g.requeued = g.lanes.length;
+    update({ ...row, outcome: "deferred", code: OUTCOME_CODES.SANDBOX_LOST, detail: `requeued: ${OUTCOME_CODES.SANDBOX_LOST} (agent ${agent} restarted): ${why ?? ""}` });
+  };
+  const rollBackLost = (agent, x) => {
+    if (x.err !== undefined) { const i = errorTimes.lastIndexOf(x.err); if (i >= 0) errorTimes.splice(i, 1); transportErrors = Math.min(transportErrors, errorTimes.length); }
+    if (!pending.includes(x.n) && !running.has(x.n)) return; // it already ended (its relaunch was used before): only the breaker count goes
+    for (const [m, v] of [[engineErrors, x.ee], [transients, x.tr], [engineSigs, x.sig]]) { if (v === undefined) m.delete(x.n); else m.set(x.n, v); }
+    if (pending.includes(x.n)) notBefore.set(x.n, now() + AGENT_LOST_REQUEUE_MS);
+    markLost(agent, x.n, { issue: x.n }, "settled as an engine-error before the restart was visible; rolled back");
+  };
+  const closeRestart = (g) => {
+    g.closed = true; g.requeued = g.lanes.length; g.detail = `agent ${g.agent} restarted at ${g.at}; ${g.lanes.length} lanes requeued`;
+    const ev = { event: "agent.restarted", batch: batchId ?? null, agent: g.agent, at: g.at, requeued: g.lanes.length, issues: [...g.lanes], detail: g.detail };
+    try { store?.log?.(ev); } catch { /* best effort */ }
+    onUpdate(ev);
+  };
+  const agentLostPass = async (t) => {
+    let changed = false;
+    for (const g of agentRestarts) {
+      if (g.closed) continue;
+      if (!g.healthyAt) {
+        let ok = true;
+        if (typeof remote?.agentHealthy === "function") { try { ok = (await remote.agentHealthy(g.agent)) === true; } catch { ok = false; } }
+        if (ok) { g.healthyAt = new Date(t).toISOString(); changed = true; } else for (const m of g.lanes) if (pending.includes(m)) notBefore.set(m, Math.max(notBefore.get(m) ?? 0, t + pollMs));
+      }
+      if (g.healthyAt && t - g.last >= AGENT_LOST_WINDOW_MS) { closeRestart(g); changed = true; }
+    }
+    if (changed) save();
   };
 
   // Apply one lane's result: requeue it (deferred, dependency-open, engine-error) or record its final row.
@@ -1016,8 +1063,27 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       }
       row.detail = `gave up after ${deferrals.get(n) ?? 0} deferrals: ${r?.detail ?? r?.code ?? ""}`;
     }
+    const la = row.outcome === "engine-error" && r?.lostWithoutResult && !cancelled && !lostOnce.has(n) ? (r.agent ?? r.sandbox?.agent ?? null) : null;
+    let lostNow = null;
+    if (la) { // #5859
+      const t = now(), win = (lostSeen.get(la) ?? []).filter((x) => t - x.at < AGENT_LOST_WINDOW_MS);
+      if (openRestart(la, t) || win.length + 1 >= AGENT_LOST_MIN) {
+        lostSeen.delete(la);
+        for (const x of win) rollBackLost(la, x);
+        if (tripped && !tripped.transport && breaker && errorTimes.length < breaker.errors && win.length && tripped.at >= win[0].at) {
+          tripped = null;
+          update({ issue: null, outcome: "breaker", detail: `circuit breaker cleared: the engine-errors were agent ${la} restarting (${OUTCOME_CODES.SANDBOX_LOST})` });
+        }
+        markLost(la, n, row, row.detail);
+        requeue(n, AGENT_LOST_REQUEUE_MS); done(); save();
+        return;
+      }
+      lostNow = { n, at: t, ee: engineErrors.get(n), tr: transients.get(n), sig: engineSigs.get(n) };
+      lostSeen.set(la, [...win, lostNow]);
+    }
     if (row.outcome === "engine-error") {
-      noteEngineError(r?.detail);
+      const errAt = noteEngineError(r?.detail);
+      if (lostNow) lostNow.err = errAt;
       // #5161: a transient failure (gateway 5xx, reset) waits out the outage with backoff instead of the single immediate relaunch.
       if (transientMax > 0 && isTransientEngineError(row.detail)) {
         const k = (transients.get(n) ?? 0) + 1;
@@ -1723,6 +1789,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           }
         }
       }
+      if (agentRestarts.length) await agentLostPass(now()); // #5859
       const t = now();
       const holdUntil = heldUntil();
       let started = 0;
@@ -1927,6 +1994,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     throw e;
   }
   await Promise.allSettled([...postRuns]); // #5437
+  if (agentRestarts.some((g) => !g.closed) && !halted) { for (const g of agentRestarts) if (!g.closed) closeRestart(g); save(); } // #5859
   if (reg) withdrawExcept(new Set());
   await relabelQueued();
   // #4657: a milestone whose `close_on` state is reached closes here; a failure is a row, never an outcome change.

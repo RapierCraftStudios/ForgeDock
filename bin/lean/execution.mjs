@@ -759,7 +759,8 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
           return { terminalReason: "deferred", code: OUTCOME_CODES.RATE_LIMITED, resetAt: lim.resetAt ?? "unknown", resetAtEpochMs: Number.isFinite(at) ? at : null,
             detail: `${why}: usage limit hit; resets at ${lim.resetAt ?? "unknown"}` };
         }
-        return isCloneFailure(tail) ? cloneDeferred(h.id, why) : { terminalReason: "engine-error", detail: why };
+        // #5859: tagged with its pool agent so the runner can tell an agent/VM restart (many lost on one agent) from one dead sandbox
+        return isCloneFailure(tail) ? cloneDeferred(h.id, why) : { terminalReason: "engine-error", detail: why, lostWithoutResult: true, ...(typeof h?.agent === "string" && h.agent ? { agent: h.agent } : {}) };
       }
       await sleep(pollMs);
     }
