@@ -98,6 +98,18 @@ describe("agent launch and warm pool", () => {
     assert.match(run[run.length - 2], /-t[0-9a-f]{12}$/);
     assert.equal(docker.builds.length, 1);
   });
+  it("a reserved launch whose lane image is still building neither throttles nor drains borrowed lanes (#5897)", async () => {
+    const docker = fakeDocker(), touched = [];
+    docker.update = async (name) => { touched.push(["update", name]); };
+    docker.kill = async (name, sig) => { touched.push(["kill", name, sig]); return true; };
+    const agent = createAgent({ name: "a", listen: { host: "127.0.0.1", port: 7712 }, router_url: "http://r:1", state_dir: tmpDir("lt-"), allow_cpus: 12, allow_mem_gb: 31, reservations: [{ name: "res", cpus: 10, mem_gb: 20 }], drain_grace_s: 0, token: "t" }, { docker, log: quiet, live: () => ({ ok: true }), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
+    for (let i = 0; i < 6; i++) assert.equal((await agent.launch({ spec: spec(`b${i}`, { priority: "borrow" }), cpus: 2, mem_gb: 4 })).status, 201);
+    const r = await agent.launch({ spec: spec("r1", { priority: "reserved", reservation: "res", lane_tools: ["promtool@2.54.1"] }), cpus: 4, mem_gb: 8 });
+    assert.equal(r.status, 503);
+    assert.equal(r.body.code, "lane_tools.building");
+    assert.deepEqual(touched, [], "no borrower was throttled or stopped for a launch that is refused anyway");
+    assert.equal(Object.values(agent.store.data.sandboxes).filter((s) => s.drained).length, 0);
+  });
   it("without lane_tools the image and tag are unchanged (no build)", async () => {
     const docker = fakeDocker(), agent = agentWith(docker);
     await agent.launch({ spec: spec("lane-2"), ...SIZE });
