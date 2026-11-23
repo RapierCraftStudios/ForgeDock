@@ -10,6 +10,17 @@ last_compacted: "2026-11-15"
 
 Rolling per-module knowledge log. Hard cap: 150 lines.
 
+## Entry 2026-11-22 — Priority classes, reservations, borrowing (#5856)
+
+- `spec.priority` is `reserved | normal | borrow` (default `normal`; anything else is 400). Lanes send `borrow` (`bin/lean/sandbox-remote.mjs`). Agent config: `reservations: [{name, cpus, mem_gb}]`, `idle_only`, optional `idle_max_owner_load_per_core` (0.5), `idle_min_free_mem_gb` (4), `cpu_shares` ({reserved 4096, normal 1024, borrow 128, throttled 2}), `drain_grace_s` (20), `cores`.
+- Admission (`admit` in `bin/pool/agent.mjs`): reserved is admitted up to its reservation whatever borrow/lanes use (503 `pool.reservation_full` past it, 400 for an unknown name); it skips the live-load gate. Reclaim order: every borrower is throttled (`docker update --cpu-shares 2`), then the newest borrowers are SIGTERMed (the lane checkpoints and reports `run.interrupted`, so the router/dispatcher reschedules it), SIGKILL after `drain_grace_s`, only as many as cpu and memory need. `normal` only gets space outside every reservation. `borrow` gets any physical headroom, i.e. reserved-but-idle space.
+- A reservation is idle when no reserved sandbox holds it; usage inside a running reserved sandbox is not lent (rejected for now: live-usage borrowing, needs `memory.high` which the docker CLI does not expose).
+- `idle_only`: borrow is admitted only while owner load per core (host load minus this agent's own sandboxes' sampled cpu) is under the floor and free memory above it (503 `pool.not_idle`). Each `reap()` throttles borrowed lanes when the owner is busy, drains one per pass if that did not help, and lifts the throttle when idle and no reserved sandbox runs.
+- Weights (`--cpu-shares`) and the new `/capacity` fields (`cpus_free_unreserved`, `mem_free_unreserved_gb`, `cpus_borrowable`, `mem_borrowable_gb`, `reservations[]`, `idle_only`) appear only when `reservations` or `idle_only` is configured; other agents are byte-identical to before. The router (`fitsPriority`/`headroom`) places reserved on the host holding the reservation, normal on unreserved headroom, borrow preferring free non-reserved capacity.
+- One agent per docker daemon: `reap()` removes any labelled container not in its own store, so reservations live inside the single agent.
+- `forgedock pool enroll --agent-url http://127.0.0.1:<port>` prints a Linux install command with `AGENT_URL` set (SSH-tunnel hosts).
+- Tests: `bin/tests/computeshare.test.mjs` (`#5856`).
+
 ## Entry 2026-11-15 — Environment snapshots (#5714)
 
 - Design, failure modes and rejected options: `devdocs/decisions/5714-env-library.md`. User guide: `docs/ENV-LIBRARY.md`.

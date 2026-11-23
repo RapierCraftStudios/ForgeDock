@@ -3,7 +3,8 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { testPlanProblems, proofEchoesDeliverable, outputTail, removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, reproQualityFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, envProvisioningCommand, assertionFailure, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered, mockedDeliverable, proofEchoDetail, contractRuleCounts, onlyTestPlanProblems } from "./conformance.mjs";
+import { toolMisses } from "./toolplace.mjs";
+import { FORGEDOCK_CHECKS_VAR, FORGEDOCK_ENTRY_VAR, portableForgedockPaths, resolvingIo, testPlanProblems, proofEchoesDeliverable, outputTail, removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, reproQualityFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, envProvisioningCommand, assertionFailure, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered, mockedDeliverable, proofEchoDetail, contractRuleCounts, onlyTestPlanProblems } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -393,7 +394,7 @@ describe("precheck (deterministic, no reviewer)", () => {
   });
   it("#5005 a missing forgedock install is env.tool_missing, not conformance; other absolute paths stay code defects", () => {
     const out = "node:internal/modules/cjs/loader\nError: Cannot find module '/opt/node/lib/node_modules/forgedock/bin/lean/checks.mjs'\n code: 'MODULE_NOT_FOUND'";
-    assert.deepEqual(missingTool({ rc: 1, output: out }), { tool: "forgedock", kind: "command" });
+    assert.deepEqual(missingTool({ rc: 1, output: out }), { tool: "forgedock", kind: "forgedock-path" }); // #5727: a path mismatch, not a tool
     assert.equal(missingTool({ rc: 1, output: "Error: Cannot find module '/repo/forgedock/src/x.mjs'" }), null);
     const contract = { requirements: [], deliverables: [], validate: [{ id: "V2", command: "node /opt/node/lib/node_modules/forgedock/bin/lean/checks.mjs --base origin/staging" }] };
     const result = { validation: [{ id: "V2", command: "", exit: 1 }] };
@@ -406,6 +407,39 @@ describe("precheck (deterministic, no reviewer)", () => {
     assert.equal(resolveForgedockPaths(cmd, { ...o, exists: () => false }), "node /h/forgedock/bin/lean/checks.mjs --base origin/staging && node /h/forgedock/bin/forgedock.mjs check");
     assert.equal(resolveForgedockPaths(cmd, { ...o, exists: () => true }), cmd);
     assert.equal(resolveForgedockPaths("node bin/x.mjs", { ...o, exists: () => false }), "node bin/x.mjs");
+  });
+  it("#5727 missingTool: a forgedock entry path is not a tool miss", () => {
+    const out = "Error: Cannot find module '/home/dev/.local/lib/node_modules/forgedock/bin/lean/checks.mjs'\n code: 'MODULE_NOT_FOUND'";
+    const miss = missingTool({ rc: 1, output: out });
+    assert.equal(miss.kind, "forgedock-path");
+    assert.deepEqual(toolMisses([{ ...miss, ids: ["V5"], source: "run" }]), { tools: [], ids: [] });
+    assert.deepEqual(missingTool({ rc: 1, output: "Error: Cannot find module 'left-pad'" }), { tool: "left-pad", kind: "node-module" });
+  });
+  it("#5727 resolveForgedockPaths expands the portable placeholders", () => {
+    const o = { checksCli: "/h/forgedock/bin/lean/checks.mjs", forgedockCli: "/h/forgedock/bin/forgedock.mjs", exists: () => true };
+    assert.equal(resolveForgedockPaths('node $FORGEDOCK_CHECKS_CLI --base origin/staging && node "${FORGEDOCK_ENTRY_CLI}" check', o), 'node /h/forgedock/bin/lean/checks.mjs --base origin/staging && node "/h/forgedock/bin/forgedock.mjs" check');
+    assert.equal(resolveForgedockPaths("echo $FORGEDOCK_CHECKS_CLIX", o), "echo $FORGEDOCK_CHECKS_CLIX");
+    assert.equal(resolveForgedockPaths("node /usr/lib/node_modules/forgedock/bin/lean/checks.mjs", o), "node /usr/lib/node_modules/forgedock/bin/lean/checks.mjs");
+    assert.equal(resolveForgedockPaths("node $FORGEDOCK_CHECKS_CLI", {}), "node $FORGEDOCK_CHECKS_CLI");
+  });
+  it("#5727 portableForgedockPaths rewrites entry tokens to placeholders", () => {
+    const cmd = "node /home/dev/.local/lib/node_modules/forgedock/bin/lean/checks.mjs --base origin/staging && node /opt/node/lib/node_modules/forgedock/bin/forgedock.mjs check";
+    assert.equal(portableForgedockPaths(cmd), "node $FORGEDOCK_CHECKS_CLI --base origin/staging && node $FORGEDOCK_ENTRY_CLI check");
+    assert.ok(portableForgedockPaths(cmd).includes(`$${FORGEDOCK_CHECKS_VAR}`) && portableForgedockPaths(cmd).includes(`$${FORGEDOCK_ENTRY_VAR}`));
+    assert.equal(portableForgedockPaths("node bin/lean/checks.mjs && node /repo/src/x.mjs"), "node bin/lean/checks.mjs && node /repo/src/x.mjs");
+    assert.equal(resolveForgedockPaths(portableForgedockPaths(cmd), { checksCli: "/c.mjs", forgedockCli: "/f.mjs" }), "node /c.mjs --base origin/staging && node /f.mjs check");
+  });
+  it("#5727 resolvingIo wraps only the command runners", async () => {
+    const seen = [], fs = { read: () => "" };
+    const io = { fs, runCommand: async (a) => { seen.push(["run", a.command, a.cwd]); return { rc: 0 }; }, probeCommand: async (a) => { seen.push(["probe", a.command]); return { rc: 0 }; },
+      preflightRun: async (a) => { seen.push(["pre", a.command]); return { rc: 0 }; }, redGreen: async (a) => { seen.push(["rg", a.command]); return {}; }, git: async (args) => args };
+    const w = resolvingIo(io, { checksCli: "/c.mjs", forgedockCli: "/f.mjs", exists: () => false });
+    await w.runCommand({ command: "node /x/forgedock/bin/lean/checks.mjs", cwd: "/wt" }); await w.probeCommand({ command: "node $FORGEDOCK_CHECKS_CLI" });
+    await w.preflightRun({ command: "node /x/forgedock/bin/forgedock.mjs check" }); await w.redGreen({ command: "node --test a.mjs" });
+    assert.deepEqual(seen, [["run", "node /c.mjs", "/wt"], ["probe", "node /c.mjs"], ["pre", "node /f.mjs check"], ["rg", "node --test a.mjs"]]);
+    assert.equal(w.fs, fs); assert.deepEqual(await w.git(["status"]), ["status"]);
+    io.later = 1; assert.equal(w.later, 1, "a member set on io later is seen");
+    assert.equal(resolvingIo(null), null);
   });
   it("a deliver requirement reported deferred without an amendment -> untracked_deferral; partial -> unimplemented", () => {
     const r = { ...res, requirements: [{ id: "R1", status: "deferred" }, { id: "R2", status: "partial" }] };
