@@ -3575,3 +3575,8 @@ Security: the workflow is `workflow_dispatch` only (never `pull_request*`), `per
 
 - `bin/lean/sandbox-remote.mjs` `remoteProvider` now sends `spec.priority: "borrow"` on every lane sandbox spec. A pool agent without `reservations`/`idle_only` ignores it (flat admission as before); with them, lanes run on leftover capacity at a low `cpu.shares` weight and are throttled, then drained, when a reserved workload arrives.
 - A drained lane reports `run.interrupted` and is rescheduled, not lost. Reclaim order and config: `devdocs/modules/pool.md` (#5856).
+
+## Entry 2026-11-23 — pool_version hint recommends the safe upgrade (#5726)
+
+- `bin/lean/lanecheck.mjs` `UPGRADE_COMMAND` is now `npx forgedock pool upgrade --wait`, and both `checkPoolVersion` details (pass and fail) add that the pool host is shared, so upgrade only when idle. The pass/fail decision is unchanged.
+- The command itself refuses (CLI) or answers 409 (router) while sandboxes are active unless `--now`/`force:true`; see `devdocs/modules/pool.md`.
