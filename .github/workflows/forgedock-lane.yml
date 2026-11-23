@@ -1,0 +1,130 @@
+name: ForgeDock lane
+
+# #5748: a ForgeDock lane on a GitHub-hosted runner. Dispatched by the ForgeDock orchestrator only (bin/lean/sandbox-actions.mjs);
+# never from pull_request or pull_request_target, so a fork cannot trigger a lane or reach a secret. The Claude credential is
+# a secret of the `forgedock-lane` environment (restrict it to feat/* branches and the ForgeDock app/bot in the repo settings).
+# #5899: the job token can write contents and a client-side hook can be bypassed, so the lane refuses to start unless the
+# default branch and the base lane branch are protected server-side (ruleset or classic required status checks).
+# Logs are public on a public repo: no step echoes the environment, and the result goes to an issue comment.
+
+run-name: forgedock-lane ${{ inputs.lane_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      lane_id:
+        description: ForgeDock lane id (fdrsbx-<batch>-<issue>)
+        required: true
+      issue:
+        description: Issue number
+        required: true
+      batch:
+        description: ForgeDock batch id
+        required: false
+      ref:
+        description: Base lane branch the lane starts from and the workflow runs on
+        required: true
+      args:
+        description: JSON array of extra run-issue arguments
+        required: false
+        default: "[]"
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: forgedock-lane-${{ inputs.lane_id }}
+  cancel-in-progress: false
+
+jobs:
+  lane:
+    runs-on: ubuntu-latest
+    environment: forgedock-lane
+    timeout-minutes: 355
+    steps:
+      - name: Validate inputs
+        env:
+          LANE_ID: ${{ inputs.lane_id }}
+          ISSUE: ${{ inputs.issue }}
+          LANE_REF: ${{ inputs.ref }}
+        run: |
+          [[ "$LANE_ID" =~ ^fdrsbx-[A-Za-z0-9._-]+-[0-9]+$ ]] || { echo "bad lane_id"; exit 1; }
+          [[ "$ISSUE" =~ ^[0-9]+$ ]] || { echo "bad issue"; exit 1; }
+          [[ "$LANE_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ && "$LANE_REF" != *..* ]] || { echo "bad ref"; exit 1; }
+      - name: Require server-side protection on the default and base lane branches
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          LANE_REF: ${{ inputs.ref }}
+          RESULT_FILE: ${{ runner.temp }}/lane-result.json
+        run: |
+          # #5899: a ruleset with pull_request, update or required_status_checks, or classic required status checks with at
+          # least one context, rejects a direct push by the job token; anything less leaves only the bypassable pre-push hook.
+          unprotected=""
+          for B in "$DEFAULT_BRANCH" "$LANE_REF"; do
+            [ -n "$B" ] || continue
+            types=$(gh api "repos/$GH_REPO/rules/branches/$B" --jq '[.[].type] | join(",")' 2>/dev/null || true)
+            case ",$types," in *,pull_request,*|*,update,*|*,required_status_checks,*) continue ;; esac
+            level=$(gh api "repos/$GH_REPO/branches/$B" --jq 'if .protected and (((.protection.required_status_checks.contexts // []) | length) > 0) then (.protection.required_status_checks.enforcement_level // "off") else "off" end' 2>/dev/null || echo off)
+            [ "$level" != "off" ] && continue
+            unprotected="$unprotected $B"
+          done
+          if [ -z "$unprotected" ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+          printf '{"terminalReason":"needs-human","code":"sandbox.start_failed","detail":"lane refused before start: branch(es)%s have no server-side push protection (a ruleset with pull_request, update or required_status_checks, or classic required status checks). The lane token can write contents and the pre-push hook is client-side only (#5899)."}\n' "$unprotected" > "$RESULT_FILE"
+      - uses: actions/checkout@v4
+        if: steps.guard.outputs.ok == 'true'
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - name: Restrict pushes to feat/* branches
+        if: steps.guard.outputs.ok == 'true'
+        run: |
+          cat > .git/hooks/pre-push <<'HOOK'
+          #!/bin/bash
+          while read -r lref lsha rref rsha; do
+            case "$rref" in refs/heads/feat/*|*/forge-salvage/*) ;; *) echo "blocked: lanes push to feat/* only ($rref)"; exit 1 ;; esac
+          done
+          HOOK
+          chmod +x .git/hooks/pre-push
+      - uses: actions/setup-node@v4
+        if: steps.guard.outputs.ok == 'true'
+        with:
+          node-version: 22
+      - name: Install ForgeDock
+        if: steps.guard.outputs.ok == 'true'
+        run: npm install -g forgedock
+      - name: Run lane
+        if: steps.guard.outputs.ok == 'true'
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          FORGEDOCK_BATCH_ID: ${{ inputs.batch }}
+          ISSUE: ${{ inputs.issue }}
+          LANE_ARGS: ${{ inputs.args }}
+          RESULT_FILE: ${{ runner.temp }}/lane-result.json
+        run: |
+          mapfile -d '' -t ARGS < <(node -e 'process.stdout.write(JSON.parse(process.env.LANE_ARGS).join("\0"))')
+          # checkpoints are pushed by run-issue; stop before the job limit so the result step still runs
+          timeout 345m forgedock run-issue "$ISSUE" "${ARGS[@]}" --result-file "$RESULT_FILE" > /dev/null 2>&1 && rc=0 || rc=$?
+          # 124 = stopped at the cap with no result: report the retryable deferral the provider maps to a checkpoint resume
+          if [ "$rc" = 124 ] && [ ! -s "$RESULT_FILE" ]; then
+            echo '{"terminalReason":"deferred","code":"sandbox.actions_timeout","retryInSeconds":60,"detail":"lane reached the 345m cap before it finished; the retry resumes from the pushed checkpoint"}' > "$RESULT_FILE"
+          fi
+      - name: Post result
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ inputs.issue }}
+          LANE_ID: ${{ inputs.lane_id }}
+          RESULT_FILE: ${{ runner.temp }}/lane-result.json
+        run: |
+          [ -s "$RESULT_FILE" ] || exit 0
+          { echo "<!-- FORGE:LANE-RESULT $LANE_ID -->"; echo '```json'; cat "$RESULT_FILE"; echo; echo '```'; } > "$RUNNER_TEMP/body.md"
+          gh issue comment "$ISSUE" --body-file "$RUNNER_TEMP/body.md"

@@ -62,7 +62,7 @@ const spec = (id) => ({ id, issue: 1, batch: "b1", repo: { slug: "o/r", url: "ht
 function agentFixture(hostDisk, opts = {}) {
   const docker = fakeDocker();
   const dir = tmpDir("cs-disk-");
-  const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: dir, allow_cpus: 16, allow_mem_gb: 32, lease_ttl_s: 600, token: "t", ...opts }, { docker, now: () => 1_000_000, log: quiet, live: () => ({ ok: true }), hostDisk });
+  const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: dir, allow_cpus: 16, allow_mem_gb: 32, lease_ttl_s: 600, token: "t", ...opts }, { docker, now: () => 1_000_000, log: quiet, live: () => ({ ok: true }), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }), hostDisk });
   return { agent, docker, dir };
 }
 async function health(agent) {
@@ -163,4 +163,19 @@ test("router places on a host with disk headroom and skips the disk-low one (#57
   assert.equal(r.status, 201);
   assert.equal(r.body.agent, "ok");
   assert.equal(calls.includes("POST low/sandboxes"), false);
+});
+
+test("a reserved launch refused by the disk gate neither throttles nor drains borrowed lanes (#5897)", async () => {
+  let gb = 100;
+  const { agent, docker } = agentFixture(() => ({ gb, path: "/mnt/c" }), { allow_cpus: 12, allow_mem_gb: 31, reservations: [{ name: "res", cpus: 10, mem_gb: 20 }], drain_grace_s: 0 });
+  const touched = [];
+  docker.update = async (name) => { touched.push(["update", name]); };
+  docker.kill = async (name, sig) => { touched.push(["kill", name, sig]); return true; };
+  for (let i = 0; i < 6; i++) assert.equal((await agent.launch({ spec: { ...spec(`b${i}`), priority: "borrow" }, cpus: 2, mem_gb: 4 })).status, 201);
+  gb = 14;
+  const r = await agent.launch({ spec: { ...spec("r1"), priority: "reserved", reservation: "res" }, cpus: 4, mem_gb: 8 });
+  assert.equal(r.status, 503);
+  assert.equal(r.body.code, "pool.disk_low");
+  assert.deepEqual(touched, [], "no borrower was throttled or stopped for a launch that is refused anyway");
+  assert.equal(Object.values(agent.store.data.sandboxes).filter((s) => s.drained).length, 0);
 });

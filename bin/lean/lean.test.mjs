@@ -7,6 +7,7 @@ import { laneBackendId } from "./limits.mjs";
 import { parseExperiment, assignArm } from "../experiment.mjs";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
+import { CHECKS_CLI } from "./prompts.mjs"; // #5727
 import { normaliseDecision, writeDecisionIndex } from "./decisions.mjs"; // #5338
 import { execFileSync } from "node:child_process";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync, readdirSync, chmodSync } from "node:fs";
@@ -32,6 +33,7 @@ import { makeRunTmp, wrapLaneLimits, laneCapNotice, systemdRunAvailable, makeLea
 import { retrying, ghCacheRetry, refreshAuthOnce, GH_AUTH_RE, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
 import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT, ENV_VALIDATE_PLACEMENT, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
+import { parsePagesConfig } from "./pagegate.mjs";
 import * as refactorMod from "./refactor.mjs";
 import { readAdmission, readConformanceMode, readReviewIncomplete, readEnvConfig, readContextPack } from "../engine-cli.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
@@ -947,6 +949,43 @@ describe("core work-on", () => {
     assert.ok(!l.edits.some((e) => e.includes("--add-label") && e.includes("needs-human")), JSON.stringify(l.edits));
   });
 
+  describe("#5727 frozen forgedock install paths", () => {
+    const remote = { placement: { where: "remote", reason: "mode remote" } };
+    const H41009 = "/home/dev/.local/lib/node_modules/forgedock/bin/lean/checks.mjs"; // #41009's frozen V5 names the host install
+    const STALE = existsSync(H41009) ? "/opt/absent-5727/lib/node_modules/forgedock/bin/lean/checks.mjs" : H41009; // on that host itself, an equally stale path
+    const V5 = `node ${STALE} --base origin/staging`;
+    const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V5", command: V5 }] };
+    const stale = (cmd) => (String(cmd).includes(STALE) ? { rc: 1, output: `node:internal/modules/cjs/loader\nError: Cannot find module '${STALE}'\n code: 'MODULE_NOT_FOUND'` } : { rc: 0, output: "" });
+    it("#5727 remote preflight runs a stale forgedock checks path as this install's path", async () => {
+      const w = world({ contract }); const seen = [];
+      w.io.probeCommand = async (a) => { seen.push(a.command); return stale(a.command); };
+      w.io.preflightRun = async (a) => { seen.push(a.command); return stale(a.command); };
+      const r = await run(w, { dir: tmpDir("lean-5727a-"), ...remote });
+      assert.notEqual(r.code, "env.tool_missing", r.detail);
+      assert.notEqual(r.terminalReason, "needs-human", r.detail);
+      assert.ok(builders(w).length >= 2, "the builder implements");
+      assert.ok(seen.some((c) => c.includes(CHECKS_CLI)), JSON.stringify(seen));
+      assert.ok(!seen.some((c) => c.includes(STALE)), "no runner saw the stale path");
+    });
+    it("#5727 a frozen contract carries no absolute forgedock install path", async () => {
+      const w = world({ contract });
+      await run(w, { dir: tmpDir("lean-5727b-") });
+      const posted = w.comments.find((x) => x.includes("FORGE:CONTRACT"));
+      assert.ok(posted, "contract posted");
+      assert.doesNotMatch(posted, /\/forgedock\/bin\//);
+      assert.match(posted, /\$FORGEDOCK_CHECKS_CLI --base origin\/staging/);
+    });
+    it("#5727 light-lane and precheck runners receive the resolved forgedock path", async () => {
+      const w = world({ contract }); const ran = [];
+      w.io.preflightRun = async (a) => { ran.push(a.command); return stale(a.command); }; // a local (host) placement runs it too
+      const r = await run(w, { dir: tmpDir("lean-5727c-"), placement: { where: "local", reason: "x" } });
+      assert.notEqual(r.code, "env.tool_missing", r.detail);
+      const v5 = ran.filter((c) => /--base origin\/staging/.test(c));
+      assert.ok(v5.length >= 1, JSON.stringify(ran));
+      assert.ok(v5.every((c) => c.includes(CHECKS_CLI) && !c.includes("$FORGEDOCK")), JSON.stringify(v5));
+    });
+  });
+
   describe("#5652 in-sandbox recipe install", () => {
     const remote = { placement: { where: "remote", reason: "mode remote" } };
     const withTool = (tool) => ({ ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: `${tool} check x` }] });
@@ -1061,6 +1100,178 @@ describe("core work-on", () => {
     assert.ok(["dependency-open", "dependency-unreadable"].includes(r.terminalReason));
     assert.equal(w.labels.length, 0);
     assert.equal(w.calls.filter((c) => c[1] === "worktree").length, 0);
+  });
+
+  describe("stacked plan lanes (#5831)", () => {
+    const openDep = (w) => {
+      const gh = w.io.gh;
+      w.io.gh = async (a) => {
+        if (a[0] === "api" && /issues\/7$/.test(a[1])) return JSON.stringify({ body: "**Depends on**: #3", user: { login: "x" }, author_association: "OWNER" });
+        if (a[0] === "api" && /issues\/3$/.test(a[1])) return JSON.stringify({ state: "open" });
+        return gh(a);
+      };
+      return w;
+    };
+    /** The fake git has no merge-base: the plan's base is an ancestor of the lane and `diff` lists `changed`. */
+    const onLane = (w, { ancestor = true, changed = "" } = {}) => {
+      const git = w.io.git;
+      w.io.git = async (a, opts) => {
+        if (a[0] === "merge-base") { if (!ancestor) throw new Error("not an ancestor"); return ""; }
+        if (a[0] === "diff" && /\.\./.test(a[2] ?? "") && a[1] === "--name-only" && !String(a[2]).includes("...")) return changed;
+        return git(a, opts);
+      };
+      return w;
+    };
+    it("plan: true skips the dependency-open refusal, freezes the contract and ends planned with {contractHash, baseSha}: no building label, no commit, push, PR or merge", async () => {
+      const w = openDep(world());
+      const r = await run(w, { plan: true });
+      assert.equal(r.terminalReason, "planned", r.detail);
+      assert.match(r.planned.contractHash, /^[0-9a-f]{12}$/);
+      assert.ok(r.planned.baseSha.length >= 7);
+      assert.ok(w.comments.some((c) => c.startsWith("<!-- FORGE:CONTRACT -->")), "the contract froze");
+      assert.equal(w.labels.some((l) => /workflow:building/.test(JSON.stringify(l))), false);
+      assert.equal(builders(w).length, 1, "only the plan session ran; no builder");
+      assert.equal(w.calls.some((c) => c[0] === "git" && ["commit", "push"].includes(c[1])), false);
+      assert.equal(w.prs.length, 0); assert.equal(w.merges.length, 0);
+    });
+    it("without plan an open dependency still refuses (preserved)", async () => {
+      const r = await run(openDep(world()));
+      assert.ok(["dependency-open", "dependency-unreadable"].includes(r.terminalReason));
+    });
+    it("planned: the build lane reuses the plan's frozen contract instead of re-planning", async () => {
+      const first = await (async () => { const w = openDep(world()); const r = await run(w, { plan: true }); return { w, r }; })();
+      const comments = first.w.comments.filter((c) => c.startsWith("<!-- FORGE:CONTRACT -->")).map((body) => ({ body, author_association: "OWNER", user: { type: "Bot", login: "forge[bot]" } }));
+      const w = world({ issueComments: comments });
+      const r = await run(onLane(w), { planned: first.r.planned });
+      assert.equal(r.terminalReason, "merged", r.detail);
+      assert.equal(w.comments.filter((c) => c.startsWith("<!-- FORGE:CONTRACT -->")).length, 0, "no second contract was frozen");
+    });
+    for (const [name, opt] of [["the lane moved (plan base not an ancestor)", { ancestor: false }], ["the dependency's merged diff touches a deliverable path", { changed: "bin/lean/foo.mjs\nsrc/foo.mjs\n" }]]) {
+      it(`planned: ${name} makes the plan stale and the lane re-plans`, async () => {
+        const first = await (async () => { const w = openDep(world()); const r = await run(w, { plan: true }); return { w, r }; })();
+        const frozen = first.w.comments.find((c) => c.startsWith("<!-- FORGE:CONTRACT -->"));
+        const paths = (frozen.match(/"path":\s*"([^"]+)"/g) ?? []).map((m) => m.replace(/.*"([^"]+)"$/, "$1"));
+        const changed = opt.changed ? `${paths.join("\n")}\n` : "";
+        const comments = [{ body: frozen, author_association: "OWNER", user: { type: "Bot", login: "forge[bot]" } }];
+        const w = world({ issueComments: comments });
+        const r = await run(onLane(w, { ...opt, changed }), { planned: first.r.planned });
+        assert.equal(r.terminalReason, "merged", r.detail);
+        assert.ok(w.comments.some((c) => c.startsWith("<!-- FORGE:CONTRACT -->")), "re-planned: a new contract froze");
+      });
+    }
+    it("planned: a different contract hash makes the plan stale and the lane re-plans", async () => {
+      const first = await (async () => { const w = openDep(world()); const r = await run(w, { plan: true }); return { w, r }; })();
+      const comments = first.w.comments.filter((c) => c.startsWith("<!-- FORGE:CONTRACT -->")).map((body) => ({ body, author_association: "OWNER", user: { type: "Bot", login: "forge[bot]" } }));
+      const w = world({ issueComments: comments });
+      const r = await run(onLane(w), { planned: { ...first.r.planned, contractHash: "ffffffffffff" } });
+      assert.equal(r.terminalReason, "merged", r.detail);
+      assert.ok(w.comments.some((c) => c.startsWith("<!-- FORGE:CONTRACT -->")), "re-planned: a new contract froze");
+    });
+  });
+
+  describe("stacked builds (#5832)", () => {
+    const STACK = { dependency: 3, branch: "feat/issue-3-lean", sha: "a".repeat(40) };
+    /** The dependency's issue is open; its PR is `depState`; the stacked PR's live base follows `pr edit --base`. */
+    const stacked = (w, { depState = "OPEN", base = STACK.branch } = {}) => {
+      const gh = w.io.gh;
+      const st = { base, edits: [] };
+      w.io.gh = async (a) => {
+        if (a[0] === "api" && /issues\/7$/.test(a[1])) return JSON.stringify({ body: "**Depends on**: #3", user: { login: "x" }, author_association: "OWNER" });
+        if (a[0] === "api" && /issues\/3$/.test(a[1])) return JSON.stringify({ state: "open" });
+        if (a[0] === "pr" && a[1] === "list" && a.includes("--head") && a[a.indexOf("--head") + 1] === STACK.branch) return JSON.stringify([{ number: 5, state: depState }]);
+        if (a[0] === "pr" && a[1] === "view" && a.includes("baseRefName")) return JSON.stringify({ baseRefName: st.base });
+        if (a[0] === "pr" && a[1] === "edit" && a.includes("--base")) { st.edits.push(a[a.indexOf("--base") + 1]); st.base = a[a.indexOf("--base") + 1]; return ""; }
+        return gh(a);
+      };
+      w.stack = st;
+      return w;
+    };
+    it("builds while the dependency is open, opens the PR on the dependency branch, records stackedOn; merges only after the dependency merged, retargeted to the lane", async () => {
+      const w = stacked(world(), { depState: "MERGED" });
+      const r = await run(w, { stackedOn: STACK });
+      assert.equal(r.terminalReason, "merged", r.detail);
+      const create = w.prs[0];
+      assert.equal(create[create.indexOf("--base") + 1], STACK.branch, "stacked PR base is the dependency branch");
+      assert.deepEqual(w.stack.edits, ["staging"], "retargeted to the lane before the merge");
+      assert.equal(w.merges.length, 1);
+      assert.ok(w.seq.indexOf("pr") < w.seq.indexOf("merge"));
+    });
+    it("merge.stacked_base: never merges while the dependency is unmerged (the base stays the dependency branch)", async () => {
+      const w = stacked(world(), { depState: "OPEN" });
+      const r = await run(w, { stackedOn: STACK, ciMaxMinutes: 0 });
+      assert.equal(w.merges.length, 0, "no gh pr merge");
+      assert.equal(w.stack.base, STACK.branch, "never retargeted");
+      assert.notEqual(r.terminalReason, "merged");
+    });
+    it("merge.stacked_base: a stacked PR whose live base is not the lane is refused even once the dependency merged", async () => {
+      const w = stacked(world(), { depState: "MERGED" });
+      const edit = w.io.gh;
+      w.io.gh = async (a) => (a[0] === "pr" && a[1] === "edit" && a.includes("--base") ? "" : edit(a)); // the retarget silently does not take
+      const r = await run(w, { stackedOn: STACK });
+      assert.equal(w.merges.length, 0);
+      assert.equal(r.code, "merge.stacked_base");
+    });
+    /** #5833: the dependency's PR list entry follows `dep.list`; `pr close` and `push --delete` are recorded. */
+    const cascading = (w, list) => {
+      const gh = w.io.gh, git = w.io.git;
+      w.closes = []; w.deletes = []; w.merged = [];
+      w.io.gh = async (a) => {
+        if (a[0] === "pr" && a[1] === "list" && a.includes("--head") && a[a.indexOf("--head") + 1] === STACK.branch) return JSON.stringify(list());
+        if (a[0] === "pr" && a[1] === "close") { w.closes.push(a.join(" ")); return ""; }
+        return gh(a);
+      };
+      w.io.git = async (a, o) => {
+        if (a[0] === "push" && a.includes("--delete")) { w.deletes.push(a.join(" ")); return ""; }
+        return git(a, o);
+      };
+      return w;
+    };
+    it("cascade replan: a dependency that ended without merging drops the stacked PR and branch, defers with stack.replan, never merges", async () => {
+      const w = cascading(stacked(world(), { depState: "CLOSED" }), () => [{ number: 5, state: "CLOSED" }]);
+      const r = await run(w, { stackedOn: STACK });
+      assert.equal(r.terminalReason, "deferred");
+      assert.equal(r.code, "stack.replan");
+      assert.equal(r.cascade, "replan");
+      assert.deepEqual(r.cascades, ["replan"]);
+      assert.equal(w.closes.length, 1);
+      assert.equal(w.deletes.length, 1);
+      assert.equal(w.merges.length, 0);
+    });
+    it("cascade restart: the dependency head moved and the rebase conflicts: PR and branch dropped, deferred with stack.restart from the frozen contract", async () => {
+      const w = cascading(stacked(world(), { depState: "OPEN" }), () => [{ number: 5, state: "OPEN", headRefOid: "b".repeat(40) }]);
+      const git = w.io.git;
+      w.io.git = async (a, o) => { if (a[0] === "merge" && a.includes("--no-commit")) throw new Error("CONFLICT"); return git(a, o); };
+      const r = await run(w, { stackedOn: STACK });
+      assert.equal(r.code, "stack.restart");
+      assert.equal(r.cascade, "restart");
+      assert.equal(w.closes.length, 1);
+      assert.equal(w.merges.length, 0);
+    });
+    it("cascade rebase: the dependency merged: retargeted to the lane, the cascade and its rework are recorded on the result", async () => {
+      const w = cascading(stacked(world(), { depState: "MERGED" }), () => [{ number: 5, state: "MERGED" }]);
+      const r = await run(w, { stackedOn: STACK });
+      assert.equal(r.terminalReason, "merged", r.detail);
+      assert.equal(r.cascade, "rebase");
+      assert.deepEqual(r.cascades, ["rebase"]);
+      assert.ok(Number.isFinite(r.cascade_minutes) && Number.isFinite(r.cascade_cost_usd));
+      assert.deepEqual(w.stack.edits, ["staging"]);
+    });
+    it("cascade reverify: a moved dependency head with a clean rebase re-verifies, then still merges only after the dependency merged", async () => {
+      let polls = 0;
+      const w = cascading(stacked(world(), { depState: "OPEN" }), () => (++polls === 1 ? [{ number: 5, state: "OPEN", headRefOid: "b".repeat(40) }] : [{ number: 5, state: "MERGED" }]));
+      const r = await run(w, { stackedOn: STACK });
+      assert.equal(r.terminalReason, "merged", r.detail);
+      assert.deepEqual(r.cascades, ["reverify", "rebase"]);
+      assert.equal(r.cascade, "rebase");
+      assert.equal(w.merges.length, 1);
+      assert.ok(w.stack.edits.length === 1, "retargeted once, after the dependency merged");
+    });
+    it("without stackedOn the PR targets the lane and an open dependency still refuses (preserved)", async () => {
+      const w = stacked(world());
+      const r = await run(w);
+      assert.ok(["dependency-open", "dependency-unreadable"].includes(r.terminalReason));
+      assert.equal(w.prs.length, 0);
+    });
   });
 
   it("an open PR / remote branch without a frozen contract re-plans, then verifies the existing commits; no second PR", async () => {
@@ -1798,7 +2009,7 @@ describe("conformance shadow mode (the default)", () => {
       assert.equal(r.code, OUTCOME_CODES.ENV_TOOL_MISSING, conformance); assert.equal(w.merges.length, 0);
       assert.equal(builders(w).length, 2, "plan + implement only"); assert.equal(reviewers(w).length, 0);
       assert.match(nhBody(w), /Environment error \(not a conformance failure\): the host is missing yaml/);
-      assert.deepEqual(ran.map((a) => [a.command, a.cwd]), [["node --test test/foo.test.js", WT]], "only the failed contract validate is rerun, in the worktree");
+      assert.deepEqual(ran.map((a) => [a.command, posix(a.cwd)]), [["node --test test/foo.test.js", WT]], "only the failed contract validate is rerun, in the worktree");
       assert.ok(ran[0].env && typeof ran[0].env === "object", "the rerun gets the lane env");
     }
   });
@@ -1843,7 +2054,7 @@ describe("conformance shadow mode (the default)", () => {
     const rb = await run(bad.w, { conformance: "enforce", dir });
     assert.equal(rb.terminalReason, "needs-human"); assert.equal(bad.w.merges.length, 0);
     assert.match(nhBody(bad.w), /frozen command runs and fails \(exit 1\)/);
-    assert.ok(bad.ran.some((a) => a.command === "node --test test/foo.test.js" && a.cwd === WT && a.env), "the frozen command is rerun in the worktree with the lane env");
+    assert.ok(bad.ran.some((a) => a.command === "node --test test/foo.test.js" && posix(a.cwd) === WT && a.env), "the frozen command is rerun in the worktree with the lane env");
     assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "SUBSTITUTE_RERUN").map((e) => e.runs), [[{ id: "V1", rc: 1 }], [{ id: "V1", rc: 1 }]]);
     const good = lane({ rc: 1, output: "no tests ran: no test files matched test/foo.test.js" });
     assert.equal((await run(good.w, { conformance: "enforce" })).terminalReason, "merged");
@@ -1908,7 +2119,7 @@ describe("conformance shadow mode (the default)", () => {
     assert.equal((await run(w, { dir })).terminalReason, "merged");
     assert.equal(builders(w).length, 3, "plan + one contract correction + implement");
     assert.match(builders(w)[1][4], /V1: needs Python module 'yaml' \(for python3\), which this host lacks[\s\S]*repo's own toolchain/);
-    assert.ok(ran.every((a) => a.cwd === WT && a.env && typeof a.env === "object"), "probes run in the worktree with the lane env");
+    assert.ok(ran.every((a) => posix(a.cwd) === WT && a.env && typeof a.env === "object"), "probes run in the worktree with the lane env");
     assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "VALIDATE_PREFLIGHT").map((e) => [e.corrected, e.misses.map((m) => m.tool)]), [[true, []]]);
     // still missing after the correction: advisory only, the lane goes on (the post-build rerun is the gate)
     const dir2 = tmpDir("preflight-");
@@ -1945,7 +2156,7 @@ describe("conformance shadow mode (the default)", () => {
     assert.match(b[1][4], /V4: running it on the base worktree stopped before any test ran: needs Python module 'httpx'[\s\S]*repo's own toolchain/);
     assert.doesNotMatch(b[1][4], /V[123]:/, "RED on base is not a miss");
     assert.match(b[2][4], /The engine froze/, "the correction lands before the implement builder");
-    assert.ok(ran.every(([, cwd]) => cwd === WT));
+    assert.ok(ran.every(([, cwd]) => posix(cwd) === WT));
     const firstImpl = w.seq.indexOf("builder-resume", w.seq.indexOf("builder-resume") + 1);
     assert.ok(ran.every(([, , at]) => at < firstImpl), "every run happens before the implement session");
     const pf = readLog(dir, 7).filter((e) => e.event === "VALIDATE_PREFLIGHT");
@@ -2256,7 +2467,7 @@ describe("structure delta (forge#4159): undeclared package edges block, import g
     assert.equal(builders(w).length, 3); assert.equal(reviewers(w).length, 1);
     assert.match(builders(w)[2][4], /@s\/db -> @s\/core \(dependencies, packages\/db\/package\.json\)[\s\S]*add it to the contract with a reason, or remove it/);
     assert.equal(builders(w)[2][2], null, "#4363: a fresh fix session");
-    assert.deepEqual(w.structureCalls[0], { cwd: "/wt/lean-7", base: "origin/staging" });
+    assert.deepEqual({ ...w.structureCalls[0], cwd: posix(w.structureCalls[0].cwd) }, { cwd: "/wt/lean-7", base: "origin/staging" });
     const e = readLog(dir, 7).find((x) => x.event === "STRUCTURE_DELTA");
     assert.equal(e.edges_added, 1);
     assert.ok(readLog(dir, 7).findIndex((x) => x.event === "STRUCTURE_DELTA") < readLog(dir, 7).findIndex((x) => x.event === "CONFORMANCE"), "before the conformance review");
@@ -2369,8 +2580,8 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(facts([], { file_lines: 1000, growth_lines: 50 })).trim(), "Don't grow a file over 1000 lines by more than 50 lines. Put new code next to it.");
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
-    // 2650: #5557 (classification record line) on top of the base's growth. 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule). 1675 (hotspot case): #5284 (rubric prod_parity clause). 2375/1825: #5345 (self-check and pitfall lines).
-    assert.ok(approxTokens(plan) <= 2700, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    // 2750: #5750 (outcome vs guidance rows). 2650: #5557 (classification record line) on top of the base's growth. 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule). 1675 (hotspot case): #5284 (rubric prod_parity clause). 2375/1825: #5345 (self-check and pitfall lines).
+    assert.ok(approxTokens(plan) <= 2750, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 2025, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 2025 tokens`); // 2025: #5752 (mechanism supersedes, negative examples, outcome evidence) // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule) // 1925: #5760 (CI budget rule)
   });
 
@@ -2475,7 +2686,7 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     const prev = process.env.FORGE_HOST_PARALLELISM; process.env.FORGE_HOST_PARALLELISM = "3";
     try { assert.equal((await run(w, { envSetup: "make setup", precheck: { commands: ["npm run lint"] } })).terminalReason, "merged"); }
     finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; }
-    const lane = { UV_CACHE_DIR: "/c/uv", TMPDIR: w.envs[0].TMPDIR, FORGE_HOST_PARALLELISM: "3", FORGE_LANE_WORKTREE: "1", GIT_CEILING_DIRECTORIES: w.envs[0].GIT_CEILING_DIRECTORIES, PATH: "/rt/toolchain/bin:/usr/bin" };
+    const lane = { UV_CACHE_DIR: "/c/uv", TMPDIR: w.envs[0].TMPDIR, FORGE_HOST_PARALLELISM: "3", FORGE_LANE_WORKTREE: "1", GIT_CEILING_DIRECTORIES: w.envs[0].GIT_CEILING_DIRECTORIES, FORGEDOCK_CHECKS_CLI: CHECKS_CLI, FORGEDOCK_ENTRY_CLI: FORGEDOCK_CLI, PATH: "/rt/toolchain/bin:/usr/bin" };
     assert.equal(lane.GIT_CEILING_DIRECTORIES.split(":")[0], "/wt", "#5825: lane children are ceiled at the worktree parent");
     assert.match(lane.TMPDIR, /\/runs\/7-/, "the builder ran with the run TMPDIR");
     assert.deepEqual(w.rgCalls.map((x) => x.env), [lane], "red-green gets the lane env, not the daemon's");
@@ -2910,7 +3121,7 @@ describe("comment templates", () => {
 
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
-    assert.ok(approxTokens(plan) <= 2650, `plan prompt is ${approxTokens(plan)} tokens`); // 2550: first-pass check-id + dependency-block rule; 2500: #5445 (Test plan heading); 2475: staging; 2375: #5432 (duplicate rule); 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule) // 2325: #5333 (git stash rule + stage stamp line)
+    assert.ok(approxTokens(plan) <= 2700, `plan prompt is ${approxTokens(plan)} tokens`); // 2700: #5750 (outcome vs guidance split) on top of 2650; 2550: first-pass check-id + dependency-block rule; 2500: #5445 (Test plan heading); 2475: staging; 2375: #5432 (duplicate rule); 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule) // 2325: #5333 (git stash rule + stage stamp line)
     assert.ok(approxTokens(impl) <= 2000, `implement prompt is ${approxTokens(impl)} of 2000 tokens`); // 2000: #5752 // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule // 1850: #5333 (git stash rule + stage stamp) // 1900: #5760 (CI budget rule)
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues", "### Test plan",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
@@ -4044,6 +4255,16 @@ describe("base-sync (#4100)", () => {
     assert.equal(r.terminalReason, "ci-pending");
     assert.equal(w.merges.length, 0);
   });
+  it("#5794 the release fix lane (FORGE_RELEASE_FIX_LANE=1) merges past a pending release PR; other lanes stay held", async () => {
+    const w = world({ releasePrs: RELEASE_PENDING });
+    w.io.env = { ...process.env, FORGE_RELEASE_FIX_LANE: "1" };
+    assert.equal((await run(w, { ciMaxMinutes: 1 })).terminalReason, "merged");
+    assert.equal(w.merges.length, 1);
+    const h = world({ releasePrs: RELEASE_PENDING });
+    h.io.env = { ...process.env, FORGE_RELEASE_FIX_LANE: "" };
+    assert.equal((await run(h, { ciMaxMinutes: 1 })).terminalReason, "ci-pending");
+    assert.equal(h.merges.length, 0);
+  });
   it("#5709 no release PR, or the hold disabled, leaves merge behaviour unchanged", async () => {
     assert.equal((await run(world({ releasePrs: [] }))).terminalReason, "merged");
     const w = world({ releasePrs: RELEASE_PENDING });
@@ -4468,6 +4689,18 @@ describe("host admission (#4105)", () => {
     assert.equal(w.ghCalls, 0); assert.equal(w.leaseWrites.length, 0); assert.equal(w.leaseReads ?? 0, 0);
     assert.equal(w.calls.length, 0, "no git or runner calls");
     assert.deepEqual(w.labels, []);
+  });
+
+  it("ramping lanes are subtracted: deferred host.busy with the projected numbers; a passed admission is recorded (#5845)", async () => {
+    const w = withHost(world(), { ...host({ mem: 6000 }), rampingMb: () => 4096, rampingLanes: () => 2, laneFootprintMb: () => 2048 });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "host.busy");
+    assert.equal(r.detail, "host busy: projected mem 1.9G (free 5.9G − ramping 4G) < need 4G; retry in 60s");
+    assert.equal(w.ghCalls, 0);
+    let recorded = 0;
+    const ok = withHost(world(), { ...host(), recordAdmission: () => { recorded++; }, rampingMb: () => 0, rampingLanes: () => 0 });
+    assert.equal((await run(ok)).terminalReason, "merged");
+    assert.equal(recorded, 1);
   });
 
   it("low tmp space on the run TMPDIR filesystem or on /tmp is deferred host.busy", async () => {
@@ -5534,6 +5767,29 @@ describe("lane resolution in core work-on (#4125)", () => {
       const r = await run(w, extra);
       assert.deepEqual([r.terminalReason, r.code], ["lane-refused", "lane.default_branch"], JSON.stringify(extra));
       assert.deepEqual(touched(w), nothing);
+    }
+  });
+
+  it("#5846 a transient lane read in runCore defers lane.unresolved instead of lane-refused", async () => {
+    const w = leased(world({ milestone: "M1", branchesOnOrigin: ["staging", "milestone/m1"] }));
+    const gh = w.io.gh;
+    w.io.gh = async (a, opts) => { if (a[0] === "issue" && a[1] === "view" && a.includes("milestone")) throw new Error("spawn UNKNOWN"); return gh(a, opts); };
+    const r = await run(w, { lane: undefined });
+    assert.deepEqual([r.terminalReason, r.code], ["deferred", "lane.unresolved"]);
+    assert.ok(r.retryInSeconds > 0);
+    assert.match(r.detail, /cannot read the milestone of #7/);
+    assert.deepEqual(touched(w), nothing);
+  });
+
+  it("#5846 genuine lane refusals stay lane-refused with their own codes", async () => {
+    const cases = [
+      [{ milestone: "M1", branchesOnOrigin: ["staging", "milestone/m1"] }, { lane: "staging" }, "lane.mismatch"],
+      [{}, { lane: "main" }, "lane.default_branch"],
+      [{ milestone: "Not Yet" }, { lane: undefined }, "lane.branch_missing"],
+    ];
+    for (const [o, extra, code] of cases) {
+      const r = await run(leased(world(o)), extra);
+      assert.deepEqual([r.terminalReason, r.code], ["lane-refused", code]);
     }
   });
 
@@ -8601,7 +8857,7 @@ describe("#4395 lane profile", () => {
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
     assert.ok(approxTokens(builderImplementPrompt()) <= 2000, `implement prompt is ${approxTokens(builderImplementPrompt())} of 2000 tokens`); // 1900: #5760; 2000: #5752
-    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2650, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2125 tokens`);
+    assert.ok(approxTokens(builderPlanPrompt(7)) <= 2700, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2125 tokens`);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {
@@ -9102,7 +9358,7 @@ describe("#5347 builders open with one batch of independent reads", () => {
 });
 
 describe("#5347 lane: the build opens with its independent reads in one turn", () => {
-  it("a lane whose contract names two deliverables hands the builder the opening batch; the builder's one-turn reads through the real stream parser record calls/turn >= 2", async () => {
+  it("a lane whose contract names two deliverables hands the builder the opening batch; the builder's one-turn reads through the real stream parser record calls/turn >= 2", { skip: process.platform === "win32" && "the fake CLI is a #!/bin/sh script" }, async () => {
     const { runCliBackendAsync } = await import("../runner.mjs");
     const { toolStats } = await import("./toolstats.mjs");
     const two = { ...CONTRACT, deliverables: [...CONTRACT.deliverables, { id: "D2", path: "src/bar.js", change: "keep callers", requirements: ["R1"] }] };
@@ -9414,6 +9670,31 @@ describe("design gate routing in the lane (#5330 R11, R13, R15)", () => {
   });
 });
 
+describe("spec-only page gate failures end design.spec_required (#5729)", () => {
+  const PAGE = "web/src/app/(site)/contact/page.tsx";
+  const brief = { design_spec: "FORGE:DESIGN_SPEC", seo: Object.fromEntries(["intent", "icp", "title", "h1", "meta", "structured_data", "links_in", "links_out", "gsc_baseline", "measure_by"].map((k) => [k, "x"])), geo: { surfaces: "llms.txt", agent_question: "q" } };
+  const pc = { ...CONTRACT, page_gate: brief, deliverables: [{ id: "D1", path: PAGE, change: "repoint the link", requirements: ["R1"] }] };
+  const pagesConfig = { ...parsePagesConfig(undefined, { hasAppPages: true }), require: ["design"] };
+  const link = (h, x = "") => `<Link href="${h}"${x}>Book a demo</Link>`;
+  const mk = (diff) => { const w = world({ contract: pc, changed: [PAGE, "test/foo.test.js"], reviews: [conf({}, pc, [PAGE, "test/foo.test.js"])] }); w.diffText = `+++ b/${PAGE}\n${diff}`; return w; };
+  it("spec-only precheck failures end design.spec_required with no resume for 5729", async () => {
+    const w = mk(`-${link("/contact")}\n+${link("/contact")}<Badge />\n`), r = await run(w, { pagesConfig });
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(r.code, OUTCOME_CODES.DESIGN_SPEC_REQUIRED);
+    assert.ok(w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN") && /recovery lane was spent/.test(c)));
+    assert.ok(!builders(w).some((c) => /resume|conformance\.unimplemented/i.test(c[4] ?? "")), "no builder resume");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: r.code }), "terminal", "no recovery lane");
+  });
+  it("replay of #40917 spends no resume or recovery for 5729", async () => {
+    const w = mk(`-${link("https://calendly.com/x", ' target="_self"')}\n+${link("/contact", ' target="_blank"')}\n`), r = await run(w, { pagesConfig });
+    assert.equal(r.code, OUTCOME_CODES.DESIGN_SPEC_REQUIRED); // only the screenshot row is left, and it is terminal too
+    const note = w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN")) ?? "";
+    assert.ok(!/is a public page but the issue has no approved/.test(note), "no spec row for a copy edit");
+    assert.match(note, /visual check/);
+    assert.ok(!builders(w).some((c) => /conformance\.unimplemented/i.test(c[4] ?? "")), "no builder resume");
+  });
+});
+
 describe("classification record in the plan prompt (#5557)", () => {
   it("asks only for the judgment fields and never for units or migrations", () => {
     const p = builderPlanPrompt(7);
@@ -9517,9 +9798,9 @@ describe("#5592 (8) comment and label spam", () => {
   it("start clears needs-human, needs-human:external, parked:* and remediation-queue; other labels stay", async () => {
     const w = world({ issueBodies: [ISSUE_BODY], labels: [{ name: "bug" }, { name: "needs-human" }, { name: "needs-human:external" }, { name: "parked:ci.red" }, { name: "remediation-queue" }] });
     await run(w);
-    const rm = w.edits.find((e) => e.includes("--remove-label") && e.some((x) => /needs-human/.test(x)));
-    assert.ok(rm, "labels cleared");
-    assert.deepEqual(rm[rm.indexOf("--remove-label") + 1].split(","), ["needs-human", "needs-human:external", "parked:ci.red", "remediation-queue"]);
+    // #5759: one removal call per label
+    const rm = w.edits.filter((e) => e.includes("--remove-label")).map((e) => e[e.indexOf("--remove-label") + 1]);
+    assert.deepEqual(rm.filter((x) => /needs-human|parked:|remediation-queue/.test(x)), ["needs-human", "needs-human:external", "parked:ci.red", "remediation-queue"]);
   });
 
   it("a merged run re-reads the labels and clears a parked label added meanwhile", async () => {
@@ -9559,7 +9840,7 @@ describe("#5683 monorepo sub-project dependencies are not host tools", () => {
   it("#5764 forgedock (the engine CLI that runs the lane in the sandbox) is never a remote tool miss", async () => {
     const remote = { placement: { where: "remote", reason: "mode remote" } };
     const w = world({ contract: { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "forgedock check" }] } });
-    w.io.probeCommand = async (a) => ({ rc: /forgedock/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
+    w.io.probeCommand = async (a) => ({ rc: /forgedock/.test(a.command) ? 127 : 0, output: /forgedock/.test(a.command) ? "sh: 1: forgedock: not found" : "" });
     const r = await run(w, { dir: tmpDir("lean-5764d-"), ...remote });
     assert.notEqual(r.code, "env.tool_missing");
     assert.doesNotMatch(w.comments.map((c) => c.body ?? c).join("\n"), /Remote sandbox lacks/);

@@ -70,6 +70,7 @@ describe("reviewStep", () => {
     assert.equal(seen.opts.env.PATH, "/usr/bin");
     assert.equal(seen.opts.env.HOME, "/h");
     assert.ok(!("FORGE_DRIVER_TOKEN" in seen.opts.env));
+    assert.equal(seen.opts.env.FORGE_RELEASE_FIX_LANE, "1", "#5794 marks the release fix lane");
   });
 
   it("runs the briefs and the spec panel in parallel, then test gate, finalize and summary in order", async () => {
