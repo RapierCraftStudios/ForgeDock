@@ -51,3 +51,8 @@ fi
 export ROUTER_URL ENROLL_TOKEN AGENT_NAME AGENT_URL BUNDLE
 export AGENT_PORT="$PORT" ALLOW_CPUS="$CPUS" ALLOW_MEM_GB="$MEM"
 bash "$HERE/install-agent.sh"
+
+# #5884: periodic discard so freed lane blocks return to the thin disk / VHDX (best effort: absent timer, no systemd or an unsupported fs is not an install failure).
+if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files fstrim.timer >/dev/null 2>&1; then
+  systemctl enable --now fstrim.timer >/dev/null 2>&1 || echo "note: could not enable fstrim.timer (the agent also runs fstrim itself)" >&2
+fi

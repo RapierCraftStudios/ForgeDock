@@ -21,6 +21,12 @@ Rolling per-module knowledge log. Hard cap: 150 lines.
 - `forgedock pool enroll --agent-url http://127.0.0.1:<port>` prints a Linux install command with `AGENT_URL` set (SSH-tunnel hosts).
 - Tests: `bin/tests/computeshare.test.mjs` (`#5856`).
 
+## Entry 2026-11-23 — lane disk cap, prune, fstrim, sparse VHD (#5884)
+
+- `bin/pool/disk.mjs` (pure, dependency-free): `laneDiskUsedGb`, `planDiskCap` (ok|prune|full), `fstrimDue`, `runFstrim` (never throws). Keys: `lane_disk_cap_gb` (unset = off, `/capacity` byte-identical), `disk_prune_at_pct` (80), `fstrim_interval_s` (6 h), `fstrim`, `docker_root`.
+- `launch` answers 503 `pool.disk_cap` at the cap; the router skips `disk_capped` agents and defers with the same code. From the threshold `reap()` runs label-scoped `containerPrune`/`imagePrune` (`docker.mjs`, #5881 scoping), builder prune and `cacheSweep`, then fstrim.
+- Installer: `.wslconfig` `[experimental] sparseVhd=true` plus `wsl --manage --set-sparse` (reverted with the backup on uninstall); Linux enables `fstrim.timer` best effort. Tests: `bin/tests/pool-disk-cap.test.mjs`.
+
 ## Entry 2026-11-15 — Environment snapshots (#5714)
 
 - Design, failure modes and rejected options: `devdocs/decisions/5714-env-library.md`. User guide: `docs/ENV-LIBRARY.md`.

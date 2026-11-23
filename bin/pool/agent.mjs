@@ -15,6 +15,7 @@ import { jsonStore } from "./store.mjs";
 import { makeWarm } from "./warm.mjs";
 import { resolveLaneImage, laneImageNow, laneToolsTag, isLaneToolsTagOf } from "./lane-tools.mjs";
 import { hostDiskFree } from "./health.mjs";
+import { laneDiskUsedGb, planDiskCap, fstrimDue, runFstrim } from "./disk.mjs";
 import { planIdleEviction, CACHE_LABEL, agentLabel } from "./cache-sweep.mjs";
 
 const LABEL = "computeshare=1";
@@ -85,7 +86,7 @@ const envLine = (k, v) => `${k}=${String(v).replace(/\r?\n/g, " ")}`;
  * Host agent: runs each sandbox as one docker container inside a fixed reservation (allow_cpus / allow_mem_gb).
  * A sandbox lives only while its lease is renewed; the reaper removes expired, over-age and orphaned containers.
  */
-export function createAgent(cfg, { docker, now = () => Date.now(), log = console, live = liveHeadroom, hostDisk = null, vm = vmSize } = {}) {
+export function createAgent(cfg, { docker, now = () => Date.now(), log = console, live = liveHeadroom, hostDisk = null, vm = vmSize, trim = runFstrim } = {}) {
   const stateDir = cfg.state_dir;
   const store = jsonStore(join(stateDir, "state.json"), { sandboxes: {} });
   const sb = () => store.data.sandboxes;
@@ -180,6 +181,13 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   });
   /** Under the floor now, or once the running sandboxes plus the new one grow the vhdx by sandbox_disk_growth_gb each. */
   const hostDiskLow = (free, active) => { const floor = cfg.min_host_disk_free_gb ?? 25; return free < floor || free - (cfg.sandbox_disk_growth_gb ?? 3.5) * (active + 1) < floor; };
+  // #5884: lane disk cap (cfg.lane_disk_cap_gb, unset = off, nothing added to /capacity): sandbox dirs plus cache volumes.
+  function laneDiskView() {
+    if (!(Number(cfg.lane_disk_cap_gb) > 0)) return {};
+    const used = laneDiskUsedGb({ sandboxMb: diskView().sandbox_disk_mb, cacheVolumes: Object.fromEntries(cacheInfo) });
+    const state = planDiskCap({ usedGb: used, capGb: cfg.lane_disk_cap_gb, pruneAtPct: cfg.disk_prune_at_pct });
+    return { lane_disk_used_gb: used, lane_disk_cap_gb: Number(cfg.lane_disk_cap_gb), disk_capped: state === "full" };
+  }
   function hostDiskView(active) {
     let hd = null; try { hd = readHostDisk(); } catch { hd = null; }
     if (!hd || !Number.isFinite(hd.gb)) return {};
@@ -264,7 +272,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const u = used();
     const active = Object.values(sb()).filter((s) => s.state !== "exited").length;
     const e = effectiveCapacity();
-    return { host: cfg.name ?? hostname(), ...running, vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10 }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...diskView(), ...hostDiskView(active), paused: Boolean(cfg.paused), live: live(cfg), usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
+    return { host: cfg.name ?? hostname(), ...running, vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10 }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...diskView(), ...laneDiskView(), ...hostDiskView(active), paused: Boolean(cfg.paused), live: live(cfg), usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
   }
 
   /** The image a spec's lanes run (the per-repo lane_tools tag when tools are listed), without building it. */
@@ -312,6 +320,9 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     if (c.host_disk_low) { // #5733: before any mkdir or docker run; the lane defers on the 503 (SANDBOX_CAPACITY)
       const floor = cfg.min_host_disk_free_gb ?? 25;
       return { status: 503, body: { error: `host disk low: ${c.host_disk_free_gb} GB free, floor ${floor} GB with ${c.active} running`, code: "pool.disk_low", host_disk_free_gb: c.host_disk_free_gb, floor_gb: floor }, retryAfter: cfg.disk_low_retry_after_s ?? 300 };
+    }
+    if (c.disk_capped) { // #5884: lane disk is at the hard cap; pressure prune runs in reap(), the lane defers like pool.disk_low
+      return { status: 503, body: { error: `lane disk full: ${c.lane_disk_used_gb} GB of ${c.lane_disk_cap_gb} GB cap`, code: "pool.disk_cap", lane_disk_used_gb: c.lane_disk_used_gb, cap_gb: c.lane_disk_cap_gb }, retryAfter: cfg.disk_low_retry_after_s ?? 300 };
     }
     if (spec.lane_tools?.length) { // #5650 follow-up: never build inside the launch request (router timeout); 503 + retry while it builds
       let st;
@@ -525,6 +536,26 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     if (!act.some((r) => prioOf(r) === "reserved")) for (const r of borrowed.filter((x) => x.throttled)) await throttle(r, SHARES().borrow);
   }
 
+  /** #5884: at the prune threshold of lane_disk_cap_gb prune this agent's own leftovers and sweep caches; fstrim on an interval and after a prune. Log lines only. */
+  let lastFstrim = -Infinity;
+  async function diskPressure(t) {
+    const v = laneDiskView();
+    const state = "lane_disk_cap_gb" in v ? planDiskCap({ usedGb: v.lane_disk_used_gb, capGb: v.lane_disk_cap_gb, pruneAtPct: cfg.disk_prune_at_pct }) : "ok";
+    if (state !== "ok") {
+      log.warn?.(`lane disk ${v.lane_disk_used_gb}/${v.lane_disk_cap_gb} GB (${state}): pruning`);
+      for (const [what, fn] of [["container prune", docker.containerPrune], ["image prune", docker.imagePrune]]) {
+        try { await fn?.call(docker, OWN); } catch (e) { log.warn?.(`${what}: ${String(e.stderr || e.message).slice(0, 200)}`); }
+      }
+      try { await docker.builderPrune?.(cfg.build_cache_keep_gb ?? 20); } catch (e) { log.warn?.(`builder prune: ${String(e.stderr || e.message).slice(0, 200)}`); }
+      lastCacheSweep = t;
+      await cacheSweep(t);
+    }
+    if (cfg.fstrim === false || !fstrimDue({ now: t, last: lastFstrim, intervalS: cfg.fstrim_interval_s, force: state !== "ok" })) return;
+    lastFstrim = t;
+    const r = await trim({ root: cfg.docker_root });
+    if (!r.ok) log.warn?.(`fstrim: ${r.error}`);
+  }
+
   async function reap() {
     const t = now();
     for (const r of Object.values(sb())) {
@@ -551,6 +582,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       }
     }
     await sweepBuildCache(t);
+    try { await diskPressure(t); } catch (e) { log.warn?.(`disk pressure: ${String(e.message).slice(0, 200)}`); }
     if (t - lastCacheSweep >= (cfg.cache_sweep_interval_s ?? 3600) * 1000) {
       lastCacheSweep = t;
       await cacheSweep(t);
