@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { createAgent } from "../pool/agent.mjs";
 import { createRouter } from "../pool/router.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
+import { httpTransport } from "../lean/sandbox-remote.mjs";
 import { tmpDir } from "./_tmp.mjs";
 
 const quiet = { info() {}, warn() {}, error() {} };
@@ -147,4 +148,24 @@ test("router status carries host drive free and growth, and warns under 2 h to f
   assert.match(legion.disk_warning, /full in ~1\.5 h/);
   assert.equal(calm.disk_warning, undefined);
   assert.equal(warns.filter((w) => /legion/.test(w)).length, 1);
+});
+
+test("the lane's remote provider settles a disk-pressure stop as a deferred sandbox.disk_pressure outcome, not a failure (#5891)", async () => {
+  const f = fixture();
+  await f.go("h1", "h2");
+  f.rec("h1").growthMbH = 5000;
+  f.st.free = 10;
+  await f.agent.reap();
+  assert.equal(f.rec("h1").state, "exited");
+  const fetchFn = async (url) => { // the router forwards /sandboxes/:id/result to the agent; serve that agent route directly
+    let body = "", status = 200;
+    await f.agent.handle({ method: "GET", url: new URL(url).pathname, headers: { authorization: "Bearer t" }, socket: { remoteAddress: "127.0.0.1" } },
+      { writeHead(s) { status = s; }, setHeader() {}, write(x) { body += x; }, end(x) { body += x ?? ""; } });
+    return new Response(body, { status, headers: { "content-type": "application/json" } });
+  };
+  const t = httpTransport({ endpoint: "http://router:7710", token: "t", fetchFn });
+  const r = await t.result("h1");
+  assert.equal(r.terminalReason, "deferred");
+  assert.equal(r.code, OUTCOME_CODES.SANDBOX_DISK_PRESSURE);
+  assert.ok(r.retryInSeconds > 0);
 });
