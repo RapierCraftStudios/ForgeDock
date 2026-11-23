@@ -65,6 +65,7 @@ export const OUTCOME_CODES = Object.freeze({
   BASE_RED: "base.red", // forge#5239: a verify.invariants guard fails on the base too; the lane is deferred behind the introducing issue, never needs-human
   SANDBOX_CAPACITY: "sandbox.capacity", // forge#4254: the sandbox provider had no capacity; deferred with backoff
   SANDBOX_TRANSIENT: "sandbox.transient", // forge#5095: the sandbox provider answered a 5xx on launch (router/agent infrastructure) or the launch hit a status-less transport error (forge#5656: fetch failed, ECONNRESET, ETIMEDOUT); deferred with backoff, capped by max_deferrals, never needs-human
+  SANDBOX_DISK_PRESSURE: "sandbox.disk_pressure", // forge#5891: the agent stopped the lane to save its host drive from filling; the worktree and volume are kept, the requeued lane adopts them
   SANDBOX_AUTH: "sandbox.auth", // forge#4685: the sandbox provider refused or lacked the credential (HTTP 401/403, no token); deferred, never needs-human
   SANDBOX_UNREACHABLE: "sandbox.unreachable", // forge#4672: the sandbox provider stayed unreachable past execution.unreachable_window_min; deferred, the sandbox is kept for adopt
   LEASE_HELD: "lease.held",

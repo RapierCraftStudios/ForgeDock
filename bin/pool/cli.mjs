@@ -87,6 +87,10 @@ export async function runPoolCli(argv, deps = {}) {
       const cfg = routerConfig();
       const r = await call(`http://${cfg.listen.host}:${cfg.listen.port}`, "GET", "/agents", { token: cfg.forgedock_token });
       console.log(JSON.stringify(r.data, null, 2));
+      for (const a of r.data?.agents ?? []) { // #5891: the host drive per agent, on stderr so the JSON above stays parseable
+        if (!Number.isFinite(a.host_disk_free_gb)) continue;
+        console.error(`${a.name}: host_disk_free_gb ${a.host_disk_free_gb}${Number.isFinite(a.host_disk_growth_gb_per_h) ? `, growth ${a.host_disk_growth_gb_per_h} GB/h` : ""}${a.disk_warning ? ` WARNING: ${a.disk_warning}` : ""}`);
+      }
       break;
     }
     case "enroll":

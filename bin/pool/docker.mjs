@@ -56,6 +56,13 @@ export const dockerCli = {
     const out = await docker(["ps", "-a", "--format", "{{.Image}}"], { timeoutMs: 30000 });
     return out ? [...new Set(out.split("\n").filter(Boolean))] : [];
   },
+  /** #5891: freezes / thaws a container (its processes keep their state; the lane is paused, not failed). A gone container is not an error. */
+  async pause(name) { try { await docker(["pause", name], { timeoutMs: 20000 }); } catch (e) { if (!/No such container|already paused/i.test(e.stderr ?? "")) throw e; } },
+  async unpause(name) { try { await docker(["unpause", name], { timeoutMs: 20000 }); } catch (e) { if (!/No such container|not paused/i.test(e.stderr ?? "")) throw e; } },
+  /** #5891: dangling images (rebuildable) only; never a tagged or in-use one. */
+  async pruneImages() { return docker(["image", "prune", "-f"], { timeoutMs: 10 * 60000 }); },
+  /** #5891: package-manager caches inside a running sandbox (rebuildable); the worktree and lane state are untouched. Best effort. */
+  async pruneCaches(name) { try { await docker(["exec", name, "sh", "-c", "rm -rf \"$HOME\"/.npm/_cacache \"$HOME\"/.cache/pip \"$HOME\"/.cache/yarn \"$HOME\"/.cache/pnpm /root/.npm/_cacache /root/.cache/pip 2>/dev/null; true"], { timeoutMs: 120000 }); } catch (e) { if (!/No such container|is not running|is paused/i.test(e.stderr ?? "")) throw e; } },
   async builderPrune(keepGb) { return docker(["builder", "prune", "-f", "--keep-storage", `${keepGb}gb`], { timeoutMs: 10 * 60000 }); },
   /** Volumes no container references (anonymous ones are named by 64 hex chars). */
   async listDanglingVolumes() {

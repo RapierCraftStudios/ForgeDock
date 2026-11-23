@@ -94,6 +94,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const leaseTtlMs = (cfg.lease_ttl_s ?? 600) * 1000;
   const maxLifeMs = (cfg.max_lifetime_s ?? 6 * 3600) * 1000;
   const keepExitedMs = (cfg.keep_exited_s ?? 2 * 3600) * 1000;
+  const keepPressureMs = (cfg.keep_disk_pressure_s ?? 24 * 3600) * 1000; // #5891: a disk-pressure stop keeps its worktree long enough for the requeue
   const running = versionOf(cfg.code_root ?? repoRoot);
   // The lane image tracks the installed ForgeDock version; only an explicit non-legacy cfg.image overrides it.
   const image = cfg.image && cfg.image !== "computeshare-lane:1" ? cfg.image : laneImageTag(running.version);
@@ -134,7 +135,13 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     try { const f = statfsSync(stateDir); out.disk_free_gb = Math.round((Number(f.bavail) * Number(f.bsize)) / 107374182.4) / 10; } catch { /* unknown */ }
     if (Date.now() - diskCache.at > 60000) {
       const mb = {};
-      for (const r of Object.values(sb())) if (r.state !== "exited") mb[r.id] = dirMb(join(stateDir, "sandboxes", safeName(r.id)));
+      for (const r of Object.values(sb())) if (r.state !== "exited") {
+        mb[r.id] = dirMb(join(stateDir, "sandboxes", safeName(r.id)));
+        // #5891: peak size (feeds the repo's p90 reservation) and growth rate (picks the sandbox to pause)
+        r.diskPeakMb = Math.max(r.diskPeakMb ?? 0, mb[r.id]);
+        if (r.diskPrev && now() > r.diskPrev.at) r.growthMbH = Math.round(((mb[r.id] - r.diskPrev.mb) / ((now() - r.diskPrev.at) / 3600000)));
+        r.diskPrev = { at: now(), mb: mb[r.id] };
+      }
       diskCache = { at: Date.now(), mb };
     }
     out.sandbox_disk_mb = diskCache.mb;
@@ -146,12 +153,34 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     if (now() - hostDiskCache.at > 60000) hostDiskCache = { at: now(), v: hostDiskFree({ path: cfg.host_disk_path ?? null }) };
     return hostDiskCache.v;
   });
-  /** Under the floor now, or once the running sandboxes plus the new one grow the vhdx by sandbox_disk_growth_gb each. */
-  const hostDiskLow = (free, active) => { const floor = cfg.min_host_disk_free_gb ?? 25; return free < floor || free - (cfg.sandbox_disk_growth_gb ?? 3.5) * (active + 1) < floor; };
-  function hostDiskView(active) {
+  // #5891: disk is a reserved resource. A lane reserves the p90 of its repo's measured peak sandbox_disk_mb (fallback sandbox_disk_growth_gb);
+  // admission needs host free minus every reservation to stay above the floor. Host free already contains the current use.
+  const floorGb = () => cfg.host_disk_floor_gb ?? cfg.min_host_disk_free_gb ?? 25;
+  const hist = () => (store.data.disk_hist ??= {});
+  const reservationGb = (slug) => {
+    const xs = [...(hist()[slug] ?? [])].sort((a, b) => a - b);
+    return xs.length >= (cfg.disk_min_samples ?? 3) ? Math.max(0.1, xs[Math.min(xs.length - 1, Math.ceil(xs.length * 0.9) - 1)] / 1024) : (cfg.sandbox_disk_growth_gb ?? 3.5);
+  };
+  const diskPaused = () => activeRecs().some((r) => r.diskPaused);
+  const hostDiskLow = (free, active, slug = null) => free < floorGb() || diskPaused() || free - (activeRecs().reduce((a, r) => a + reservationGb(r.slug), 0) + reservationGb(slug)) < floorGb();
+  const hostSamples = []; // [{t, gb}] over the last 3h: the drive's growth rate and time-to-full
+  function noteHostDisk(gb) {
+    const t = now();
+    if (hostSamples.length && hostSamples[hostSamples.length - 1].t === t) hostSamples.pop();
+    hostSamples.push({ t, gb });
+    while (hostSamples.length > 2 && t - hostSamples[0].t > 3 * 3600000) hostSamples.shift();
+  }
+  /** GB/h the host drive shrinks (negative = freeing), or null until two samples at least a minute apart exist. */
+  function hostGrowthPerH() {
+    const a = hostSamples[0], b = hostSamples[hostSamples.length - 1];
+    return a && b && b.t - a.t >= 60000 ? Math.round(((a.gb - b.gb) / ((b.t - a.t) / 3600000)) * 10) / 10 : null;
+  }
+  function hostDiskView(active, slug = null) {
     let hd = null; try { hd = readHostDisk(); } catch { hd = null; }
     if (!hd || !Number.isFinite(hd.gb)) return {};
-    return { host_disk_free_gb: hd.gb, host_disk_low: hostDiskLow(hd.gb, active) };
+    noteHostDisk(hd.gb);
+    const g = hostGrowthPerH();
+    return { host_disk_free_gb: hd.gb, host_disk_low: hostDiskLow(hd.gb, active, slug), ...(g === null ? {} : { host_disk_growth_gb_per_h: g, ...(g > 0 ? { host_disk_full_in_h: Math.round((hd.gb / g) * 10) / 10 } : {}) }), ...(diskPaused() ? { disk_paused: activeRecs().filter((r) => r.diskPaused).length } : {}) };
   }
   // #5856: priority classes. `reserved` sandboxes are admitted up to a named reservation (cfg.reservations) and may reclaim
   // capacity from `borrow` ones (throttle first, then SIGTERM so the lane checkpoints and reports run.interrupted);
@@ -253,6 +282,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id) || !Array.isArray(spec.command) || !spec.command.length) throw Object.assign(new Error("spec.id ([A-Za-z0-9._-], max 128) and spec.command are required"), { status: 400 });
     let existing = own(spec.id);
     if (existing?.drained && existing.state === "exited") { await destroy(existing.id, "drained: relaunch"); existing = null; } // #5856: the router/dispatcher rescheduled a drained lane under the same id
+    if (existing?.diskPressure && existing.state === "exited") { await destroy(existing.id, "disk pressure: resume", { keepWork: true }); existing = null; } // #5891: the worktree stays, the lane adopts it
     if (existing) { existing.lease = now(); store.save(); return { status: 200, body: view(existing) }; }
     if (Number.isInteger(spec.warm)) warm.configure({ spec, cpus, mem_gb, limit, n: spec.warm }); // #4912: the lane's execution.warm_sandboxes sizes the repo's pool
     const prio = spec.priority ?? "normal";
@@ -273,9 +303,10 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       for (const r of tiers().act.filter((s) => prioOf(s) === "borrow")) await throttle(r, SHARES().throttled); // throttle every borrower first,
       for (const v of adm.victims) await drainOne(v, `reserved ${reservation} arrived`); // then stop only as many as the reservation needs
     }
-    if (c.host_disk_low) { // #5733: before any mkdir or docker run; the lane defers on the 503 (SANDBOX_CAPACITY)
-      const floor = cfg.min_host_disk_free_gb ?? 25;
-      return { status: 503, body: { error: `host disk low: ${c.host_disk_free_gb} GB free, floor ${floor} GB with ${c.active} running`, code: "pool.disk_low", host_disk_free_gb: c.host_disk_free_gb, floor_gb: floor }, retryAfter: cfg.disk_low_retry_after_s ?? 300 };
+    const gate = hostDiskView(c.active, spec.repo?.slug ?? null);
+    if (gate.host_disk_low) { // #5733: before any mkdir or docker run; the lane defers on the 503 (SANDBOX_CAPACITY)
+      const floor = floorGb();
+      return { status: 503, body: { error: `host disk low: ${gate.host_disk_free_gb} GB free, floor ${floor} GB with ${c.active} running`, code: "pool.disk_low", host_disk_free_gb: gate.host_disk_free_gb, floor_gb: floor }, retryAfter: cfg.disk_low_retry_after_s ?? 300 };
     }
     if (spec.lane_tools?.length) { // #5650 follow-up: never build inside the launch request (router timeout); 503 + retry while it builds
       let st;
@@ -294,7 +325,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const env = { ...(spec.env ?? {}), ...(withDocker ? { DOCKER_HOST: "tcp://127.0.0.1:2375" } : {}), CS_CRED_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/creds`, CS_RELAY_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/relay`, CS_CRED_TOKEN: credToken, CS_SANDBOX_ID: spec.id, CS_REPO_SLUG: spec.repo?.slug ?? "", CS_REPO_URL: spec.repo?.url ?? "", CS_REPO_REF: spec.repo?.ref ?? "", CS_RESULT_FILE: spec.result_file ?? "", CS_WORK_DIR: workDirOf(name),
       ...(spec.env_snapshots?.enabled ? { FORGE_ENV_IMAGE: envImageOf(spec) } : {}) }; // the image is part of the snapshot key
     writeFileSync(envFile, Object.entries(env).map(([k, v]) => envLine(k, v)).join("\n") + "\n", { mode: 0o600 });
-    const rec = { id: spec.id, name, dir, issue: spec.issue ?? null, batch: spec.batch ?? null, cpus, mem_gb, result_file: spec.result_file ?? null, state: "starting", startedAt: now(), finishedAt: null, lease: now(), credToken, docker: withDocker, ...(weighted() || spec.priority ? { priority: prio, ...(reservation ? { reservation } : {}) } : {}) };
+    const rec = { id: spec.id, name, dir, issue: spec.issue ?? null, slug: spec.repo?.slug ?? null, batch: spec.batch ?? null, cpus, mem_gb, result_file: spec.result_file ?? null, state: "starting", startedAt: now(), finishedAt: null, lease: now(), credToken, docker: withDocker, ...(weighted() || spec.priority ? { priority: prio, ...(reservation ? { reservation } : {}) } : {}) };
     sb()[spec.id] = rec;
     store.save();
     const cacheKey = String(spec.cache?.key ?? spec.repo?.slug ?? "default").toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
@@ -355,7 +386,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     return { status: 201, body: view(rec) };
   }
 
-  const view = (r) => ({ id: r.id, state: r.state, issue: r.issue, cpus: r.cpus, mem_gb: r.mem_gb, started_at: new Date(r.startedAt).toISOString(), ...(r.error ? { error: r.error } : {}) });
+  const view = (r) => ({ id: r.id, state: r.state, issue: r.issue, cpus: r.cpus, mem_gb: r.mem_gb, started_at: new Date(r.startedAt).toISOString(), ...(r.error ? { error: r.error } : {}), ...(r.diskPaused ? { status_detail: "paused (disk)" } : {}), ...(r.diskPressure ? { code: "sandbox.disk_pressure", status_detail: "stopped (disk pressure): worktree kept for resume" } : {}) });
 
   const warm = makeWarm({ store, sb, own, now, launch, destroy: (id, why) => destroy(id, why), view, log });
 
@@ -364,7 +395,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const s = await docker.inspect(r.name);
     if (!s) { r.state = "exited"; r.finishedAt ??= now(); }
     else if (!s.running && r.state !== "starting") { r.state = "exited"; r.exitCode = s.exitCode; r.finishedAt = Date.parse(s.finishedAt) || now(); }
-    else if (s.running) r.state = "running";
+    else if (s.running) r.state = r.diskPaused ? "paused" : "running";
     return r;
   }
 
@@ -386,13 +417,15 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     try { return JSON.parse(readFileSync(join(r.dir, "result", basename(r.result_file)), "utf8")); } catch { return null; }
   }
 
-  async function destroy(id, why) {
+  async function destroy(id, why, { keepWork = false } = {}) {
     const r = own(id);
     if (!r) return false;
+    if (r.slug && r.diskPeakMb) { const h = (hist()[r.slug] ??= []); h.push(r.diskPeakMb); if (h.length > 50) h.shift(); }
     const history = r.usage?.samples ? JSON.stringify({ at: new Date(now()).toISOString(), id: r.id, issue: r.issue, docker: Boolean(r.docker), minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10, ...usageView(r) }) : null;
     await docker.remove(r.name);
     if (r.docker) await docker.remove(dindName(r.name));
-    if (r.workDir) { try { await docker.removeWorkDir(r.cacheVolume, image, r.workDir); } catch (e) { sweepFail(r.cacheVolume, "work dir", e); } }
+    if (r.workDir && keepWork) { /* #5891: a disk-pressure stop keeps the worktree and cache volume for the resumed lane */ }
+    else if (r.workDir) { try { await docker.removeWorkDir(r.cacheVolume, image, r.workDir); } catch (e) { sweepFail(r.cacheVolume, "work dir", e); } }
     else if (r.docker) await docker.removeVolume(workVolume(r.name)); // sandbox launched before #5696
     try { await docker.wipe(r.dir, image); } catch (e) { log.warn?.(`wipe ${r.name}: ${String(e.stderr || e.message).slice(0, 200)}`); }
     rmSync(r.dir, { recursive: true, force: true });
@@ -474,13 +507,70 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     if (!act.some((r) => prioOf(r) === "reserved")) for (const r of borrowed.filter((x) => x.throttled)) await throttle(r, SHARES().borrow);
   }
 
+
+  // #5891: runtime disk control, once per reap. Below the floor: prune rebuildables, then pause the fastest grower (lease kept),
+  // then below floor/2 stop it with sandbox.disk_pressure (worktree + volume kept). Above floor + margin: unpause.
+  const freshHostDisk = () => { if (!hostDisk) hostDiskCache.at = -Infinity; try { const hd = readHostDisk(); return hd && Number.isFinite(hd.gb) ? hd.gb : null; } catch { return null; } };
+  const cntNames = (r) => (r.docker ? [r.name, dindName(r.name)] : [r.name]);
+  /** Removes the exited container(s) of sandboxes dead for ttlMs (their data stays for a resume), and orphan fdrsbx-* volumes. Never cs-cache-*. */
+  async function reapDead(t, ttlMs) {
+    for (const r of Object.values(sb())) {
+      if (r.state !== "exited" || r.containerReaped || !r.finishedAt || t - r.finishedAt < ttlMs) continue;
+      try { for (const n of cntNames(r)) await docker.remove(n); r.containerReaped = true; log.info?.(`removed dead sandbox container ${r.name}`); } catch (e) { log.warn?.(`reap ${r.name}: ${String(e.stderr || e.message).slice(0, 200)}`); }
+    }
+    const names = Object.values(sb()).flatMap((r) => [r.id, r.name]); // a volume named after a known sandbox stays for its resume
+    try {
+      for (const v of (await docker.listVolumes?.("fdrsbx-")) ?? []) {
+        if (!v.startsWith("fdrsbx-") || v.startsWith("cs-cache-") || names.some((n) => v === n || v.startsWith(`${n}-`) || v.startsWith(`${n}_`))) continue;
+        try { await docker.removeVolume(v); log.info?.(`removed dead sandbox volume ${v}`); } catch (e) { log.warn?.(`rm volume ${v}: ${String(e.stderr || e.message).slice(0, 200)}`); }
+      }
+    } catch (e) { log.warn?.(`dead volume sweep: ${String(e.stderr || e.message).slice(0, 200)}`); }
+  }
+  async function reclaimDisk(t) {
+    try { await docker.builderPrune?.(0); } catch (e) { log.warn?.(`builder prune: ${String(e.stderr || e.message).slice(0, 200)}`); }
+    try { await docker.pruneImages?.(); } catch (e) { log.warn?.(`image prune: ${String(e.stderr || e.message).slice(0, 200)}`); }
+    const heavy = activeRecs().sort((a, b) => (diskCache.mb[b.id] ?? 0) - (diskCache.mb[a.id] ?? 0)).slice(0, cfg.disk_reclaim_sandboxes ?? 3);
+    for (const r of heavy) { try { await docker.pruneCaches?.(r.name); } catch { /* best effort: package-manager caches only */ } }
+    await reapDead(t, 0);
+  }
+  async function diskPressure(t) {
+    let free = freshHostDisk();
+    if (free === null) { await reapDead(t, (cfg.dead_ttl_s ?? 600) * 1000); return; }
+    noteHostDisk(free);
+    const floor = floorGb(), hard = floor / 2;
+    if (free >= floor) {
+      await reapDead(t, (cfg.dead_ttl_s ?? 600) * 1000);
+      if (free >= floor + (cfg.disk_resume_margin_gb ?? 2)) for (const r of activeRecs().filter((x) => x.diskPaused)) {
+        try { for (const n of cntNames(r)) await docker.unpause?.(n); r.diskPaused = false; r.state = "running"; log.info?.(`resumed ${r.id}: host disk ${free} GB`); } catch (e) { log.warn?.(`unpause ${r.id}: ${String(e.stderr || e.message).slice(0, 200)}`); }
+      }
+      for (const r of activeRecs().filter((x) => x.diskPaused)) r.lease = t;
+      return;
+    }
+    await reclaimDisk(t);
+    free = freshHostDisk() ?? free;
+    if (free >= floor) return; // pruning was enough: nothing paused or stopped
+    let victim = activeRecs().find((r) => r.diskPaused);
+    if (!victim) {
+      victim = activeRecs().filter((r) => r.state === "running").sort((a, b) => (b.growthMbH ?? 0) - (a.growthMbH ?? 0) || (diskCache.mb[b.id] ?? 0) - (diskCache.mb[a.id] ?? 0))[0];
+      if (victim) { try { for (const n of cntNames(victim)) await docker.pause?.(n); victim.diskPaused = true; victim.state = "paused"; log.warn?.(`paused ${victim.id} (disk): host free ${free} GB < floor ${floor} GB`); } catch (e) { log.warn?.(`pause ${victim.id}: ${String(e.stderr || e.message).slice(0, 200)}`); victim = null; } }
+    }
+    for (const r of activeRecs().filter((x) => x.diskPaused)) r.lease = t; // the paused lane stays leased: it is not lost
+    if (victim && free < hard) { // the guest is about to fill: stop it to save every other sandbox; worktree and volume stay
+      for (const n of cntNames(victim)) { try { await docker.unpause?.(n); } catch { /* not paused */ } }
+      for (const n of cntNames(victim)) { try { await docker.kill(n, "KILL"); } catch { /* gone */ } }
+      victim.diskPaused = false; victim.state = "exited"; victim.finishedAt = t; victim.diskPressure = true;
+      log.error?.(`stopped ${victim.id} (sandbox.disk_pressure): host free ${free} GB < ${hard} GB`);
+    }
+  }
+
   async function reap() {
     const t = now();
     for (const r of Object.values(sb())) {
       try { await refresh(r); } catch { /* docker hiccup: judge by lease only */ }
-      const why = t - r.lease > leaseTtlMs ? "lease expired" : t - r.startedAt > maxLifeMs ? "max lifetime" : r.state === "exited" && r.finishedAt && t - r.finishedAt > keepExitedMs ? "exited retention" : null;
+      const why = t - r.lease > leaseTtlMs && !r.diskPaused ? "lease expired" : t - r.startedAt > maxLifeMs ? "max lifetime" : r.state === "exited" && r.finishedAt && t - r.finishedAt > (r.diskPressure ? keepPressureMs : keepExitedMs) ? "exited retention" : null;
       if (why) await destroy(r.id, why);
     }
+    await diskPressure(t);
     const known = new Set(Object.values(sb()).flatMap((r) => [r.name, dindName(r.name)]));
     for (const name of await docker.listLabelled(LABEL)) if (!known.has(name)) { await docker.remove(name); log.info?.(`removed orphan container ${name}`); }
     await sampleUsage();
