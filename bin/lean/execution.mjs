@@ -710,6 +710,13 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
     if (ok) { try { led?.release("sandbox", h.id); led?.remove(); } catch { /* the reaper retries */ } }
     return ok;
   };
+  // #5808: the result is handed back at once; the teardown starts now and the dispatcher's postRun hook waits for it (the batch
+  // never ends before it, the ledger still holds the sandbox until it is released), so it is off the slot's path.
+  const tearAfter = (led, h, r) => {
+    const torn = tear(led, h), prev = r && typeof r === "object" && typeof r.postRun === "function" ? r.postRun : null;
+    const postRun = async () => { await torn; if (prev) await prev(); };
+    return (r && typeof r === "object") ? { ...r, postRun } : r;
+  };
   // #4672: a transport failure (router restart, refused/reset connection, 502/503/504) is retried with backoff until the lane has
   // waited `unreachableWindowMs` in a row without one successful poll; then it ends sandbox.unreachable with the sandbox kept.
   const guard = (st) => async (fn) => {
@@ -802,8 +809,8 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
         if (started && e?.unreachable) return withUsage(unreachable(h, e), h); // #4672: no tear, the ledger keeps it
         r = started ? settleClone({ terminalReason: "engine-error", detail: `sandbox ${base.id}: ${errText(e)}` }, base.id) : startFailed(base.id, e);
       }
-      await tear(led, h); // every path, after the result is in (tear never throws)
-      return started ? withUsage(r, h) : r; // a sandbox that never started used nothing
+      const torn = tearAfter(led, h, r); // every path, after the result is in (tear never throws); #5808: not awaited here
+      return started ? withUsage(torn, h) : torn; // a sandbox that never started used nothing
     },
     adopt: (n, rec, ctx = {}) => adoptSaved(n, rec, ctx),
   };
@@ -831,8 +838,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
         if (e?.unreachable) return withUsage(unreachable(h, e), h); // #4672: same tolerance; no tear, left for the next adopt
         r = { terminalReason: "engine-error", detail: `sandbox ${h.id}: ${errText(e)}` };
       }
-      await tear(led, h);
-      return withUsage(r, h);
+      return withUsage(tearAfter(led, h, r), h); // #5808: teardown runs after the result is handed back
   }
   // A leftover ledger entry of this lane's sandbox: its result if it can still be had, else null (torn down by the caller).
   async function adoptLeft(n, left, ctx) {
