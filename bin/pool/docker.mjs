@@ -36,13 +36,15 @@ export const dockerCli = {
   },
   /** #5856: re-weights a running container (throttle/unthrottle a borrowed lane); a gone container is not an error. */
   async update(name, { cpuShares, memoryReservationMb }) { try { await docker(["update", "--cpu-shares", String(cpuShares), ...(memoryReservationMb ? ["--memory-reservation", `${memoryReservationMb}m`] : []), name], { timeoutMs: 20000 }); } catch (e) { if (!/No such container/i.test(e.stderr ?? "")) throw e; } },
+  /** `label` is one label or a list; docker ANDs the filters (#5881: [computeshare=1, computeshare.agent=<id>]). */
   async listLabelled(label) {
-    const out = await docker(["ps", "-a", "--filter", `label=${label}`, "--format", "{{.Names}}"], { timeoutMs: 20000 });
+    const out = await docker(["ps", "-a", ...[].concat(label).flatMap((l) => ["--filter", `label=${l}`]), "--format", "{{.Names}}"], { timeoutMs: 20000 });
     return out ? out.split("\n").filter(Boolean) : [];
   },
   async removeVolume(name) { try { await docker(["volume", "rm", "-f", name], { timeoutMs: 120000 }); } catch (e) { if (!/no such volume/i.test(e.stderr ?? "")) throw e; } },
-  async listVolumes(prefix) {
-    const out = await docker(["volume", "ls", "-q", "--filter", `name=${prefix}`], { timeoutMs: 20000 });
+  /** #5881: `label` (one or a list) restricts the list to volumes carrying it, e.g. this agent's. */
+  async listVolumes(prefix, label = []) {
+    const out = await docker(["volume", "ls", "-q", "--filter", `name=${prefix}`, ...[].concat(label).flatMap((l) => ["--filter", `label=${l}`])], { timeoutMs: 20000 });
     return out ? out.split("\n").filter((v) => v.startsWith(prefix)) : [];
   },
   /** Local image refs (`repo:tag`) starting with prefix; untagged images are skipped. */
@@ -58,8 +60,8 @@ export const dockerCli = {
   },
   async builderPrune(keepGb) { return docker(["builder", "prune", "-f", "--keep-storage", `${keepGb}gb`], { timeoutMs: 10 * 60000 }); },
   /** Volumes no container references (anonymous ones are named by 64 hex chars). */
-  async listDanglingVolumes() {
-    const out = await docker(["volume", "ls", "-q", "--filter", "dangling=true"], { timeoutMs: 30000 });
+  async listDanglingVolumes(label = []) {
+    const out = await docker(["volume", "ls", "-q", "--filter", "dangling=true", ...[].concat(label).flatMap((l) => ["--filter", `label=${l}`])], { timeoutMs: 30000 });
     return out ? out.split("\n").filter(Boolean) : [];
   },
   async pull(image) { return docker(["pull", "-q", image], { timeoutMs: 30 * 60000 }); },

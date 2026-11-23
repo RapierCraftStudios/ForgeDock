@@ -15,7 +15,7 @@ import { jsonStore } from "./store.mjs";
 import { makeWarm } from "./warm.mjs";
 import { resolveLaneImage, laneImageNow, laneToolsTag, isLaneToolsTagOf } from "./lane-tools.mjs";
 import { hostDiskFree } from "./health.mjs";
-import { planIdleEviction, CACHE_LABEL } from "./cache-sweep.mjs";
+import { planIdleEviction, CACHE_LABEL, agentLabel } from "./cache-sweep.mjs";
 
 const LABEL = "computeshare=1";
 const LOG_CHUNK = 256 * 1024;
@@ -68,10 +68,10 @@ export const ENV_ENSURE_GAP_MS = 5 * 60000;
  * stages `ready` hardlink copies and collects old snapshots. It writes only under /cache/env, on the same volume as the
  * lane worktrees (/cache/work), so a lane claims a staged copy with a rename. Pure.
  */
-export function envEnsureArgs({ volume, image, slug, ref = null, laneTools = [], snapshots = {}, net = [], cpus = 2, mem_gb = 4 }) {
+export function envEnsureArgs({ volume, image, slug, ref = null, laneTools = [], snapshots = {}, net = [], cpus = 2, mem_gb = 4, agent = null }) {
   const int = (v, d) => (Number.isInteger(v) && v >= 0 ? v : d);
   return [
-    "--rm", "--name", `cs-envbuild-${volume.replace(/^cs-cache-/, "")}`.slice(0, 120), "--label", "computeshare.env=1",
+    "--rm", "--name", `cs-envbuild-${volume.replace(/^cs-cache-/, "")}`.slice(0, 120), "--label", "computeshare.env=1", ...(agent ? ["--label", agent] : []),
     "--cpus", String(cpus), "--memory", `${Math.round(mem_gb * 1024)}m`, ...net, "-v", `${volume}:/cache`,
     "-e", "FORGE_ENV_ROOT=/cache/env", "-e", `FORGE_ENV_IMAGE=${image}`, "-e", "FORGE_DEPCACHE_ROOT=/cache/forge-depcache", "-e", "npm_config_store_dir=/cache/pnpm-store",
     "--entrypoint", "forgedock", image, "env", "ensure", "--mirror", `/cache/git/${String(slug).replace(/\//g, "_")}.git`, ...(ref ? ["--ref", String(ref)] : []),
@@ -100,6 +100,10 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const upgrade = { state: "idle", error: null };
   const prepull = { error: null };
   const dindImage = cfg.dind_image ?? "docker:27.5.1-dind";
+  // #5881: every container/volume this agent creates carries its label; reap and the sweeps list only by it, so a co-resident agent or foreign containers are never touched.
+  const agentId = String(cfg.agent_id ?? cfg.name ?? hostname()).toLowerCase().replace(/[^a-z0-9_.-]/g, "-").slice(0, 60);
+  const AGENT = agentLabel(agentId);
+  const OWN = [LABEL, AGENT];
   /** Images a sandbox may need are pulled ahead of time, never inside a launch request (which has a short timeout). */
   async function prepullImages() {
     if (await docker.hasImage?.(dindImage)) { prepull.error = null; return; }
@@ -242,7 +246,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   function ensureEnv({ volume, spec, net }) {
     if (now() - (envEnsured.get(volume) ?? -Infinity) < ENV_ENSURE_GAP_MS) return null;
     envEnsured.set(volume, now());
-    const args = envEnsureArgs({ volume, image: envImageOf(spec), slug: spec.repo.slug, ref: spec.repo.ref ?? null, laneTools: spec.lane_tools ?? [], snapshots: spec.env_snapshots, net, cpus: cfg.env_build_cpus ?? 2, mem_gb: cfg.env_build_mem_gb ?? 4 });
+    const args = envEnsureArgs({ volume, image: envImageOf(spec), slug: spec.repo.slug, ref: spec.repo.ref ?? null, laneTools: spec.lane_tools ?? [], snapshots: spec.env_snapshots, net, cpus: cfg.env_build_cpus ?? 2, mem_gb: cfg.env_build_mem_gb ?? 4, agent: AGENT });
     return Promise.resolve().then(() => docker.run(args)).then(() => log.info?.(`env snapshot helper started for ${spec.repo.slug}`), (e) => log.warn?.(`env snapshot helper: ${String(e.stderr || e.message).slice(0, 200)}`));
   }
 
@@ -298,10 +302,10 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     sb()[spec.id] = rec;
     store.save();
     const cacheKey = String(spec.cache?.key ?? spec.repo?.slug ?? "default").toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
-    rec.cacheVolume = `cs-cache-${cacheKey}`;
+    rec.cacheVolume = `cs-cache-${cfg.agent_id ? `${agentId}-` : ""}${cacheKey}`; // an explicit agent_id gives this agent its own volume: a shared one would let its work sweep delete a co-resident agent's worktrees
     rec.workDir = workDirOf(name);
     cacheUsed.set(rec.cacheVolume, now());
-    try { await docker.createVolume?.(rec.cacheVolume, [CACHE_LABEL]); } catch (e) { log.warn?.(`label ${rec.cacheVolume}: ${String(e.stderr || e.message).slice(0, 200)}`); } // an unlabelled volume still works
+    try { await docker.createVolume?.(rec.cacheVolume, [CACHE_LABEL, AGENT]); } catch (e) { log.warn?.(`label ${rec.cacheVolume}: ${String(e.stderr || e.message).slice(0, 200)}`); } // an unlabelled volume still works
     // Public resolvers: host resolvers like Tailscale MagicDNS are not reachable from the container network.
     const netArgs = ["--add-host", "host.docker.internal:host-gateway", ...(cfg.dns ?? ["1.1.1.1", "8.8.8.8"]).flatMap((d) => ["--dns", String(d)])];
     let laneCpus = cpus, laneMem = mem_gb, laneNet = netArgs, work = [];
@@ -319,7 +323,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
         ({ cpus: dCpus, mem: dMem } = clampToVm(dCpus, dMem));
         work = cacheMount; // the daemon sees the checkout at the same /cache/work path as the lane
         await docker.run([
-          "--name", dindName(name), "--label", LABEL, "--label", `computeshare.id=${spec.id}`, "--label", "computeshare.role=dind",
+          "--name", dindName(name), "--label", LABEL, "--label", AGENT, "--label", `computeshare.id=${spec.id}`, "--label", "computeshare.role=dind",
           "--privileged", "--cpus", String(dCpus), ...sharesArgs(prio), "--memory", mb(dMem), "--memory-swap", mb(dMem + swapFor(limit?.dind_swap_gb)),
           ...netArgs, ...work,
           // Bypass dockerd-entrypoint: it adds tcp://0.0.0.0:2375 (reachable from other sandboxes on the bridge).
@@ -332,7 +336,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       if (limit && !withDocker) { laneCpus = limit.lane_cpus; laneMem = limit.lane_mem_gb; }
       ({ cpus: laneCpus, mem: laneMem } = clampToVm(laneCpus, laneMem));
       await docker.run([
-        "--name", name, "--label", LABEL, "--label", `computeshare.id=${spec.id}`,
+        "--name", name, "--label", LABEL, "--label", AGENT, "--label", `computeshare.id=${spec.id}`,
         // Hard burst cap per container; the (smaller) reservation is only what placement counts.
         // --memory-swap above --memory lets a rare spike page out instead of being OOM-killed (swap deal).
         "--cpus", String(laneCpus), ...sharesArgs(prio), "--memory", mb(laneMem), "--memory-swap", mb(laneMem + swapFor(limit?.lane_swap_gb)), "--pids-limit", "4096",
@@ -432,7 +436,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     lastCachePrune = t;
     try { await docker.builderPrune?.(cfg.build_cache_keep_gb ?? 20); } catch (e) { log.warn?.(`builder prune: ${String(e.stderr || e.message).slice(0, 200)}`); }
     try {
-      for (const v of (await docker.listDanglingVolumes?.()) ?? []) {
+      for (const v of (await docker.listDanglingVolumes?.(AGENT)) ?? []) {
         if (!/^[0-9a-f]{64}$/.test(v)) continue;
         try { await docker.removeVolume(v); log.info?.(`removed anonymous volume ${v.slice(0, 12)}`); } catch (e) { log.warn?.(`rm volume ${v.slice(0, 12)}: ${String(e.stderr || e.message).slice(0, 200)}`); }
       }
@@ -444,7 +448,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const never = cfg.cache_never_evict ?? [];
     const keep = Object.values(sb()).map((r) => r.workDir).filter(Boolean);
     const volumes = [];
-    for (const v of await docker.listVolumes("cs-cache-")) {
+    for (const v of await docker.listVolumes("cs-cache-", AGENT)) {
       if (never.includes(v)) continue;
       try {
         const r = await docker.sweepCache(v, image, { maxAgeDays: cfg.cache_max_age_days ?? 14, maxGb: cfg.cache_max_gb ?? null, keep, now: t });
@@ -482,7 +486,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       if (why) await destroy(r.id, why);
     }
     const known = new Set(Object.values(sb()).flatMap((r) => [r.name, dindName(r.name)]));
-    for (const name of await docker.listLabelled(LABEL)) if (!known.has(name)) { await docker.remove(name); log.info?.(`removed orphan container ${name}`); }
+    for (const name of await docker.listLabelled(OWN)) if (!known.has(name)) { await docker.remove(name); log.info?.(`removed orphan container ${name}`); }
     await sampleUsage();
     await reclaimIdle();
     await warm.maintain(maxLifeMs);
@@ -491,11 +495,11 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       log.info?.(`pending resize applied: HTTP ${r.status} ${JSON.stringify(r.body)}`);
     }
     const knownVols = new Set(Object.values(sb()).filter((r) => !r.workDir).map((r) => workVolume(r.name)));
-    for (const v of await docker.listVolumes("cs-work-")) if (!knownVols.has(v)) { await docker.removeVolume(v); log.info?.(`removed orphan volume ${v}`); }
+    for (const v of await docker.listVolumes("cs-work-", AGENT)) if (!knownVols.has(v)) { await docker.removeVolume(v); log.info?.(`removed orphan volume ${v}`); }
     if (t - lastWorkSweep >= WORK_SWEEP_MS) {
       lastWorkSweep = t;
       const keep = Object.values(sb()).map((r) => r.workDir).filter(Boolean);
-      for (const v of await docker.listVolumes("cs-cache-")) {
+      for (const v of await docker.listVolumes("cs-cache-", AGENT)) {
         try { await docker.pruneWorkDirs(v, image, keep); cacheErr.delete(`work sweep:${v}`); } catch (e) { sweepFail(v, "work sweep", e); }
       }
     }
@@ -590,7 +594,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   /** Peak and average CPU (cores) and memory (GB) per sandbox, lane + docker sidecar, against what it reserved. */
   async function sampleUsage() {
     let st;
-    try { st = await docker.stats?.(LABEL); } catch { return; }
+    try { st = await docker.stats?.(OWN); } catch { return; }
     if (!st) return;
     for (const r of Object.values(sb())) {
       if (r.state === "exited") continue;
