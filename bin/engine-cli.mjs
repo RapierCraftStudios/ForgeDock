@@ -509,10 +509,10 @@ export function readExecution(cwd = process.cwd()) {
 export function executionModeExplicit(cwd = process.cwd()) {
   try { return ["local", "remote", "hybrid"].includes(String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.execution?.mode ?? "").trim()); } catch { return false; }
 }
-/** #5748: `exec` with the public-repo default (actions provider) applied; visibility is read once per repo and fails closed to private. */
+/** #5748/#5900: `exec` with the opt-in public-repo default (`execution.public_default: actions`) applied; without the opt-in no API call and no change. Visibility is read once per repo and fails closed to private. */
 const visibilityCache = new Map();
 export async function withPublicDefault(exec, { repo, gh, deps = {}, cwd = process.cwd() } = {}) {
-  if (executionModeExplicit(cwd)) return exec;
+  if (exec?.publicDefault !== "actions" || executionModeExplicit(cwd)) return exec;
   const execMod = await import("./lean/execution.mjs");
   const key = String(repo ?? "");
   let isPublic = deps.repoPublic;

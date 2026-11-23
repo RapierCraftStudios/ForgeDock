@@ -3,6 +3,8 @@ name: ForgeDock lane
 # #5748: a ForgeDock lane on a GitHub-hosted runner. Dispatched by the ForgeDock orchestrator only (bin/lean/sandbox-actions.mjs);
 # never from pull_request or pull_request_target, so a fork cannot trigger a lane or reach a secret. The Claude credential is
 # a secret of the `forgedock-lane` environment (restrict it to feat/* branches and the ForgeDock app/bot in the repo settings).
+# #5899: the job token can write contents and a client-side hook can be bypassed, so the lane refuses to start unless the
+# default branch and the base lane branch are protected server-side (ruleset or classic required status checks).
 # Logs are public on a public repo: no step echoes the environment, and the result goes to an issue comment.
 
 run-name: forgedock-lane ${{ inputs.lane_id }}
@@ -51,11 +53,36 @@ jobs:
           [[ "$LANE_ID" =~ ^fdrsbx-[A-Za-z0-9._-]+-[0-9]+$ ]] || { echo "bad lane_id"; exit 1; }
           [[ "$ISSUE" =~ ^[0-9]+$ ]] || { echo "bad issue"; exit 1; }
           [[ "$LANE_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ && "$LANE_REF" != *..* ]] || { echo "bad ref"; exit 1; }
+      - name: Require server-side protection on the default and base lane branches
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          LANE_REF: ${{ inputs.ref }}
+          RESULT_FILE: ${{ runner.temp }}/lane-result.json
+        run: |
+          # #5899: a ruleset with pull_request, update or required_status_checks, or classic required status checks with at
+          # least one context, rejects a direct push by the job token; anything less leaves only the bypassable pre-push hook.
+          unprotected=""
+          for B in "$DEFAULT_BRANCH" "$LANE_REF"; do
+            [ -n "$B" ] || continue
+            types=$(gh api "repos/$GH_REPO/rules/branches/$B" --jq '[.[].type] | join(",")' 2>/dev/null || true)
+            case ",$types," in *,pull_request,*|*,update,*|*,required_status_checks,*) continue ;; esac
+            level=$(gh api "repos/$GH_REPO/branches/$B" --jq 'if .protected and (((.protection.required_status_checks.contexts // []) | length) > 0) then (.protection.required_status_checks.enforcement_level // "off") else "off" end' 2>/dev/null || echo off)
+            [ "$level" != "off" ] && continue
+            unprotected="$unprotected $B"
+          done
+          if [ -z "$unprotected" ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+          printf '{"terminalReason":"needs-human","code":"sandbox.start_failed","detail":"lane refused before start: branch(es)%s have no server-side push protection (a ruleset with pull_request, update or required_status_checks, or classic required status checks). The lane token can write contents and the pre-push hook is client-side only (#5899)."}\n' "$unprotected" > "$RESULT_FILE"
       - uses: actions/checkout@v4
+        if: steps.guard.outputs.ok == 'true'
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
       - name: Restrict pushes to feat/* branches
+        if: steps.guard.outputs.ok == 'true'
         run: |
           cat > .git/hooks/pre-push <<'HOOK'
           #!/bin/bash
@@ -65,11 +92,14 @@ jobs:
           HOOK
           chmod +x .git/hooks/pre-push
       - uses: actions/setup-node@v4
+        if: steps.guard.outputs.ok == 'true'
         with:
           node-version: 22
       - name: Install ForgeDock
+        if: steps.guard.outputs.ok == 'true'
         run: npm install -g forgedock
       - name: Run lane
+        if: steps.guard.outputs.ok == 'true'
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GH_TOKEN: ${{ github.token }}

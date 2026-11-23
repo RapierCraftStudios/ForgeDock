@@ -152,8 +152,9 @@ export function parseExecution(sec = {}) {
   const jobLimit = str(s.job_limit) !== "" && Number.isInteger(jl) && jl > 0 ? jl : null;
   const ciReserve = str(s.ci_reserve) !== "" && Number.isInteger(cr) && cr >= 0 ? cr : null;
   const plan = ["free", "pro", "team", "enterprise"].includes(str(s.plan).toLowerCase()) ? str(s.plan).toLowerCase() : null;
+  const publicDefault = str(s.public_default).toLowerCase() === "actions" ? "actions" : null; // #5900: opt-in only
   const dispatcher = /^[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?$/.test(str(s.dispatcher)) ? str(s.dispatcher) : null;
-  return { mode, maxRemote, provider, image, secrets, budget, ...(jobLimit ? { jobLimit } : {}), ...(ciReserve !== null ? { ciReserve } : {}), ...(plan ? { plan } : {}), ...(dispatcher ? { dispatcher } : {}), ...(hostFallback !== null ? { hostFallback } : {}), ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(accountRotator ? { accountRotator } : {}), ...(lt.tools.length ? { laneTools: lt.tools } : {}), ...(lt.errors.length ? { laneToolsErrors: lt.errors } : {}) };
+  return { mode, maxRemote, provider, image, secrets, budget, ...(jobLimit ? { jobLimit } : {}), ...(ciReserve !== null ? { ciReserve } : {}), ...(plan ? { plan } : {}), ...(publicDefault ? { publicDefault } : {}), ...(dispatcher ? { dispatcher } : {}), ...(hostFallback !== null ? { hostFallback } : {}), ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(accountRotator ? { accountRotator } : {}), ...(lt.tools.length ? { laneTools: lt.tools } : {}), ...(lt.errors.length ? { laneToolsErrors: lt.errors } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -223,13 +224,15 @@ export function openExecutionBudget({ budget = {}, file = executionBudgetFile(),
 }
 
 /**
- * #5748: the product default. An `execution.mode` that forge.yaml does not set (`exec.modeExplicit` unset) on a public repo
- * places lanes on GitHub-hosted runners (`provider: actions`, free minutes), capped at the plan's job limit minus a CI reserve.
- * A private repo, an unknown visibility (`isPublic` not true: fails closed) and any explicit mode, `local` included, keep
- * `exec` as is.
+ * #5748/#5900: opt-in public-repo placement. Only when forge.yaml sets `execution.public_default: actions` and no
+ * `execution.mode` (`exec.modeExplicit` unset) does a public repo place lanes on GitHub-hosted runners (`provider: actions`,
+ * free minutes), capped at the plan's job limit minus a CI reserve. Without the opt-in nothing changes (lanes stay local, as
+ * before 1.62.0): the actions provider needs owner setup (workflow file, `forgedock-lane` environment and secret, branch
+ * protection) that an upgrade cannot do. A private repo, an unknown visibility (`isPublic` not true: fails closed) and any
+ * explicit mode, `local` included, keep `exec` as is.
  */
 export function resolveDefaultExecution(exec, { isPublic = false } = {}) {
-  if (exec?.modeExplicit || isPublic !== true) return exec;
+  if (exec?.publicDefault !== "actions" || exec?.modeExplicit || isPublic !== true) return exec;
   const base = exec ?? parseExecution({});
   const cap = laneCap({ jobLimit: base.jobLimit ?? null, plan: base.plan ?? null, ciReserve: base.ciReserve });
   return { ...base, mode: "remote", provider: "actions", maxRemote: cap, defaultedActions: true };
