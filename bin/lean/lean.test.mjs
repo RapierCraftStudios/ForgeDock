@@ -1211,6 +1211,61 @@ describe("core work-on", () => {
       assert.equal(w.merges.length, 0);
       assert.equal(r.code, "merge.stacked_base");
     });
+    /** #5833: the dependency's PR list entry follows `dep.list`; `pr close` and `push --delete` are recorded. */
+    const cascading = (w, list) => {
+      const gh = w.io.gh, git = w.io.git;
+      w.closes = []; w.deletes = []; w.merged = [];
+      w.io.gh = async (a) => {
+        if (a[0] === "pr" && a[1] === "list" && a.includes("--head") && a[a.indexOf("--head") + 1] === STACK.branch) return JSON.stringify(list());
+        if (a[0] === "pr" && a[1] === "close") { w.closes.push(a.join(" ")); return ""; }
+        return gh(a);
+      };
+      w.io.git = async (a, o) => {
+        if (a[0] === "push" && a.includes("--delete")) { w.deletes.push(a.join(" ")); return ""; }
+        return git(a, o);
+      };
+      return w;
+    };
+    it("cascade replan: a dependency that ended without merging drops the stacked PR and branch, defers with stack.replan, never merges", async () => {
+      const w = cascading(stacked(world(), { depState: "CLOSED" }), () => [{ number: 5, state: "CLOSED" }]);
+      const r = await run(w, { stackedOn: STACK });
+      assert.equal(r.terminalReason, "deferred");
+      assert.equal(r.code, "stack.replan");
+      assert.equal(r.cascade, "replan");
+      assert.deepEqual(r.cascades, ["replan"]);
+      assert.equal(w.closes.length, 1);
+      assert.equal(w.deletes.length, 1);
+      assert.equal(w.merges.length, 0);
+    });
+    it("cascade restart: the dependency head moved and the rebase conflicts: PR and branch dropped, deferred with stack.restart from the frozen contract", async () => {
+      const w = cascading(stacked(world(), { depState: "OPEN" }), () => [{ number: 5, state: "OPEN", headRefOid: "b".repeat(40) }]);
+      const git = w.io.git;
+      w.io.git = async (a, o) => { if (a[0] === "merge" && a.includes("--no-commit")) throw new Error("CONFLICT"); return git(a, o); };
+      const r = await run(w, { stackedOn: STACK });
+      assert.equal(r.code, "stack.restart");
+      assert.equal(r.cascade, "restart");
+      assert.equal(w.closes.length, 1);
+      assert.equal(w.merges.length, 0);
+    });
+    it("cascade rebase: the dependency merged: retargeted to the lane, the cascade and its rework are recorded on the result", async () => {
+      const w = cascading(stacked(world(), { depState: "MERGED" }), () => [{ number: 5, state: "MERGED" }]);
+      const r = await run(w, { stackedOn: STACK });
+      assert.equal(r.terminalReason, "merged", r.detail);
+      assert.equal(r.cascade, "rebase");
+      assert.deepEqual(r.cascades, ["rebase"]);
+      assert.ok(Number.isFinite(r.cascade_minutes) && Number.isFinite(r.cascade_cost_usd));
+      assert.deepEqual(w.stack.edits, ["staging"]);
+    });
+    it("cascade reverify: a moved dependency head with a clean rebase re-verifies, then still merges only after the dependency merged", async () => {
+      let polls = 0;
+      const w = cascading(stacked(world(), { depState: "OPEN" }), () => (++polls === 1 ? [{ number: 5, state: "OPEN", headRefOid: "b".repeat(40) }] : [{ number: 5, state: "MERGED" }]));
+      const r = await run(w, { stackedOn: STACK });
+      assert.equal(r.terminalReason, "merged", r.detail);
+      assert.deepEqual(r.cascades, ["reverify", "rebase"]);
+      assert.equal(r.cascade, "rebase");
+      assert.equal(w.merges.length, 1);
+      assert.ok(w.stack.edits.length === 1, "retargeted once, after the dependency merged");
+    });
     it("without stackedOn the PR targets the lane and an open dependency still refuses (preserved)", async () => {
       const w = stacked(world());
       const r = await run(w);

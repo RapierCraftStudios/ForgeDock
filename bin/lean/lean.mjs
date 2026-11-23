@@ -124,7 +124,7 @@ import { reconcileCheckpoints } from "./checkpoint-reconcile.mjs";
 import { guardStagedDeletions, deletionEvidence, maxForeignDeletions } from "./delguard.mjs";
 import { createLedger, flattenPhases } from "./phaseledger.mjs";
 import { DEFAULT_CATALOG_SOURCES, deriveCatalog, mergeRecipes, rewriteMissed, isDriftFailure, rewriteSubprojectVenv } from "./validate-catalog.mjs";
-import { planStale, stackedBaseBlock, validStackedOn } from "./stacking.mjs";
+import { planStale, stackedBaseBlock, validStackedOn, cascadeDecision, invalidatedChecks } from "./stacking.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
 
 /**
@@ -375,6 +375,8 @@ export async function runCore(o) {
   const stackPlanned = o.planned && typeof o.planned.contractHash === "string" && typeof o.planned.baseSha === "string" ? o.planned : null;
   // #5832 stacked lanes phase 2: `stackedOn` ({dependency, branch, sha}) builds on the dependency's PR-ready lane head and opens the PR on its branch.
   let stackedOn = planOnly ? null : validStackedOn(o.stackedOn);
+  const cascadeLog = { kinds: [], costUsd: 0, ms: 0 }; // #5833: cascades of this stacked lane and what the rework cost
+  let stackInvalidation = null; // #5833: {changedPaths} narrows postMergeGate to the checks the dependency's final diff invalidates
   const withLink = (body) => `${issuePrMarker(issue)}\n${body}`; // #5505: the issue → PR link GitHub does not record for a staging PR
   const closeBlockers = (reason, exceptPr = null) => openPrBlockingClose({ repo, io: { gh: ghw }, issue, reason, exceptPr }).catch(() => []); // #5505: fail open
   let branch = `feat/issue-${issue}-lean`; // #5469: an adopted PR's own head branch replaces it
@@ -766,7 +768,7 @@ export async function runCore(o) {
     if (deferTail) postRun.add("teardown", () => teardown(reason, extra)); // last: the structure delta and guard read the worktree
     if (reason === "merged" || reason === "invalid") await clearPipelineLabels({ gh: ghc, repo, issue }); // #5592: a merged or closed issue keeps no needs-human / parked:* / remediation-queue
     await releaseLease(reason, code, extra.mergedTo ?? null);
-    done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0, model_ms: modelMs, phases: phaseLedger.snapshot(),
+    done = { terminalReason: reason, detail, branch, worktree: wt, ...(cascadeLog.kinds.length ? { cascade: cascadeLog.kinds[cascadeLog.kinds.length - 1], cascades: [...cascadeLog.kinds], cascade_cost_usd: Math.round(cascadeLog.costUsd * 1e6) / 1e6, cascade_minutes: Math.round(cascadeLog.ms / 6000) / 10 } : {}), cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0, model_ms: modelMs, phases: phaseLedger.snapshot(),
       ...(laneHead && reason !== "merged" ? { laneHead: { ...laneHead } } : {}), light, ...(lightVerdict ? { light_eligibility: lightVerdict } : {}), ...(lightUpgrade ? { light_upgrade: lightUpgrade } : {}), // #4453
       ...(Object.keys(waits).length ? { waits: { ...waits } } : {}), ...(followupsFiled.length ? { followups: followupsFiled.map((f) => ({ ...f })) } : {}), ...(pendingRecord().length ? { pendingFollowups: pendingRecord() } : {}), ...(heavyQueueMax ? { heavyQueueMax } : {}), ...(precheckRan ? { precheckMs, precheckDeferred } : {}),
       ...(firstPassOf(builderTriggers) != null ? { firstPass: firstPassOf(builderTriggers) } : {}), ...(tb.record() ? { turns: tb.record() } : {}), // #4392
@@ -3042,7 +3044,8 @@ export async function runCore(o) {
     await i18nGate("hand-off");
     /** #4406: verify.post_merge (else the scoped typecheck) on the merged tree before the base-sync push; fix rounds up to verify.max_rounds. */
     async function postMergeGate(trigger) {
-      const commands = io.runCommand && !isSplit ? [...new Set([...postMergeCommands({ configured: vcfg.postMerge, scoped: (await io.postMergeChecks?.({ cwd: wt, base }).catch(() => [])) ?? [], mode: vcfg.mode }), ...(guardOn() ? vcfg.invariants : [])])] : []; // #5239: the guard set also runs on the merged tree
+      let commands = io.runCommand && !isSplit ? [...new Set([...postMergeCommands({ configured: vcfg.postMerge, scoped: (await io.postMergeChecks?.({ cwd: wt, base }).catch(() => [])) ?? [], mode: vcfg.mode }), ...(guardOn() ? vcfg.invariants : [])])] : [];
+      if (stackInvalidation) { const all = commands; commands = invalidatedChecks({ changedPaths: stackInvalidation.changedPaths, checks: commands }); if (commands.length < all.length) T.decisions.push(`Stacked lane: ${all.length - commands.length} check(s) not re-run, the dependency's final diff does not touch them`); } // #5833 // #5239: the guard set also runs on the merged tree
       let fixed = false, results = [];
       for (let round = 0; commands.length; round++) {
         await renew();
@@ -4140,20 +4143,62 @@ export async function runCore(o) {
     // #5832: review passed and precheck green: this head is PR-ready (FORGE:STATE `prReady`, read by the orchestrator's stacked admission).
     try { if (finishing) throw new Error("finishing"); leaseState = { ...leaseState, prReady: { pr, branch, sha: localHead } }; await writeLease(leaseObj()); ev({ event: "PR_READY", pr, branch, sha: localHead }); } catch { /* best effort */ }
     const stackedState = stackedOn ?? validStackedOn(leaseState?.stackedOn);
-    const depMerged = async () => { // the dependency's lane PR merged (any PR from its branch in MERGED state)
-      try { return JSON.parse(String(await ghc(["pr", "list", "-R", repo, "--head", stackedState.branch, "--state", "all", "--json", "number,state"])) || "[]").some((x) => x?.state === "MERGED"); } catch { return false; }
+    const depInfo = async () => { // #5833: the dependency's PRs from its branch -> {state: merged|closed|open, head}
+      try {
+        const l = JSON.parse(String(await ghc(["pr", "list", "-R", repo, "--head", stackedState.branch, "--state", "all", "--json", "number,state,headRefOid"])) || "[]");
+        const open = l.find((x) => x?.state === "OPEN");
+        if (l.some((x) => x?.state === "MERGED")) return { state: "merged", head: null };
+        if (open) return { state: "open", head: open.headRefOid ?? null };
+        return { state: l.length ? "closed" : "unknown", head: null };
+      } catch { return { state: "unknown", head: null }; }
+    };
+    const depMerged = async () => (await depInfo()).state === "merged";
+    const cascade = (kind, t1) => { cascadeLog.kinds.push(kind); cascadeLog.costUsd += Math.max(0, usage.cost_usd - t1.cost); cascadeLog.ms += now() - t1.at; ev({ event: "STACK_CASCADE", cascade: kind, pr, dependency: stackedState.dependency }); T.decisions.push(`Stacked lane cascade: ${kind} (dependency #${stackedState.dependency})`); };
+    const dropStacked = async (why) => { // drop the stacked PR and branch; the rerun starts from the frozen contract
+      try { await ghw(["pr", "close", String(pr), "-R", repo, "--comment", why]); } catch { /* best effort */ }
+      try { await gitPush(["push", "origin", "--delete", branch]); } catch { /* best effort */ }
     };
     if (stackedState) { // wait for the dependency to merge, then move the PR onto the lane (merge.stacked_base never merges it before)
       const since = now();
-      while (!(await depMerged())) {
+      let curSha = stackedState.sha;
+      for (;;) {
+        const di = await depInfo(), t1 = { cost: usage.cost_usd, at: now() };
+        if (di.state === "merged") break;
+        if (di.state === "closed") { // ended unsatisfied: re-plan the dependent on the lane base
+          cascade("replan", t1); await dropStacked(`stacked dependency #${stackedState.dependency} ended without merging; re-planning on ${lane}`);
+          return await finish("deferred", `stacked dependency #${stackedState.dependency} ended unsatisfied; dependent re-planned on ${lane}`, { code: "stack.replan", pr, cascade: "replan" });
+        }
+        if (cascadeDecision({ depState: di.state, depHeadSha: di.head, stackedSha: curSha })) { // the dependency head moved: rebase and re-verify, or restart on a conflict
+          try { await git(["fetch", "origin", stackedState.branch]); } catch { /* offline: use the local ref */ }
+          let conflict = false;
+          try { await git(["merge", "--no-commit", "--no-ff", base]); } catch { conflict = true; }
+          try { await gitOut(["merge", "--abort"]); } catch { /* nothing to abort */ }
+          const kind = cascadeDecision({ depState: "open", depHeadSha: di.head, stackedSha: curSha, rebaseConflict: conflict });
+          if (kind === "restart") {
+            cascade("restart", t1); await dropStacked(`rebase onto the moved head of #${stackedState.dependency} conflicts; restarting from the frozen contract`);
+            return await finish("deferred", `stacked dependency #${stackedState.dependency} head moved and the rebase conflicts; restarting from the frozen contract`, { code: "stack.restart", pr, cascade: "restart" });
+          }
+          const r1 = await baseSync("stacked dependency head moved"); if (r1) return r1;
+          const rv = await doReview(); // the review delta
+          if (rv.env) return await envNeedsHuman(rv.env);
+          if (rv.unusable || rv.fail) return await needsHuman(`Review ${rv.fail ? "FAIL" : "unusable"} after rebasing onto the moved head of #${stackedState.dependency}: ${rv.reason ?? rv.unusable}`, rv.fail ? OUTCOME_CODES.REVIEW_FAILED : UNUSABLE_REVIEW_CODES[rv.unusable]);
+          await gatePassed("review");
+          curSha = di.head; localHead = await gitOut(["rev-parse", "HEAD"]);
+          leaseState = { ...leaseState, stackedOn: { ...stackedState, sha: curSha }, prReady: { pr, branch, sha: localHead } }; try { await writeLease(leaseObj()); } catch { /* best effort */ }
+          cascade("reverify", t1); continue;
+        }
         if (now() - since >= ciMaxMinutes * 60000) return await finish("ci-pending", `stacked PR #${pr} waited ${ciMaxMinutes} min for dependency #${stackedState.dependency} to merge; rerun resumes the PR`, { pr });
         onProgress({ event: "phase_paused", phase: "merge", detail: `merge.stacked_base: waiting for #${stackedState.dependency} to merge` });
         await sleep(30000);
         await renew();
       }
+      const t2 = { cost: usage.cost_usd, at: now() };
       try { await ghw(["pr", "edit", String(pr), "-R", repo, "--base", lane]); ev({ event: "STACK_RETARGET", pr, from: stackedState.branch, to: lane }); }
       catch (e) { return await finish("deferred", `stacked PR #${pr}: retarget to ${lane} failed: ${String(e?.message ?? e).slice(0, 200)}`, { pr }); }
-      const r0 = await baseSync("stacked PR moved onto the lane"); if (r0) return r0;
+      base = `origin/${lane}`; // the PR now targets the lane: later syncs merge the lane, not the dependency branch
+      try { await git(["fetch", "origin", lane]); stackInvalidation = { changedPaths: String(await git(["diff", "--name-only", curSha, `origin/${lane}`])).split("\n").map((x) => x.trim()).filter(Boolean) }; } catch { stackInvalidation = null; } // unknown diff: every check re-runs
+      let r0; try { r0 = await baseSync("stacked PR moved onto the lane"); } finally { stackInvalidation = null; }
+      cascade("rebase", t2); if (r0) return r0;
     }
     // A rerun on an existing PR goes through the same conflict check, so a conflicting PR from an earlier run recovers.
     for (;;) {

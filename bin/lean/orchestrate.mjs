@@ -854,6 +854,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       ...(Number.isFinite(r?.wall_ms) ? { wall_ms: r.wall_ms } : {}), ...(Number.isFinite(r?.model_ms) ? { model_ms: r.model_ms } : {}), // #4451
       ...(phasesOf(r, rec) ? { phases: phasesOf(r, rec) } : {}), // #4908
       ...(Array.isArray(r?.followups) && r.followups.length ? { followups: r.followups } : {}), // #5078
+      ...(r?.cascade ? { cascade: r.cascade, cascades: Array.isArray(r.cascades) ? r.cascades : [r.cascade], ...(Number.isFinite(r.cascade_cost_usd) ? { cascade_cost_usd: r.cascade_cost_usd } : {}), ...(Number.isFinite(r.cascade_minutes) ? { cascade_minutes: r.cascade_minutes } : {}) } : {}), // #5833
       ...(Number.isFinite(r?.precheckMs) ? { precheck_ms: r.precheckMs } : {}), ...(Number.isInteger(r?.precheckDeferred) && r.precheckDeferred > 0 ? { precheck_deferred: r.precheckDeferred } : {}), // #4331
       ...(typeof r?.firstPass === "boolean" ? { first_pass: r.firstPass } : {}), // #4362
       ...(r?.turns && typeof r.turns === "object" ? { turns: r.turns } : {}), // #4392
@@ -950,6 +951,18 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (cancelled && (row.outcome === "deferred" || row.outcome === "engine-error")) {
       requeue(n, 0); done(); save();
       update({ ...row, detail: `stopped by cancel: ${r?.code ?? row.outcome}${r?.detail ? ` ${r.detail}` : ""}` });
+      return;
+    }
+    if (row.outcome === "deferred" && (r?.code === "stack.replan" || r?.code === "stack.restart") && !cancelled) {
+      // #5833: the stacked dependent's PR and branch were dropped. replan: it builds as a normal lane on the lane base (today's held/skipped
+      // rules decide while its dependency is unsatisfied); restart: it may stack again on the dependency's new head, from the frozen contract.
+      const so = stackedOf.get(n);
+      stackedOf.delete(n); planned.delete(n);
+      if (r.code === "stack.restart") { stackedTried.delete(n); if (so) prReady.delete(so.dependency); }
+      requeue(n, 0); done(); save();
+      store?.log?.({ event: "STACK_CASCADE", issue: n, cascade: r.cascade, ...(so ? { dependency: so.dependency } : {}) });
+      decided({ issue: n, what: `stacked cascade ${r.cascade} for #${n}`, why: firstLine(row.detail) || "the stacked dependency moved or ended", alternative: "keep the stacked PR" });
+      update({ ...row, detail: `requeued after cascade ${r.cascade}: ${firstLine(row.detail)}` });
       return;
     }
     if (row.outcome === "deferred") {

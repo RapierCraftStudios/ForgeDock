@@ -254,3 +254,8 @@ Cite: #5831.
 
 `orchestration.stacking: full` adds `stackAdmissible` (`bin/lean/stacking.mjs`) to the plan lanes of phase 1. A pending dependent whose single unmerged in-batch dependency is running and PR-ready (`prReady` in that lane's FORGE:STATE, read through the `readPrReady` seam, `engine-cli.mjs` projector `readState`) starts a build lane with `ctx.stackedOn` `{dependency, branch, sha}` (`--stacked-on <dep>:<sha>:<branch>` for spawned lanes), once per issue (`stackedTried`; `stacked`/`stackedTried` persist for `--resume`). Event `STACK_BUILD_START` goes to the batch log, a FORGE:DECISION per admission, and the row carries `stacked: true` / `stackedOn`. Results of the dependent still count only when it merged, so dependents of the dependent keep the dependency gate. Stacking is core path only.
 Cite: #5832.
+
+## Entry 2026-11-23 — Stacked lanes phase 3: retarget on merge and cascade rules (#5833, epic #5822)
+
+A lane result with code `stack.replan` or `stack.restart` (stacked PR and branch dropped by the lane) is requeued by `settleLane` without a deferral count: `stackedOf` and `planned` are cleared; `restart` also clears `stackedTried` and the dependency's cached `prReady`, so the dependent may stack again on the new head; `replan` leaves `stackedTried`, so it builds as a normal lane (today's held/skipped rules decide while the dependency is unsatisfied). Rows carry `cascade`, `cascades`, `cascade_cost_usd`, `cascade_minutes`; `STACK_CASCADE` is logged. The batch report gets `cascades` (`cascadeRate`: stacked dependents, cascades, per dependent, rework cost/minutes) and one summary line (`formatCascadeSummary`).
+Cite: #5833.
