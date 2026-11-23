@@ -58,6 +58,9 @@ export const dockerCli = {
     const out = await docker(["ps", "-a", "--format", "{{.Image}}"], { timeoutMs: 30000 });
     return out ? [...new Set(out.split("\n").filter(Boolean))] : [];
   },
+  /** #5884: removes this agent's stopped containers and dangling images only (`label` carries the agent id, #5881). */
+  async containerPrune(label) { return docker(["container", "prune", "-f", ...[].concat(label).flatMap((l) => ["--filter", `label=${l}`])], { timeoutMs: 120000 }); },
+  async imagePrune(label) { return docker(["image", "prune", "-f", ...[].concat(label).flatMap((l) => ["--filter", `label=${l}`])], { timeoutMs: 120000 }); },
   async builderPrune(keepGb) { return docker(["builder", "prune", "-f", "--keep-storage", `${keepGb}gb`], { timeoutMs: 10 * 60000 }); },
   /** Volumes no container references (anonymous ones are named by 64 hex chars). */
   async listDanglingVolumes(label = []) {
