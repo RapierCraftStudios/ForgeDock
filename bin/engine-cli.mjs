@@ -2350,6 +2350,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   report.push(await budgetReportLine({ cwd, repo, gh: (a) => leanIo.gh(a) })); // #5278: month usage, projection and any auto switch to local-first
   const adequacyLine = formatTestAdequacySummary(rows); // #5449
   if (adequacyLine) report.push(adequacyLine);
+  try { const cl = (await import("./lean/stacking.mjs")).formatCascadeSummary(rows); if (cl) report.push(cl); } catch { /* #5833: the cascade line never fails a batch */ }
   const shadowLine = formatShadowSummary(rows); // #4398
   if (shadowLine) report.push(shadowLine);
   const decompLine = formatDecompositionSummary(rows); // #4396
@@ -2375,7 +2376,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   // #4917: a batch with any pending issue is not finished: no report, so a resume or the daemon picks it up
   let unfinished = false;
   try { unfinished = (batch.pendingIssues().length > 0 || batch.unrunAdds().length > 0 || batch.unrunRequeues().length > 0) && !batch.readCancel(); } catch { unfinished = false; } // a cancel ends the batch for good
-  if (!unfinished) try { batch.writeReport({ rows, crossLane, ok, reclaimed, ...(dag?.edges ? { dag: { planned: dag.edges.length, falseHolds: removedEdges } } : {}), report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
+  if (!unfinished) try { batch.writeReport({ rows, crossLane, ok, reclaimed, ...(rows.some((r) => r.stacked) ? { cascades: (await import("./lean/stacking.mjs")).cascadeRate(rows) } : {}), ...(dag?.edges ? { dag: { planned: dag.edges.length, falseHolds: removedEdges } } : {}), report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
   try { await healthCheck("end"); } catch { /* #5167: health never fails a batch */ }
   return { rows, crossLane, batch: batch.id, reclaimed, ok };
 }

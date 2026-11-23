@@ -328,6 +328,10 @@ orchestration:
   # is PR-ready (review passed, precheck green) builds on that lane head and opens a stacked PR
   # on the dependency's branch. The merge step (guard merge.stacked_base) refuses while the PR
   # base is not the lane or the dependency is unmerged; after it merged the PR moves onto the lane.
+  # Cascades (#5833): while it waits, a moved dependency head is rebased onto and re-verified (a conflict
+  # restarts the dependent from its frozen contract), a dependency closed without merging drops the
+  # stacked PR/branch and re-plans the dependent on the lane base, and after the merge only the checks
+  # the dependency's diff touches re-run. Rows carry `cascade`; the batch report counts cascades per dependent.
   # A plan lane's other ends do not count toward the breaker, relaunch or requeue budgets.
   stacking: off
 

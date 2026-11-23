@@ -118,5 +118,24 @@ describe("orchestrate stacked builds, phase 2 (#5832)", () => {
     assert.deepEqual(saved.stackedTried, [2]);
     assert.equal(saved.stacked[2].dependency, 1);
   });
+  it("cascade (#5833): a stack.replan end requeues the dependent as a normal lane; the row records the cascade and its rework", async () => {
+    let gate; const g = new Promise((r) => { gate = r; });
+    const calls = [];
+    const runOne = async (n, lane, ctx = {}) => {
+      calls.push({ n, ctx });
+      if (n === 1) { await g; return { terminalReason: "merged", cost_usd: 0 }; }
+      if (ctx.plan) return { terminalReason: "planned", planned: { contractHash: HASH, baseSha: SHA } };
+      if (ctx.stackedOn) { gate(); return { terminalReason: "deferred", code: "stack.replan", cascade: "replan", cascades: ["replan"], cascade_cost_usd: 0.25, cascade_minutes: 2, cost_usd: 0.25, detail: "dependency ended unsatisfied" }; }
+      return { terminalReason: "merged", cost_usd: 0 };
+    };
+    const updates = [], events = [];
+    const store = { load: () => null, save: () => {}, log: (r) => events.push(r) };
+    await orchestrate({ issues: [1, 2], parallel: 2, readBody: body, runOne, stacking: "full", readPrReady: async () => RD, store, onUpdate: (r) => updates.push(r), maxDeferrals: 2 });
+    const cas = updates.find((u) => u.issue === 2 && u.cascade);
+    assert.equal(cas.cascade, "replan"); assert.equal(cas.stacked, true); assert.equal(cas.cascade_cost_usd, 0.25);
+    assert.ok(events.some((e) => e.event === "STACK_CASCADE" && e.issue === 2 && e.cascade === "replan"));
+    const later = calls.filter((c) => c.n === 2 && !c.ctx.plan && !c.ctx.stackedOn);
+    assert.equal(later.length, 1, "rebuilt as a normal lane");
+    assert.equal(updates.filter((u) => u.issue === 2).pop().outcome, "merged");
+  });
 });
-
