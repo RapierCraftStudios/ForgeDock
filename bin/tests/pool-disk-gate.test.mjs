@@ -62,7 +62,7 @@ const spec = (id) => ({ id, issue: 1, batch: "b1", repo: { slug: "o/r", url: "ht
 function agentFixture(hostDisk, opts = {}) {
   const docker = fakeDocker();
   const dir = tmpDir("cs-disk-");
-  const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: dir, allow_cpus: 16, allow_mem_gb: 32, lease_ttl_s: 600, token: "t", ...opts }, { docker, now: () => 1_000_000, log: quiet, live: () => ({ ok: true }), hostDisk });
+  const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: dir, allow_cpus: 16, allow_mem_gb: 32, lease_ttl_s: 600, token: "t", ...opts }, { docker, now: () => 1_000_000, log: quiet, live: () => ({ ok: true }), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }), hostDisk });
   return { agent, docker, dir };
 }
 async function health(agent) {

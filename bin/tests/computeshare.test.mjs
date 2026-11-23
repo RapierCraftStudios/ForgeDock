@@ -39,7 +39,7 @@ function agentFixture(opts = {}) {
   let t = 1_000_000;
   const docker = fakeDocker();
   const dir = tmpDir("cs-agent-");
-  const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: dir, allow_cpus: 4, allow_mem_gb: 8, lease_ttl_s: 600, token: "agent-token", ...opts }, { docker, now: () => t, log: quiet, live: opts.live ?? (() => ({ ok: true })) });
+  const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: dir, allow_cpus: 4, allow_mem_gb: 8, lease_ttl_s: 600, token: "agent-token", ...opts }, { docker, now: () => t, log: quiet, live: opts.live ?? (() => ({ ok: true })), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
   return { agent, docker, dir, advance: (ms) => { t += ms; } };
 }
 
@@ -441,7 +441,7 @@ test("lane image version equals the dispatcher version (#4545)", async () => {
   assert.match(df, /^ARG FORGEDOCK_VERSION$/m, "no separate version pin in the Dockerfile");
   const dir = tmpDir("lane-image-");
   const docker = { ...fakeDocker(), builds: [], async hasImage() { return false; }, async build(d, tag, args) { this.builds.push({ tag, args }); } };
-  const agent = createAgent({ state_dir: dir, allow_cpus: 2, allow_mem_gb: 4, router_url: "http://x" }, { docker, log: quiet });
+  const agent = createAgent({ state_dir: dir, allow_cpus: 2, allow_mem_gb: 4, router_url: "http://x" }, { docker, log: quiet, vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
   await agent.ensureImage();
   assert.deepEqual(docker.builds, [{ tag: `forgedock-lane:${pkg.version}`, args: { FORGEDOCK_VERSION: pkg.version } }]);
 });
@@ -1006,7 +1006,7 @@ function sharedDaemon() {
 
 test("reap, orphan-volume and work sweep touch only this agent's labelled resources (#5881)", async () => {
   const docker = sharedDaemon();
-  const mkAgent = (name) => createAgent({ name, listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: tmpDir("cs-agent-"), allow_cpus: 4, allow_mem_gb: 8, lease_ttl_s: 600, token: "t" }, { docker, now: () => 1_000_000, log: quiet, live: () => ({ ok: true }) });
+  const mkAgent = (name) => createAgent({ name, listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: tmpDir("cs-agent-"), allow_cpus: 4, allow_mem_gb: 8, lease_ttl_s: 600, token: "t" }, { docker, now: () => 1_000_000, log: quiet, live: () => ({ ok: true }), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
   const a = mkAgent("agent-a"), b = mkAgent("agent-b");
   await a.launch({ spec: spec("la"), cpus: 1, mem_gb: 1 });
   await b.launch({ spec: spec("lb"), cpus: 1, mem_gb: 1 });

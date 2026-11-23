@@ -67,7 +67,7 @@ function fakeDocker() {
     async sweepCache(v) { this.swept.push(v); if (this.failSweep) throw Object.assign(new Error("timeout"), { stderr: "timed out" }); return { size_bytes: 5 * GB, last_used_ms: v === "cs-cache-idle" || v === "cs-cache-marcode" ? 1000 : null, removed: 0, errors: [] }; },
   };
 }
-const mk = (docker, cfg = {}) => createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://x", state_dir: tmpDir("cs-agent-"), allow_cpus: 4, allow_mem_gb: 8, token: "t", ...cfg }, { docker, now: () => 100 * DAY, log: quiet, live: () => ({ ok: true }) });
+const mk = (docker, cfg = {}) => createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://x", state_dir: tmpDir("cs-agent-"), allow_cpus: 4, allow_mem_gb: 8, token: "t", ...cfg }, { docker, now: () => 100 * DAY, log: quiet, live: () => ({ ok: true }), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
 
 describe("agent cache sweep", () => {
   it("evicts idle unreferenced volumes, never the never-evict list, and reports sizes", async () => {
