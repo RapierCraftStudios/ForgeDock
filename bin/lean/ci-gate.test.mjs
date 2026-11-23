@@ -112,6 +112,23 @@ describe("annotation and single-file steps", () => {
   });
 });
 
+describe("push path scoping exemptions (#5792)", () => {
+  const rel = (on, pre = "") => `${pre}# FORGE:CI_BUDGET trigger=push minutes=5 why=release\nname: rel\non:\n${on}\nconcurrency: rel\njobs:\n  rel:\n    runs-on: ubuntu-latest\n    timeout-minutes: 10\n    steps:\n      - run: make release\n`;
+  const run = (text) => ciGateFindings({ cfg, base: {}, head: { ".github/workflows/rel.yml": text } });
+  it("a tag-only push trigger needs no paths", () => {
+    assert.deepEqual(run(rel("  push:\n    tags: ['v*']")), []);
+  });
+  it("a push with branches (or tags and branches) still needs paths", () => {
+    assert.match(run(rel("  push:\n    branches: [main]"))[0].detail, /path scoping/);
+    assert.match(run(rel("  push:\n    tags: ['v*']\n    branches: [main]"))[0].detail, /path scoping/);
+  });
+  it("a FORGE:CI_PATHS_EXEMPT annotation with why exempts a deploy-on-main push; without why it does not", () => {
+    const on = "  push:\n    branches: [main]";
+    assert.deepEqual(run(rel(on, "# FORGE:CI_PATHS_EXEMPT why=deploys on every merge\n")), []);
+    assert.match(run(rel(on, "# FORGE:CI_PATHS_EXEMPT\n"))[0].detail, /path scoping/);
+  });
+});
+
 describe("new jobs and hygiene", () => {
   const withJob = (job) => BASE_CI + job;
   it("a job added to an existing workflow needs an annotation above or inside it", () => {
@@ -140,7 +157,7 @@ describe("new jobs and hygiene", () => {
   });
   it("scanWorkflow reads triggers, concurrency and job children", () => {
     const s = scanWorkflow(BASE_CI);
-    assert.deepEqual(s.triggers, { pull_request: { paths: true } });
+    assert.deepEqual(s.triggers, { pull_request: { paths: true, tagOnly: false } });
     assert.equal(s.concurrency, true);
     assert.deepEqual(s.jobs.map((j) => [j.id, j.timeout, j.if]), [["lint", true, false], ["regression", true, false]]);
     assert.deepEqual(Object.keys(scanWorkflow("on: [push, pull_request]\njobs: {}\n").triggers), ["push", "pull_request"]);

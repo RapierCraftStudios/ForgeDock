@@ -25,6 +25,12 @@ describe("release merge hold (#5709)", () => {
     assert.equal((await releaseMergeHold(O(run([PEND]), { policy: { release: { hold_merges_during_release_ci: true } } }))).held, true);
     assert.equal(holdEnabled(null), true); assert.equal(holdEnabled({ schema: 1 }), true); assert.equal(holdEnabled({ release: {} }), true);
   });
+  it("#5794 skipReleaseCi lets the release fix lane past a pending release PR; the manual hold and the default still hold", async () => {
+    assert.equal((await releaseMergeHold(O(run([PEND]), { skipReleaseCi: true }))).held, false);
+    assert.equal((await releaseMergeHold(O(run([PEND]), { skipReleaseCi: false }))).held, true);
+    const m = await releaseMergeHold(O(run([PEND]), { skipReleaseCi: true, readActive: async () => ({ mergeHold: { reason: "r" } }) }));
+    assert.equal(m.held, true); assert.equal(m.kind, "manual");
+  });
   it("holds on a manual hold and fails open on read errors", async () => {
     const m = await releaseMergeHold(O(run([]), { readActive: async () => ({ mergeHold: { reason: "r" } }) }));
     assert.equal(m.held, true); assert.equal(m.kind, "manual");

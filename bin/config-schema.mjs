@@ -66,6 +66,9 @@ export const TYPES = {
   "ci.budget.monthly_minutes": "number",
   "ci.budget.shared_regression_job": "scalar",
   "orchestration.stacking": { enum: ["off", "plan", "full"] }, // #5831: plan lanes for dependents of in-batch dependencies (bin/lean/stacking.mjs)
+  "execution.provider": { enum: ["local", "container", "remote", "pool", "actions"] }, // #5748
+  "execution.ci_reserve": "number",
+  "execution.job_limit": "number",
   "engine.path": { enum: ["core", "full", "lean", "auto"] },
   "deploy.engine.enabled": "bool",
   "deploy.engine.stage_timeout_s": "number",
