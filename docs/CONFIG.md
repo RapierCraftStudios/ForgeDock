@@ -2950,6 +2950,7 @@ Keys of the pool agent's JSON config (`forgedock pool agent`), not of `forge.yam
 |---|---|---|---|
 | `cache_max_age_days` | number | `14` | uv/npm/pip/poetry cache files, depcache and env snapshot entries older than this are deleted by the agent sweep, with no launch needed. The pnpm store is pruned and the git mirror gets `git gc --auto`. |
 | `cache_max_gb` | number | unset (no cap) | Per-volume cap. A volume over it is shrunk oldest-first below the cap; work dirs of live sandboxes are never touched. |
+| `depcache_max_gb` | number | `40` | Per-repo cap on `forge-depcache/<repo>/` (#5901). Over it, the least recently used snapshots (by their `last-used` stamp) are deleted, never one held by a lane lock. `/capacity` `cache_volumes.<volume>.depcache_gb` and `forgedock pool status` show each repo's depcache size. Snapshots are also aged out per snapshot by `cache_max_age_days`. |
 | `cache_idle_days` | number | `30` | A volume with no launch for this long and no referencing sandbox is removed. Evicted only when its last use is known (`/cache/.last-used`, written by the lane entrypoint). |
 | `cache_never_evict` | list of volume names | `[]` | Volumes (e.g. `cs-cache-marcode`) that are never swept or evicted. |
 | `cache_sweep_interval_s` | number | `3600` | Gap between cache sweeps. |

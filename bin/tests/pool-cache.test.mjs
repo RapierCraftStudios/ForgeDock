@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, existsSync, utimesSync } from "node:fs";
 import { join } from "node:path";
-import { planCacheCap, planIdleEviction, sweepVolume, CACHE_LABEL } from "../pool/cache-sweep.mjs";
+import { planCacheCap, planDepcacheCap, planIdleEviction, sweepVolume, CACHE_LABEL } from "../pool/cache-sweep.mjs";
 import { createAgent } from "../pool/agent.mjs";
 import { tmpDir } from "./_tmp.mjs";
 
@@ -29,6 +29,46 @@ describe("planIdleEviction", () => {
   const vols = [{ name: "old", lastUsedMs: 10 * DAY }, { name: "ref", lastUsedMs: 10 * DAY }, { name: "never", lastUsedMs: 10 * DAY }, { name: "fresh", lastUsedMs: 99 * DAY }, { name: "unknown", lastUsedMs: null }];
   it("evicts only idle, unreferenced, known, non-protected volumes", () => {
     assert.deepEqual(planIdleEviction({ volumes: vols, referenced: new Set(["ref"]), neverEvict: ["never"], now, idleMs: 30 * DAY }), ["old"]);
+  });
+});
+
+describe("depcache cap (#5901)", () => {
+  it("planDepcacheCap evicts least-recently-used snapshots until under the cap", () => {
+    const e = [1, 2, 3, 4, 5].map((n) => ({ path: `s${n}`, bytes: 10, lastUsedMs: n * 100 }));
+    const p = planDepcacheCap(e, 25);
+    assert.deepEqual(p.delete, ["s1", "s2", "s3"]);
+    assert.equal(p.after, 20);
+    assert.deepEqual(planDepcacheCap([{ path: "s", bytes: 10, lastUsedMs: 1, live: true }], 1).delete, []);
+  });
+  const snap = (root, repo, key, kb, usedAgoDays) => {
+    const d = join(root, "forge-depcache", repo, `npm-${key}`);
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, "f"), "x".repeat(kb * 1024));
+    writeFileSync(join(d, "last-used"), String(Date.now() - usedAgoDays * DAY));
+    return d;
+  };
+  it("sweepVolume removes the oldest snapshots past the per-repo cap before newer ones", () => {
+    const root = tmpDir("cs-sweep-");
+    const [o, m, n] = [snap(root, "acme_shop", "0000000000000001", 400, 3), snap(root, "acme_shop", "0000000000000002", 400, 2), snap(root, "acme_shop", "0000000000000003", 400, 1)];
+    const other = snap(root, "other", "0000000000000004", 400, 9);
+    const r = sweepVolume({ root, maxAgeDays: 14, maxDepcacheGb: 0.0009, keep: [] });
+    assert.ok(!existsSync(o) && existsSync(m) && existsSync(n));
+    assert.ok(existsSync(other)); // its own repo, under the cap
+  });
+  it("a locked snapshot is never evicted", () => {
+    const root = tmpDir("cs-sweep-");
+    const o = snap(root, "r", "0000000000000001", 400, 3);
+    writeFileSync(`${o}.lock`, "{}");
+    snap(root, "r", "0000000000000002", 400, 1);
+    sweepVolume({ root, maxAgeDays: 14, maxDepcacheGb: 0.0005, keep: [] });
+    assert.ok(existsSync(o));
+  });
+  it("sweep result reports depcache bytes per repo", () => {
+    const root = tmpDir("cs-sweep-");
+    snap(root, "a_b", "0000000000000001", 100, 1);
+    snap(root, "c_d", "0000000000000002", 200, 1);
+    const r = sweepVolume({ root, maxAgeDays: 14, keep: [] });
+    assert.ok(r.depcache_bytes.a_b >= 100 * 1024 && r.depcache_bytes.c_d >= 200 * 1024);
   });
 });
 
@@ -64,7 +104,7 @@ function fakeDocker() {
     async listVolumes(prefix) { return [...this.volumes].filter((v) => v.startsWith(prefix)); },
     async removeVolume(v) { this.removed.push(v); this.volumes.delete(v); },
     async createVolume(n, l) { this.labels.push([n, l]); },
-    async sweepCache(v) { this.swept.push(v); if (this.failSweep) throw Object.assign(new Error("timeout"), { stderr: "timed out" }); return { size_bytes: 5 * GB, last_used_ms: v === "cs-cache-idle" || v === "cs-cache-marcode" ? 1000 : null, removed: 0, errors: [] }; },
+    async sweepCache(v) { this.swept.push(v); if (this.failSweep) throw Object.assign(new Error("timeout"), { stderr: "timed out" }); return { size_bytes: 5 * GB, last_used_ms: v === "cs-cache-idle" || v === "cs-cache-marcode" ? 1000 : null, removed: 0, errors: [], ...(this.depcache ? { depcache_bytes: this.depcache } : {}) }; },
   };
 }
 const mk = (docker, cfg = {}) => createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://x", state_dir: tmpDir("cs-agent-"), allow_cpus: 4, allow_mem_gb: 8, token: "t", ...cfg }, { docker, now: () => 100 * DAY, log: quiet, live: () => ({ ok: true }), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
@@ -79,6 +119,13 @@ describe("agent cache sweep", () => {
     const cap = agent.capacity();
     assert.equal(cap.cache_sweep_error, undefined);
     assert.equal(cap.cache_volumes["cs-cache-o_r"].size_gb, 5);
+  });
+  it("capacity carries depcache_gb per repo", async () => {
+    const docker = fakeDocker();
+    docker.depcache = { acme_shop: 3 * GB };
+    const agent = mk(docker);
+    await agent.reap();
+    assert.deepEqual(agent.capacity().cache_volumes["cs-cache-o_r"].depcache_gb, { acme_shop: 3 });
   });
   it("a failing sweep surfaces as cache_sweep_error in capacity", async () => {
     const docker = fakeDocker();

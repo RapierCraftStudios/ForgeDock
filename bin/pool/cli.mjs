@@ -41,6 +41,16 @@ function rejectUnknownFlags(cmd, rest) {
 }
 
 /** The `forgedock pool` verbs (and the `computeshare` script). Throws on usage or router errors; `deps` injects the HTTP client and config. */
+/** #5901: one line per agent cache volume with each repo's depcache size, from the router's /agents view. */
+export function depcacheLines(agents) {
+  const out = [];
+  for (const a of agents ?? []) for (const [vol, v] of Object.entries(a.cache_volumes ?? {})) {
+    const repos = Object.entries(v.depcache_gb ?? {}).map(([k, gb]) => `${k} ${gb} GB`).join(", ");
+    if (repos) out.push(`${a.name} ${vol}: depcache ${repos}`);
+  }
+  return out;
+}
+
 export async function runPoolCli(argv, deps = {}) {
   const [cmd, ...rest] = argv;
   const call = deps.call ?? httpCall;
@@ -87,6 +97,7 @@ export async function runPoolCli(argv, deps = {}) {
       const cfg = routerConfig();
       const r = await call(`http://${cfg.listen.host}:${cfg.listen.port}`, "GET", "/agents", { token: cfg.forgedock_token });
       console.log(JSON.stringify(r.data, null, 2));
+      for (const l of depcacheLines(r.data?.agents)) console.log(l);
       break;
     }
     case "enroll":
