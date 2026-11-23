@@ -41,16 +41,18 @@ export function ledgerIoFromGh(gh) {
  * @param {string[]} [o.defaults]  default branch names; a release PR targets one of them
  * @param {boolean} [o.enabled]  explicit switch (false disables)
  * @param {object|null} [o.policy]  parsed release policy; `release.hold_merges_during_release_ci: false` disables
+ * @param {boolean} [o.skipReleaseCi]  the release job's own fix lane (#5794): skip only the release-PR pending-CI hold; the manual hold still applies
  * @param {() => Promise<object|null>} [o.readActive]  the `_active` record, for the manual hold
  * @returns {Promise<{held: boolean, kind?: "manual"|"release-ci", reason?: string, pr?: number}>}
  */
-export async function releaseMergeHold({ gh, repo, branch, defaults = [], enabled = true, policy = null, readActive = null }) {
+export async function releaseMergeHold({ gh, repo, branch, defaults = [], enabled = true, policy = null, readActive = null, skipReleaseCi = false }) {
   if (enabled === false || !holdEnabled(policy) || !branch) return { held: false };
   try {
     const a = readActive ? await readActive() : null;
     const m = a?.mergeHold;
     if (m) return { held: true, kind: "manual", reason: `manual merge hold (${m.reason ?? "no reason"})` };
   } catch { /* fail-open */ }
+  if (skipReleaseCi) return { held: false };
   try {
     const rows = JSON.parse(String(await gh(["pr", "list", "-R", repo, "--head", branch, "--state", "open", "--json", "number,baseRefName,statusCheckRollup"])) || "[]");
     const names = new Set(defaults.filter(Boolean));

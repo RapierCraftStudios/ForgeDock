@@ -67,7 +67,7 @@ function fakeDocker() {
     async sweepCache(v) { this.swept.push(v); if (this.failSweep) throw Object.assign(new Error("timeout"), { stderr: "timed out" }); return { size_bytes: 5 * GB, last_used_ms: v === "cs-cache-idle" || v === "cs-cache-marcode" ? 1000 : null, removed: 0, errors: [] }; },
   };
 }
-const mk = (docker, cfg = {}) => createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://x", state_dir: tmpDir("cs-agent-"), allow_cpus: 4, allow_mem_gb: 8, token: "t", ...cfg }, { docker, now: () => 100 * DAY, log: quiet, live: () => ({ ok: true }) });
+const mk = (docker, cfg = {}) => createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://x", state_dir: tmpDir("cs-agent-"), allow_cpus: 4, allow_mem_gb: 8, token: "t", ...cfg }, { docker, now: () => 100 * DAY, log: quiet, live: () => ({ ok: true }), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
 
 describe("agent cache sweep", () => {
   it("evicts idle unreferenced volumes, never the never-evict list, and reports sizes", async () => {
@@ -92,6 +92,20 @@ describe("agent cache sweep", () => {
     const docker = fakeDocker();
     const agent = mk(docker);
     await agent.launch({ spec: { id: "s1", repo: { slug: "o/r", url: "u" }, command: ["x"] }, cpus: 1, mem_gb: 1 });
-    assert.deepEqual(docker.labels, [["cs-cache-o-r", [CACHE_LABEL]]]);
+    assert.deepEqual(docker.labels, [["cs-cache-o-r", [CACHE_LABEL, "computeshare.agent=a1"]]]);
+  });
+  it("a pre-label cache volume the agent mounts is swept and work-pruned; a foreign unlabelled one is not", async () => {
+    const docker = fakeDocker();
+    docker.volumes = new Set(["cs-cache-o-r", "cs-cache-foreign"]);
+    docker.listVolumes = async function (prefix, label) { return label ? [] : [...this.volumes].filter((v) => v.startsWith(prefix)); }; // nothing carries the label
+    docker.volumeLabels = async () => ({});
+    docker.pruned = [];
+    docker.pruneWorkDirs = async function (v) { this.pruned.push(v); };
+    const agent = mk(docker);
+    await agent.launch({ spec: { id: "s1", repo: { slug: "o/r", url: "u" }, command: ["x"] }, cpus: 1, mem_gb: 1 });
+    await agent.reap();
+    assert.ok(docker.swept.includes("cs-cache-o-r"));
+    assert.ok(docker.pruned.includes("cs-cache-o-r"));
+    assert.ok(!docker.swept.includes("cs-cache-foreign") && !docker.pruned.includes("cs-cache-foreign"));
   });
 });

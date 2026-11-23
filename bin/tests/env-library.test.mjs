@@ -343,7 +343,7 @@ describe("pool agent env snapshot helper", () => {
     const runs = [];
     const docker = { async run(args) { runs.push(args); return "id"; }, async inspect() { return { running: true }; }, async remove() {}, async listLabelled() { return []; }, async listVolumes() { return []; }, async removeVolume() {}, async hasImage() { return true; }, async stats() { return {}; }, async removeWorkDir() {}, async pruneWorkDirs() {}, async wipe() {} };
     let t = 1e12;
-    const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: tmpDir("fd-env-agent-"), allow_cpus: 8, allow_mem_gb: 16, token: "t", image: "lane:1" }, { docker, now: () => t, log: {}, live: () => ({ ok: true }) });
+    const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: tmpDir("fd-env-agent-"), allow_cpus: 8, allow_mem_gb: 16, token: "t", image: "lane:1" }, { docker, now: () => t, log: {}, live: () => ({ ok: true }), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
     return { agent, runs, tick: (ms) => { t += ms; } };
   };
   const spec = (id, extra = {}) => ({ id, command: ["true"], repo: { slug: "acme/shop", url: "https://example.invalid/acme/shop.git", ref: "staging" }, ...extra });

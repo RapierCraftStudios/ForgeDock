@@ -34,14 +34,35 @@ export const dockerCli = {
     try { await docker(["kill", `--signal=${signal}`, name], { timeoutMs: 20000 }); return true; }
     catch (e) { if (/No such container|is not running/i.test(e.stderr ?? "")) return false; throw e; }
   },
+  /** #5856: re-weights a running container (throttle/unthrottle a borrowed lane); a gone container is not an error. */
+  async update(name, { cpuShares, memoryReservationMb }) { try { await docker(["update", "--cpu-shares", String(cpuShares), ...(memoryReservationMb ? ["--memory-reservation", `${memoryReservationMb}m`] : []), name], { timeoutMs: 20000 }); } catch (e) { if (!/No such container/i.test(e.stderr ?? "")) throw e; } },
+  /** `label` is one label or a list; docker ANDs the filters (#5881: [computeshare=1, computeshare.agent=<id>]). */
   async listLabelled(label) {
-    const out = await docker(["ps", "-a", "--filter", `label=${label}`, "--format", "{{.Names}}"], { timeoutMs: 20000 });
+    const out = await docker(["ps", "-a", ...[].concat(label).flatMap((l) => ["--filter", `label=${l}`]), "--format", "{{.Names}}"], { timeoutMs: 20000 });
     return out ? out.split("\n").filter(Boolean) : [];
   },
   async removeVolume(name) { try { await docker(["volume", "rm", "-f", name], { timeoutMs: 120000 }); } catch (e) { if (!/no such volume/i.test(e.stderr ?? "")) throw e; } },
-  async listVolumes(prefix) {
-    const out = await docker(["volume", "ls", "-q", "--filter", `name=${prefix}`], { timeoutMs: 20000 });
+  /** #5881: `label` (one or a list) restricts the list to volumes carrying it, e.g. this agent's. */
+  async listVolumes(prefix, label = []) {
+    const out = await docker(["volume", "ls", "-q", "--filter", `name=${prefix}`, ...[].concat(label).flatMap((l) => ["--filter", `label=${l}`])], { timeoutMs: 20000 });
     return out ? out.split("\n").filter((v) => v.startsWith(prefix)) : [];
+  },
+  /** Local image refs (`repo:tag`) starting with prefix; untagged images are skipped. */
+  async listImages(prefix) {
+    const out = await docker(["images", "--format", "{{.Repository}}:{{.Tag}}"], { timeoutMs: 30000 });
+    return [...new Set(out ? out.split("\n").filter((t) => t.startsWith(prefix) && !t.endsWith(":<none>")) : [])];
+  },
+  async removeImage(tag) { try { await docker(["rmi", tag], { timeoutMs: 120000 }); } catch (e) { if (!/no such image/i.test(e.stderr ?? "")) throw e; } },
+  /** Image refs of every container, running or exited (a ref in use must never be removed). */
+  async listContainerImages() {
+    const out = await docker(["ps", "-a", "--format", "{{.Image}}"], { timeoutMs: 30000 });
+    return out ? [...new Set(out.split("\n").filter(Boolean))] : [];
+  },
+  async builderPrune(keepGb) { return docker(["builder", "prune", "-f", "--keep-storage", `${keepGb}gb`], { timeoutMs: 10 * 60000 }); },
+  /** Volumes no container references (anonymous ones are named by 64 hex chars). */
+  async listDanglingVolumes(label = []) {
+    const out = await docker(["volume", "ls", "-q", "--filter", "dangling=true", ...[].concat(label).flatMap((l) => ["--filter", `label=${l}`])], { timeoutMs: 30000 });
+    return out ? out.split("\n").filter(Boolean) : [];
   },
   async pull(image) { return docker(["pull", "-q", image], { timeoutMs: 30 * 60000 }); },
   async load(file) { return docker(["load", "-q", "-i", file], { timeoutMs: 30 * 60000 }); },
@@ -70,6 +91,10 @@ export const dockerCli = {
   },
   /** #5757: creates a volume carrying labels (idempotent: an existing volume keeps its labels). */
   async createVolume(name, labels = []) { await docker(["volume", "create", ...labels.flatMap((l) => ["--label", l]), name], { timeoutMs: 20000 }); },
+  /** Labels of an existing volume ({} when it is missing or cannot be inspected). */
+  async volumeLabels(name) {
+    try { return JSON.parse(await docker(["volume", "inspect", "--format", "{{json .Labels}}", name], { timeoutMs: 20000 })) ?? {}; } catch { return {}; }
+  },
   /** #5757: runs the in-volume cache sweep (bin/pool/cache-sweep.mjs) in a lane-image container; resolves its JSON result, rejects on failure or timeout. */
   async sweepCache(volume, image, opts) {
     const out = await docker(["run", "--rm", "--network", "none", "-v", `${volume}:/cache`, "-e", `CS_CACHE_SWEEP_OPTS=${JSON.stringify(opts)}`, "-e", `CS_CACHE_SWEEP_SRC=${readFileSync(SWEEP_SRC, "utf8")}`, "--entrypoint", "sh", image, "-c", 'printf %s "$CS_CACHE_SWEEP_SRC" > /tmp/cache-sweep.mjs && exec node /tmp/cache-sweep.mjs'], { timeoutMs: SWEEP_TIMEOUT_MS });

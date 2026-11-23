@@ -49,3 +49,11 @@ test("python: literal-in-text and re.search over read_text are weak; calling pro
   assert.equal(isWeakGuardTest(`${PY}import subprocess\ndef test_cli():\n    out = subprocess.run(["x"], capture_output=True, text=True).stdout\n    assert "ok" in out\n`, "tests/test_x.py"), false);
   assert.equal(isWeakGuardTest(`def test_no_read():\n    assert "a" in "abc"\n`, "tests/test_z.py"), false);
 });
+
+test("regex-literal presence check stays linear on many backslash escapes (CodeQL js/redos)", () => {
+  const evil = `assert.ok(/${"\\a".repeat(5000)}\n)`; // an unterminated regex literal full of escapes
+  const t0 = Date.now();
+  assert.equal(isWeakGuardTest(`${HEAD}test("r", () => { ${evil}; });\n`, "a.test.mjs"), false);
+  assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0} ms`);
+  assert.equal(isWeakGuardTest(`${HEAD}test("r", () => assert.ok(/a\\/b\\.c/.test(src)));\n`, "a.test.mjs"), true); // escaped "/" and "." still parse
+});

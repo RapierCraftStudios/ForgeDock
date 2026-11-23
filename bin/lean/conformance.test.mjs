@@ -3,7 +3,8 @@
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { testPlanProblems, proofEchoesDeliverable, outputTail, isEnvValidateFailure, removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, reproQualityFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, envProvisioningCommand, assertionFailure, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered, mockedDeliverable, proofEchoDetail, contractRuleCounts, onlyTestPlanProblems } from "./conformance.mjs";
+import { toolMisses } from "./toolplace.mjs";
+import { BINDING, GUIDANCE, guidanceStance, FORGEDOCK_CHECKS_VAR, FORGEDOCK_ENTRY_VAR, portableForgedockPaths, resolvingIo, testPlanProblems, proofEchoesDeliverable, outputTail, isEnvValidateFailure, removedNamedPaths, removedPathsOf, shellSyntaxError, unrunnableValidate, noopCommand, substituteVerdict, describesUnrunnableCommand, vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, amendmentKindProblems, precheck, hotspotGrowth, reproFailures, reproQualityFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, snapQuote, snapQuotes, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, reaskable, matchCriterion, criterionLines, fillEngineRows, explainFailures, resolveForgedockPaths, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, renderPendingFollowups, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, inLaneDeferral, pendingTracking, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables, applyValidateRecipes, deferChecklessPostDeploy, substituteShellProblem, reproEnvMiss, ORCHESTRATOR_BUCKET, ownerRoute, weakenedE2eDecisions, guessedUvEnv, envProvisioningCommand, assertionFailure, projectDirPathMiss, rewriteProjectDirCommand, convertDelivered, mockedDeliverable, proofEchoDetail, contractRuleCounts, onlyTestPlanProblems } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -359,6 +360,10 @@ describe("precheck (deterministic, no reviewer)", () => {
     assert.deepEqual(codes(carried), []);
     assert.deepEqual(precheck({ contract: C, result: { ...res, validation: [] }, changedFiles: files }).failures.map((f) => f.kind), ["validate_missing"]);
   });
+  it("#5750 GUIDANCE and BINDING partition the freezable dispositions; guidanceStance reads the planned stance from a why", () => {
+    assert.deepEqual([...GUIDANCE], ["guidance"]); assert.deepEqual([...BINDING], ["deliver", "defer", "post-deploy"]);
+    assert.equal(guidanceStance("adapt: the helper already exists"), "adapt"); assert.equal(guidanceStance("follow"), null); assert.equal(guidanceStance(""), null);
+  });
   it("#5446 reproQualityFailures: a mutation survivor fails only when enforced; patch_echo and behavioural never do", () => {
     assert.equal(reproQualityFailures({ quality: "mutation_survivor", enforce: true })[0].kind, "repro_mutation_survivor");
     assert.deepEqual(reproQualityFailures({ quality: "mutation_survivor", enforce: false }), []);
@@ -403,7 +408,7 @@ describe("precheck (deterministic, no reviewer)", () => {
   });
   it("#5005 a missing forgedock install is env.tool_missing, not conformance; other absolute paths stay code defects", () => {
     const out = "node:internal/modules/cjs/loader\nError: Cannot find module '/opt/node/lib/node_modules/forgedock/bin/lean/checks.mjs'\n code: 'MODULE_NOT_FOUND'";
-    assert.deepEqual(missingTool({ rc: 1, output: out }), { tool: "forgedock", kind: "command" });
+    assert.deepEqual(missingTool({ rc: 1, output: out }), { tool: "forgedock", kind: "forgedock-path" }); // #5727: a path mismatch, not a tool
     assert.equal(missingTool({ rc: 1, output: "Error: Cannot find module '/repo/forgedock/src/x.mjs'" }), null);
     const contract = { requirements: [], deliverables: [], validate: [{ id: "V2", command: "node /opt/node/lib/node_modules/forgedock/bin/lean/checks.mjs --base origin/staging" }] };
     const result = { validation: [{ id: "V2", command: "", exit: 1 }] };
@@ -416,6 +421,39 @@ describe("precheck (deterministic, no reviewer)", () => {
     assert.equal(resolveForgedockPaths(cmd, { ...o, exists: () => false }), "node /h/forgedock/bin/lean/checks.mjs --base origin/staging && node /h/forgedock/bin/forgedock.mjs check");
     assert.equal(resolveForgedockPaths(cmd, { ...o, exists: () => true }), cmd);
     assert.equal(resolveForgedockPaths("node bin/x.mjs", { ...o, exists: () => false }), "node bin/x.mjs");
+  });
+  it("#5727 missingTool: a forgedock entry path is not a tool miss", () => {
+    const out = "Error: Cannot find module '/home/dev/.local/lib/node_modules/forgedock/bin/lean/checks.mjs'\n code: 'MODULE_NOT_FOUND'";
+    const miss = missingTool({ rc: 1, output: out });
+    assert.equal(miss.kind, "forgedock-path");
+    assert.deepEqual(toolMisses([{ ...miss, ids: ["V5"], source: "run" }]), { tools: [], ids: [] });
+    assert.deepEqual(missingTool({ rc: 1, output: "Error: Cannot find module 'left-pad'" }), { tool: "left-pad", kind: "node-module" });
+  });
+  it("#5727 resolveForgedockPaths expands the portable placeholders", () => {
+    const o = { checksCli: "/h/forgedock/bin/lean/checks.mjs", forgedockCli: "/h/forgedock/bin/forgedock.mjs", exists: () => true };
+    assert.equal(resolveForgedockPaths('node $FORGEDOCK_CHECKS_CLI --base origin/staging && node "${FORGEDOCK_ENTRY_CLI}" check', o), 'node /h/forgedock/bin/lean/checks.mjs --base origin/staging && node "/h/forgedock/bin/forgedock.mjs" check');
+    assert.equal(resolveForgedockPaths("echo $FORGEDOCK_CHECKS_CLIX", o), "echo $FORGEDOCK_CHECKS_CLIX");
+    assert.equal(resolveForgedockPaths("node /usr/lib/node_modules/forgedock/bin/lean/checks.mjs", o), "node /usr/lib/node_modules/forgedock/bin/lean/checks.mjs");
+    assert.equal(resolveForgedockPaths("node $FORGEDOCK_CHECKS_CLI", {}), "node $FORGEDOCK_CHECKS_CLI");
+  });
+  it("#5727 portableForgedockPaths rewrites entry tokens to placeholders", () => {
+    const cmd = "node /home/dev/.local/lib/node_modules/forgedock/bin/lean/checks.mjs --base origin/staging && node /opt/node/lib/node_modules/forgedock/bin/forgedock.mjs check";
+    assert.equal(portableForgedockPaths(cmd), "node $FORGEDOCK_CHECKS_CLI --base origin/staging && node $FORGEDOCK_ENTRY_CLI check");
+    assert.ok(portableForgedockPaths(cmd).includes(`$${FORGEDOCK_CHECKS_VAR}`) && portableForgedockPaths(cmd).includes(`$${FORGEDOCK_ENTRY_VAR}`));
+    assert.equal(portableForgedockPaths("node bin/lean/checks.mjs && node /repo/src/x.mjs"), "node bin/lean/checks.mjs && node /repo/src/x.mjs");
+    assert.equal(resolveForgedockPaths(portableForgedockPaths(cmd), { checksCli: "/c.mjs", forgedockCli: "/f.mjs" }), "node /c.mjs --base origin/staging && node /f.mjs check");
+  });
+  it("#5727 resolvingIo wraps only the command runners", async () => {
+    const seen = [], fs = { read: () => "" };
+    const io = { fs, runCommand: async (a) => { seen.push(["run", a.command, a.cwd]); return { rc: 0 }; }, probeCommand: async (a) => { seen.push(["probe", a.command]); return { rc: 0 }; },
+      preflightRun: async (a) => { seen.push(["pre", a.command]); return { rc: 0 }; }, redGreen: async (a) => { seen.push(["rg", a.command]); return {}; }, git: async (args) => args };
+    const w = resolvingIo(io, { checksCli: "/c.mjs", forgedockCli: "/f.mjs", exists: () => false });
+    await w.runCommand({ command: "node /x/forgedock/bin/lean/checks.mjs", cwd: "/wt" }); await w.probeCommand({ command: "node $FORGEDOCK_CHECKS_CLI" });
+    await w.preflightRun({ command: "node /x/forgedock/bin/forgedock.mjs check" }); await w.redGreen({ command: "node --test a.mjs" });
+    assert.deepEqual(seen, [["run", "node /c.mjs", "/wt"], ["probe", "node /c.mjs"], ["pre", "node /f.mjs check"], ["rg", "node --test a.mjs"]]);
+    assert.equal(w.fs, fs); assert.deepEqual(await w.git(["status"]), ["status"]);
+    io.later = 1; assert.equal(w.later, 1, "a member set on io later is seen");
+    assert.equal(resolvingIo(null), null);
   });
   it("a deliver requirement reported deferred without an amendment -> untracked_deferral; partial -> unimplemented", () => {
     const r = { ...res, requirements: [{ id: "R1", status: "deferred" }, { id: "R2", status: "partial" }] };
@@ -2257,6 +2295,50 @@ describe("#5773 operator decisions survive requeue and amendment replay", () => 
       const pc = precheck({ contract: eff, result: { requirements: [], validation: [] }, changedFiles: ["scripts/backfill.py"], checkIds: new Set() });
       assert.ok(!pc.failures.some((f) => f.kind === "check_unknown"), JSON.stringify(pc.failures));
     }
+  });
+});
+
+describe("#5750 outcome rows bind, proposed-change rows are guidance", () => {
+  const GI = `${ISSUE}\n\n## Proposed fix\nWrap the limiter call in try/catch and return an empty result.`;
+  const GQ = "Wrap the limiter call in try/catch and return an empty result.";
+  const G = { ...C, requirements: [...C.requirements, { id: "R3", quote: GQ, disposition: "guidance", why: "adapt: release the reservation and re-throw; an empty result hides the 429" }] };
+  const gctx = { ...ctx, contract: G, issueText: GI };
+  it("guidance freezes with a stance and a reason, needs no deliverable, and is rejected without one", () => {
+    assert.deepEqual(validateContract(G, GI), { ok: true, problems: [] });
+    for (const why of [undefined, "", "because", "adapt"]) assert.ok(validateContract({ ...G, requirements: [...C.requirements, { ...G.requirements[2], why }] }, GI).problems.some((p) => /R3: guidance needs a why/.test(p)), String(why));
+    assert.ok(!validateContract({ ...G, requirements: [...C.requirements, { ...G.requirements[2], quote: "return an empty list from the limiter forever" }] }, GI).ok, "the verbatim quote check applies to guidance");
+  });
+  it("a contract of guidance rows only is rejected; derived_outcome rides only on a deliver row", () => {
+    assert.ok(validateContract({ ...G, requirements: [G.requirements[2]] }, GI).problems.some((p) => /no binding outcome row/.test(p)));
+    const derived = { ...G, requirements: [{ ...C.requirements[0], derived_outcome: "Outstanding reservations return to 0 after a 429." }, G.requirements[2]] };
+    assert.equal(validateContract(derived, GI).ok, true);
+    assert.ok(validateContract({ ...derived, requirements: [{ ...C.requirements[0], disposition: "defer", why: "w", bucket: "host", derived_outcome: "x" }, G.requirements[2]] }, GI).problems.some((p) => /derived_outcome must be/.test(p)));
+  });
+  it("decide passes when the outcome is implemented and the guidance row was not followed", () => {
+    for (const status of ["missing", "partial", "not-applicable", undefined]) {
+      const rv = { ...good, issue_coverage: [...good.issue_coverage, { quote: GQ, status: "missing" }], requirements: [...good.requirements, ...(status ? [{ id: "R3", status }] : [])] };
+      assert.equal(decide(rv, gctx).state, "conforms", String(status));
+    }
+  });
+  it("decide fails when the prescription was followed but the outcome row is missing", () => {
+    const rv = { ...row("R1", { status: "missing", evidence: "" }), requirements: [{ id: "R1", status: "missing" }, good.requirements[1], { id: "R3", status: "implemented", evidence: "src/scrape.js:7" }] };
+    assert.ok(codes(decide(rv, gctx)).includes("conformance.unimplemented"));
+    assert.ok(codes(precheck({ contract: G, result: { requirements: [{ id: "R1", status: "missing" }, { id: "R2", status: "implemented" }, { id: "R3", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] }, changedFiles: files })).includes("conformance.unimplemented"));
+  });
+  it("a guidance quote the reviewer flags misclassified is judged as a binding omission", () => {
+    const d = decide({ ...good, issue_coverage: [...good.issue_coverage, { quote: GQ, contract_ids: ["R3"], status: "covered", misclassified: true }] }, gctx);
+    assert.ok(codes(d).includes("conformance.omission")); assert.match(d.failures.map((f) => f.detail).join(), /misclassified/);
+  });
+  it("reviewSkeleton pre-fills guidance rows and precheck skips them", () => {
+    const sk = reviewSkeleton(G, files);
+    assert.deepEqual([sk.issue_coverage[2].status, sk.requirements[2].status, sk.requirements[2].stance], ["covered", "not-applicable", "adapt"]);
+    assert.equal(sk.issue_coverage[0].status, "");
+    assert.equal(precheck({ contract: G, result: { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] }, changedFiles: files }).ok, true);
+  });
+  it("add-requirement accepts guidance with a stance and rejects it without one", () => {
+    const ok = applyAmendments(C, [{ kind: "add-requirement", requirement: { id: "R9", quote: GQ, disposition: "guidance" }, why: "reject: the route must surface the 429" }], GI);
+    assert.equal(ok.contract.requirements.find((r) => r.id === "R9")?.disposition, "guidance");
+    assert.match(applyAmendments(C, [{ kind: "add-requirement", requirement: { id: "R9", quote: GQ, disposition: "guidance" }, why: "seems off" }], GI).problems.join(), /guidance needs a why/);
   });
 });
 
