@@ -365,9 +365,15 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     [route("GET", "/agent/relay/:id/:rid"), { fn: async (p, _b, _u, req) => relayPoll(req, p), auth: "agent" }],
     [route("GET", "/agent/bundle"), { fn: async () => ({ bundle: true }), auth: "agent" }],
     [route("GET", "/agent/images/:ref"), { fn: async ({ ref }) => ({ image: ref }), auth: "agent" }],
-    [route("POST", "/agents/:name/upgrade"), fd(async ({ name }) => {
+    [route("POST", "/agents/:name/upgrade"), fd(async ({ name }, body) => {
       const a = own(agents(), name);
       if (!a) return { status: 404, body: { error: "unknown agent" } };
+      // The host is shared: an upgrade restarts the agent under its live sandboxes, so it needs force:true while any run.
+      if (body?.force !== true) {
+        const cap = await agentCall(a, "GET", "/capacity", undefined, 5000).catch(() => null);
+        const active = Number(cap?.data?.active);
+        if (active > 0) return { status: 409, body: { error: `${active} active sandbox(es); retry when idle or pass force:true`, active } };
+      }
       const r = await agentCall(a, "POST", "/admin/update", {});
       return { status: r.status, body: { ...(r.data ?? {}), target: versionOf(cfg.repo_root) } };
     })],

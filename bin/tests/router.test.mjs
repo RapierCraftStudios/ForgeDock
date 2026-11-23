@@ -2289,3 +2289,33 @@ describe("update — global npm install self-update (forge#2133)", () => {
     }
   });
 });
+
+// #5726: the pool router refuses to upgrade an agent under live sandboxes unless forced.
+describe("pool router upgrade guard (#5726)", () => {
+  it("upgrade returns 409 when agent has active sandboxes and no force", async () => {
+    const [{ createRouter }, { createServer }] = await Promise.all([import("../pool/router.mjs"), import("node:http")]);
+    const seen = [];
+    const mk = async (active) => {
+      const fetchFn = async (url, init) => {
+        const u = new URL(url); seen.push(`${init.method} ${u.pathname}`);
+        return new Response(JSON.stringify(u.pathname === "/capacity" ? { active } : { ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+      };
+      const router = createRouter({ state_dir: tmpDir("cs-router-"), lane: { cpus: 2, mem_gb: 3 }, enroll_token: "e", forgedock_token: "fd", repos: {} }, { fetchFn, now: () => 1 });
+      router.store.data.agents.a1 = { url: "http://a1:7711", token: "t" };
+      const server = createServer(router.handle); await new Promise((r) => server.listen(0, "127.0.0.1", r));
+      const post = async (body) => { const r = await fetch(`http://127.0.0.1:${server.address().port}/agents/a1/upgrade`, { method: "POST", headers: { authorization: "Bearer fd", "content-type": "application/json" }, body: JSON.stringify(body) }); return { status: r.status, data: await r.json() }; };
+      return { post, close: () => server.close() };
+    };
+    const busy = await mk(2);
+    try {
+      const r = await busy.post({});
+      assert.equal(r.status, 409); assert.equal(r.data.active, 2);
+      assert.ok(!seen.includes("POST /admin/update"));
+      assert.equal((await busy.post({ force: true })).status, 200);
+      assert.ok(seen.includes("POST /admin/update"));
+    } finally { busy.close(); }
+    seen.length = 0;
+    const idle = await mk(0);
+    try { assert.equal((await idle.post({})).status, 200); assert.ok(seen.includes("POST /admin/update")); } finally { idle.close(); }
+  });
+});
