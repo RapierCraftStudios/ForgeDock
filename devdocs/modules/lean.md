@@ -633,6 +633,8 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `meta/_journal.json`, or ≥2 distinct numbers of the file's width filling at least
    half of their range (sparse issue-numbered docs are not a series).
 
+#5755: an env.* `needs-human` end (`env.tool_missing`, `env.repro_unrunnable`, `env.validate_timeout`, `env.capability_remote`) is one engine/env defect per signature (`envKey`, state `envSigs`). With the `envIssue` seam (`makeEnvIssue` in `bin/engine-cli.mjs`: `ensure` finds or files the one issue carrying a `FORGE:ENVSIG` marker and labels the affected issues `waiting-dependency`; `isClosed`), orchestrate holds the product issue (`held`, `envHold.envIssue`) instead of recovering or relabelling needs-human; `watchEnvHolds` requeues it when the env issue closes. Once 2 issues share a signature `gateEnvSigs` holds pending issues whose body names the missing tool (or `envIssue.needs(n, sig)`) instead of admitting them. No seam (tests) keeps the earlier flow.
+
    Runner CLI usage errors (#4761): `validateContract` rejects vitest `-q`/`--quiet`; a failed validate rerun whose output is a usage error (`cliUsageError`: vitest `Unknown option`, jest `Unrecognized CLI Parameter`) is first rerun once with `normalizeRunnerCommand` (`-q` → `--reporter=dot`), and if still rejected fails `contract.invalid_command` (an `ENV_CODES` state, no builder resume; recoverable and mechanical).
 
    Project-dir paths (#5234): `poetry -C D run pytest D/x.py` / `uv run --project D pytest D/x.py` name repo-root paths that do not exist from `D` (pytest exit 4). `freezeRewrites` rewrites the single-segment, all-`D/`-prefixed case to `cd D && poetry run pytest x.py` (`rewriteProjectDirCommand`, logged in decisions); `validateContract` rejects any other (`projectDirPathMiss`). `UNRUNNABLE_RE` also matches pytest's `ERROR: file or directory not found`, and `unrunnableValidate(run, command)` treats pytest exit 4 or 5 of a pytest command as unrunnable whatever the output, so such a rerun is `contract.invalid_command` (not `conformance.unimplemented`) and a substitute-validate for it is judged ok.
@@ -3545,6 +3547,8 @@ In `runCore`'s lane step, a `resolveLane` result with `transient: true` (a faile
 ## Entry 2026-11-22 — FORGE:DECISION quote clipped without an ellipsis (#5786)
 
 `parseRequirementDecision` (`decisions.mjs`) clips an optional `quote` over 400 chars to its first 400 chars with no trailing `…` (`one(v, max, ellipsis)`), so the clipped quote stays a prefix of the row quote and `applyRequirementDecisions` still matches the row by contained quote instead of falling back to a renumbered id. Short quotes, a missing quote and the 200-char ellipsis clipping of `why` are unchanged. Cost: 0 LLM calls.
+
+#5755 follow-up: the admission stop matches a pending issue's body and frozen contract against the signature's tools (tool_missing) or the path/command tokens of its first evidence line (other env.* codes), or `envIssue.needs`. An env.* end on an issue labelled `security*` is escalated (stays needs-human for a person, `securityEscalated`), never held and never parked into `remediation-queue`.
 
 ## Entry 2026-11-22 — release fix lane is not held on its own release PR's CI (#5794)
 
