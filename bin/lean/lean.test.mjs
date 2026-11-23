@@ -1169,6 +1169,56 @@ describe("core work-on", () => {
     });
   });
 
+  describe("stacked builds (#5832)", () => {
+    const STACK = { dependency: 3, branch: "feat/issue-3-lean", sha: "a".repeat(40) };
+    /** The dependency's issue is open; its PR is `depState`; the stacked PR's live base follows `pr edit --base`. */
+    const stacked = (w, { depState = "OPEN", base = STACK.branch } = {}) => {
+      const gh = w.io.gh;
+      const st = { base, edits: [] };
+      w.io.gh = async (a) => {
+        if (a[0] === "api" && /issues\/7$/.test(a[1])) return JSON.stringify({ body: "**Depends on**: #3", user: { login: "x" }, author_association: "OWNER" });
+        if (a[0] === "api" && /issues\/3$/.test(a[1])) return JSON.stringify({ state: "open" });
+        if (a[0] === "pr" && a[1] === "list" && a.includes("--head") && a[a.indexOf("--head") + 1] === STACK.branch) return JSON.stringify([{ number: 5, state: depState }]);
+        if (a[0] === "pr" && a[1] === "view" && a.includes("baseRefName")) return JSON.stringify({ baseRefName: st.base });
+        if (a[0] === "pr" && a[1] === "edit" && a.includes("--base")) { st.edits.push(a[a.indexOf("--base") + 1]); st.base = a[a.indexOf("--base") + 1]; return ""; }
+        return gh(a);
+      };
+      w.stack = st;
+      return w;
+    };
+    it("builds while the dependency is open, opens the PR on the dependency branch, records stackedOn; merges only after the dependency merged, retargeted to the lane", async () => {
+      const w = stacked(world(), { depState: "MERGED" });
+      const r = await run(w, { stackedOn: STACK });
+      assert.equal(r.terminalReason, "merged", r.detail);
+      const create = w.prs[0];
+      assert.equal(create[create.indexOf("--base") + 1], STACK.branch, "stacked PR base is the dependency branch");
+      assert.deepEqual(w.stack.edits, ["staging"], "retargeted to the lane before the merge");
+      assert.equal(w.merges.length, 1);
+      assert.ok(w.seq.indexOf("pr") < w.seq.indexOf("merge"));
+    });
+    it("merge.stacked_base: never merges while the dependency is unmerged (the base stays the dependency branch)", async () => {
+      const w = stacked(world(), { depState: "OPEN" });
+      const r = await run(w, { stackedOn: STACK, ciMaxMinutes: 0 });
+      assert.equal(w.merges.length, 0, "no gh pr merge");
+      assert.equal(w.stack.base, STACK.branch, "never retargeted");
+      assert.notEqual(r.terminalReason, "merged");
+    });
+    it("merge.stacked_base: a stacked PR whose live base is not the lane is refused even once the dependency merged", async () => {
+      const w = stacked(world(), { depState: "MERGED" });
+      const edit = w.io.gh;
+      w.io.gh = async (a) => (a[0] === "pr" && a[1] === "edit" && a.includes("--base") ? "" : edit(a)); // the retarget silently does not take
+      const r = await run(w, { stackedOn: STACK });
+      assert.equal(w.merges.length, 0);
+      assert.equal(r.code, "merge.stacked_base");
+    });
+    it("without stackedOn the PR targets the lane and an open dependency still refuses (preserved)", async () => {
+      const w = stacked(world());
+      const r = await run(w);
+      assert.ok(["dependency-open", "dependency-unreadable"].includes(r.terminalReason));
+      assert.equal(w.prs.length, 0);
+    });
+  });
+
   it("an open PR / remote branch without a frozen contract re-plans, then verifies the existing commits; no second PR", async () => {
     const w = world({ prList: [{ number: 77, headRefOid: "x" }], remote: "abc\trefs/heads/feat/issue-7-lean" });
     const r = await run(w);

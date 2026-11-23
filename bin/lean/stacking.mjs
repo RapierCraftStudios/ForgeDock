@@ -7,10 +7,10 @@
 
 export const STACKING_MODES = ["off", "plan", "full"];
 
-/** forge.yaml `orchestration.stacking`: off (default) | plan | full. `full` behaves as `plan` until phase 2; anything else is off. */
+/** forge.yaml `orchestration.stacking`: off (default) | plan | full (plan lanes plus stacked builds at PR-ready, #5832); anything else is off. */
 export function normalizeStacking(value) {
   const v = String(value ?? "").trim().toLowerCase();
-  return v === "plan" || v === "full" ? "plan" : "off";
+  return v === "plan" || v === "full" ? v : "off";
 }
 
 /**
@@ -49,4 +49,47 @@ export function planStale({ planned, contractHash, ancestor, changedPaths = [], 
   const want = new Set(deliverablePaths);
   const hit = changedPaths.filter((p) => want.has(p));
   return hit.length ? `dependency diff touches deliverable path(s): ${hit.slice(0, 5).join(", ")}` : null;
+}
+
+/**
+ * #5832 (phase 2): whether `n` may build now on its dependency's lane head. Exactly one in-batch dependency is unmerged (running, not
+ * ended) and it is PR-ready (`prReady`: issue -> {pr, branch, sha}); every other dependency ended satisfied. Never for a lane that
+ * is running, has a result, or was stacked before (one stacked build per issue per batch).
+ * @param {{n:number, edges:number[], results:Map, pending:number[], running:Map|Set, prReady:Map, stackedTried:Set, satisfied:Set<string>}} a
+ * @returns {{dependency:number, branch:string, sha:string}|null}
+ */
+export function stackAdmissible({ n, edges, results, pending, running, prReady, stackedTried, satisfied }) {
+  if (!edges.length || stackedTried.has(n) || results.has(n) || running.has(n) || !pending.includes(n)) return null;
+  let open = null;
+  for (const d of edges) {
+    const r = results.get(d);
+    if (r) { if (!satisfied.has(r.outcome)) return null; continue; }
+    if (open !== null || !running.has(d)) return null;
+    open = d;
+  }
+  const rd = open === null ? null : prReady.get(open);
+  return rd?.branch && rd?.sha ? { dependency: open, branch: String(rd.branch), sha: String(rd.sha) } : null;
+}
+
+/** `stackedOn` {dependency, branch, sha} <-> `--stacked-on <dep>:<sha>:<branch>`; null when malformed. */
+export const formatStackedOn = (s) => (s?.dependency && s?.branch && s?.sha ? `${s.dependency}:${s.sha}:${s.branch}` : null);
+export function parseStackedOn(text) {
+  const m = /^(\d+):([0-9a-f]{7,64}):(.+)$/.exec(String(text ?? "").trim());
+  return m ? { dependency: Number(m[1]), sha: m[2], branch: m[3] } : null;
+}
+
+/** Valid `stackedOn` object (from ctx/CLI) or null. */
+export const validStackedOn = (s) => (Number.isInteger(s?.dependency) && typeof s?.branch === "string" && s.branch && typeof s?.sha === "string" && /^[0-9a-f]{7,64}$/.test(s.sha) ? { dependency: s.dependency, branch: s.branch, sha: s.sha } : null);
+
+/**
+ * Engine guard `merge.stacked_base` (#5832): why a PR may not be merged now, or null. A PR whose base is not the lane is a
+ * stacked PR; it never merges into the dependency branch (or anything but the lane), and not while a `Depends on` is unmerged.
+ * @param {{prBase:string, lane:string, stackedBranch?:string|null, dependencyMerged:boolean}} a
+ */
+export function stackedBaseBlock({ prBase, lane, stackedBranch = null, dependencyMerged }) {
+  const stacked = Boolean(stackedBranch) || (prBase && lane && prBase !== lane);
+  if (!stacked) return null;
+  if (!dependencyMerged) return `merge.stacked_base: PR base ${prBase || "?"} is not the lane ${lane} and its dependency is unmerged`;
+  if (prBase !== lane) return `merge.stacked_base: PR base ${prBase || "?"} is not the lane ${lane}`;
+  return null;
 }
