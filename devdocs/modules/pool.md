@@ -10,6 +10,13 @@ last_compacted: "2026-11-15"
 
 Rolling per-module knowledge log. Hard cap: 150 lines.
 
+## Entry 2026-11-23 — Outbound-only agent transport (#5882, parent #5857)
+
+- An agent enrolled without `url` (`POST /enroll` {token,name}) is stored `{name, transport:"poll", token}`; the router never dials it. `agentCall` (`bin/pool/router.mjs`) enqueues the request and awaits the reply (rejects at once when the agent has not polled for `poll_offline_s`, default 60, so callers answer 502 / `ok:false` in `capacities()`).
+- Agent side (`startPoll`, `bin/pool/agent.mjs`, on when `outbound: true` in agent.json): `GET /agent/poll?wait=25` (router clamps to 55s; 204 on timeout; the poll is the heartbeat), runs the request on its own bearer-checked API via loopback, `POST /agent/reply/:rid`. Reconnect backoff 1s..30s. Queue is in memory (a router restart drops it).
+- The local listener stays for the lanes' credential calls; `install-agent.sh` binds it to the docker bridge (`AGENT_LISTEN_HOST`, default 172.17.0.1) in outbound mode. `forgedock pool enroll --outbound` prints `OUTBOUND=1 install-agent-linux.sh ...`.
+- Long-poll chosen over WebSocket: no stdlib WS server, no new dependency. Tests: `bin/tests/pool-outbound.test.mjs`.
+
 ## Entry 2026-11-22 — Priority classes, reservations, borrowing (#5856)
 
 - `spec.priority` is `reserved | normal | borrow` (default `normal`; anything else is 400). Lanes send `borrow` (`bin/lean/sandbox-remote.mjs`). Agent config: `reservations: [{name, cpus, mem_gb}]`, `idle_only`, optional `idle_max_owner_load_per_core` (0.5), `idle_min_free_mem_gb` (4), `cpu_shares` ({reserved 4096, normal 1024, borrow 128, throttled 2}), `drain_grace_s` (20), `cores`.
