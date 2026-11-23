@@ -40,8 +40,6 @@ describe("#5749 yaml recipe", () => {
   it("#5749 yaml has a lane_tools recipe", () => {
     assert.ok(hasRecipe("yaml"));
     assert.match(installCommands("yaml")[0], /apt-get install .*python3-yaml/);
-    assert.ok(hasRecipe("shellcheck") && hasRecipe("vite") && hasRecipe("forgedock"));
-    assert.match(installCommands("vite@5.4.0")[0], /^npm install -g vite@5\.4\.0/);
-    assert.match(installCommands("forgedock")[0], /^npm install -g forgedock$/);
+    assert.ok(hasRecipe("shellcheck") && !hasRecipe("vite") && !hasRecipe("forgedock")); // vite and forgedock are owned project deps, not recipes (K1, K2)
   });
 });
