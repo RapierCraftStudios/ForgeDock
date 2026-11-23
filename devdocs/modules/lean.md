@@ -3568,3 +3568,8 @@ Security: the workflow is `workflow_dispatch` only (never `pull_request*`), `per
 
 - `bin/lean/sandbox-remote.mjs` `remoteProvider` now sends `spec.priority: "borrow"` on every lane sandbox spec. A pool agent without `reservations`/`idle_only` ignores it (flat admission as before); with them, lanes run on leftover capacity at a low `cpu.shares` weight and are throttled, then drained, when a reserved workload arrives.
 - A drained lane reports `run.interrupted` and is rescheduled, not lost. Reclaim order and config: `devdocs/modules/pool.md` (#5856).
+
+## Entry 2026-11-23 — Remote result maps a disk-pressure stop to `sandbox.disk_pressure` (#5891)
+
+- `bin/lean/sandbox-remote.mjs` `httpTransport.result` returns a deferred `sandbox.disk_pressure` outcome (retry in 120 s) when the agent's result carries `disk_pressure: true`. The pool agent stopped that lane to save its host drive; worktree and volume are kept, so the requeued lane resumes through the existing adopt path instead of failing.
+- Pause, prune and reap behaviour on the agent side: `devdocs/modules/pool.md`.
