@@ -1,0 +1,138 @@
+{
+ "status": "fixed",
+ "summary": "Freeze-time host-only/busy-loop rule, yaml/vite/forgedock recipes, precheck output tail, overload deferral of env.validate_timeout recovery",
+ "requirements": [
+  {
+   "id": "R1",
+   "status": "implemented",
+   "evidence": "bin/lean/preflight.test.mjs #5749 repro_test probe"
+  },
+  {
+   "id": "R2",
+   "status": "implemented",
+   "evidence": "bin/lean/lean.test.mjs #5749 remote probe"
+  },
+  {
+   "id": "R3",
+   "status": "implemented",
+   "evidence": "bin/lean/lean.test.mjs #5749 remote probe"
+  },
+  {
+   "id": "R5",
+   "status": "implemented",
+   "evidence": "bin/pool/lane-tools.mjs:20"
+  },
+  {
+   "id": "R6",
+   "status": "implemented",
+   "evidence": "bin/lean/preflight.mjs hostOnlyProblems"
+  },
+  {
+   "id": "R7",
+   "status": "implemented",
+   "evidence": "bin/lean/lean.mjs:2520,2545"
+  },
+  {
+   "id": "R8",
+   "status": "implemented",
+   "evidence": "bin/lean/lean.mjs:2782"
+  },
+  {
+   "id": "R9",
+   "status": "implemented",
+   "evidence": "bin/lean/orchestrate.mjs:1028"
+  },
+  {
+   "id": "R10",
+   "status": "implemented",
+   "evidence": "bin/lean/lean.test.mjs #5749 keeps remote placement"
+  },
+  {
+   "id": "R11",
+   "status": "implemented",
+   "evidence": "bin/lean/orchestrate-overload-recovery.test.mjs"
+  }
+ ],
+ "validation": [
+  {
+   "id": "V1",
+   "command": "node --test --test-name-pattern \"#5749\" (4 files)",
+   "exit": 0
+  },
+  {
+   "id": "V2",
+   "command": "node --test (6 files)",
+   "exit": 0
+  },
+  {
+   "id": "V3",
+   "command": "node --test --test-name-pattern 5764|5423|5331|5683|5652|precheck bin/lean/lean.test.mjs",
+   "exit": 0
+  }
+ ],
+ "tests": [
+  {
+   "command": "node --test --test-name-pattern #5749 (4 files)",
+   "result": "pass",
+   "fails_without_fix": true
+  }
+ ],
+ "self_review": [
+  {
+   "question": "1",
+   "answer": "yes",
+   "evidence": "requirement map in implementation.md"
+  },
+  {
+   "question": "2",
+   "answer": "yes",
+   "evidence": "V2/V3 pass; non-overloaded and other codes unchanged"
+  },
+  {
+   "question": "3",
+   "answer": "yes",
+   "evidence": "validate exit 0; vite/forgedock recipes recorded as a decision amendment"
+  },
+  {
+   "question": "4",
+   "answer": "yes",
+   "evidence": "git diff --stat: only deliverables and tests"
+  }
+ ],
+ "amendments": [
+  {
+   "kind": "decision",
+   "decision": {
+    "choice": "Add npm recipes for forgedock in lane-tools.mjs (R5 quote names it)",
+    "anchors": [
+     "bin/pool/lane-tools.mjs"
+    ],
+    "supersedes": "K1"
+   },
+   "why": "R5 is a deliver requirement quoting 'forgedock (#5727)' as a lane_tools recipe; an owned dep is still skipped by notOwned, so placement is unchanged"
+  },
+  {
+   "kind": "decision",
+   "decision": {
+    "choice": "Add npm recipe for vite in lane-tools.mjs (R5 quote names it)",
+    "anchors": [
+     "bin/pool/lane-tools.mjs"
+    ],
+    "supersedes": "K2"
+   },
+   "why": "R5 quotes 'vite (#5747)'; a manifest dep is still prepared by the lane and skipped by notOwned, so placement is unchanged"
+  },
+  {
+   "kind": "post-deploy",
+   "requirement": "R4",
+   "why": "Replaying six AlterLab issues needs the AlterLab repo and lane logs; per-class tests (yaml recipe, repro_test probe, host-only rule) ship here",
+   "check": "R4-alterlab-replay"
+  },
+  {
+   "kind": "post-deploy",
+   "requirement": "R12",
+   "why": "Recovery share is measurable only over a real AlterLab batch of 30+ issues after release; no in-repo job computes it",
+   "check": "R12-recovery-share"
+  }
+ ]
+}

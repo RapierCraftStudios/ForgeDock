@@ -1,0 +1,384 @@
+{
+ "requirements": [
+  {
+   "id": "R1",
+   "quote": "At contract freeze, every frozen validate and repro command is probed in the **chosen placement** (resolve argv[0], `poetry`/`npx` binaries, `python -c \"import pytest\"` for `python -m pytest`, docker daemon for docker commands).",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R2",
+   "quote": "A miss either (a) installs it via a lane_tools recipe, or (b) re-places the lane **local** before plan starts.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R3",
+   "quote": "It is never discovered at precheck.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R4",
+   "quote": "Replaying this batch's issues #41009, #41093, #41096, #41095, #41077 and #40974 produces zero `env.tool_missing` / `env.repro_unrunnable` recoveries.",
+   "disposition": "defer",
+   "why": "Needs a replay of AlterLab issues on the AlterLab repo (a third-party repo and its lane logs); this change ships the per-class tests (yaml recipe, repro_test probe, host-only rule) that cover each row.",
+   "bucket": "owner:replay the six AlterLab issues on the AlterLab repo after release"
+  },
+  {
+   "id": "R5",
+   "quote": "lane_tools recipes for `shellcheck`, `yaml`, `vite` (#5747) and `forgedock` (#5727).",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R6",
+   "quote": "Contract validation rejects frozen validate commands that use host-only binaries (`legion-run`, `ssh \u003chost>`, `/home/\u003cuser>/...`) or unbounded busy loops.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R7",
+   "quote": "Replaying the #41095 plan fails at freeze with a contract rule, not at precheck.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R8",
+   "quote": "A failing declared check stores its tail output in the result and the recovery comment (#41100 would name the failing lane check).",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R9",
+   "quote": "Host-overload: a lane whose declared checks would time out under current load waits in admission instead of building. Or: the timeout retry is deferred until load drops, and no `env.validate_timeout` recovery is started while `host_overloaded` is active.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R10",
+   "quote": "Regression guard: lanes whose sandbox has every tool keep remote placement.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R11",
+   "quote": "No change to builder resume counts for genuine conformance failures.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R12",
+   "quote": "Metric: recovery share for an AlterLab batch of ≥30 issues stays under 5% of lanes (this batch: 11 of 39 issues, 28%).",
+   "disposition": "defer",
+   "why": "Measured only over a real AlterLab batch of 30+ issues after release; no in-repo job computes it.",
+   "bucket": "owner:measure recovery share on the next AlterLab batch of 30+ issues"
+  }
+ ],
+ "deliverables": [
+  {
+   "id": "D1",
+   "path": "bin/pool/lane-tools.mjs",
+   "change": "Add a `yaml` RECIPES entry (unversioned, apt python3-yaml; the binary `yq` is not provided) and map the binary names `yaml` to it via recipeFor/BINARY_RECIPES so hasRecipe('yaml') is true and installCommands('yaml') is non-empty. shellcheck exists already (line 19); vite and forgedock get no recipe: they are owned project deps (lean.mjs:2600), recorded as decisions K1/K2.",
+   "requirements": [
+    "R5",
+    "R2"
+   ]
+  },
+  {
+   "id": "D2",
+   "path": "bin/lean/preflight.mjs",
+   "change": "Add exported pure `hostOnlyProblems(contract)`: one problem string per validate or repro_test command (via contractCommands) that uses a host-only binary (`legion-run`, `ssh \u003chost>`) or a `/home/\u003cuser>/` absolute path, or an unbounded busy loop (`while :`/`while true` with no sleep or timeout bound inside a CPU-stress wrapper, `yes > /dev/null`, `seq $(nproc)` loops). Each message names the id and how to fix the plan.",
+   "requirements": [
+    "R6",
+    "R7"
+   ]
+  },
+  {
+   "id": "D3",
+   "path": "bin/lean/lean.mjs",
+   "change": "(a) Add hostOnlyProblems(contract) to the problem lists at the freeze-time correction (lean.mjs ~2520 `correctContract([...vc.problems, ...preflightProblems(missed), ...testRunnerProblems(...)])`) and its trigger condition, and to the first-plan validation, so a host-only or busy-loop validate is corrected once and then parks contract.invalid at freeze. (b) At the verify.precheck_block and no-new-commit needsHuman sites (~2783, ~2798) append `quietFailure(output)` (precheck.mjs:223, 40-line tail) of each failed check to the message and the T result so the recovery comment names the failing check. (c) Keep the remote probe (lean.mjs:2596-2625) covering the repro_test command and confirm R1 by test; no behaviour change unless the test shows a gap.",
+   "requirements": [
+    "R1",
+    "R2",
+    "R3",
+    "R6",
+    "R7",
+    "R8",
+    "R10",
+    "R11"
+   ]
+  },
+  {
+   "id": "D4",
+   "path": "bin/lean/orchestrate.mjs",
+   "change": "In the recovery path (~985-1010) when row.code is ENV_VALIDATE_TIMEOUT and `overload()?.overloaded`, do not launch the recovery lane: wait with `sleep(pollMs)` rechecking overload (bounded by a max wait so the batch cannot hang; one decided() row noting the deferral), then launch. A non-overloaded host and every other code are unchanged.",
+   "requirements": [
+    "R9",
+    "R11"
+   ]
+  },
+  {
+   "id": "D5",
+   "path": "devdocs/modules/lean.md",
+   "change": "Document the host-only/busy-loop contract rule, the yaml recipe, the precheck tail and the overload deferral of env.validate_timeout recovery (#5749).",
+   "requirements": [
+    "R5",
+    "R6",
+    "R8",
+    "R9"
+   ]
+  },
+  {
+   "id": "D6",
+   "path": "bin/pool/lane-tools.test.mjs",
+   "change": "Add `#5749` tests: hasRecipe('yaml') true, installCommands('yaml') non-empty, vite/forgedock still have no recipe.",
+   "requirements": [
+    "R5"
+   ]
+  },
+  {
+   "id": "D7",
+   "path": "bin/lean/preflight.test.mjs",
+   "change": "Add `#5749` tests for hostOnlyProblems: rejects the #41095 V2 `legion-run bash -lc '... while :; do :; done ...'`, `ssh host cmd`, `/home/u/x`; accepts `npx vitest run`, `python -m pytest tests/x.py`, `while read l; do ...; done \u003c file`; also checks repro_test is covered by preflightProbes.",
+   "requirements": [
+    "R1",
+    "R6",
+    "R7"
+   ]
+  },
+  {
+   "id": "D8",
+   "path": "bin/lean/lean.test.mjs",
+   "change": "Add `#5749` tests: a remote lane whose planned validate is a legion-run busy loop is corrected then parks contract.invalid before the builder implements; a repro_test `python -m pytest` miss in the remote sandbox is detected at freeze and installs or re-places before the builder; precheck_block detail contains the failing check's output tail; a remote lane with every tool present keeps remote placement.",
+   "requirements": [
+    "R1",
+    "R2",
+    "R3",
+    "R7",
+    "R8",
+    "R10"
+   ]
+  },
+  {
+   "id": "D9",
+   "path": "bin/lean/orchestrate-overload-recovery.test.mjs",
+   "change": "New `#5749` test file in the style of orchestrate-envhold.test.mjs: with overload() true an env.validate_timeout row starts no recovery lane until overload clears; with overload false the recovery starts immediately; a conformance.unimplemented row keeps its existing resume counts under overload.",
+   "requirements": [
+    "R9",
+    "R11"
+   ]
+  }
+ ],
+ "preserve": [
+  {
+   "id": "P1",
+   "what": "Remote placement for a lane whose sandbox has every tool (lean.mjs:2596-2625 REMOTE probe path and toolplace.mjs:25 toolMisses/lackedTools unchanged in behaviour)."
+  },
+  {
+   "id": "P2",
+   "what": "RECIPES existing entries and recipeFor/hasRecipe/installCommands/installLaneTools signatures and behaviour in bin/pool/lane-tools.mjs (#5650, #5652, #5764), incl. python3 alias mapping."
+  },
+  {
+   "id": "P3",
+   "what": "Builder resume counts and recovery attempt classes (recoveryClassOf, classUsed, maxFor) in bin/lean/orchestrate.mjs:985-1010 for every code other than env.validate_timeout, and the #5805 envHold behaviour tested in bin/lean/orchestrate-envhold.test.mjs."
+  },
+  {
+   "id": "P4",
+   "what": "Exported shapes of preflightProbes, preflightProblems, testRunnerProblems and contractCommands in bin/lean/preflight.mjs; ordinary validates (npx vitest, python -m pytest, poetry run pytest, bash scripts) stay valid."
+  },
+  {
+   "id": "P5",
+   "what": "Admission hold for non-remote placements under overload (orchestrate.mjs:735-743) and remote placements never held there."
+  }
+ ],
+ "validate": [
+  {
+   "id": "V1",
+   "command": "node --test --test-name-pattern \"#5749\" bin/pool/lane-tools.test.mjs bin/lean/preflight.test.mjs bin/lean/lean.test.mjs bin/lean/orchestrate-overload-recovery.test.mjs"
+  },
+  {
+   "id": "V2",
+   "command": "node --test bin/pool/lane-tools.test.mjs bin/lean/preflight.test.mjs bin/lean/orchestrate-envhold.test.mjs bin/lean/orchestrate-recovering.test.mjs bin/lean/orchestrate-hostfallback.test.mjs bin/lean/precheck.test.mjs"
+  },
+  {
+   "id": "V3",
+   "command": "node --test --test-name-pattern \"5764|5423|5331|5683|5652|precheck\" bin/lean/lean.test.mjs"
+  },
+  {
+   "id": "G1",
+   "command": "node --test bin/lean/orchestrate-envhold.test.mjs bin/lean/orchestrate-blocked.test.mjs bin/lean/orchestrate-cancel.test.mjs",
+   "regression": true
+  },
+  {
+   "id": "G2",
+   "command": "node --test bin/lean/toolplace.test.mjs bin/lean/depcache.test.mjs bin/pool/lane-tools.test.mjs",
+   "regression": true
+  }
+ ],
+ "regression": [
+  {
+   "id": "G1",
+   "command": "node --test bin/lean/orchestrate-envhold.test.mjs bin/lean/orchestrate-blocked.test.mjs bin/lean/orchestrate-cancel.test.mjs",
+   "covers": "orchestrate.mjs recovery path: resume counts, holds, cancel unchanged"
+  },
+  {
+   "id": "G2",
+   "command": "node --test bin/lean/toolplace.test.mjs bin/lean/depcache.test.mjs bin/pool/lane-tools.test.mjs",
+   "covers": "toolplace/depcache/lane-tools neighbours: remote probe, nested deps, recipes"
+  }
+ ],
+ "decisions": [
+  {
+   "id": "K1",
+   "choice": "No lane_tools recipe for `forgedock`: it stays an owned dep, not a recipe.",
+   "justification": "lean.mjs:2600 `ownedDep = t === \"forgedock\" || remoteDeps.owner(t)`; #5727 merged (PR #5740) resolves the frozen checks.mjs path instead, so AC5's forgedock recipe is satisfied by that fix.",
+   "source": "precedent"
+  },
+  {
+   "id": "K2",
+   "choice": "No `vite` recipe: vite is a manifest dependency the lane prepares.",
+   "justification": "preflight.mjs:388 manifestDepOwner and depcache.mjs:73-92 nestedJsLocks (#5683, #5423); #5747 closed already-fixed; a recipe would be skipped by notOwned at lean.mjs:2600-2601.",
+   "source": "precedent"
+  },
+  {
+   "id": "K3",
+   "choice": "Host-only/busy-loop check is a deterministic static rule in preflight.mjs, run in the existing freeze correction round, not a new agent.",
+   "justification": "NORTHSTAR 'Where a fix belongs' layer 3 (script detects exactly); sits beside testRunnerProblems at preflight.mjs:145 and is consumed at lean.mjs:2520.",
+   "source": "doc"
+  },
+  {
+   "id": "K4",
+   "choice": "Overload handling takes the issue's second option: defer the env.validate_timeout recovery launch while overload() is active, rather than admission-time prediction of check duration.",
+   "justification": "orchestrate.mjs:735-743 already holds local admission by overload() snapshot; predicting a lane's check time is not deterministic, while the recovery launch site (orchestrate.mjs:985-1010) already has overload injected.",
+   "source": "precedent"
+  },
+  {
+   "id": "K5",
+   "choice": "The repro_test command is probed through the existing path: preflightProbes iterates contractCommands which already includes repro_test (preflight.mjs:107-111), so R1 needs a test, not new code, unless the test shows a docker-daemon gap.",
+   "justification": "preflight.mjs:107-111 and lean.mjs:2602 preflightValidates(frozen).",
+   "source": "precedent"
+  }
+ ],
+ "repro_test": {
+  "path": "bin/pool/lane-tools.test.mjs",
+  "id": "#5749 yaml has a lane_tools recipe",
+  "command": "node --test --test-name-pattern \"#5749 yaml has a lane_tools recipe\" bin/pool/lane-tools.test.mjs"
+ },
+ "test_plan": [
+  {
+   "requirement": "R1",
+   "proof": "a repro_test command `python -m pytest ...` whose pytest import is missing in the remote sandbox is reported as a miss by the freeze-time probe before the builder runs, instead of surfacing at repro",
+   "level": "unit",
+   "level_reason": "the cheapest level that observes the cause: preflightProbes/contractCommands are pure functions over the contract; the real exported functions are exercised with a real contract object",
+   "repro": "#5749 repro_test python -m pytest is probed at freeze",
+   "regression": [
+    "ordinary validate probes unchanged"
+   ],
+   "env": [],
+   "command": "node --test --test-name-pattern \"#5749 repro_test python -m pytest is probed at freeze\" bin/lean/preflight.test.mjs"
+  },
+  {
+   "requirement": "R2",
+   "proof": "a remote lane whose frozen validate needs a tool with a recipe installs it in the sandbox and continues remote, and one with no recipe is re-placed on the host before plan/implement",
+   "level": "integration",
+   "level_reason": "the real runCore lane flow in lean.test.mjs is run end to end through the remote probe branch; only the sandbox command runner (I/O boundary) is injected",
+   "repro": "#5749 remote probe installs a recipe tool or re-places before the builder",
+   "regression": [
+    "#5652 recipe install tests"
+   ],
+   "env": [],
+   "command": "node --test --test-name-pattern \"#5749 remote probe installs a recipe tool or re-places before the builder\" bin/lean/lean.test.mjs"
+  },
+  {
+   "requirement": "R3",
+   "proof": "a missing tool or unrunnable repro is decided at freeze: the lane ends env.tool_missing before the builder starts and never reaches the precheck round",
+   "level": "integration",
+   "level_reason": "the real runCore flow is run in lean.test.mjs and the assertion is that no builder run and no precheck event happened; only the sandbox runner (I/O boundary) is injected",
+   "repro": "#5749 remote probe installs a recipe tool or re-places before the builder",
+   "regression": [],
+   "env": [],
+   "command": "node --test --test-name-pattern \"#5749 remote probe installs a recipe tool or re-places before the builder\" bin/lean/lean.test.mjs"
+  },
+  {
+   "requirement": "R5",
+   "proof": "hasRecipe('yaml') is true and installCommands('yaml') returns apt install steps, while vite and forgedock have no recipe",
+   "level": "unit",
+   "level_reason": "RECIPES and hasRecipe are pure exports of lane-tools.mjs; the real module is called directly",
+   "repro": "#5749 yaml has a lane_tools recipe",
+   "regression": [
+    "existing recipes and the python3 alias keep passing"
+   ],
+   "env": [],
+   "command": "node --test --test-name-pattern \"#5749 yaml has a lane_tools recipe\" bin/pool/lane-tools.test.mjs"
+  },
+  {
+   "requirement": "R6",
+   "proof": "hostOnlyProblems returns a problem naming the id for `legion-run`, `ssh host cmd`, `/home/u/x` and a `while :; do :; done` busy loop, and none for `npx vitest run` or `python -m pytest tests/x.py`",
+   "level": "unit",
+   "level_reason": "hostOnlyProblems is a pure function of the contract; the real function is called with real contract objects",
+   "repro": "#5749 hostOnlyProblems rejects host-only and busy-loop validates",
+   "regression": [
+    "preflightProbes and testRunnerProblems outputs unchanged"
+   ],
+   "env": [],
+   "command": "node --test --test-name-pattern \"#5749 hostOnlyProblems rejects host-only and busy-loop validates\" bin/lean/preflight.test.mjs"
+  },
+  {
+   "requirement": "R7",
+   "proof": "the #41095 V2 plan (`legion-run bash -lc '... while :; do (timeout 300 sh -c \"while :; do :; done\") & ... npx vitest ...'`) is rejected at freeze with a contract rule, corrected once, then parks contract.invalid before the precheck",
+   "level": "integration",
+   "level_reason": "the real runCore freeze correction path is run in lean.test.mjs with the V2 contract as planner output; only the model session (I/O boundary) is injected",
+   "repro": "#5749 host-only validate is rejected at freeze",
+   "regression": [],
+   "env": [],
+   "command": "node --test --test-name-pattern \"#5749 host-only validate is rejected at freeze\" bin/lean/lean.test.mjs"
+  },
+  {
+   "requirement": "R8",
+   "proof": "the verify.precheck_block needs-human detail contains the last lines of the failing declared check's output and its name",
+   "level": "integration",
+   "level_reason": "the real runCore precheck round runs a failing declared command in a temp worktree; the assertion reads the real result detail",
+   "repro": "#5749 precheck_block detail carries the failing check tail",
+   "regression": [
+    "#5079 precheck_block tests"
+   ],
+   "env": [],
+   "command": "node --test --test-name-pattern \"#5749 precheck_block detail carries the failing check tail\" bin/lean/lean.test.mjs"
+  },
+  {
+   "requirement": "R9",
+   "proof": "today the AlterLab batch launched three recovery lanes for env.validate_timeout while Arch load was 25-36 on 4 threads, and each timed out again (8.47, 1.06 and 2.07 dollars) → assert that no runOne recovery call is made for that row while overload() reports overloaded, and that one is made once it clears",
+   "level": "integration",
+   "level_reason": "the real orchestrate() scheduler is run with a fake clock and a scripted runOne, as orchestrate-envhold.test.mjs does; only runOne, the clock and overload() (I/O boundaries) are injected",
+   "repro": "#5749 env.validate_timeout recovery waits while overloaded",
+   "regression": [
+    "orchestrate-envhold.test.mjs"
+   ],
+   "env": [],
+   "command": "node --test --test-name-pattern \"#5749 env.validate_timeout recovery waits while overloaded\" bin/lean/orchestrate-overload-recovery.test.mjs"
+  },
+  {
+   "requirement": "R10",
+   "proof": "a lane whose sandbox already has every tool must not be sent to the host: a false-positive miss today would end it env.tool_missing → assert placement stays remote and the run reaches the builder",
+   "level": "integration",
+   "level_reason": "the real runCore remote probe branch is run with a probe that finds every tool; only the sandbox runner (I/O boundary) is injected",
+   "repro": "#5749 remote lane with every tool keeps remote placement",
+   "regression": [],
+   "env": [],
+   "command": "node --test --test-name-pattern \"#5749 remote lane with every tool keeps remote placement\" bin/lean/lean.test.mjs"
+  },
+  {
+   "requirement": "R11",
+   "proof": "a conformance.unimplemented row under overload gets the same recovery attempts and resume counts as before",
+   "level": "integration",
+   "level_reason": "the real orchestrate() scheduler is run in the same harness; resume counts are read from the real rows",
+   "repro": "#5749 conformance.unimplemented keeps resume counts under overload",
+   "regression": [
+    "orchestrate-blocked.test.mjs"
+   ],
+   "env": [],
+   "command": "node --test --test-name-pattern \"#5749 conformance.unimplemented keeps resume counts under overload\" bin/lean/orchestrate-overload-recovery.test.mjs"
+  }
+ ]
+}
