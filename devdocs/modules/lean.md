@@ -3550,6 +3550,11 @@ In `runCore`'s lane step, a `resolveLane` result with `transient: true` (a faile
 
 `parseRequirementDecision` (`decisions.mjs`) clips an optional `quote` over 400 chars to its first 400 chars with no trailing `…` (`one(v, max, ellipsis)`), so the clipped quote stays a prefix of the row quote and `applyRequirementDecisions` still matches the row by contained quote instead of falling back to a renumbered id. Short quotes, a missing quote and the 200-char ellipsis clipping of `why` are unchanged. Cost: 0 LLM calls.
 
+## Entry 2026-11-22 — Plan lanes and `planned` reuse (#5831, epic #5822)
+
+`runCore({plan: true})` (`run-issue --plan`) skips the `dependency-open` refusal, takes no light/fast-forward build, never labels `workflow:building`, stops right after the contract freezes and ends `planned` with `{contractHash, baseSha}` (outcome code `COMPLETED`); teardown does no checkpoint commit or push. An adopted PR or a refactor:split has nothing to plan ahead and ends `deferred` `plan.unsupported`. `runCore({planned})` (`--planned <hash>:<sha>`) reads the frozen contract like a recovery (`readFrozenContract`, `CONTRACT_REUSED`) and re-plans (`CONTRACT_STALE`) unless `reuseStale` (scope, lane) and `stacking.mjs` `planStale` pass: same hash, the plan's base still an ancestor of the lane, and `git diff --name-only <baseSha>..<base>` (the dependency's merge) touching no deliverable path.
+Cite: #5831.
+
 #5755 follow-up: the admission stop matches a pending issue's body and frozen contract against the signature's tools (tool_missing) or the path/command tokens of its first evidence line (other env.* codes), or `envIssue.needs`. An env.* end on an issue labelled `security*` is escalated (stays needs-human for a person, `securityEscalated`), never held and never parked into `remediation-queue`.
 
 ## Entry 2026-11-22 — release fix lane is not held on its own release PR's CI (#5794)

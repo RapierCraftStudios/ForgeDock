@@ -124,6 +124,7 @@ import { reconcileCheckpoints } from "./checkpoint-reconcile.mjs";
 import { guardStagedDeletions, deletionEvidence, maxForeignDeletions } from "./delguard.mjs";
 import { createLedger, flattenPhases } from "./phaseledger.mjs";
 import { DEFAULT_CATALOG_SOURCES, deriveCatalog, mergeRecipes, rewriteMissed, isDriftFailure, rewriteSubprojectVenv } from "./validate-catalog.mjs";
+import { planStale } from "./stacking.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
 
 /**
@@ -369,6 +370,9 @@ export async function runCore(o) {
   let lane = null, base = null, defaults = [], milestone = null; // set by lane resolution, before the lease
   // #4267: a batch recovery lane for a mechanical needs-human ({code, attempt, final}); #4302: only a final attempt relabels.
   const recover = o.recover && typeof o.recover.code === "string" ? { code: o.recover.code, attempt: Number.isInteger(o.recover.attempt) ? o.recover.attempt : 1, final: o.recover.final !== false } : null;
+  // #5831 stacked lanes: `plan` plans a dependent (contract frozen, no build, no checkpoint); `stackPlanned` ({contractHash, baseSha}) is the plan a build lane reuses.
+  const planOnly = o.plan === true;
+  const stackPlanned = o.planned && typeof o.planned.contractHash === "string" && typeof o.planned.baseSha === "string" ? o.planned : null;
   const withLink = (body) => `${issuePrMarker(issue)}\n${body}`; // #5505: the issue → PR link GitHub does not record for a staging PR
   const closeBlockers = (reason, exceptPr = null) => openPrBlockingClose({ repo, io: { gh: ghw }, issue, reason, exceptPr }).catch(() => []); // #5505: fail open
   let branch = `feat/issue-${issue}-lean`; // #5469: an adopted PR's own head branch replaces it
@@ -604,7 +608,7 @@ export async function runCore(o) {
     // #5333: the worktree goes only after the builder processes exited (SIGTERM, then SIGKILL after a grace period).
     const stillRunning = io.proc?.alive && builderPids.length ? await waitPidsExit(builderPids, { alive: io.proc.alive, kill: io.proc.kill, sleep }).catch(() => []) : [];
     // Never discard work silently: an unmerged lane commits and pushes what is left before its worktree goes.
-    const saved = !wtCreated || reason === "merged" || (await checkpoint(`exit (${reason})`));
+    const saved = !wtCreated || reason === "merged" || reason === "planned" || (await checkpoint(`exit (${reason})`)); // #5831: a plan lane built nothing: no checkpoint commit or push
     await reportLaneHead(reason);
     try { ghCache?.dispose?.(); } catch { /* best effort */ }
     if (runTmp) {
@@ -766,6 +770,7 @@ export async function runCore(o) {
       ...(firstPassOf(builderTriggers) != null ? { firstPass: firstPassOf(builderTriggers) } : {}), ...(tb.record() ? { turns: tb.record() } : {}), // #4392
       ...(route ? { builderRoute: { tier: route.tier, class: route.class, escalated, model: route.model ?? "default" } } : {}),
       ...(gateRan ? { conformance: { mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", would: shadowWould, ...(adequacyCounts(adequacy) ? { test_adequacy: adequacyCounts(adequacy) } : {}), risk: Boolean(riskEnforced), ...(Object.keys(kinds).length ? { kinds: [...failureClasses] } : {}) } } : {}), ...extra };
+    if (extra.planned) done.planned = extra.planned; // #5831
     if (deferTail && o.deferPostRun) done.postRun = () => postRun.run(); // the caller runs it once the lane slot is free
     else await postRun.run();
     return done;
@@ -1487,7 +1492,9 @@ export async function runCore(o) {
       T.decisions.push(`Dependency satisfied by lane merge: ${names}`);
       try { await post("FORGE:DEPENDENCY", `## Dependency satisfied\n${names} merged into ${lane}; the issue stays open until promotion, so the **Depends on** edge is met.`); } catch { /* best effort */ }
     }
-    if (dep?.open?.length) {
+    if (dep?.open?.length && planOnly) { // #5831: a plan lane runs while its in-batch dependency is open
+      T.decisions.push(`Plan lane: dependency ${dep.open.map((n) => `#${n}`).join(", ")} still open; planning only`);
+    } else if (dep?.open?.length) {
       return { terminalReason: "dependency-open", code: OUTCOME_CODES.DEPENDENCY_OPEN, dependencies: dep.open,
         detail: `issue ${issue} **Depends on** ${dep.open.map((n) => `#${n}`).join(", ")} which is still open; re-run once it is closed` };
     }
@@ -2293,6 +2300,7 @@ export async function runCore(o) {
       }
       return dups;
     }
+    if (planOnly && (adoptPr || isSplit)) return finish("deferred", `plan lane: ${adoptPr ? "an adopted PR" : "a refactor:split"} has nothing to plan ahead`, { code: "plan.unsupported" }); // #5831
     if (adoptPr) {
       // ---- 3''. #5469 adopt: the PR's diff is the change; no plan and no builder session, a location-only contract for the renderers ----
       { const f = await gateSetup(); if (f) return f; }
@@ -2308,13 +2316,18 @@ export async function runCore(o) {
       frozen = split.contract; hash = contractHash(contractJson(frozen));
       files = await changedFiles();
     } else {
-      if (resumed || recover) { // #5811: a recovery with no branch to resume (it ended before its first commit) still reuses the frozen contract
+      if (resumed || recover || stackPlanned) { // #5811: (#5831: a build lane handed a plan reuses its contract too) a recovery with no branch to resume (it ended before its first commit) still reuses the frozen contract
         const fc = await readFrozenContract();
         if (fc) {
           // #4265: a contract planned from an older issue scope is stale: re-plan and freeze a new one instead of judging against it
           await refreshIssue("rerun contract check");
           const gone = (Array.isArray(fc.contract?.requirements) ? fc.contract.requirements : []).filter((r) => r?.disposition === "deliver" && !inIssue(r.quote, issueText)).map((r) => r.id);
-          const stale = reuseStale({ fc, scopeHash, lane, resumed: Boolean(resumed), gone });
+          let stale = reuseStale({ fc, scopeHash, lane, resumed: Boolean(resumed || stackPlanned), gone });
+          if (!stale && stackPlanned) { // #5831: the plan's base must still be on the lane and the dependency's merged diff must not touch a deliverable path
+            const ancestor = await git(["merge-base", "--is-ancestor", stackPlanned.baseSha, base]).then(() => true, () => false);
+            const changedPaths = ancestor ? String(await git(["diff", "--name-only", `${stackPlanned.baseSha}..${base}`]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean) : [];
+            stale = planStale({ planned: stackPlanned, contractHash: fc.hash, ancestor, changedPaths, deliverablePaths: (fc.contract?.deliverables ?? []).map((d) => d?.path).filter(Boolean) });
+          }
           if (stale) {
             ev({ event: "CONTRACT_STALE", hash: fc.hash, scope: fc.scope, now: scopeHash, base: fc.base, lane, reason: stale });
             T.decisions.push(`Rerun: frozen contract ${fc.hash} is stale (${stale}); re-planning`);
@@ -2343,7 +2356,7 @@ export async function runCore(o) {
         ev(rec); await emit(rec);
         T.decisions.push(`Pre-contract sessions provisionally routed to the ${preRoute.tier} tier (${preRoute.class}: ${preRoute.reason})`);
       }
-      await label("building");
+      if (!planOnly) await label("building"); // #5831
       // #4450: the light lane (lean.light mode on, eligible, fresh lane): one builder session, derived contract, or an upgrade
       const waitMs = Math.max(0, Number(contextWaitSeconds) || 0) * 1000, tHot = now();
       if (recCfg.mode === "on" && !recurrence && (namedPaths(iss.body ?? "").length || recursLinks(iss.body ?? "").length)) { // #5751: 0 LLM calls; an issue naming no path and no Recurs link cannot recur
@@ -2364,8 +2377,8 @@ export async function runCore(o) {
       lightVerdict = elig.verdict;
       if (elig.mode !== "off") T.decisions.push(`Light lane ${elig.mode}: ${elig.verdict}${elig.reasons.length ? ` (${elig.reasons.map((x) => x.code).join(", ")})` : ""}`);
       // #4451: a light try skips the hotspots and the context pack; an upgrade computes them before the plan call
-      const ffSource = fastForwardSource(o.light), ffFresh = ffSource === "investigation" && !frozen && !resumed && !salvagedRef && !recover && !recurrence?.recurs; // #5426: the text verdict above is only a shadow signal then
-      const lightTry = ffSource === "text" && elig.light && !hotLate && !frozen && !resumed && !salvagedRef && !recover && !recurrence?.recurs; // #5751: a recurrence never takes the light lane
+      const ffSource = fastForwardSource(o.light), ffFresh = !planOnly && ffSource === "investigation" && !frozen && !resumed && !salvagedRef && !recover && !recurrence?.recurs; // #5426: the text verdict above is only a shadow signal then
+      const lightTry = !planOnly && ffSource === "text" && elig.light && !hotLate && !frozen && !resumed && !salvagedRef && !recover && !recurrence?.recurs; // #5751: a recurrence never takes the light lane
       if (recurrence?.recurs && elig.light) T.decisions.push("Light lane skipped: the issue recurs (design lane)");
       if (!lightTry) hotFacts = namedHot; // #4451: a light try still gives its builder no hotspot facts
       enumList = io.enumeratingTests ? ((await within(io.enumeratingTests({ cwd: wt, paths: namedPaths(iss.body ?? "") }), waitMs)) ?? []) : [];
@@ -2556,6 +2569,12 @@ export async function runCore(o) {
         T.decisions.push(`Contract frozen (${hash}): ${frozen.requirements.length} requirement(s), ${deferredN} deferred pending review`);
       } else {
         T.validate = lightDone ? "light lane (no plan session)" : resumed ? "resumed (existing branch)" : "recovered (frozen contract)";
+      }
+      if (planOnly) { // #5831: a plan lane ends right after the freeze: nothing is built, labelled, committed or pushed
+        const baseSha = String(await git(["rev-parse", base]).catch(() => "")).trim();
+        ev({ event: "STACK_PLANNED", hash, baseSha });
+        T.validate = ["PLANNED", `contract ${hash} frozen on ${baseSha.slice(0, 12)}; build waits for its dependency`];
+        return finish("planned", `contract ${hash} frozen; build starts once its dependencies merged`, { planned: { contractHash: hash, baseSha }, code: OUTCOME_CODES.COMPLETED }, OUTCOME_CODES.COMPLETED);
       }
       const dgFiles = (frozen?.deliverables ?? []).map((d) => d?.path).filter(Boolean);
       const designComments = (iss?.comments ?? []).filter(isTrustedIssueComment);
