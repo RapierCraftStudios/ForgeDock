@@ -137,6 +137,7 @@ import { mapLimit } from "./pmap.mjs";
 import { quotaRequeue } from "./rotator.mjs";
 import { joinsDecomposed, addsEpicChildren, selectChildren, edgeText, DEFAULT_POLL_S } from "./autochildren.mjs";
 import { formatOverload } from "./hostload.mjs";
+import { normalizeStacking, planAdmissible, stackAdmissible } from "./stacking.mjs";
 import { lackedTools } from "./toolplace.mjs";
 import { openPrerequisites } from "./prereq.mjs";
 
@@ -329,7 +330,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
-  getChildren = null, autoChildren = null, baseWait = null, rotator = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null, envHold = null, envIssue = null, logicalDeps = null }) {
+  getChildren = null, autoChildren = null, baseWait = null, rotator = null, stacking = "off", readPrReady = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null, envHold = null, envIssue = null, logicalDeps = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -457,6 +458,16 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const maxFor = (cls) => (cls === "mechanical" ? mechMax : recoveryMax);
   const classUsed = toMap(saved?.recoveryClasses); // `${issue}:${class}` -> recovery lanes launched in that class
   const recoveries = toMap(saved?.recoveries); // issue -> recovery lanes launched (#4267)
+  // #5831 stacked lanes: `planned` = issue -> {contractHash, baseSha} of its finished plan lane; `planTried` = issues that had their one plan lane
+  const stackOn = normalizeStacking(stacking) !== "off";
+  // #5832 phase 2 (`full`): `prReady` = running issue -> {pr, branch, sha} of its PR-ready lane head (FORGE:STATE via `readPrReady`);
+  // `stackedTried` = issues whose one stacked build was admitted; `stackedOf` = issue -> {dependency, branch, sha} of that build.
+  const stackFull = normalizeStacking(stacking) === "full" && typeof readPrReady === "function";
+  const prReady = new Map();
+  const stackedOf = toMap(saved?.stacked);
+  const stackedTried = new Set(saved?.stackedTried ?? []);
+  const planned = toMap(saved?.planned);
+  const planTried = new Set(saved?.planTried ?? []);
   const recovering = toMap(saved?.recovering); // issue -> {code, attempt, detail, outcome, ...} of the recovery lane queued or running
   const freeRecovered = new Set(); // #5727: issues whose one free (no-attempt) recovery for a recipe-less remote tool miss was spent
   const requeueApplied = new Set(saved?.requeueApplied ?? []); // #4550: `--requeue` entries already applied (batch `requeue` file)
@@ -476,6 +487,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
       ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
       ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering), recoveryClasses: toObj(classUsed) } : {}),
+      ...(planned.size || planTried.size ? { planned: toObj(planned), planTried: [...planTried] } : {}),
+      ...(stackedTried.size ? { stacked: toObj(stackedOf), stackedTried: [...stackedTried] } : {}),
       ...(requeueApplied.size ? { requeueApplied: [...requeueApplied], requeued: toObj(requeuedInfo) } : {}),
       ...(relabelled.size ? { relabelled: [...relabelled] } : {}), ...(cancelled ? { cancelled } : {}),
       ...(estimate ? { estimates: toObj(estimates), enqueued: toObj(enqueued) } : {}), ...(heads.size ? { heads: [...heads] } : {}),
@@ -836,7 +849,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (releaseLease && (cancelled || (r?.terminalReason ?? "engine-error") === "engine-error" || (r?.terminalReason === "deferred" && r?.code === "run.interrupted"))) { try { await releaseLease(n, rec); } catch { /* best effort: the lease expires */ } }
     // #4304: the pre-filter runs once per issue; a recovery pass's row adds the earlier attempt's cost, which already holds it.
     const pfCost = recovering.has(n) ? 0 : (pf?.cost_usd ?? 0);
-    const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + pfCost, minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(pf ? { prefilter: pf } : {}),
+    const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + pfCost, minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(pf ? { prefilter: pf } : {}), ...(rec?.stackedOn ? { stacked: true, stackedOn: rec.stackedOn } : {}),
       ...(() => { const w = capWait.take(n, r?.waits); return w && typeof w === "object" ? { waits: w } : {}; })(), ...(Number.isInteger(r?.heavyQueueMax) ? { heavyQueueMax: r.heavyQueueMax } : {}),
       ...(Number.isFinite(r?.wall_ms) ? { wall_ms: r.wall_ms } : {}), ...(Number.isFinite(r?.model_ms) ? { model_ms: r.model_ms } : {}), // #4451
       ...(phasesOf(r, rec) ? { phases: phasesOf(r, rec) } : {}), // #4908
@@ -867,6 +880,18 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     if (sandboxUse.has(n)) row.sandbox = { ...sandboxUse.get(n), ...(sandboxUse.get(n).by_agent ? { by_agent: { ...sandboxUse.get(n).by_agent } } : {}) };
     const done = () => { running.delete(n); runRecs.delete(n); releaseSlot(n); endRemote(n); };
+    if (rec?.plan) {
+      // #5831: a plan lane ends `planned` or `plan-failed` and goes back to pending for its build lane. It is never a final row and
+      // never counts toward the breaker, the engine-error relaunch, the deferral or the requeue budgets (it returns before them).
+      done();
+      const ok = r?.terminalReason === "planned" && r?.planned?.contractHash && r?.planned?.baseSha;
+      if (ok) planned.set(n, { contractHash: r.planned.contractHash, baseSha: r.planned.baseSha });
+      store?.log?.({ event: ok ? "STACK_PLANNED" : "STACK_PLAN_FAILED", issue: n, ...(ok ? { contractHash: r.planned.contractHash, baseSha: r.planned.baseSha } : { reason: row.outcome }) });
+      requeue(n, 0); save();
+      if (!ok) decided({ issue: n, what: `plan lane for #${n} ended ${row.outcome}; it will run as a normal build lane after its dependencies`, why: firstLine(row.detail) || row.outcome, alternative: "retry the plan lane" });
+      update({ ...row, outcome: ok ? "planned" : "plan-failed", ...(ok ? { detail: `contract ${r.planned.contractHash} frozen at ${String(r.planned.baseSha).slice(0, 12)}` } : {}) });
+      return;
+    }
     // #5805: an engine/env-caused end that would repeat as-is: held with its signature, re-admitted by watchEnvHolds, never terminal.
     const holdEnv = ({ kind, sig, tools = null, why, envIssueNo = null }) => {
       const p = recovering.get(n);
@@ -1152,7 +1177,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const k = laneRetries.get(n) ?? 0; laneRetries.set(n, k + 1);
     return { terminalReason: "deferred", code: "lane.unresolved", retryInSeconds: Math.min(DEFER_BACKOFF_S * 2 ** k, DEFER_BACKOFF_MAX_S), cost_usd: 0, detail: l.detail };
   })().then((x) => settle(n, x, rec, null)));
-  const start = (n) => {
+  const start = (n, { plan = false, stackedOn = null } = {}) => {
     const ln = lanes.get(n);
     if (ln && !ln.ok && ln.transient && resolveLane) { retryLane(n, runRecs.get(n) ?? { startedAt: now() }); return; }
     if (ln && !ln.ok) { // settled synchronously: nothing runs, no lease, no comment
@@ -1166,7 +1191,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     placed.delete(n);
     const queueMs = Number.isFinite(enqueued.get(n)) ? Math.max(0, now() - enqueued.get(n)) : null; // #4908: queue_wait in the phase ledger
     heads.delete(n); enqueued.delete(n); busyNoted.delete(n);
-    const rec = { startedAt: now(), ...(queueMs != null ? { queueMs } : {}), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}), ...(pl ? { placement: pl } : {}) };
+    const rec = { startedAt: now(), ...(plan ? { plan: true } : {}), ...(stackedOn ? { stackedOn } : {}), ...(queueMs != null ? { queueMs } : {}), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}), ...(pl ? { placement: pl } : {}) };
     runRecs.set(n, rec); notBefore.delete(n); save();
     track(n, (async () => {
       // Pre-filter once per issue (a requeued issue is not re-checked); fail-open: an error means a normal lane.
@@ -1189,7 +1214,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       else if (pf?.parked) r = { terminalReason: pf.kind, cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
       else {
         try {
-          r = await runOne(n, lane, { ...(signal ? { signal } : {}), remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(recovering.has(n) ? { recover: { code: recovering.get(n).code, attempt: recovering.get(n).attempt, final: recovering.get(n).attempt >= (recovering.get(n).max ?? recoveryMax) } } : {}), onStart: (info) => {
+          r = await runOne(n, lane, { ...(signal ? { signal } : {}), remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(plan ? { plan: true } : planned.has(n) ? { planned: planned.get(n) } : {}), ...(rec.stackedOn ? { stackedOn: rec.stackedOn } : {}), ...(recovering.has(n) ? { recover: { code: recovering.get(n).code, attempt: recovering.get(n).attempt, final: recovering.get(n).attempt >= (recovering.get(n).max ?? recoveryMax) } } : {}), onStart: (info) => {
             Object.assign(rec, info ?? {}); save();
             if (rec.remote && remoteRun.has(n)) noteRemote(n, rec.handle);
             if (cancelled) stop(n, rec); // #4376: launched while the cancel arrived
@@ -1709,13 +1734,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         if (pfNoted.size && !keys.size) update({ issue: null, outcome: "preflight", detail: "preflight cleared; admissions resumed" });
         pfNoted = keys;
       }
+      let planPass = false; // #5831: the plan pass evaluates every other gate but the in-batch dependencies
       await gateEnvSigs(); // #5755
       const isReady = (n) => {
         if (pfAll || (pfRemote && isRemote(n))) return false;
         if (opHeld.has(n)) { opHeldHit.add(n); return false; }
         if (blocked.has(n)) { blockedHit.add(n); return false; } // #4773
         if (baseHeld.has(n)) { baseHit.add(n); return false; } // #5031
-        if (!((notBefore.get(n) ?? 0) <= t && edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome)))) return false;
+        if (!((notBefore.get(n) ?? 0) <= t && (planPass || edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome))))) return false;
         if (integration?.holds) {
           let why = null;
           try { why = integration.holds(n, { lane: lanes.get(n)?.lane ?? null }); } catch { why = null; }
@@ -1766,6 +1792,51 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           if (running.size >= K()) break;
           if (grant(n, new Set()) === true) { pending.splice(pending.indexOf(n), 1); start(n); started++; }
         }
+      }
+      // #5832: stacked lanes (phase 2, `full`). A dependent whose one unmerged in-batch dependency is PR-ready (precheck green, review
+      // passed) builds now on that lane head; its PR targets the dependency branch and the merge step holds it until the dependency merged.
+      if (stackFull && !tripped && !cancelled && !holdUntil && !pfAll && running.size < K()) {
+        const watch = new Set(pending.filter((n) => !stackedTried.has(n)).flatMap((n) => edges(n)).filter((d) => running.has(d) && !results.has(d)));
+        for (const d of watch) {
+          if (prReady.has(d)) continue;
+          let rd = null;
+          try { rd = await readPrReady(d); } catch { rd = null; }
+          if (rd?.branch && rd?.sha) prReady.set(d, rd);
+        }
+        planPass = true;
+        let sc = [];
+        try { sc = rank(pending.filter((n) => stackAdmissible({ n, edges: edges(n), results, pending, running, prReady, stackedTried, satisfied: SATISFIED }) && isReady(n))); } finally { planPass = false; }
+        for (const n of sc) {
+          if (running.size >= K()) break;
+          if (lanes.get(n)?.ok === false || (notBefore.get(n) ?? 0) > t) continue;
+          const so = stackAdmissible({ n, edges: edges(n), results, pending, running, prReady, stackedTried, satisfied: SATISFIED });
+          if (!so || grant(n, new Set()) !== true) continue;
+          pending.splice(pending.indexOf(n), 1);
+          stackedTried.add(n); stackedOf.set(n, so);
+          store?.log?.({ event: "STACK_BUILD_START", issue: n, stacked: true, stackedOn: so });
+          decided({ issue: n, what: `stacked build for #${n} on #${so.dependency}'s lane head ${String(so.sha).slice(0, 12)}`, why: "orchestration.stacking: full builds a dependent once its dependency's PR is ready; the PR targets the dependency branch and merges only after the dependency", alternative: "wait for the dependency to merge" });
+          start(n, { stackedOn: so }); started++;
+        }
+        if (sc.length) save();
+      }
+      // #5831: stacked lanes (phase 1). After every ready issue, an idle slot plans a dependent whose only unmet gates are in-batch
+      // dependencies still pending or running: one plan lane per issue per batch (contract frozen, no build).
+      if (stackOn && !tripped && !cancelled && !holdUntil && !pfAll && running.size < K() && !pending.some(isReady)) {
+        planPass = true;
+        let cands = [];
+        try { cands = rank(pending.filter((n) => planAdmissible({ n, edges: edges(n), results, pending, running, planTried, satisfied: SATISFIED }) && isReady(n))); } finally { planPass = false; }
+        for (const n of cands) {
+          if (running.size >= K()) break;
+          if (lanes.get(n)?.ok === false || (notBefore.get(n) ?? 0) > t) continue;
+          if (grant(n, new Set()) !== true) continue;
+          pending.splice(pending.indexOf(n), 1);
+          planTried.add(n);
+          const open = edges(n).filter((d) => !results.has(d));
+          store?.log?.({ event: "STACK_PLAN_START", issue: n, dependencies: open });
+          decided({ issue: n, what: `plan lane for #${n} while ${open.map((d) => `#${d}`).join(", ")} ${open.length > 1 ? "are" : "is"} still open`, why: "orchestration.stacking: plan admits a dependent in an idle slot; the contract freezes now and the build starts after its dependencies merged", alternative: "leave the slot idle until the dependencies merge" });
+          start(n, { plan: true }); started++;
+        }
+        if (cands.length) save();
       }
       if (reg) withdrawExcept(wanted);
       // #4685: a breaker tripped only by link failures (a router restart) closes itself after a cooldown

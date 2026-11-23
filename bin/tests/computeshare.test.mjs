@@ -984,3 +984,54 @@ test("#5856 router places a borrow lane on another host when its previous host i
   assert.equal(again.body.agent, "b");
   assert.equal(router.store.data.sandboxes.rs1.agent, "b");
 });
+
+// #5881: a label-aware fake daemon shared by two agents and a foreign workload.
+function sharedDaemon() {
+  const labelsOf = new Map(); // container or volume name -> labels
+  const d = fakeDocker();
+  const has = (n, want) => [].concat(want).every((l) => (labelsOf.get(n) ?? []).includes(l));
+  const run = d.run.bind(d);
+  d.run = async function (args) {
+    const ls = args.flatMap((a, i) => (args[i - 1] === "--label" ? [a] : []));
+    labelsOf.set(args[args.indexOf("--name") + 1], ls);
+    return run(args);
+  };
+  d.listLabelled = async (want) => [...d.containers.keys()].filter((n) => has(n, want));
+  d.listVolumes = async (prefix, want = []) => [...d.volumes].filter((v) => v.startsWith(prefix) && has(v, want));
+  d.createVolume = async (n, l) => { d.volumes.add(n); labelsOf.set(n, l); };
+  d.foreign = (name, labels) => { d.containers.set(name, { running: true }); labelsOf.set(name, labels); };
+  d.foreignVolume = (name, labels) => { d.volumes.add(name); labelsOf.set(name, labels); };
+  return d;
+}
+
+test("reap, orphan-volume and work sweep touch only this agent's labelled resources (#5881)", async () => {
+  const docker = sharedDaemon();
+  const mkAgent = (name) => createAgent({ name, listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: tmpDir("cs-agent-"), allow_cpus: 4, allow_mem_gb: 8, lease_ttl_s: 600, token: "t" }, { docker, now: () => 1_000_000, log: quiet, live: () => ({ ok: true }) });
+  const a = mkAgent("agent-a"), b = mkAgent("agent-b");
+  await a.launch({ spec: spec("la"), cpus: 1, mem_gb: 1 });
+  await b.launch({ spec: spec("lb"), cpus: 1, mem_gb: 1 });
+  assert.ok(docker.runs[0].includes("computeshare.agent=agent-a") && docker.runs[1].includes("computeshare.agent=agent-b"));
+  docker.foreign("legacy-cs", ["computeshare=1"]);
+  docker.foreign("someone-elses", ["app=db"]);
+  docker.foreign("cs-orphan-a", ["computeshare=1", "computeshare.agent=agent-a"]);
+  docker.foreignVolume("cs-work-b", ["computeshare.agent=agent-b"]);
+  docker.foreignVolume("cs-work-foreign", []);
+  docker.foreignVolume("cs-work-a", ["computeshare.agent=agent-a"]);
+  const pruned = [];
+  docker.pruneWorkDirs = async (v) => { pruned.push(v); };
+  await a.reap();
+  assert.ok(docker.containers.has(safeName("lb")), "B's lane survives A's reap");
+  assert.ok(docker.containers.has("legacy-cs") && docker.containers.has("someone-elses"), "unlabelled and foreign containers survive");
+  assert.ok(!docker.containers.has("cs-orphan-a"), "A's own orphan is removed");
+  assert.ok(docker.volumes.has("cs-work-b") && docker.volumes.has("cs-work-foreign"), "foreign work volumes survive");
+  assert.ok(!docker.volumes.has("cs-work-a"), "A's own orphan volume is removed");
+  assert.ok(!pruned.some((v) => v === "cs-work-b"));
+});
+
+test("an explicit agent_id gives the agent its own cache volume, labelled with the agent (#5881)", async () => {
+  const { agent, docker } = agentFixture({ agent_id: "Donor.1" });
+  const created = [];
+  docker.createVolume = async (n, l) => { created.push([n, l]); };
+  await agent.launch({ spec: spec("c1"), cpus: 1, mem_gb: 1 });
+  assert.deepEqual(created[0], ["cs-cache-donor.1-o-r", ["computeshare.cache=1", "computeshare.agent=donor.1"]]);
+});
