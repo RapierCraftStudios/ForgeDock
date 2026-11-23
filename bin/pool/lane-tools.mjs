@@ -18,7 +18,6 @@ export const RECIPES = {
   xvfb: { versioned: false, steps: () => [apt("xvfb xauth")] }, // headless X for browser/GUI tests that call xvfb-run
   shellcheck: { versioned: false, steps: () => [apt("shellcheck")] }, // shell-script linter for validate commands
   yaml: { versioned: false, steps: () => [apt("python3-yaml")] }, // PyYAML for validate commands that `import yaml` (#5749)
-  vite: { versioned: true, steps: (v) => [`RUN npm install -g vite${v ? `@${v}` : ""}`] }, // web build/test runner; a manifest dep of the repo is still prepared by the lane, not installed here (#5683)
   playwright: { versioned: true, steps: (v) => [`RUN npx --yes playwright${v ? `@${v}` : ""} install --with-deps chromium`] },
   // Example of a release-tarball tool; the version is required.
   promtool: { versioned: true, steps: (v) => [`RUN curl -fsSL https://github.com/prometheus/prometheus/releases/download/v${v ?? "2.54.1"}/prometheus-${v ?? "2.54.1"}.linux-amd64.tar.gz | tar -xz --strip-components=1 -C /usr/local/bin --wildcards '*/promtool'`] },
