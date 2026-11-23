@@ -117,6 +117,15 @@
    "requirement": "R12",
    "why": "Recovery share is measurable only over a real 30+ issue AlterLab batch after release; no in-repo job computes it",
    "check": "R12-recovery-share"
+  },
+  {
+   "kind": "add-requirement",
+   "requirement": {
+    "id": "R13",
+    "quote": "`forgedock` (#5727)",
+    "disposition": "defer"
+   },
+   "why": "The frozen contract (D1, D6, K1) keeps forgedock recipe-less: it is an owned dep and a recipe would change toolNoRecipe re-placement; #5727 is fixed by resolving the frozen checks path. A forgedock lane_tools recipe, if still wanted, is a separate tracked change."
   }
  ]
 }

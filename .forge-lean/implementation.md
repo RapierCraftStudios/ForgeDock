@@ -24,3 +24,4 @@ Freeze-time runnability: static host-only/busy-loop rule, recipes, precheck tail
 V1/V2/V3 exit 0 (prior run; V1 re-run: 10 pass). Tests fail without the fix (new symbols/behaviour). `forgedock check` PASS. checks.mjs widened to the full suite (fan-out cap) so was not run, per host rules.
 ### Notes
 Decisions: forgedock stays recipe-less (K1); R5 amended accordingly. R4, R12 deferred.
+- R13 (forgedock recipe, quoted from R5): deferred as a tracked follow-up; contract K1 keeps it recipe-less.
