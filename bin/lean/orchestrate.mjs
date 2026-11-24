@@ -353,6 +353,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const notBefore = toMap(saved?.notBefore);
   const requeues = toMap(saved?.requeues);
   const deferrals = toMap(saved?.deferrals);
+  const capReasons = toMap(saved?.capReasons); // #5938: issue -> the pool's last `sandbox.capacity` / host-disk reason (read by the batch health stall verdict)
   const capDefers = toMap(saved?.capDeferrals); // #5112: issue -> `sandbox.capacity` deferrals (uncapped, so not in `deferrals`)
   const capFellBack = new Set(); // #5112: issues already reported as a capacity fallback (one decision each)
   const engineErrors = toMap(saved?.engineErrors);
@@ -495,7 +496,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const save = () => {
     if (!store || halted) return;
     store.save({ v: 1, ...(setup ? { phase: "setup", setup: { ...setup } } : {}), engineVersion: version, order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
-      pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors), ...(transients.size ? { transientRetries: toObj(transients) } : {}), ...(quota.size ? { quota: toObj(quota) } : {}), ...(limitedAccounts.size ? { limitedAccounts: toObj(limitedAccounts) } : {}), ...(capDefers.size ? { capDeferrals: toObj(capDefers) } : {}),
+      pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors), ...(transients.size ? { transientRetries: toObj(transients) } : {}), ...(quota.size ? { quota: toObj(quota) } : {}), ...(limitedAccounts.size ? { limitedAccounts: toObj(limitedAccounts) } : {}), ...(capDefers.size ? { capDeferrals: toObj(capDefers) } : {}), ...(capReasons.size ? { capReasons: toObj(capReasons) } : {}),
       prefilter: toObj(checked), errorTimes, breaker: tripped, ...(agentRestarts.length ? { agentRestarts, lostRequeued: [...lostOnce] } : {}), ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
       ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
       ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering), recoveryClasses: toObj(classUsed) } : {}),
@@ -1030,6 +1031,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (r?.code === "sandbox.unreachable") notePool(true, r.detail ?? "sandbox unreachable");
       if (r?.code === "sandbox.capacity") {
         capWait.refused(n);
+        if (r.detail) capReasons.set(n, String(r.detail).slice(0, 300));
         capDefers.set(n, (capDefers.get(n) ?? 0) + 1); // #5112: counted for the fallback_local capacity fallback
         try { capGated = Number.isInteger(remote?.capacity?.()?.free); } catch { capGated = false; }
       }
@@ -1283,7 +1285,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const queueMs = Number.isFinite(enqueued.get(n)) ? Math.max(0, now() - enqueued.get(n)) : null; // #4908: queue_wait in the phase ledger
     heads.delete(n); enqueued.delete(n); busyNoted.delete(n);
     const rec = { startedAt: now(), ...(plan ? { plan: true } : {}), ...(stackedOn ? { stackedOn } : {}), ...(queueMs != null ? { queueMs } : {}), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}), ...(pl ? { placement: pl } : {}) };
-    runRecs.set(n, rec); notBefore.delete(n); save();
+    runRecs.set(n, rec); notBefore.delete(n); capReasons.delete(n); save();
     track(n, (async () => {
       // Pre-filter once per issue (a requeued issue is not re-checked); fail-open: an error means a normal lane.
       if (prefilter && !checked.has(n)) { let pf = null; try { pf = await prefilter(n, lane); } catch { pf = null; } checked.set(n, pf); save(); }
