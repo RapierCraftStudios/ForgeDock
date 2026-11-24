@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseCeilingBySize, ceilingFor, predictRestart, handoffFacts, firstEditTurn, HANDOFF_FILES_MAX, routeHandoff, buildReadsOf, ROUTE_DIGEST_MAX_BYTES } from "./ceiling.mjs";
+import { parseCeilingBySize, ceilingFor, predictRestart, handoffFacts, firstEditTurn, HANDOFF_FILES_MAX, routeHandoff, buildReadsOf, ROUTE_DIGEST_MAX_BYTES, modelCeiling, restartDecision, DEFAULT_CEILING, REAL_LIMIT_SHARE } from "./ceiling.mjs";
 import { contextRestartPrompt, routeDigestPrompt } from "./prompts.mjs";
 import { toolStats } from "./toolstats.mjs";
 
@@ -81,5 +81,34 @@ describe("route hand-off (#5812)", () => {
     const huge = routeDigestPrompt({ contract, read: Array.from({ length: 500 }, (_, i) => `src/${"x".repeat(80)}${i}.js`), stat: "a | 1", diff: "d".repeat(200000), maxBytes: 4096 });
     assert.ok(Buffer.byteLength(huge) <= 4096, `digest is ${Buffer.byteLength(huge)} bytes`);
     assert.match(huge, /<\/route_digest>$/);
+  });
+});
+
+describe("model-aware ceiling and cost gate (#5829)", () => {
+  it("modelCeiling 1M model gets about 500000", () => {
+    assert.equal(modelCeiling("claude-opus-5-5[1m]"), 500000);
+    assert.equal(modelCeiling("claude-sonnet-5-5"), 100000);
+    assert.equal(modelCeiling("claude-opus-5-5[1m]", 0.6), 600000);
+  });
+  it("an unknown or missing model keeps 120000", () => {
+    assert.equal(modelCeiling("some-local-model"), DEFAULT_CEILING); assert.equal(modelCeiling(null), 120000);
+  });
+  it("explicit context_ceiling_tokens wins over model default", () => {
+    const m = "claude-opus-5-5[1m]";
+    assert.equal(ceilingFor("M", { tokens: 90000, model: m }), 90000);
+    assert.equal(ceilingFor("M", { tokens: 0, model: m }), 0, "0 = off");
+    assert.equal(ceilingFor("M", { tokens: null, bySize: { M: 80000 }, model: m }), 80000);
+    assert.equal(ceilingFor("L", { tokens: null, bySize: { M: 80000 }, model: m }), 500000);
+    assert.equal(ceilingFor("M", { tokens: null }), 0, "no model, nothing set: unchanged");
+  });
+  it("restartDecision continues when restart costs more", () => {
+    const d = restartDecision({ context: 200000, turnsLeft: 2, cachePrice: 0.5e-6, restartCost: 0.5, window: 1000000 });
+    assert.equal(d.action, "continue"); assert.ok(d.continueCost < d.restartCost);
+    assert.equal(restartDecision({ context: 200000, turnsLeft: 50, cachePrice: 0.5e-6, restartCost: 0.5, window: 1000000 }).action, "restart");
+  });
+  it("restartDecision restarts at the model real limit", () => {
+    const d = restartDecision({ context: 1000000 * REAL_LIMIT_SHARE, turnsLeft: 0, restartCost: 100, window: 1000000 });
+    assert.equal(d.action, "restart"); assert.equal(d.reason, "real_limit");
+    assert.equal(restartDecision({ context: 1000, turnsLeft: 0, restartCost: 100 }).action, "restart", "unknown window never continues");
   });
 });

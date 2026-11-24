@@ -25,10 +25,54 @@ export function parseCeilingBySize(engine) {
   return Object.keys(out).length ? out : null;
 }
 
-/** The ceiling for a lane of `size`: its per-size entry, else the global one. */
-export function ceilingFor(size, { tokens = 0, bySize = null } = {}) {
+/** The ceiling a model without a known window keeps (#4390). */
+export const DEFAULT_CEILING = 120000;
+/** #5829: the share of a model's input window used as its default ceiling. */
+export const WINDOW_SHARE = 0.5;
+/** #5829: a session at this share of the window always restarts (digest), whatever continuing costs. */
+export const REAL_LIMIT_SHARE = 0.9;
+/** #5829: cache-read USD per token and an estimated restart cost, used when a model has no entry or the engine sets none. */
+export const RESTART_COST_USD = 0.5;
+export const CACHE_READ_USD = 0.5 / 1e6;
+/** #5829: static input windows (tokens) and cache-read prices (USD per token), first match wins; no model-API lookup (this module is pure). */
+export const MODEL_WINDOWS = [
+  { match: /1m/i, window: 1000000, cacheRead: 0.5 / 1e6 },
+  { match: /opus/i, window: 200000, cacheRead: 0.5 / 1e6 },
+  { match: /sonnet/i, window: 200000, cacheRead: 0.3 / 1e6 },
+  { match: /haiku/i, window: 200000, cacheRead: 0.1 / 1e6 },
+];
+/** The static entry for a routed model id; null when unknown. */
+export function modelInfo(model) {
+  const m = String(model ?? "");
+  return m ? MODEL_WINDOWS.find((e) => e.match.test(m)) ?? null : null;
+}
+/** The default ceiling for `model`: `share` of its window; DEFAULT_CEILING for an unknown model. */
+export function modelCeiling(model, share = WINDOW_SHARE) {
+  const e = modelInfo(model);
+  const sh = Number.isFinite(share) && share > 0 && share <= 1 ? share : WINDOW_SHARE;
+  return e ? Math.floor(e.window * sh) : DEFAULT_CEILING;
+}
+
+/**
+ * The ceiling for a lane of `size`: its per-size entry, else the global explicit one, else (#5829) the routed model's default
+ * when `model` is given and the global one was not set explicitly (`tokens` null/undefined), else `tokens`.
+ */
+export function ceilingFor(size, { tokens = 0, bySize = null, model = null, share = WINDOW_SHARE } = {}) {
   const v = bySize && SIZES.includes(size) ? bySize[size] : undefined;
-  return Number.isFinite(v) && v >= 0 ? v : tokens;
+  if (Number.isFinite(v) && v >= 0) return v;
+  if (tokens == null && model != null) return modelCeiling(model, share);
+  return tokens ?? 0;
+}
+
+/**
+ * #5829: at a context stop, continue the session or restart it from the digest. Continuing costs `turnsLeft x context x cachePrice`;
+ * restarting costs `restartCost`. A session at REAL_LIMIT_SHARE of a known `window` always restarts; an unknown window never continues.
+ */
+export function restartDecision({ context = 0, turnsLeft = 0, cachePrice = CACHE_READ_USD, restartCost = RESTART_COST_USD, window = 0 } = {}) {
+  const continueCost = Math.max(0, turnsLeft) * Math.max(0, context) * cachePrice;
+  if (!(window > 0)) return { action: "restart", reason: "unknown_window", continueCost, restartCost };
+  if (context >= window * REAL_LIMIT_SHARE) return { action: "restart", reason: "real_limit", continueCost, restartCost };
+  return continueCost > restartCost ? { action: "restart", reason: "cost", continueCost, restartCost } : { action: "continue", reason: "cost", continueCost, restartCost };
 }
 
 /**
