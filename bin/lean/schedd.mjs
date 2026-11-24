@@ -72,7 +72,7 @@ export function batchVerdicts(root, { now = Date.now(), windowMin = DEFAULT_STAL
     try {
       const b = openBatch(root, id);
       if (!b.readPlan()?.daemon || b.isTerminal()) continue;
-      const state = b.store.peek(), stall = evaluateDispatchStall(state, { held: b.readHeld(), parallel: b.readParallel(), hosted: false, lastProgressMs: b.lastProgressMs(), now, windowMin, lanesAliveMs: lanesAlive(b, state) });
+      const state = b.store.peek(), stall = evaluateDispatchStall(state, { held: b.readHeld(), parallel: b.readParallel(), hosted: false, paused: b.readPause?.() ?? null, lastProgressMs: b.lastProgressMs(), now, windowMin, lanesAliveMs: lanesAlive(b, state) });
       const decision = stall ? decideStallAction(stall, { recovery: readHealth(b.dir)?.stallRecovery ?? null, hosted: false }) : null;
       out.push(batchVerdict(id, stall, decision));
     } catch { /* one unreadable batch has no verdict */ }
@@ -422,6 +422,13 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       const changed = req.op === "hold" ? b.holdIssues(req.issues ?? [], req.meta ?? null) : b.releaseIssues(req.issues ?? []);
       return send({ type: "ok", changed, held: b.readHeld(), hosted: hosted.has(req.id) }, true);
     }
+    if (req.op === "pause" || req.op === "unpause") { // #5975: batch-level admission pause
+      const b = openBatch(root, req.id);
+      if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
+      if (req.op === "pause" && !req.meta?.reason) throw new Error("--pause needs --reason <text>");
+      const res = req.op === "pause" ? { pause: b.setPause(req.meta ?? {}) } : { changed: b.clearPause() };
+      return send({ type: "ok", ...res, hosted: hosted.has(req.id) }, true);
+    }
     if (req.op === "gc-orphans") { // #5469: cancel every orphaned batch (unhosted, pending issues, idle past the threshold)
       const { orphaned } = unhostedBatches(Date.now(), Number.isFinite(req.minAgeMs) ? req.minAgeMs : ORPHAN_AGE_MS);
       for (const o of orphaned) openBatch(root, o.id).requestCancel({ reason: "gc-orphans" });
@@ -618,7 +625,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
         const created = Date.parse(plan.created ?? "");
         if (b.isTerminal() && (!Number.isFinite(created) || now - created >= 24 * 3600_000)) continue; // nothing left to report or re-host
         const reported = !!b.readReport(), cancelled = !!b.readCancel(), state = b.store.peek(), isHosted = hosted.has(id) || starting.has(id);
-        const stallOpts = { held: b.readHeld(), parallel: b.readParallel(), hosted: isHosted, lastProgressMs: b.lastProgressMs(), now, windowMin: stallMin, cancelled, reported, lanesAliveMs: lanesAlive(b, state) };
+        const stallOpts = { held: b.readHeld(), paused: b.readPause?.() ?? null, parallel: b.readParallel(), hosted: isHosted, lastProgressMs: b.lastProgressMs(), now, windowMin: stallMin, cancelled, reported, lanesAliveMs: lanesAlive(b, state) };
         let stall = evaluateDispatchStall(state, stallOpts);
         if (stall && preflight) { // #5745: name the preflight gate holding admission (advisory; dispatch decisions are unchanged)
           let gates = [];
@@ -626,7 +633,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
           if (gates.length) stall = evaluateDispatchStall(state, { ...stallOpts, gates }) ?? stall;
         }
         if (Number.isFinite(created) && (reported || now - created >= FIRST_HOUR_MIN * 60_000) && !existsSync(join(b.dir, FIRST_HOUR_FILE)) && now - created < 24 * 3600_000) {
-          if (writeFirstHour(b, firstHourReport(state, { batchId: id, now, held: b.readHeld(), holdInfo: b.readHoldInfo?.() ?? null, stall }))) log(`schedd: first-hour report written for batch ${id}`);
+          if (writeFirstHour(b, firstHourReport(state, { batchId: id, now, held: b.readHeld(), holdInfo: b.readHoldInfo?.() ?? null, paused: b.readPause?.() ?? null, stall }))) log(`schedd: first-hour report written for batch ${id}`);
         }
         const sig = stall ? stall.ready.join(",") : "";
         const last = b.lastProgressMs();

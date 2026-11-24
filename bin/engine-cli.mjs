@@ -1396,7 +1396,7 @@ async function envBatch({ argv, root, print = (l) => console.log(l) }) {
   return { ok: true, batch: id };
 }
 
-const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] [--auto-children off|decomposed|epic|all] [--epic N] | --resume <id> [issue...] | --set-parallel <id> <K> | --set-max-remote <id> <N> | --set-placement <id> remote|hybrid|local | --clear-breaker <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> <issue...> [--for <4h|30m|1d>] [--reason <text>] | --gc-orphans | --adopt <issue> [--repo owner/repo] [--lane L] | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
+const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] [--auto-children off|decomposed|epic|all] [--epic N] | --resume <id> [issue...] | --set-parallel <id> <K> | --set-max-remote <id> <N> | --set-placement <id> remote|hybrid|local | --clear-breaker <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> --all [--for 2h] [--reason T] (sugar for --pause) | --hold <id> <issue...> [--for <4h|30m|1d>] [--reason <text>] | --pause <id> [--for <4h|30m|1d>] --reason <text> | --unpause <id> | --gc-orphans | --adopt <issue> [--repo owner/repo] [--lane L] | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
 const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force", "--auto-children", "--epic", "--for"];
 const issuesOf = (argv) => {
   const issues = [];
@@ -1534,6 +1534,12 @@ function holdMeta(argv) {
   return { owner: process.env.FORGE_HOLD_OWNER || `${process.env.USER || process.env.USERNAME || "operator"}@${hostname()}`, ownerPid: process.ppid, ownerHost: hostname(), forMs: parseHoldFor(forLabel), forLabel, reason: reason && !reason.startsWith("--") ? reason : null };
 }
 
+/** #5975: `--hold --all` pauses the batch without a `--reason`: the reason defaults to the flag that asked. */
+function holdMetaAll(argv) {
+  const m = holdMeta(argv);
+  return argv.includes("--hold") && !m.reason ? { ...m, reason: "--hold --all" } : m;
+}
+
 /** #5469: `--gc-orphans`: cancel every orphaned batch (unhosted, pending issues, idle for a week) through the daemon or the batch files. */
 async function gcOrphans({ root, viaDaemon = null, print = (l) => console.log(l) }) {
   let res = viaDaemon ? await viaDaemon() : null;
@@ -1545,6 +1551,25 @@ async function gcOrphans({ root, viaDaemon = null, print = (l) => console.log(l)
   }
   print(res.cancelled?.length ? `cancelled ${res.cancelled.length} orphaned batch(es): ${res.cancelled.join(" ")}` : "no orphaned batches");
   return { ok: true, cancelled: res.cancelled ?? [] };
+}
+
+/**
+ * `--pause <id> [--for 2h] --reason T` / `--unpause <id>` (#5975): the batch's `pause` file, through the daemon (`viaDaemon(op, meta)`,
+ * null when none runs) or directly. Admission stops for every issue, later re-admissions, requeues and adds included; running lanes
+ * are untouched. @returns {{ok, batch, pause}}
+ */
+async function pauseBatch({ op, id, root, viaDaemon = null, meta = null, print = (l) => console.log(l) }) {
+  if (!id || String(id).startsWith("--")) throw new Error(ORCH_USAGE);
+  if (op === "pause" && !meta?.reason) throw new Error("--pause needs --reason <text>");
+  let res = viaDaemon ? await viaDaemon(op, meta) : null;
+  if (!res) {
+    const b = (await import("./lean/batch.mjs")).openBatch(root, id);
+    if (!b.exists()) throw new Error(`no batch ${id} in ${root}`);
+    res = op === "pause" ? { pause: b.setPause(meta) } : { changed: b.clearPause() };
+  }
+  print(op === "pause" ? `batch ${id}: paused (${meta.reason}, until ${res.pause?.expiresAt ?? "unpause"}); running lanes continue; forgedock orchestrate --unpause ${id} re-admits`
+    : res.changed === false ? `batch ${id}: not paused` : `batch ${id}: unpaused`);
+  return { ok: true, batch: id, pause: res.pause ?? null };
 }
 
 /**
@@ -1692,6 +1717,11 @@ async function orchestrateClient(argv, deps = {}) {
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
     return sock ? schedd.request(sock, { op, id, issues, ...(meta ? { meta } : {}) }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
   };
+  const viaPause = async (id, op, meta) => {
+    let sock = null;
+    try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
+    return sock ? schedd.request(sock, { op, id, ...(meta ? { meta } : {}) }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
+  };
   const batchRootOf = async () => (await import("./lean/batch.mjs")).batchRoot();
   if (["--show-env", "--set-env", "--unset-env"].some((f) => argv.includes(f))) return envBatch({ argv, root: await batchRootOf() });
   if (argv.includes("--clear-breaker")) return runBatch({ argv, deps, sink: consoleSink() });
@@ -1712,6 +1742,10 @@ async function orchestrateClient(argv, deps = {}) {
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
     return sock ? schedd.request(sock, { op: "gc-orphans" }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
   } });
+  for (const [flagName, op] of [["--pause", "pause"], ["--unpause", "unpause"], ["--hold", "pause"]]) if (argv.includes(flagName) && (flagName !== "--hold" || argv.includes("--all"))) { // #5975: `--hold <id> --all` is sugar for `--pause`
+    const id = flag(argv, flagName), pv = (_o, meta) => viaPause(id, op, meta);
+    return pauseBatch({ op, id, root: await batchRootOf(), viaDaemon: pv, meta: op === "pause" ? holdMetaAll(argv) : null });
+  }
   for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
     const id = flag(argv, `--${op}`);
     const root = await batchRootOf(), io = deps.io ?? makeIo();
@@ -1836,6 +1870,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     return requeueBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root, io: deps.io ?? makeIo(), requireHost: true, force: forceOf(argv), print: (l) => sink.line(l) });
   }
   if (argv.includes("--gc-orphans")) return gcOrphans({ root, print: (l) => sink.line(l) });
+  for (const [flagName, op] of [["--pause", "pause"], ["--unpause", "unpause"], ["--hold", "pause"]]) if (argv.includes(flagName) && (flagName !== "--hold" || argv.includes("--all"))) { // #5975: `--hold <id> --all` is sugar for `--pause`
+    return pauseBatch({ op, id: flag(argv, flagName), root, meta: op === "pause" ? holdMetaAll(argv) : null, print: (l) => sink.line(l) });
+  }
   for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
     const hid = flag(argv, `--${op}`);
     return holdBatch({ op, id: hid, tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root, meta: op === "hold" ? holdMeta(argv) : null, print: (l) => sink.line(l),
@@ -2309,7 +2346,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       trusted: (n) => trustedOf.get(n) === true,
       autoChildren,
       ...(autoMod.addsEpicChildren(autoChildren.mode) ? { getChildren: async () => ({ list: await autoMod.readChildList({ gh: (a) => leanIo.gh(a), repo, fields: childFields ??= await autoMod.hostListFields((a) => leanIo.gh(a)) }), elsewhere: autoMod.liveElsewhere({ batchMod, root, self: batch.id, repo }) }) } : {}),
-      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getClearBreaker: batch.peekClearBreaker, consumeClearBreaker: batch.readClearBreaker, ackClearBreaker: batch.ackClearBreaker, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, expireHolds: batch.expireHolds, getHoldInfo: batch.readHoldInfo, getGates: batch.readGates, baseWait: baseWaits.size ? baseWaitOf(baseWaits, { io, leanIo, cwd }) : null, ...lanes,
+      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getClearBreaker: batch.peekClearBreaker, consumeClearBreaker: batch.readClearBreaker, ackClearBreaker: batch.ackClearBreaker, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, expireHolds: batch.expireHolds, getPause: batch.readPause, expirePause: batch.expirePause, getHoldInfo: batch.readHoldInfo, getGates: batch.readGates, baseWait: baseWaits.size ? baseWaitOf(baseWaits, { io, leanIo, cwd }) : null, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(Number.isInteger(orch.transientRetries) ? { transientRetries: orch.transientRetries } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, rotator, batchId: batch.id, drift, lifecycle, integration,
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd), host: { cores: () => cpus().length, memAvailableMb, rampingMb: rampProbe.rampingMb } }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       // #5174: hold new local admissions while loadavg/cores is above engine.overload_load_per_core (host-wide batches only)

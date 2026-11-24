@@ -331,6 +331,23 @@ export function openBatch(root, id) {
       self.releaseIssues(due.map((e) => e.issue));
       return out;
     },
+    /** #5975: batch-level pause (`pause` file): `{owner, since, expiresAt|null, reason, ownerPid, ownerHost}`; admission stops for every issue, present and future. */
+    setPause: ({ owner = "operator", reason = null, forMs = null, ownerPid = null, ownerHost = null } = {}) => {
+      const now = Date.now(), rec = { owner: String(owner), since: new Date(now).toISOString(), expiresAt: Number(forMs) > 0 ? new Date(now + Number(forMs)).toISOString() : null, reason: reason ? String(reason) : null, ownerPid: Number.isSafeInteger(ownerPid) ? ownerPid : null, ownerHost: ownerHost ?? null };
+      put(f("pause"), JSON.stringify(rec) + "\n");
+      return rec;
+    },
+    /** #5975: the pause record, or null when missing or invalid. */
+    readPause: () => { const v = readJson(f("pause")); return v && typeof v === "object" && !Array.isArray(v) && typeof v.since === "string" ? v : null; },
+    /** #5975: lift the pause. @returns {boolean} whether one was set */
+    clearPause: () => { const had = !!self.readPause(); try { rmSync(f("pause"), { force: true }); } catch { /* already gone */ } return had; },
+    /** #5975: lift the pause when its `expiresAt` has passed. @returns {object|null} the expired record (with `ownerGone`) */
+    expirePause: (now = Date.now()) => {
+      const p = self.readPause();
+      if (!p?.expiresAt || !(Date.parse(p.expiresAt) <= now)) return null;
+      self.clearPause();
+      return { ...p, ownerGone: ownerGone(p) };
+    },
     /** Remove `list` from the `hold` file. @returns {number[]} the issues that were held */
     releaseIssues: (list) => {
       const have = new Set(readAdded(f("hold")));
