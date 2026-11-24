@@ -440,9 +440,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (hostFallbackOn() && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
     // #5371: a mechanical recovery never repeats the placement of the run that failed (a remote sandbox env defect recurs there), and a remote validate failure is rerun on the host
     if (recovering.get(n)?.code === ENV_VALIDATE_PLACEMENT || (MECHANICAL_CODES.includes(recovering.get(n)?.code) && recovering.get(n)?.where === "remote")) {
-      if (hostFallbackOn()) return { where: "local", reason: `different placement: recovering ${recovering.get(n).code} off the remote run` };
+      if (hostFallbackOn()) return { where: "local", reason: `different placement: recovering ${rec.code} off the remote run` };
       // #5746: the host is not allowed: retry remotely (a fresh sandbox) instead of the orchestrator
-      if (!budgetLocal) return { where: "remote", reason: `retry remotely, host fallback off: recovering ${recovering.get(n).code}` };
+      if (!budgetLocal) return { where: "remote", reason: `retry remotely, host fallback off: recovering ${rec.code}` };
     }
     if (hostFallbackOn()) { // #5331: a frozen contract naming a tool the sandbox is known to lack runs on the host (`remote.lacks`, `remote.contractOf(n)`; both optional)
       const lk = lackedTools(remote.contractOf?.(n), remote.lacks);
