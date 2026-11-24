@@ -2416,3 +2416,19 @@ describe("#5754 live-stack e2e rows convert to post-deploy at freeze", () => {
     }
   });
 });
+
+describe("#5754 precheck fails fast on a deliver row the placement cannot produce", () => {
+  const LIVE = "A burst of 100 requests produces zero 429 lines against the live stack [type:e2e]";
+  const run = (quote, extra = {}) => precheck({ contract: { ...C, requirements: [{ id: "R1", quote, disposition: "deliver", ...extra }], validate: [] }, result: { requirements: [], validation: [] }, changedFiles: [] });
+  it("a live-stack deliver e2e row fails with a typed code before any builder resume", () => {
+    const f = run(LIVE).failures.filter((x) => x.kind === "e2e_placement");
+    assert.equal(f.length, 1);
+    assert.equal(f[0].code, "conformance.e2e_unverified");
+  });
+  it("local, post-deploy, out-of-band and non-e2e rows do not trip it", () => {
+    assert.equal(run("works against the local stack [type:e2e]").failures.some((x) => x.kind === "e2e_placement"), false);
+    assert.equal(run(LIVE, { disposition: "post-deploy" }).failures.some((x) => x.kind === "e2e_placement"), false);
+    assert.equal(run(LIVE, { verify: "out_of_band", evidence: "job" }).failures.some((x) => x.kind === "e2e_placement"), false);
+    assert.equal(run("zero 429 lines against the live stack").failures.some((x) => x.kind === "e2e_placement"), false);
+  });
+});
