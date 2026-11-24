@@ -793,6 +793,47 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await d2?.close?.(); }
   });
 
+  it("#5966: a handover under an active unit exits non-zero after close, and the hard bound fires when a batch stop hangs", async () => {
+    for (const hang of [false, true]) {
+      const dir = tmpDir("schedd-exit-"), root = join(dir, "batches"), lines = [], exits = [];
+      let version = "1.51.0";
+      const d = await startDaemon({ dir, root, log: (m) => lines.push(m), resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => "active",
+        exit: (c) => exits.push(c), stopMs: hang ? 60_000 : 1000, hardExitMs: 200,
+        runBatch: ({ sink, signal }) => { sink.batch({ id: "x", dir }); return new Promise((_, rej) => { if (!hang) signal.addEventListener("abort", () => rej(Object.assign(new Error("stopped"), { code: "batch.stopped" }))); }); } });
+      request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: ["x"], cwd: dir, env: {} }).catch(() => {});
+      await until(() => lines.some((l) => l.includes("listening")));
+      version = "1.52.0";
+      await until(() => exits.length > 0);
+      assert.deepEqual(exits, [1], `hang=${hang}`);
+      assert.equal(d.stopCode(), 1);
+      if (hang) assert.ok(lines.some((l) => l.includes("did not finish within")), lines.join("\n"));
+      await d.close();
+    }
+  });
+
+  it("#5966: without a unit, a handover whose successor never listens retries once then exits non-zero (no silent zombie)", async () => {
+    const dir = tmpDir("schedd-nosucc-"), root = join(dir, "batches"), lines = [], exits = [];
+    let version = "1.51.0", spawns = 0;
+    const d = await startDaemon({ dir, root, log: (m) => lines.push(m), resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => null,
+      exit: (c) => exits.push(c), respawn: () => { spawns++; }, probe: async () => false, successorMs: 50, successorPollMs: 10, runBatch: async () => ({}) });
+    version = "1.52.0";
+    await until(() => exits.length > 0);
+    assert.deepEqual(exits, [1]);
+    assert.equal(spawns, 2, "the successor is started twice");
+    assert.ok(lines.some((l) => l.includes("no successor listening")));
+    await d.closed;
+  });
+
+  it("#5966: a stall-recovery restart also exits (shared self-stop path)", async () => {
+    const dir = tmpDir("schedd-stallexit-"), root = join(dir, "batches"), exits = [];
+    let version = "1.51.0";
+    const d = await startDaemon({ dir, root, log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => "active", exit: (c) => exits.push(c), runBatch: async () => ({}) });
+    version = "1.52.0";
+    await until(() => exits.length > 0);
+    assert.deepEqual(exits, [1]);
+    await d.closed;
+  });
+
   it("#5204: readInstalledVersion reads this install's package.json version, null when unreadable", () => {
     assert.equal(readInstalledVersion(), JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version);
     const dir = tmpDir("schedd-ver-");
