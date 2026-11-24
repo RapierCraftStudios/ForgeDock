@@ -22,7 +22,7 @@ const run = ({ script, issues, store = memStore(), pause = { v: null }, extra = 
 };
 
 describe("#5975: batch pause", () => {
-  it("a dependency merge in a paused batch does not dispatch the dependent; after --unpause it does; the running lane completes", async () => {
+  it("paused batch: a dependency merge does not dispatch the re-admitted dependent; after --unpause it does; the running lane completes", async () => {
     const store = memStore(), pause = { v: null };
     const a = await run({ script: {}, issues: [2, 1], store, pause, onStart: (n) => { if (n === 1) pause.v = REC; } });
     assert.deepEqual(a.calls, [1], "the lane already running finishes through the pause; its dependent is not admitted");
