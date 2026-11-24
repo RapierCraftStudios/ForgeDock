@@ -901,7 +901,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (releaseLease && (cancelled || (r?.terminalReason ?? "engine-error") === "engine-error" || (r?.terminalReason === "deferred" && r?.code === "run.interrupted"))) { try { await releaseLease(n, rec); } catch { /* best effort: the lease expires */ } }
     // #4304: the pre-filter runs once per issue; a recovery pass's row adds the earlier attempt's cost, which already holds it.
     const pfCost = recovering.has(n) ? 0 : (pf?.cost_usd ?? 0);
-    const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + pfCost, minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(pf ? { prefilter: pf } : {}), ...(rec?.stackedOn ? { stacked: true, stackedOn: rec.stackedOn } : {}),
+    const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + pfCost, minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(r?.culprit ? { culprit: r.culprit } : {}), ...(pf ? { prefilter: pf } : {}), ...(rec?.stackedOn ? { stacked: true, stackedOn: rec.stackedOn } : {}),
       ...(() => { const w = capWait.take(n, r?.waits); return w && typeof w === "object" ? { waits: w } : {}; })(), ...(Number.isInteger(r?.heavyQueueMax) ? { heavyQueueMax: r.heavyQueueMax } : {}),
       ...(Number.isFinite(r?.wall_ms) ? { wall_ms: r.wall_ms } : {}), ...(Number.isFinite(r?.model_ms) ? { model_ms: r.model_ms } : {}), // #4451
       ...(phasesOf(r, rec) ? { phases: phasesOf(r, rec) } : {}), // #4908
@@ -1794,10 +1794,12 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         save(); update(row);
       } else {
         results.delete(n);
-        await settleLane(n, { terminalReason: "needs-human", code: e.code, detail: e.detail, pr: e.pr, cost_usd: prev.cost_usd ?? 0, lane: e.entry.lane }, { startedAt: now() - Math.round((Number(prev.minutes) || 0) * 60000), lane: e.entry.lane }, null);
+        // #5838: a bisection culprit broke the merged tree of its batch, not its own head; the recovery note leads with that.
+        const c = e.culprit, detail = c ? `Recovery note: PR #${c.pr} broke the merged tree of train batch ${c.batch} (required check ${c.check}${c.url ? ` ${c.url}` : ""}), not its own head; fix it against ${e.entry.lane ?? "the base"} with the PRs merged before it.\n${e.detail}` : e.detail;
+        await settleLane(n, { terminalReason: "needs-human", code: e.code, detail, pr: e.pr, cost_usd: prev.cost_usd ?? 0, lane: e.entry.lane, ...(c ? { culprit: c } : {}) }, { startedAt: now() - Math.round((Number(prev.minutes) || 0) * 60000), lane: e.entry.lane }, null);
         if (results.get(n)?.outcome === "needs-human" && !everRelabelled.has(n) && typeof relabelNeedsHuman === "function") {
           everRelabelled.add(n);
-          try { await relabelNeedsHuman({ issue: n, evidence: e.detail }); } catch { /* best effort */ }
+          try { await relabelNeedsHuman({ issue: n, evidence: detail }); } catch { /* best effort */ }
         }
       }
     }

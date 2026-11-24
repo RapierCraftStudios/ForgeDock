@@ -100,3 +100,31 @@ describe("batched merge train resume (#5837)", () => {
     assert.equal(train.snapshot().batches.length, 1);
   });
 });
+
+describe("merge train bisection culprit in the batch runner (#5838)", () => {
+  it("a culprit handback reaches settleLane with a merged-tree recovery note; only the culprit is requeued", async () => {
+    const w = world({ 10: ["pending", "green"], 11: ["pending", "green"] }); const real = createMergeTrain({ gh: w.gh, repo: "o/r" });
+    const culprit = { pr: 10, check: "build", url: "https://ci/batch", batch: "b1" };
+    const train = { ...real, tick: async () => {
+      if (!real.has(1)) return real.tick();
+      const entry = real.snapshot().entries.find((e) => e.issue === 1); real.drop(1);
+      return [{ kind: "handback", issue: 1, pr: 10, code: "ci.red", detail: "PR #10 broke the merged tree of train batch b1", entry, culprit }, ...await real.tick()];
+    } };
+    const runs = [], decisions = [], marks = [];
+    const rows = await go({ issues: [1, 2], train, recovery: { maxAttempts: 1 }, decide: (d) => decisions.push(d), markRecovering: async (x) => { marks.push(x); },
+      runOne: async (n) => { runs.push(n); return runs.filter((x) => x === n).length === 1 ? READY(n === 1 ? 10 : 11) : { terminalReason: "merged" }; } });
+    assert.deepEqual(runs.sort(), [1, 1, 2], "only the culprit gets a fix lane");
+    assert.deepEqual(marks.map((m) => [m.issue, m.code]), [[1, "ci.red"]]);
+    const why = decisions.find((d) => d.issue === 1 && /recovery lane for ci\.red/.test(d.what))?.why ?? "";
+    assert.match(why, /PR #10 broke the merged tree of train batch b1 \(required check build https:\/\/ci\/batch\), not its own head/);
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+  });
+  it("with no recovery budget the needs-human row carries the culprit and the merged-tree note", async () => {
+    const w = world({ 10: ["pending"] }); const real = createMergeTrain({ gh: w.gh, repo: "o/r" });
+    const train = { ...real, tick: async () => { const entry = real.snapshot().entries[0]; real.drop(1); return [{ kind: "handback", issue: 1, pr: 10, code: "ci.red", detail: "d", entry, culprit: { pr: 10, check: "build", url: null, batch: "b2" } }]; } };
+    const rows = await go({ issues: [1], train, recovery: { maxAttempts: 0 }, runOne: async () => READY(10) });
+    assert.equal(rows[0].outcome, "needs-human");
+    assert.deepEqual(rows[0].culprit, { pr: 10, check: "build", url: null, batch: "b2" });
+    assert.match(rows[0].detail, /^Recovery note: PR #10 broke the merged tree of train batch b2/);
+  });
+});
