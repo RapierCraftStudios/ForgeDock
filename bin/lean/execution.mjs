@@ -257,14 +257,14 @@ export function detectNeeds(text, exec = null, { prose = false } = {}) {
 
 /**
  * #5652: may a remote lane that lacks a tool or host capability be re-placed on the dispatching host? An explicit
- * `execution.host_fallback` wins; else off when forge.yaml `host.role` is `orchestrator`; else off in `mode: remote` unless
- * `fallback_local` is set (#5746); else on (hybrid and local unchanged).
+ * `execution.host_fallback` wins; else off when forge.yaml `host.role` is `orchestrator`; else off in `mode: remote` (#5746);
+ * else on (hybrid and local unchanged).
  */
-export function hostFallbackAllowed({ hostFallback = null, hostRole = null, mode = null, fallbackLocal = false } = {}) {
+export function hostFallbackAllowed({ hostFallback = null, hostRole = null, mode = null } = {}) {
   if (typeof hostFallback === "boolean") return hostFallback;
   if (String(hostRole ?? "").trim().toLowerCase() === "orchestrator") return false;
-  // #5746: in remote mode the host is not a fallback unless the repo opted in (host_fallback: true or fallback_local)
-  return !(mode === "remote" && !fallbackLocal);
+  // #5746: in remote mode the host is not a fallback unless the repo opts in with host_fallback: true
+  return mode !== "remote";
 }
 
 /** Declared host capabilities a remote lane's block summary names (#4542); empty when it names none the host has. */

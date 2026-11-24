@@ -54,7 +54,7 @@ describe("#5652 host fallback placement", () => {
     assert.equal(hostFallbackAllowed({ mode: "remote" }), false);
     assert.equal(hostFallbackAllowed({ mode: "hybrid" }), true);
     assert.equal(hostFallbackAllowed({ mode: "remote", hostFallback: true }), true);
-    assert.equal(hostFallbackAllowed({ mode: "remote", fallbackLocal: true }), true);
+    assert.equal(hostFallbackAllowed({ mode: "remote", fallbackLocal: true }), false);
   });
   it("#5746: a #5371 mechanical recovery with host_fallback false retries remotely, not on the host", async () => {
     const calls = await goMech(false);
@@ -64,6 +64,25 @@ describe("#5652 host fallback placement", () => {
   it("#5746: with host fallback on the #5371 recovery still goes to the host", async () => {
     const calls = await goMech(true);
     assert.equal(calls[1], "local");
+  });
+  for (const [name, remoteCfg] of [
+    ["fallback_local with max_remote 0", { max: 0, fallbackLocal: true, offlineFallback: true, admit: () => ({ ok: true }), onBudget: "stop" }],
+    ["execution budget under on_budget local", { max: 2, admit: () => ({ ok: false, reason: "budget cap" }), onBudget: "local" }],
+  ]) {
+    it(`#5746: host_fallback false: ${name} never runs the lane on the host`, async () => {
+      const ac = new AbortController(), where = [];
+      const run = orchestrate({ issues: [5], parallel: 2, readBody: async () => "", pollMs: 5, signal: ac.signal,
+        remote: { isRemote: () => true, hostFallback: false, place: () => ({ where: "remote", reason: "mode remote" }), costPerMinute: 0, ...remoteCfg },
+        runOne: async (_n, _l, ctx = {}) => { where.push(ctx.placement?.where); return { terminalReason: "merged", pr: 1 }; } }).catch(() => {});
+      await new Promise((r) => setTimeout(r, 120));
+      ac.abort();
+      await Promise.race([run, new Promise((r) => setTimeout(r, 1000))]);
+      assert.ok(!where.includes("local"), JSON.stringify(where));
+    });
+  }
+  it("#5746: remote mode with nothing set ends a host-capability lane without a host re-placement", async () => {
+    const r = await go("env.capability_remote", { mode: "remote" });
+    assert.equal(r.calls.length, 1);
   });
   it("#5746: max_remote 0 holds the lane (no host run) and announces waiting", async () => {
     const events = [], ac = new AbortController();

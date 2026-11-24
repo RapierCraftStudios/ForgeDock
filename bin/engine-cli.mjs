@@ -495,7 +495,7 @@ export function readHostFallback(cwd = process.cwd()) {
   let hostRole = null;
   try { hostRole = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.host?.role ?? null; } catch { /* unreadable: role unset */ }
   const exec = readExecution(cwd);
-  return hostFallbackAllowed({ hostFallback: exec?.hostFallback ?? null, hostRole, mode: exec?.mode ?? null, fallbackLocal: exec?.fallbackLocal === true });
+  return hostFallbackAllowed({ hostFallback: exec?.hostFallback ?? null, hostRole, mode: exec?.mode ?? null });
 }
 export function readExecution(cwd = process.cwd()) {
   try {

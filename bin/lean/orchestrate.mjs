@@ -438,7 +438,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         return { where: p?.where === "remote" ? "remote" : "local", reason: String(p?.reason ?? "") };
       }
       return remote.isRemote?.(n) ? { where: "remote", reason: "mode remote" } : { where: "local", reason: "local" };
-    } catch { return { where: "local", reason: "placement failed" }; }
+    } catch { return hostFallbackOn() ? { where: "local", reason: "placement failed" } : { where: "remote", reason: "placement failed, host fallback off: retry remotely" }; } // #5746
   };
   const isRemote = (n) => placeOf(n)?.where === "remote";
   const placed = new Map(); // issue -> {where, reason} granted this pass, picked up by start()
@@ -726,14 +726,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           if (capAdmits >= cap.free && remoteRun.size < remoteMax()) { notBefore.set(n, now() + Math.max(pollMs, 1)); return false; }
         }
         if (p.where === "remote" && remoteRun.size < remoteMax()) { remoteCapped.delete(n); capWait.admitted(n); remoteRun.add(n); capAdmits++; placed.set(n, p); return true; }
-        if (p.where === "remote" && !remote.fallbackLocal) {
+        if (p.where === "remote" && (!remote.fallbackLocal || !hostFallbackOn())) { // #5746: host_fallback: false never runs a capped remote lane on the host
           if (remoteMax() < 1 && !maxHeldNoted.has(n)) { maxHeldNoted.add(n); decided({ issue: n, what: `waiting: max_remote 0 (#${n} is queued, not run on the host)`, why: "remote mode holds admissions while max_remote is 0", alternative: "raise max_remote or set execution.host_fallback: true" }); }
           remoteCapped.add(n); return false;
         }
         if (p.where === "remote") p = { where: "local", reason: `fallback to local: max_remote ${remoteMax()} reached (${p.reason})` }; // #4256: hybrid runs it on the host
       } else {
         noteBudget(adm.reason);
-        if (remote.onBudget !== "local" && !remote.fallbackLocal) { budgetStop = adm.reason; return false; }
+        if ((remote.onBudget !== "local" && !remote.fallbackLocal) || !hostFallbackOn()) { budgetStop = adm.reason; return false; } // #5746: host_fallback: false stops instead of using the host
         budgetLocal = true; // falls through to the host path
         p = { where: "local", reason: `fallback to local: execution budget: ${adm.reason}` };
       }
