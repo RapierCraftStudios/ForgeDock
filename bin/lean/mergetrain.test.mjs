@@ -181,10 +181,10 @@ describe("mergetrain batches (#5837)", () => {
     assert.equal(t2.snapshot().batches[0].state, "validating");
     assert.equal(t2.stats().candidateRuns, 1);
   });
-  it("a red candidate deletes the ref and falls back to serial handling, without re-batching", async () => {
+  it("a candidate red on the bare base tip too deletes the ref, hands back nothing and goes on serially, without re-batching (#5838)", async () => {
     const w = batchWorld(bprs(), { runs: [{ name: "build", status: "completed", conclusion: "failure" }] }); let clock = 0;
     const t = createMergeTrain({ gh: w.gh, repo: "o/r", batchSize: 4, now: () => ++clock }); fill(t);
-    await t.tick(); await t.tick();
+    assert.deepEqual([...await t.tick(), ...await t.tick(), ...await t.tick()], []);
     assert.equal(w.refs.size, 0);
     assert.equal(t.snapshot().batches.length, 0);
     assert.equal(t.stats().candidateRed, 1);
@@ -201,5 +201,113 @@ describe("mergetrain batches (#5837)", () => {
   });
   it("the summary line stays unchanged without batches", () => {
     assert.ok(!/batches/.test(formatTrainSummary({ merged: 1, handedBack: {}, waits: [0], syncs: 0 })));
+  });
+});
+
+/** #5838: candidate refs whose sha names the PR heads merged into them; `bad(heads)` says whether `build` fails on that tree. */
+function bisectWorld(prs, { bad, baseRed = false, rerunGreen = false, stuck = null } = {}) {
+  const f = fake(prs); const refs = new Map(); const reruns = new Set(); let ids = 100; const runIds = new Map();
+  const shaOf = (r) => `t_${r.replaceAll("/", "~")}_${refs.get(r).join(",")}`;
+  const runOf = (sha) => { if (!runIds.has(sha)) runIds.set(sha, ids++); return runIds.get(sha); };
+  const gh = async (a) => {
+    const s = a.join(" ");
+    if (s.includes("/git/ref/heads/") && !s.includes("forge-train")) return JSON.stringify({ object: { sha: "base" } });
+    if (s.includes("/git/ref/heads/forge-train")) return JSON.stringify({ object: { sha: shaOf(s.split("/git/ref/heads/")[1]) } });
+    if (s.startsWith("api -X POST repos/o/r/git/refs")) { f.calls.push(a); refs.set(a[5].slice(15), []); return "{}"; }
+    if (s.startsWith("api -X POST repos/o/r/merges")) { f.calls.push(a); refs.get(a.find((x) => x.startsWith("base=")).slice(5)).push(a.find((x) => x.startsWith("head=")).slice(5, 6)); return "{}"; }
+    if (s.startsWith("api -X DELETE repos/o/r/git/refs/heads/forge-train")) { f.calls.push(a); refs.delete(a[3].split("/heads/")[1]); return ""; }
+    if (s.startsWith("api -X POST repos/o/r/actions/jobs/")) { f.calls.push(a); reruns.add(Number(a[3].split("/")[5])); return ""; }
+    if (s.includes("/check-runs")) {
+      f.calls.push(a);
+      const sha = a[1].split("/")[4];
+      if (sha === "base") return JSON.stringify({ check_runs: [{ id: 1, name: "build", status: "completed", conclusion: baseRed ? "failure" : "success", html_url: "https://ci/base" }] });
+      const heads = sha.split("_")[2].split(",");
+      if (stuck && stuck(heads)) return JSON.stringify({ check_runs: [{ id: runOf(sha), name: "build", status: "in_progress", conclusion: null }] });
+      const id = runOf(sha), out = [{ id, name: "build", status: "completed", conclusion: bad(heads) ? "failure" : "success", html_url: `https://ci/${heads.join("")}` }];
+      if (reruns.has(id)) out.push({ id: id + 1000, name: "build", status: "completed", conclusion: rerunGreen || !bad(heads) ? "success" : "failure", html_url: `https://ci/${heads.join("")}/rerun` });
+      return JSON.stringify({ check_runs: out });
+    }
+    return f.gh(a);
+  };
+  return { gh, calls: f.calls, refs };
+}
+const four = () => Object.fromEntries([5, 6, 7, 8].map((pr, i) => [pr, { head: hd(String(i + 1)), checks: [ok("build")] }]));
+const fill4 = (t) => [5, 6, 7, 8].forEach((pr, i) => t.add(eb(i + 1, pr, hd(String(i + 1)))));
+const ticks = async (t, n) => { const out = []; for (let i = 0; i < n; i++) out.push(...await t.tick()); return out; };
+
+describe("mergetrain bisection (#5838)", () => {
+  it("isolates the culprit of 4 within ceil(log2 4)+1 runs; only it is handed back, the innocents merge in the next batch", async () => {
+    const w = bisectWorld(four(), { bad: (h) => h.includes("3") }); let clock = 0;
+    const t = createMergeTrain({ gh: w.gh, repo: "o/r", batchSize: 4, now: () => ++clock }); fill4(t);
+    const ev = await ticks(t, 6);
+    const hb = ev.filter((e) => e.kind === "handback");
+    assert.deepEqual(hb.map((e) => [e.issue, e.code]), [[3, "ci.red"]]);
+    const batchId = [...w.calls.filter((a) => a[3] === "repos/o/r/git/refs")][0][5].split("/").at(-1);
+    assert.deepEqual(hb[0].culprit, { pr: 7, check: "build", url: "https://ci/3", batch: batchId });
+    assert.match(hb[0].detail, new RegExp(`broke the merged tree of train batch ${batchId}.*build`));
+    const runsSpent = t.stats().candidateRuns - 1; // the original candidate run is not a bisection step
+    assert.ok(runsSpent <= Math.ceil(Math.log2(4)) + 1, `spent ${runsSpent}`);
+    assert.equal(t.stats().bisections, 1); assert.equal(t.stats().culprits, 1);
+    // half candidates hold the FIFO first half: PRs 5,6 then 7
+    assert.deepEqual(w.calls.filter((a) => a[3] === "repos/o/r/merges" && /bisect/.test(a.at(-1))).map((a) => a.at(-1).split("#")[1]), ["5", "6", "7"]);
+    const rest = await ticks(t, 4);
+    assert.deepEqual(rest.filter((e) => e.kind === "merged").map((e) => e.issue), [1, 2, 4]);
+    assert.equal(t.stats().batches, 2, "the innocents shared a second batch");
+    assert.equal(w.calls.filter((a) => a[1] === "update-branch").length, 0, "no serial fallback, no lane rerun");
+    assert.equal(w.refs.size, 0, "every candidate ref deleted");
+    assert.match(formatTrainSummary(t.stats()), /batches 2, candidate CI runs \d+ \(1 red\), bisections 1, culprits 1/);
+  });
+  it("a red base tip calls onBaseRed, hands back no PR and builds no candidate on that tip again", async () => {
+    const w = bisectWorld(four(), { bad: () => true, baseRed: true }); let clock = 0; const reported = [];
+    const t = createMergeTrain({ gh: w.gh, repo: "o/r", batchSize: 4, now: () => ++clock, onBaseRed: async (r) => { reported.push(r); } }); fill4(t);
+    const ev = await ticks(t, 4);
+    assert.ok(!ev.some((e) => e.kind === "handback"));
+    assert.equal(reported.length, 1);
+    assert.equal(reported[0].baseSha, "base"); assert.deepEqual(reported[0].checks.map((c) => c.name), ["build"]);
+    assert.equal(t.stats().bisections, 0); assert.equal(t.stats().redBase, 1); assert.equal(t.size(), 4);
+    await ticks(t, 2);
+    assert.equal(w.calls.filter((a) => a[3] === "repos/o/r/git/refs").length, 1, "no new candidate on the red tip");
+    assert.equal(JSON.parse(JSON.stringify(t.snapshot())).redBases.staging, "base");
+  });
+  it("a known-flaky check green on its one rerun merges the batch without bisection", async () => {
+    const w = bisectWorld(four(), { bad: () => true, rerunGreen: true }); let clock = 0;
+    const t = createMergeTrain({ gh: w.gh, repo: "o/r", batchSize: 4, now: () => ++clock, flaky: ["build"] }); fill4(t);
+    const ev = await ticks(t, 4);
+    assert.equal(w.calls.filter((a) => String(a[3]).includes("/actions/jobs/")).length, 1, "rerun once");
+    assert.deepEqual(ev.map((e) => e.kind), ["merged", "merged", "merged", "merged"]);
+    assert.equal(t.stats().bisections, 0); assert.equal(t.stats().culprits, 0);
+  });
+  it("a half that never finishes exhausts the budget: the whole batch falls back to serial phase-1 merging", async () => {
+    const w = bisectWorld(four(), { bad: (h) => h.includes("3"), stuck: (h) => h.length === 2 }); let clock = 0;
+    const t = createMergeTrain({ gh: w.gh, repo: "o/r", batchSize: 4, batchTimeoutMs: 5, now: () => (clock += 3) }); fill4(t);
+    const ev = await ticks(t, 6);
+    assert.ok(!ev.some((e) => e.kind === "handback"));
+    assert.equal(t.snapshot().batches.length, 0);
+    assert.ok(t.snapshot().entries.every((e) => e.noBatch), "every member serial");
+  });
+  it("a spent run budget goes serial instead of building another half", async () => {
+    const w = bisectWorld(four(), { bad: (h) => h.includes("3") }); let clock = 0;
+    const saved = { entries: [5, 6, 7, 8].map((pr, i) => ({ ...eb(i + 1, pr, hd(String(i + 1))), since: 1 })), stats: { merged: 0, handedBack: {}, waits: [], syncs: 0, batches: 1, candidateRuns: 3 },
+      batches: [{ id: "x", base: "staging", baseSha: "base", prs: [5, 6, 7, 8].map((pr, i) => ({ issue: i + 1, pr, head: hd(String(i + 1)) })), candidate: "forge-train/staging/x", candSha: "t_forge-train~staging~x_1,2,3,4", state: "bisecting", startedAt: 1,
+        bisect: { runs: 3, budget: 3, failed: [{ name: "build", url: "u" }], frame: [3, 4], step: "probe", stale: [], at: 1, halves: 2 } }] };
+    const t = createMergeTrain({ gh: w.gh, repo: "o/r", batchSize: 4, saved, now: () => ++clock });
+    assert.deepEqual(await t.tick(), []);
+    assert.ok(t.snapshot().entries.every((e) => e.noBatch)); assert.equal(t.snapshot().batches.length, 0);
+    assert.equal(w.calls.filter((a) => a[3] === "repos/o/r/git/refs").length, 0);
+  });
+  it("a resume mid-bisection re-reads the half's checks and rebuilds nothing; a phase-2a snapshot still restores", async () => {
+    const w = bisectWorld(four(), { bad: (h) => h.includes("3") }); let clock = 0;
+    const t = createMergeTrain({ gh: w.gh, repo: "o/r", batchSize: 4, now: () => ++clock }); fill4(t);
+    await ticks(t, 3); // build, red -> rerun, rerun red -> probe
+    await t.tick(); // probe green -> first half built
+    const snap = JSON.parse(JSON.stringify(t.snapshot()));
+    assert.equal(snap.batches[0].bisect.step, "half");
+    const built = w.calls.filter((a) => a[3] === "repos/o/r/git/refs" || a[3] === "repos/o/r/merges").length;
+    const t2 = createMergeTrain({ gh: w.gh, repo: "o/r", batchSize: 4, saved: snap, now: () => ++clock });
+    await t2.tick();
+    assert.equal(w.calls.filter((a) => a[3] === "repos/o/r/git/refs" || a[3] === "repos/o/r/merges").length, built + 2, "only the next half (one ref + one merge)");
+    assert.deepEqual(t2.snapshot().batches[0].bisect.frame, [3, 4]);
+    const old = createMergeTrain({ gh: w.gh, repo: "o/r", saved: { entries: [], stats: { merged: 1, handedBack: {}, waits: [], syncs: 0, batches: 1, candidateRuns: 1 }, batches: [] } });
+    assert.deepEqual([old.stats().bisections, old.stats().culprits], [0, 0]);
   });
 });

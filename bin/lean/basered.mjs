@@ -99,7 +99,20 @@ export function baseRedNote({ base, att, laneIssue, commands }) {
  * issue number, or null when GitHub could not be written (the lane still defers).
  */
 export async function reportBaseRed({ ghc, repo, base, att, laneIssue, commands }) {
-  const body = baseRedNote({ base, att, laneIssue, commands });
+  return fileBaseRed({ ghc, repo, att, body: baseRedNote({ base, att, laneIssue, commands }), title: `fix: ${base} is red on guard command ${commands[0] ?? ""}` });
+}
+
+/**
+ * #5838: the merge train found `checks` red on the bare `base` tip `baseSha` while bisecting batch `batch`: a red base, not a
+ * culprit, so no PR is handed back. Filed through the same red-base path (a `base-red` tracking issue); returns its number or null.
+ */
+export async function reportTrainBaseRed({ ghc, repo, base, baseSha, checks = [], batch }) {
+  const list = checks.map((c) => `- \`${c.name}\`${c.url ? ` ${c.url}` : ""}`).join("\n");
+  const body = `<!-- FORGE:BASE_RED -->\n## Base is red\nThese required check(s) fail on the bare \`${base}\` tip \`${String(baseSha ?? "").slice(0, 12)}\`, found while bisecting merge-train batch ${batch}:\n${list}\n\nNo PR of the batch is handed back; they stay in the train and merge once the base is fixed.`;
+  return fileBaseRed({ ghc, repo, att: null, body, title: `fix: ${base} is red on required check ${checks[0]?.name ?? ""}` });
+}
+
+async function fileBaseRed({ ghc, repo, att, body, title }) {
   try {
     if (att?.issue) {
       let state = "";
@@ -108,7 +121,7 @@ export async function reportBaseRed({ ghc, repo, base, att, laneIssue, commands 
       await ghc(["issue", "comment", String(att.issue), "-R", repo, "--body", body]);
       return att.issue;
     }
-    const url = String(await ghc(["issue", "create", "-R", repo, "--title", `fix: ${base} is red on guard command ${commands[0] ?? ""}`.slice(0, 120), "--body", body])).trim();
+    const url = String(await ghc(["issue", "create", "-R", repo, "--title", title.slice(0, 120), "--body", body])).trim();
     const n = url.match(/\/issues\/(\d+)/);
     return n ? Number(n[1]) : null;
   } catch { return null; }
