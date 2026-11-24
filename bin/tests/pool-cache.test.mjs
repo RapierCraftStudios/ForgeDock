@@ -58,6 +58,16 @@ describe("sweepVolume age-out", () => {
     assert.ok(existsSync(locked), "snapshot with a live lock kept");
     assert.equal(r.errors.length, 0);
   });
+  it("cap never deletes a locked depcache snapshot (#5898)", () => {
+    const root = tmpDir("cs-sweep-");
+    const big = "x".repeat(300000), t0 = Date.now() - DAY;
+    const mk = (n, lastMs) => { const d = join(root, "forge-depcache/rk", n); mkdirSync(d, { recursive: true }); writeFileSync(join(d, "manifest.json"), "{}"); writeFileSync(join(d, "blob"), big); writeFileSync(join(d, "last-used"), String(lastMs)); return d; };
+    const locked = mk("pnpm-aaaaaaaaaaaaaaaa", t0 - 5 * DAY), other = mk("pnpm-bbbbbbbbbbbbbbbb", t0);
+    writeFileSync(`${locked}.lock`, "{}");
+    sweepVolume({ root, maxAgeDays: 14, maxGb: 0.0003, keep: [] });
+    assert.ok(existsSync(locked), "locked snapshot survives the cap");
+    assert.ok(!existsSync(other), "unlocked snapshot is evicted instead");
+  });
   it("cap shrinks work dirs oldest-first but keeps live ones; reports last use", () => {
     const root = tmpDir("cs-sweep-");
     const big = "x".repeat(300000);
