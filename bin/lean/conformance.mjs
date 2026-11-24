@@ -890,16 +890,6 @@ const ENV_SIGNATURES = [
   // #5732: the command picks an interpreter the host does not have (`poetry env use python3.11` on a python3.12-only sandbox)
   [/Could not find the python executable|poetry env use\b[^\n]*(?:not found|error|failed)|\bpython\d(?:\.\d+)?:? not found|No interpreter found|pyenv: version `[^`]+' is not installed/i, "Python interpreter"],
 ];
-// #5730: sandbox-only failures a validate rerun can show beyond ENV_SIGNATURES: a missing command, a refused connection, an unresolved host, an absent venv path, no display
-const VALIDATE_ENV_RE = /: command not found|: not found\b|ECONNREFUSED|connection refused|no such host|\.venv\/bin\/[\w.-]+: No such file or directory|cannot open display|Missing X server|\$DISPLAY/i;
-/** #5730: a validate output that is the executor's environment (not a red test, not a stale artifact): only these defer to a host replay. */
-export function isEnvValidateFailure(output) {
-  const out = String(output ?? "");
-  if (!out || isDriftFailure(out) || ASSERTION_RE.test(out)) return false;
-  return Boolean(envSignature(out)) || VALIDATE_ENV_RE.test(out);
-}
-/** #5730: the redacted last 4000 characters of a rerun's output, kept on a validate_failed failure so the lane can classify it. */
-const rawTail = (output) => String(output ?? "").replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").slice(-4000).replace(SECRET_PAIR_RE, "$1[redacted]").replace(SECRET_SHAPE_RE, "[redacted]");
 const envSignature = (out) => { const hit = ENV_SIGNATURES.find(([re]) => re.test(out)); return hit ? { tool: hit[1], kind: "environment" } : null; };
 export const SECRET_PAIR_RE = /\b([A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL)[A-Za-z0-9_]*\s*[=:]\s*)\S+/gi;
 export const SECRET_SHAPE_RE = /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b|Bearer\s+[A-Za-z0-9._~+/=-]{12,}/g;
@@ -968,6 +958,16 @@ export function envProvisioningCommand(command) {
 }
 /** #5732: true when a failed run's output carries test-failure text (an assertion, a runner's failed-test mark), not only an environment error. */
 const ASSERTION_RE = /AssertionError|\bassert(?:ion)?\b[^\n]*(?:==|!=|failed|error)|^FAILED\s+\S+::|^\s*E\s+(?:assert|Expected)|\bExpected\b[^\n]*\b(?:Received|got|to (?:be|equal))|expect\(|^not ok \d+|^\s*[✗×✖]\s|^\s*● |\bTests?:\s+\d+ failed/m;
+// #5730: sandbox-only failures a validate rerun can show beyond ENV_SIGNATURES: a missing command, a refused connection, an unresolved host, an absent venv path, no display
+const VALIDATE_ENV_RE = /: command not found|: not found\b|ECONNREFUSED|connection refused|no such host|\.venv\/bin\/[\w.-]+: No such file or directory|cannot open display|Missing X server|\$DISPLAY/i;
+/** #5730: a validate output that is the executor's environment (not a red test, not a stale artifact): only these defer to a host replay. */
+export function isEnvValidateFailure(output) {
+  const out = String(output ?? "");
+  if (!out || isDriftFailure(out) || ASSERTION_RE.test(out)) return false;
+  return Boolean(envSignature(out)) || VALIDATE_ENV_RE.test(out);
+}
+/** #5730: the redacted last 4000 characters of a rerun's output, kept on a validate_failed failure so the lane can classify it. */
+const rawTail = (output) => String(output ?? "").replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").slice(-4000).replace(SECRET_PAIR_RE, "$1[redacted]").replace(SECRET_SHAPE_RE, "[redacted]");
 export function assertionFailure(output) {
   return ASSERTION_RE.test(String(output ?? ""));
 }
