@@ -127,6 +127,15 @@ describe("agent cache sweep", () => {
     await agent.reap();
     assert.deepEqual(agent.capacity().cache_volumes["cs-cache-o_r"].depcache_gb, { acme_shop: 3 });
   });
+  it("a launch sweeps the cache volumes first, once per minute, so the depcache cap holds before the lane writes", async () => {
+    const docker = fakeDocker();
+    const agent = mk(docker);
+    await agent.launch({ spec: { id: "s1", repo: { slug: "o/r", url: "u" }, command: ["x"] }, cpus: 1, mem_gb: 1 });
+    const n = docker.swept.length;
+    assert.ok(n > 0);
+    await agent.launch({ spec: { id: "s2", repo: { slug: "o/r", url: "u" }, command: ["x"] }, cpus: 1, mem_gb: 1 });
+    assert.equal(docker.swept.length, n);
+  });
   it("a failing sweep surfaces as cache_sweep_error in capacity", async () => {
     const docker = fakeDocker();
     docker.failSweep = true;

@@ -158,6 +158,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   let lastCachePrune = -Infinity;
   // #5757: cache volume hygiene state: per-volume sweep error/size/last use (last use also from launches in this process).
   let lastCacheSweep = -Infinity;
+  let lastLaunchSweep = -Infinity;
   const cacheErr = new Map(), cacheInfo = new Map(), cacheUsed = new Map(), adoptedCache = new Set(); // adoptedCache: pre-label volumes this agent mounts (labels cannot be added to an existing volume)
   const sweepFail = (v, what, e) => { const m = `${what} ${v}: ${String(e.stderr || e.message).slice(0, 200)}`; cacheErr.set(`${what}:${v}`, m); log.warn?.(m); };
   const dirMb = (d) => { let n = 0, seen = 0; const walk = (x) => { if (seen++ > 200000) return; let st; try { st = lstatSync(x); } catch { return; } n += st.size; if (st.isDirectory()) { try { for (const e of readdirSync(x)) walk(join(x, e)); } catch { /* unreadable */ } } }; walk(d); return Math.round(n / 1048576); };
@@ -289,6 +290,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     let existing = own(spec.id);
     if (existing?.drained && existing.state === "exited") { await destroy(existing.id, "drained: relaunch"); existing = null; } // #5856: the router/dispatcher rescheduled a drained lane under the same id
     if (existing) { existing.lease = now(); store.save(); return { status: 200, body: view(existing) }; }
+    if (now() - lastLaunchSweep > 60000) { lastLaunchSweep = now(); await cacheSweep(now()).catch(() => {}); } // #5901: trim the depcache to its cap before this lane can write a new entry (throttled; the periodic sweep also runs)
     if (Number.isInteger(spec.warm)) warm.configure({ spec, cpus, mem_gb, limit, n: spec.warm }); // #4912: the lane's execution.warm_sandboxes sizes the repo's pool
     const prio = spec.priority ?? "normal";
     if (!PRIORITIES.includes(prio)) throw Object.assign(new Error(`spec.priority must be one of ${PRIORITIES.join(", ")}`), { status: 400 });
