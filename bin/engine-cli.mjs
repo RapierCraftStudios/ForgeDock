@@ -2081,7 +2081,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     lanes = { ...lanes, stopLane, releaseLease };
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
-  const train = orch.mergeTrain === "on" ? (deps.train ?? (await import("./lean/mergetrain.mjs")).createMergeTrain({ gh: (a) => leanIo.gh(a), repo })) : null; // #5836: off (default) builds nothing
+  const train = orch.mergeTrain === "on" ? (deps.train ?? (await import("./lean/mergetrain.mjs")).createMergeTrain({ gh: (a) => leanIo.gh(a), repo, batchSize: orch.mergeTrainBatch ?? 4 })) : null; // #5836: off (default) builds nothing
   // #4965: --auto-children overrides forge.yaml; it is part of plan.argv, so --resume keeps it
   const autoMod = _autoChildren, yamlAuto = readAutoChildren(cwd);
   const autoChildren = { mode: argv.includes("--auto-children") ? autoMod.parseAutoModeFlag(flag(argv, "--auto-children")) : yamlAuto.mode, pollS: yamlAuto.pollS,
@@ -2893,7 +2893,7 @@ export function readOrchestration(cwd = process.cwd()) {
   const errors = int(o.breaker_errors ?? o.errors, 3), windowMin = int(o.breaker_window_min ?? o.window_min, 30);
   const gp = int(o.global_parallel, null);
   const recoveryMax = int(o.recovery_max_attempts ?? o.max_attempts, 1);
-  return { mergeTrain: String(o.merge_train ?? "off").trim().toLowerCase() === "on" ? "on" : "off", /* #5836 */ breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), transientRetries: int(o.transient_retries, 4), blockedLabel: String(o.blocked_label ?? "blocked").trim(), globalParallel: gp >= 1 ? gp : null,
+  return { mergeTrain: String(o.merge_train ?? "off").trim().toLowerCase() === "on" ? "on" : "off", /* #5836 */ mergeTrainBatch: int(o.merge_train_batch, 4) >= 1 ? int(o.merge_train_batch, 4) : 4, /* #5837 */ breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), transientRetries: int(o.transient_retries, 4), blockedLabel: String(o.blocked_label ?? "blocked").trim(), globalParallel: gp >= 1 ? gp : null,
     stacking: normalizeStacking(o.stacking), // #5831
     recovery: { maxAttempts: recoveryMax, mechanicalMaxAttempts: Math.max(int(o.recovery_mechanical_max_attempts ?? o.mechanical_max_attempts, 2), recoveryMax) }, // #4725: env/base/sequence codes have their own budget
     // #4525: parked-PR base sync. The parser flattens one level, so `base_sync.enabled|union_globs` arrive as `enabled|union_globs` (or flat `base_sync_*`).
