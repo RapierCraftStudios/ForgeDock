@@ -3668,3 +3668,7 @@ Cite: #5908.
 ## Git transport failures defer as net.transient; --clear-breaker reaches a hosted runner (#5947)
 
 `orchestrate.mjs` `GIT_TRANSPORT_TEXT` (curl 56/28, early EOF, RPC failed, invalid index-pack output, unexpected disconnect, "is not a local repository") is part of `TRANSPORT_TEXT`. A lane ending engine-error with such detail settles as a `net.transient` deferral (backoff from `transientRetryDelayMs`) and never reaches `noteEngineError`, so the breaker does not count it; other engine-errors still do. `getClearBreaker` is polled with `getParallel`: when set, the runner resets `tripped`, `errorTimes` and `transportErrors`, saves, and calls `ackClearBreaker`; a tripped runner keeps polling at `pollMs`. `batch.mjs` holds the `clear-breaker` request file and `clear-breaker.ack`; `schedd.mjs` op `clear-breaker` writes the request, waits briefly for the ack and replies `{cleared, acknowledged, hosted}`. Pool mirror details: `modules/pool.md`.
+
+## A disk-paused sandbox is still running (#5957)
+
+A sandbox the pool pauses under disk pressure (agent state `paused`, #5891) is not finished. `httpTransport.status` (`sandbox-remote.mjs`) maps `paused` to `running` alongside `running|pending|starting`, and `containerProvider.status` (`execution.mjs`) maps docker `paused` to `running`, so the lane poll keeps waiting instead of fetching `/result` (404) and ending engine-error `lostWithoutResult`. Other unknown pool states still map to `exited` and a 404 to `gone`.
