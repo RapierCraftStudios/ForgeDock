@@ -2700,13 +2700,14 @@ export async function scheddFromCli(argv, deps = {}) {
     const bm = await import("./lean/batch.mjs");
     const unfinished = () => { const root = bm.batchRoot(); return bm.listBatches(root).filter((id) => { try { const b = bm.openBatch(root, id); const br = b.store.peek()?.breaker; return !!b.readPlan()?.daemon && !b.isTerminal() && b.pendingIssues().length > 0 && !(br && !br.transport); } catch { return false; } }); };
     const start = () => { if (schedd.unitState() === null) schedd.defaultSpawn({ dir }); else schedd.startUnit(); };
+    const unit = deps.unitState ?? schedd.unitState; // #5966: active unit but no daemon is alerted and the unit restarted
     const batchVerdicts = () => schedd.batchVerdicts(bm.batchRoot());
-    return (deps.watchdog ?? health.watchdog)({ dir, ...(sec > 0 ? { stallMs: sec * 1000 } : {}), unfinished, start, batchVerdicts });
+    return (deps.watchdog ?? health.watchdog)({ dir, ...(sec > 0 ? { stallMs: sec * 1000 } : {}), unfinished, start, batchVerdicts, unit });
   }
   if (argv.length) throw new Error("usage: forgedock schedd [status | watchdog [--stall-sec N]]");
   (deps.renice ?? (await import("./lean/schedd-health.mjs")).bestEffortRenice)(); // #4780: lanes must not starve the scheduler
   process.title = "forgedock-schedd"; // distinctive name for OOM-killer avoid lists and ps (#4673)
-  const d = await schedd.startDaemon({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }), ...(deps.due !== undefined ? { due: deps.due } : { due: scheddDue }),
+  const d = await schedd.startDaemon({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }), exit: deps.exit ?? ((c) => process.exit(c)), ...(deps.due !== undefined ? { due: deps.due } : { due: scheddDue }),
     ...(deps.daemonPreflight !== undefined ? { preflight: deps.daemonPreflight } : deps.batchDeps ? {} : { preflight: async () => { const lc = await import("./lean/lanecheck.mjs"); return (await lc.runLaneChecks({ exec: readExecution(process.cwd()), io: await lc.hostLaneIo() })).filter((c) => !c.ok); } }) });
   if (!d.running) {
     // #4775: under systemd, exiting here (code 0) makes `Restart=always` loop while another daemon holds the lock: stand by, take over when it dies
@@ -2718,7 +2719,13 @@ export async function scheddFromCli(argv, deps = {}) {
   // #4454: a signal stops the hosted batch loops, then releases the lock and socket, then exits 128+signo
   schedd.exitOnSignals(d, { ...(deps.processOn ? { on: deps.processOn } : {}), ...(deps.exit ? { exit: deps.exit } : {}) });
   await d.closed;
-  return { running: false };
+  // #5966 R1: a handover whose successor never listened re-hosted the batches in a new daemon; follow it to its end
+  let cur = d;
+  while (cur.rehosted?.()) { cur = cur.rehosted(); await cur.closed; }
+  // #5966: a self-initiated stop (handover, stall recovery, lost socket) exits non-zero so systemd restarts the unit instead of leaving a zombie
+  const code = cur.stopCode?.();
+  if (code) (deps.exit ?? ((c) => process.exit(c)))(code);
+  return { running: false, ...(code ? { exitCode: code } : {}) };
 }
 
 /**
