@@ -2050,7 +2050,7 @@ describe("conformance shadow mode (the default)", () => {
   it("5730: a recovery lane whose host replay fails the same way ends conformance.unimplemented, not another placement hop", async () => {
     const w = world({ validation: v5730 }); w.io.runCommand = async () => ({ rc: 1, output: "connect ECONNREFUSED 127.0.0.1:5432" });
     const r = await run(w, { ...remoteV, recover: { code: ENV_VALIDATE_PLACEMENT, attempt: 1, final: true } });
-    assert.notEqual(r.code, ENV_VALIDATE_PLACEMENT);
+    assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0); assert.equal(builders(w).length, 3);
   });
   it("#4906 a validate rerun that times out (rc 124) ends env.validate_timeout: recoverable, no builder resume, never conformance.unimplemented", async () => {
     const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 124 }];
