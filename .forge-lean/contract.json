@@ -1,0 +1,313 @@
+{
+ "requirements": [
+  {
+   "id": "R1",
+   "quote": "With `merge_train: off`, lanes and batches behave exactly as before.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R2",
+   "quote": "With `merge_train: on`, a lane with pending checks ends `pr-ready` and its slot admits the next issue at once.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R3",
+   "quote": "The train merges green PRs one at a time per base, with `--match-head-commit` set to the reviewed head, then closes the issue, sets `workflow:merged` and deletes the branch.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R4",
+   "quote": "Red hands the PR back as `ci.red`, naming the failing checks and their URLs, and a recovery lane runs.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R5",
+   "quote": "Conflict hands it back as `base.conflict`.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R6",
+   "quote": "Dependents wait for the train's merge.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R7",
+   "quote": "A stopped batch reports `pr-ready` rows, and `--resume` continues them.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R8",
+   "quote": "The batch report has a `merge train:` line: merged, handed back by code, train wait p50, base-syncs.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R9",
+   "quote": "When the train is on, a lane whose reviewed PR has pending required checks ends with a new terminal reason, `pr-ready` (code `awaiting_merge`).",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R10",
+   "quote": "It returns `{pr, head, required, policy, lane}` and the batch runner frees its slot.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R11",
+   "quote": "A red check still gets the lane's own CI fix round.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R12",
+   "quote": "A lane whose checks are already green merges itself.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R13",
+   "quote": "Only a plain merge is handed over. A split, an e2e gate, numbered sequence files or close-time records keep the lane waiting.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R14",
+   "quote": "`bin/lean/mergetrain.mjs` adds a minimal serial train in the batch runner (`orchestrate.mjs`). Its state is persisted in the batch `state.json` as `train`.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R15",
+   "quote": "Each poll it merges at most one green PR per lane base at the reviewed head.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R16",
+   "quote": "A green PR that is behind its base gets `gh pr update-branch`.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R17",
+   "quote": "Red, conflicting or moved-head PRs are handed back as `needs-human` `ci.red` / `base.conflict` / `merge.head_mismatch`. In-batch recovery then requeues a fix lane.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R18",
+   "quote": "No batching and no bisection.",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R19",
+   "quote": "Scope (phase 1, behind `orchestration.merge_train: off|on`, default off)",
+   "disposition": "deliver"
+  },
+  {
+   "id": "R20",
+   "quote": "behind `orchestration.merge_train: off|on`, default off",
+   "disposition": "defer",
+   "why": "Default-off flag. First cohort: one low-traffic repo lane base. Guard metrics: lifecycle minutes p50, needs-human rate, ci.red/merge.head_mismatch hand-backs, train wait p50. Shadow evidence: batch reports with the `merge train:` line from a cohort run.",
+   "bucket": "owner:promote:orchestration.merge_train"
+  }
+ ],
+ "deliverables": [
+  {
+   "id": "D1",
+   "path": "bin/lean/mergetrain.mjs",
+   "change": "New module: createTrain({gh, state, now}) with persisted train state, tick() merging at most one green PR per base via `gh pr merge --merge --match-head-commit \u003chead>`, `gh pr update-branch` when behind, hand-back (ci.red with failing check names+URLs, base.conflict, merge.head_mismatch), shared post-merge close sequence call, wait p50 and base-sync stats, summary line formatter. No batching, no bisection.",
+   "requirements": [
+    "R3",
+    "R4",
+    "R5",
+    "R14",
+    "R15",
+    "R16",
+    "R17",
+    "R18",
+    "R8"
+   ]
+  },
+  {
+   "id": "D2",
+   "path": "bin/lean/mergetrain.test.mjs",
+   "change": "Unit tests on injected gh: serial per base, match-head-commit, update-branch when behind, red/conflict/head-mismatch hand-back, state persistence and resume, p50, report line.",
+   "requirements": [
+    "R3",
+    "R4",
+    "R5",
+    "R8",
+    "R14",
+    "R15",
+    "R16",
+    "R17"
+   ]
+  },
+  {
+   "id": "D3",
+   "path": "bin/lean/lean.mjs",
+   "change": "Add `mergeTrain` option (default off). In step 7 CI wait, when on, checks pending, and plain merge (no split, e2e gate, sequence lease, close-time records) finish('pr-ready') with {pr, head, required, policy, lane}; red keeps the CI fix round; green merges in-lane. Extract the post-merge close/label/branch-delete steps into a helper reused by the train. Off path unchanged.",
+   "requirements": [
+    "R1",
+    "R2",
+    "R9",
+    "R10",
+    "R11",
+    "R12",
+    "R13",
+    "R3"
+   ]
+  },
+  {
+   "id": "D4",
+   "path": "bin/lean/lean.test.mjs",
+   "change": "Tests: off unchanged; on+pending gives pr-ready with payload; on+green self-merges; red fix round; split/e2e/sequence/close-time records keep waiting.",
+   "requirements": [
+    "R1",
+    "R2",
+    "R9",
+    "R10",
+    "R11",
+    "R12",
+    "R13"
+   ]
+  },
+  {
+   "id": "D5",
+   "path": "bin/lean/orchestrate.mjs",
+   "change": "Wire the train: tick during polling, pr-ready rows free the slot, dependents wait until train merge (SATISFIED handling), train state in state.json, resume of pr-ready rows, hand-back rows enter in-batch recovery, `merge train:` report line. Off path unchanged.",
+   "requirements": [
+    "R2",
+    "R6",
+    "R7",
+    "R8",
+    "R14",
+    "R17",
+    "R1"
+   ]
+  },
+  {
+   "id": "D6",
+   "path": "bin/lean/orchestrate-train.test.mjs",
+   "change": "New orchestrate tests: slot frees at pr-ready, dependents wait, stopped batch reports pr-ready and resume continues, hand-back requeues recovery, report line, off unchanged.",
+   "requirements": [
+    "R2",
+    "R6",
+    "R7",
+    "R8",
+    "R17",
+    "R1"
+   ]
+  },
+  {
+   "id": "D7",
+   "path": "bin/lean/batch.mjs",
+   "change": "Add `train` to state.json shape and make `pr-ready` resumable/requeuable (REQUEUABLE at :113).",
+   "requirements": [
+    "R7",
+    "R14"
+   ]
+  },
+  {
+   "id": "D8",
+   "path": "bin/engine/outcome-codes.mjs",
+   "change": "Map `pr-ready` to AWAITING_MERGE; add ci.red code if missing; treat pr-ready alongside ci-pending in recovery classification.",
+   "requirements": [
+    "R9",
+    "R4",
+    "R5",
+    "R17"
+   ]
+  },
+  {
+   "id": "D9",
+   "path": "bin/config-schema.mjs",
+   "change": "Add `orchestration.merge_train` enum off|on, default off.",
+   "requirements": [
+    "R19",
+    "R1"
+   ]
+  },
+  {
+   "id": "D10",
+   "path": "bin/tests/config-schema.test.mjs",
+   "change": "Test that merge_train accepts off|on, rejects others, defaults off.",
+   "requirements": [
+    "R19"
+   ]
+  },
+  {
+   "id": "D11",
+   "path": "devdocs/modules/lean.md",
+   "change": "Document pr-ready terminal, mergeTrain option, shared post-merge helper.",
+   "requirements": [
+    "R9",
+    "R13"
+   ]
+  },
+  {
+   "id": "D12",
+   "path": "devdocs/modules/orchestrate.md",
+   "change": "Document the merge train, state.json `train`, report line, flag default off.",
+   "requirements": [
+    "R14",
+    "R8",
+    "R19"
+   ]
+  }
+ ],
+ "preserve": [
+  {
+   "id": "P1",
+   "what": "With merge_train off, the step-7 CI wait, lane-own merge (`gh pr merge --merge --match-head-commit`) and ci-pending terminal at bin/lean/lean.mjs:4150-4261 behave byte-identically."
+  },
+  {
+   "id": "P2",
+   "what": "ci-pending recovery handling in bin/lean/orchestrate.mjs:984-1040 and REQUEUABLE at bin/lean/batch.mjs:113."
+  },
+  {
+   "id": "P3",
+   "what": "bin/lean/release-train.mjs and bin/lean/train.mjs (milestone/release trains) are untouched."
+  },
+  {
+   "id": "P4",
+   "what": "AWAITING_MERGE mapping of ci-pending in bin/engine/outcome-codes.mjs:193."
+  }
+ ],
+ "validate": [
+  {
+   "id": "V1",
+   "command": "node --test bin/lean/mergetrain.test.mjs"
+  },
+  {
+   "id": "V2",
+   "command": "node --test bin/lean/lean.test.mjs"
+  },
+  {
+   "id": "V3",
+   "command": "node --test bin/lean/orchestrate-train.test.mjs bin/lean/orchestrate-recovering.test.mjs bin/lean/orchestrate-blocked.test.mjs bin/lean/batch.test.mjs"
+  },
+  {
+   "id": "V4",
+   "command": "node --test bin/tests/config-schema.test.mjs bin/tests/batch-runner.test.mjs"
+  },
+  {
+   "id": "G1",
+   "command": "node --test bin/lean/orchestrate-children.test.mjs bin/lean/orchestrate-cancel.test.mjs bin/lean/orchestrate-owned.test.mjs bin/lean/orchestrate-envhold.test.mjs bin/lean/orchestrate-hostfallback.test.mjs",
+   "regression": true
+  }
+ ],
+ "regression": [
+  {
+   "id": "G1",
+   "command": "node --test bin/lean/orchestrate-children.test.mjs bin/lean/orchestrate-cancel.test.mjs bin/lean/orchestrate-owned.test.mjs bin/lean/orchestrate-envhold.test.mjs bin/lean/orchestrate-hostfallback.test.mjs",
+   "covers": "orchestrate neighbours that consume terminalReason and SATISFIED"
+  }
+ ],
+ "decisions": [
+  {
+   "id": "K1",
+   "choice": "Reuse the lane's post-merge close sequence via an extracted helper instead of copying it into the train.",
+   "justification": "Issue requires reuse; the sequence sits after the lane merge at bin/lean/lean.mjs:4233.",
+   "source": "spec"
+  },
+  {
+   "id": "K2",
+   "choice": "New orchestrate tests go in a new file orchestrate-train.test.mjs, following the orchestrate-*.test.mjs per-feature convention.",
+   "justification": "bin/lean/orchestrate-*.test.mjs siblings.",
+   "source": "precedent"
+  }
+ ]
+}
