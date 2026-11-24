@@ -106,3 +106,100 @@ describe("mergetrain (#5836)", () => {
     assert.equal(judgeChecks(st, { policy: "all" }).green, false);
   });
 });
+
+/** #5837: a fake gh with candidate-ref support on top of `fake`. `conflict` = PR heads whose candidate merge 409s. */
+function batchWorld(prs, { conflict = [], runs = [{ name: "build", status: "completed", conclusion: "success" }], mergeRefuse = null } = {}) {
+  const f = fake(prs); const refs = new Set(); let checkRuns = runs;
+  const gh = async (a) => {
+    const s = a.join(" ");
+    if (s.includes("/git/ref/heads/") && !s.includes("forge-train")) return JSON.stringify({ object: { sha: "c".repeat(40) } });
+    if (s.includes("/git/ref/heads/forge-train")) { f.calls.push(a); return JSON.stringify({ object: { sha: "d".repeat(40) } }); }
+    if (s.startsWith("api -X POST repos/o/r/git/refs")) { f.calls.push(a); refs.add(a[5].slice(15)); return "{}"; }
+    if (s.startsWith("api -X POST repos/o/r/merges")) { f.calls.push(a); const head = a.find((x) => x.startsWith("head=")).slice(5); if (conflict.includes(head)) throw Object.assign(new Error("Merge conflict (HTTP 409)"), { stderr: "" }); return "{}"; }
+    if (s.startsWith("api -X DELETE repos/o/r/git/refs/heads/forge-train")) { f.calls.push(a); refs.delete(a[3].split("/heads/")[1]); return ""; }
+    if (s.startsWith("api -X POST repos/o/r/actions")) { f.calls.push(a); return ""; }
+    if (s.includes("/check-runs")) { f.calls.push(a); return JSON.stringify({ check_runs: checkRuns }); }
+    if (s.includes("compare/")) return JSON.stringify({ files: [{ filename: "x.js" }] });
+    if (a[0] === "pr" && a[1] === "view" && a.includes("files")) return JSON.stringify({ files: [{ path: "x.js" }, { path: "y.js" }] });
+    if (a[0] === "pr" && a[1] === "merge" && mergeRefuse === a[2]) { f.calls.push(a); throw new Error("base branch policy prohibits the merge"); }
+    return f.gh(a);
+  };
+  return { gh, calls: f.calls, refs, setRuns: (r) => { checkRuns = r; } };
+}
+const hd = (c) => c.repeat(40);
+const bprs = () => ({ 5: { head: hd("1"), mergeState: "BEHIND", checks: [ok("build")] }, 6: { head: hd("2"), mergeState: "BEHIND", checks: [ok("build")] }, 7: { head: hd("3"), mergeState: "BEHIND", checks: [ok("build")] } });
+const eb = (issue, pr, head) => entry(issue, pr, { head });
+const fill = (t) => { t.add(eb(1, 5, hd("1"))); t.add(eb(2, 6, hd("2"))); t.add(eb(3, 7, hd("3"))); };
+
+describe("mergetrain batches (#5837)", () => {
+  it("N BEHIND PRs share one candidate CI run, no update-branch, merged FIFO at their heads", async () => {
+    const w = batchWorld(bprs()); let clock = 0;
+    const t = createMergeTrain({ gh: w.gh, repo: "o/r", batchSize: 4, now: () => ++clock }); fill(t);
+    assert.deepEqual(await t.tick(), []); // builds + validating
+    assert.ok(w.refs.size === 1 && [...w.refs][0].startsWith("forge-train/staging/"));
+    const merges = w.calls.filter((a) => a[0] === "api" && a[3] === "repos/o/r/merges");
+    assert.equal(merges.length, 3);
+    assert.ok(merges.every((a) => a.includes("base=" + [...w.refs][0])), "merge into the candidate, never a rebase");
+    assert.equal(t.snapshot().batches[0].state, "validating");
+    assert.deepEqual(await t.tick(), []); // candidate checks green -> merging
+    const all = await t.tick(); // merges the batch in order
+    assert.deepEqual(all.map((e) => e.issue), [1, 2, 3]);
+    const pm = w.calls.filter((a) => a[1] === "merge").map((a) => [a[2], a.at(-1)]);
+    assert.deepEqual(pm.slice(0, 3), [["5", hd("1")], ["6", hd("2")], ["7", hd("3")]]);
+    assert.equal(w.calls.filter((a) => a[1] === "update-branch").length, 0);
+    assert.equal(w.refs.size, 0, "candidate ref deleted when finished");
+    assert.equal(t.stats().candidateRuns, 1);
+    assert.equal(t.stats().merged, 3);
+    assert.match(formatTrainSummary(t.stats()), /batches 1, candidate CI runs 1/);
+  });
+  it("a conflict on the candidate removes only that PR, as base.conflict with the files; the rest merge", async () => {
+    const w = batchWorld(bprs(), { conflict: [hd("2")] }); let clock = 0;
+    const t = createMergeTrain({ gh: w.gh, repo: "o/r", batchSize: 4, now: () => ++clock }); fill(t);
+    const ev = await t.tick();
+    assert.deepEqual(ev.map((e) => [e.kind, e.issue, e.code]), [["handback", 2, "base.conflict"]]);
+    assert.match(ev[0].detail, /x\.js/);
+    assert.deepEqual(t.snapshot().batches[0].prs.map((p) => p.pr), [5, 7]);
+    await t.tick(); await t.tick();
+    assert.deepEqual(w.calls.filter((a) => a[1] === "merge").map((a) => a[2]), ["5", "7"]);
+  });
+  it("a protection refusal keeps the PR in the train and holds order", async () => {
+    const w = batchWorld(bprs(), { mergeRefuse: "5" }); let clock = 0;
+    const t = createMergeTrain({ gh: w.gh, repo: "o/r", batchSize: 4, now: () => ++clock }); fill(t);
+    await t.tick(); await t.tick(); await t.tick();
+    assert.equal(t.size(), 3);
+    assert.deepEqual([...new Set(w.calls.filter((a) => a[1] === "merge").map((a) => a[2]))], ["5"]);
+  });
+  it("a restored validating batch re-reads the candidate checks and does not rebuild it", async () => {
+    const w = batchWorld(bprs(), { runs: [{ name: "build", status: "in_progress", conclusion: null }] }); let clock = 0;
+    const t = createMergeTrain({ gh: w.gh, repo: "o/r", batchSize: 4, now: () => ++clock }); fill(t);
+    await t.tick();
+    const snap = JSON.parse(JSON.stringify(t.snapshot()));
+    const before = w.calls.filter((a) => a[3] === "repos/o/r/git/refs" || a[3] === "repos/o/r/merges").length;
+    const t2 = createMergeTrain({ gh: w.gh, repo: "o/r", batchSize: 4, saved: snap, now: () => ++clock });
+    await t2.tick();
+    assert.equal(w.calls.filter((a) => a[3] === "repos/o/r/git/refs" || a[3] === "repos/o/r/merges").length, before);
+    assert.equal(t2.snapshot().batches[0].state, "validating");
+    assert.equal(t2.stats().candidateRuns, 1);
+  });
+  it("a red candidate deletes the ref and falls back to serial handling, without re-batching", async () => {
+    const w = batchWorld(bprs(), { runs: [{ name: "build", status: "completed", conclusion: "failure" }] }); let clock = 0;
+    const t = createMergeTrain({ gh: w.gh, repo: "o/r", batchSize: 4, now: () => ++clock }); fill(t);
+    await t.tick(); await t.tick();
+    assert.equal(w.refs.size, 0);
+    assert.equal(t.snapshot().batches.length, 0);
+    assert.equal(t.stats().candidateRed, 1);
+    await t.tick();
+    assert.equal(w.calls.filter((a) => a[3] === "repos/o/r/git/refs").length, 1, "no second candidate");
+    assert.ok(w.calls.some((a) => a[1] === "update-branch"), "serial sync resumed");
+  });
+  it("batchSize 1 keeps the serial train: no candidate calls", async () => {
+    const w = batchWorld(bprs());
+    const t = createMergeTrain({ gh: w.gh, repo: "o/r" }); fill(t);
+    await t.tick();
+    assert.ok(!w.calls.some((a) => a[0] === "api" && String(a[3]).includes("merges")));
+    assert.equal(t.stats().batches, 0);
+  });
+  it("the summary line stays unchanged without batches", () => {
+    assert.ok(!/batches/.test(formatTrainSummary({ merged: 1, handedBack: {}, waits: [0], syncs: 0 })));
+  });
+});

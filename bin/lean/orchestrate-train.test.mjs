@@ -76,3 +76,27 @@ describe("merge train in the batch runner (#5836)", () => {
     assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
   });
 });
+
+describe("batched merge train resume (#5837)", () => {
+  it("a saved snapshot with a validating batch is restored by orchestrate; tick re-reads checks and does not rebuild", async () => {
+    const calls = []; const ac = new AbortController();
+    const gh = async (a) => {
+      calls.push(a);
+      const s = a.join(" ");
+      if (s.includes("/check-runs")) ac.abort();
+      if (a[0] === "pr" && a[1] === "view") return JSON.stringify({ state: "OPEN", headRefOid: H, headRefName: "b", mergeable: "MERGEABLE", mergeStateStatus: "BEHIND", baseRefName: "staging", statusCheckRollup: [{ name: "build", conclusion: "SUCCESS" }] });
+      if (s.includes("/check-runs")) return JSON.stringify({ check_runs: [{ name: "build", status: "in_progress", conclusion: null }] });
+      return "";
+    };
+    const mk = (n) => ({ issue: n, pr: 10 + n, head: H, required: ["build"], policy: "required", lane: "staging", since: 1 });
+    const saved = { entries: [mk(1), mk(2)], stats: { merged: 0, handedBack: {}, waits: [], syncs: 0, batches: 1, candidateRuns: 1 },
+      batches: [{ id: "x", base: "staging", baseSha: "c".repeat(40), prs: [1, 2].map((n) => ({ issue: n, pr: 10 + n, head: H })), candidate: "forge-train/staging/x", candSha: "d".repeat(40), state: "validating", startedAt: Date.now() }] };
+    const train = createMergeTrain({ gh, repo: "o/r", batchSize: 4 });
+    const store = { load: () => ({ order: [1, 2], results: { 1: { issue: 1, outcome: "pr-ready", pr: 11 }, 2: { issue: 2, outcome: "pr-ready", pr: 12 } }, train: saved }), save: () => {}, log: () => {} };
+    await go({ issues: [1, 2], train, store, signal: ac.signal, runOne: async () => { throw new Error("must not relaunch"); } }).catch(() => {});
+    assert.ok(calls.some((a) => a.join(" ").includes("/check-runs")), "orchestrate restored the train and ticked it");
+    assert.ok(calls.some((a) => a.join(" ").includes("/check-runs")));
+    assert.ok(!calls.some((a) => a.join(" ").includes("git/refs") && a.includes("POST")), "candidate not rebuilt");
+    assert.equal(train.snapshot().batches.length, 1);
+  });
+});
