@@ -1,0 +1,14 @@
+{"status":"fixed","summary":"WSL mirrored NAT pin (install + agent start), net state in status and pool status with DEGRADED, typed deferred sandbox.egress_timeout","requirements":[
+{"id":"R1","status":"implemented","evidence":"bin/pool/health.mjs ensureNatPin; bin/pool/agent.mjs wslNetworkFixup"},
+{"id":"R2","status":"implemented","evidence":"bin/pool/health.mjs natPinUnit"},
+{"id":"R3","status":"implemented","evidence":"bin/pool/agent.mjs capacity net; bin/pool/cli.mjs status"},
+{"id":"R4","status":"implemented","evidence":"bin/pool/health.mjs netState"},
+{"id":"R5","status":"implemented","evidence":"bin/lean/execution.mjs egressDeferred"},
+{"id":"R6","status":"implemented","evidence":"devdocs/decisions/5923-wsl-mirrored-egress.md"},
+{"id":"R7","status":"implemented","evidence":"bin/tests/pool-nat-pin.test.mjs"},
+{"id":"R8","status":"implemented","evidence":"bin/tests/pool-nat-pin.test.mjs"},
+{"id":"R9","status":"implemented","evidence":"bin/lean/lanecheck.test.mjs"}],
+"validation":[{"id":"V1","command":"node --test --test-concurrency=1 bin/tests/pool-nat-pin.test.mjs","exit":0},{"id":"V2","command":"node --test --test-concurrency=1 bin/lean/lanecheck.test.mjs bin/tests/pool-cli.test.mjs bin/tests/pool-install.test.mjs bin/tests/pool-agent-bundle.test.mjs","exit":0},{"id":"V3","command":"node --test --test-concurrency=1 bin/tests/engine-outcome-codes.test.mjs","exit":0},{"id":"V4","command":"JSON.parse post-deploy-checks && bash -n install-agent.sh","exit":0},{"id":"G1","command":"node --test --test-concurrency=1 bin/lean/lean.test.mjs","exit":0}],
+"tests":[{"command":"node --test bin/tests/pool-nat-pin.test.mjs bin/lean/lanecheck.test.mjs","result":"pass","fails_without_fix":true}],
+"self_review":[{"question":"1","answer":"yes","evidence":"R1-R9 mapped in implementation.md; R10 post-deploy entry in .forge/post-deploy-checks.json"},{"question":"2","answer":"yes","evidence":"G1, pool-cli, pool-install, outcome-codes tests pass"},{"question":"3","answer":"yes","evidence":"all validate commands exit 0; forgedock check PASS"},{"question":"4","answer":"yes","evidence":"git diff --stat touches only deliverables and tests"}],
+"amendments":[],"not_members":[]}
