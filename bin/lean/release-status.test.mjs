@@ -237,4 +237,23 @@ describe("release status / explain (#5554)", () => {
     assert.match(out, /refused: no valid \.forge\/release\.yaml.*check-config/);
     assert.ok(!out.includes(ID), out);
   });
+  it("#5848: plain `release --merge` without a valid release.yaml also refuses with the check-config hint and exits 1", async () => {
+    const io = fakeIo({ state: { ...STATE, status: "refused" } });
+    const code = await releaseFromCli(["--merge", "--repo", REPO], { io, cwd: managedDir, env: { FORGEDOCK_RELEASE_DIR: join(managedDir, "rel") }, deps: {} });
+    const out = io.printed.join("\n");
+    assert.equal(code, 1);
+    assert.match(out, /check-config/);
+    assert.ok(!out.includes(ID), out);
+  });
+
+  it("#5848: `release --merge --watch` with a valid release.yaml prints only the record this start created", async () => {
+    const io = fakeIo({ state: { ...STATE, status: "refused" } });
+    const policy = "schema: 1\nbranches: {default: main, integration: staging}\nunits:\n  api: {paths: [\"services/api/**\"], criticality: high}\nlanes:\n  release: {pipeline: full, ci_tier: T3, base: integration}\ndeploy:\n  pipelines:\n    full: {workflow: deploy.yml, trigger: push, wait: true}\nci:\n  tiers: {T3: {jobs: [e2e]}}\n";
+    io.git = (a) => { if (String(a[1]).endsWith(".forge/release.yaml")) return policy; throw new Error("git"); };
+    io.now = () => Date.UTC(2026, 10, 20, 1, 2, 3);
+    await releaseFromCli(["--merge", "--watch", "--repo", REPO], { io, cwd: managedDir, env: { FORGEDOCK_RELEASE_DIR: join(managedDir, "rel2") }, deps: {} }).catch(() => 1);
+    const out = io.printed.join("\n");
+    assert.ok(!out.includes(ID), out);
+    assert.doesNotMatch(out, /no valid \.forge\/release\.yaml/);
+  });
 });
