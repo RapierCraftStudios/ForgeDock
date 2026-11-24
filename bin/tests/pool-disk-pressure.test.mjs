@@ -169,3 +169,22 @@ test("the lane's remote provider settles a disk-pressure stop as a deferred sand
   assert.equal(r.code, OUTCOME_CODES.SANDBOX_DISK_PRESSURE);
   assert.ok(r.retryInSeconds > 0);
 });
+
+test("real pruneCaches targets every package store under /cache and nothing under $HOME (#5955)", async () => {
+  const { mkdirSync, writeFileSync, chmodSync, readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { dockerCli } = await import("../pool/docker.mjs");
+  const { PACKAGE_STORES } = await import("../pool/cache-sweep.mjs");
+  const dir = tmpDir("cs-fakedocker-"), out = join(dir, "args.txt");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "docker"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${out}"\n`);
+  chmodSync(join(dir, "docker"), 0o755);
+  const prev = process.env.PATH;
+  process.env.PATH = `${dir}:${prev}`;
+  try { await dockerCli.pruneCaches("sb1"); } finally { process.env.PATH = prev; }
+  const script = readFileSync(out, "utf8").split("\n").find((l) => l.startsWith("rm -rf"));
+  assert.ok(script, "an rm -rf script is exec'd");
+  for (const d of PACKAGE_STORES) assert.ok(script.includes(`/cache/${d}`), d);
+  assert.ok(script.includes("/cache/forge-depcache/stores/npm-cache") && script.includes("/cache/pnpm-store"));
+  assert.ok(!/HOME|\/root|\.npm|\.cache/.test(script));
+});
