@@ -99,7 +99,9 @@ describe("model-aware ceiling and cost gate (#5829)", () => {
     assert.equal(ceilingFor("M", { tokens: 0, model: m }), 0, "0 = off");
     assert.equal(ceilingFor("M", { tokens: null, bySize: { M: 80000 }, model: m }), 80000);
     assert.equal(ceilingFor("L", { tokens: null, bySize: { M: 80000 }, model: m }), 500000);
-    assert.equal(ceilingFor("M", { tokens: null }), 0, "no model, nothing set: unchanged");
+    assert.equal(ceilingFor("M", { tokens: null }), DEFAULT_CEILING, "no model, nothing set: the 120000 default, not off");
+    assert.equal(ceilingFor("M", { tokens: null, model: "mystery-1" }), DEFAULT_CEILING);
+    assert.equal(ceilingFor("L", { tokens: null, bySize: { M: 80000 } }), DEFAULT_CEILING, "a size without an entry keeps the default");
   });
   it("restartDecision continues when restart costs more", () => {
     const d = restartDecision({ context: 200000, turnsLeft: 2, cachePrice: 0.5e-6, restartCost: 0.5, window: 1000000 });

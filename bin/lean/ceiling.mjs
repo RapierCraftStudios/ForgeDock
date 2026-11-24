@@ -55,12 +55,12 @@ export function modelCeiling(model, share = WINDOW_SHARE) {
 
 /**
  * The ceiling for a lane of `size`: its per-size entry, else the global explicit one, else (#5829) the routed model's default
- * when `model` is given and the global one was not set explicitly (`tokens` null/undefined), else `tokens`.
+ * (DEFAULT_CEILING for a null or unknown model) when the global one was not set explicitly (`tokens` null), else `tokens`.
  */
 export function ceilingFor(size, { tokens = 0, bySize = null, model = null, share = WINDOW_SHARE } = {}) {
   const v = bySize && SIZES.includes(size) ? bySize[size] : undefined;
   if (Number.isFinite(v) && v >= 0) return v;
-  if (tokens == null && model != null) return modelCeiling(model, share);
+  if (tokens == null) return modelCeiling(model, share); // no explicit ceiling: the model default, DEFAULT_CEILING for a null or unknown model
   return tokens ?? 0;
 }
 
