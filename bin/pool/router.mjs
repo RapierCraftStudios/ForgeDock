@@ -93,11 +93,43 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     if (consume) { c.used = true; store.save(); }
     return true;
   }
-  function issueCode() {
+  function issueCode(account) {
     const code = randomBytes(9).toString("base64url");
-    codes()[code] = { expires: now() + codeTtlMs, used: false };
+    codes()[code] = { expires: now() + codeTtlMs, used: false, ...(account ? { account } : {}) };
     store.save();
     return { code, expires_at: new Date(now() + codeTtlMs).toISOString() };
+  }
+  // #5886: device-code login. A box asks for a device+user code, the operator approves the user code (binding an account),
+  // the box polls /device/token and receives a single-use enroll code that stamps that account on its agent record.
+  const devices = () => (store.data.devices ??= {});
+  const ACCOUNT_RE = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$/;
+  const deviceTtlMs = (cfg.device_ttl_s ?? 600) * 1000, deviceIntervalS = cfg.device_interval_s ?? 5;
+  let deviceBurst = { at: 0, n: 0 };
+  function deviceStart() {
+    if (now() - deviceBurst.at > 60000) deviceBurst = { at: now(), n: 0 };
+    if (++deviceBurst.n > (cfg.device_codes_per_min ?? 20) || Object.keys(devices()).length >= 200) return { status: 429, body: { error: "too many device codes" }, retryAfter: 60 };
+    const device_code = randomBytes(24).toString("base64url"), user_code = randomBytes(5).toString("hex").toUpperCase().replace(/^(.{4})/, "$1-");
+    devices()[device_code] = { user_code, expires: now() + deviceTtlMs, interval: deviceIntervalS, polled: 0 };
+    store.save();
+    return { status: 200, body: { device_code, user_code, interval: deviceIntervalS, expires_in: Math.floor(deviceTtlMs / 1000) } };
+  }
+  function deviceApprove(body) {
+    const code = String(body?.user_code ?? "").toUpperCase().trim(), account = String(body?.account ?? "default");
+    if (!ACCOUNT_RE.test(account)) return { status: 400, body: { error: "account must be 1-64 chars of [A-Za-z0-9._@-]" } };
+    const d = Object.values(devices()).find((x) => x.user_code === code && !x.account && x.expires > now());
+    if (!d) return { status: 404, body: { error: "unknown, expired or already approved user code" } };
+    d.account = account; store.save();
+    return { status: 200, body: { ok: true, account } };
+  }
+  function deviceToken(body) {
+    const d = own(devices(), body?.device_code);
+    if (!d || d.expires <= now()) { if (d) { delete devices()[body.device_code]; store.save(); } return { status: 400, body: { error: "expired_token" } }; }
+    if (d.polled && now() - d.polled < d.interval * 1000) { d.interval += 5; d.polled = now(); return { status: 400, body: { error: "slow_down", interval: d.interval } }; }
+    d.polled = now();
+    if (!d.account) return { status: 400, body: { error: "authorization_pending", interval: d.interval } };
+    delete devices()[body.device_code];
+    const { code } = issueCode(d.account);
+    return { status: 200, body: { enroll_code: code, account: d.account } };
   }
   /** The enrolled agent whose token the request carries, or null. */
   function agentFor(req) {
@@ -297,6 +329,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     return cpusFree >= size.cpus && memFree >= size.mem_gb;
   };
   const headroom = (c, spec) => (spec?.priority === "borrow" && Number.isFinite(c.cpus_free_unreserved) ? c.cpus_free_unreserved : 0);
+  /** #5886: a spec naming an account is placed only on that account's agents; without one, any enrolled agent (as before). */
+  const inAccount = (c, spec) => typeof spec?.account !== "string" || own(agents(), c.name)?.account === spec.account;
   async function launch(spec) {
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id)) return { status: 400, body: { error: "spec.id required ([A-Za-z0-9._-], max 128)" } };
     const known = own(sbx(), spec.id);
@@ -308,7 +342,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       delete sbx()[spec.id]; store.save();
     }
     const size = sizeFor(spec);
-    const sized = (await capacities()).filter((c) => c.ok && !c.paused && fitsPriority(c, spec, size));
+    const sized = (await capacities()).filter((c) => c.ok && !c.paused && inAccount(c, spec) && fitsPriority(c, spec, size));
     const diskLow = sized.filter((c) => c.host_disk_low === true).map((c) => c.name); // #5733: never POST to a host whose drive is short
     const capped = sized.filter((c) => c.disk_capped === true && c.host_disk_low !== true).map((c) => c.name); // #5884: lane disk at its hard cap
     const fits = sized.filter((c) => c.host_disk_low !== true && c.disk_capped !== true).sort((a, b) => headroom(b, spec) - headroom(a, spec) || b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
@@ -337,7 +371,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     if (own(sbx(), spec.id)) return launch(spec); // already placed: the same idempotent path
     const size = sizeFor(spec);
     const laneId = isLane(spec.id);
-    for (const c of (await capacities()).filter((x) => x.ok && !x.paused)) {
+    for (const c of (await capacities()).filter((x) => x.ok && !x.paused && inAccount(x, spec))) {
       if (laneId && atCeiling(c.name)) continue; // #5735: the 404 makes the caller cold-launch, which gets the ceiling 503
       if (laneId) reserve(c.name, spec.id);
       try {
@@ -366,6 +400,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   /** Renew leases for sandboxes ForgeDock still polls; destroy the ones it abandoned. */
   async function tick() {
     for (const [k, c] of Object.entries(codes())) if (c.expires <= now()) delete codes()[k];
+    for (const [k, d] of Object.entries(devices())) if (d.expires <= now()) delete devices()[k];
+    for (const [name, a] of Object.entries(agents())) if (a.policy_pending) await pushPolicy(name); // #5886: re-push a policy the box missed
     for (const [id, s] of Object.entries(sbx())) {
       const a = own(agents(), s.agent);
       if (!a) { delete sbx()[id]; continue; }
@@ -389,14 +425,46 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     let url = null;
     if (body.url) { try { url = new URL(String(body.url)); } catch { return { status: 400, body: { error: "url must be a valid URL (or omitted for an outbound agent)" } }; } }
     if (!name) return { status: 400, body: { error: "name required" } };
+    const account = own(codes(), body.token)?.account; // #5886: a device-login code carries its account
     enrollOk(body.token, true);
     const token = randomBytes(32).toString("hex");
     const keep = own(agents(), name)?.max_lanes; // #5735: re-enrollment keeps a `pool limit` ceiling
     const keepCfg = validCeiling(keep) ? { max_lanes: keep } : {};
-    agents()[name] = url ? { url: url.origin, token, enrolledAt: new Date(now()).toISOString(), ...keepCfg } : { name, transport: "poll", token, enrolledAt: new Date(now()).toISOString(), ...keepCfg };
+    agents()[name] = { ...(url ? { url: url.origin, token, enrolledAt: new Date(now()).toISOString(), ...keepCfg } : { name, transport: "poll", token, enrolledAt: new Date(now()).toISOString(), ...keepCfg }), ...(account ? { account } : {}) };
     store.save();
     log.info?.(`enrolled agent ${name} ${url ? `at ${url.origin}` : "(outbound poll)"}`);
     return { status: 200, body: { name, agent_token: token } };
+  }
+
+  /** #5886: per-box policy, allowlisted keys only; pushed to the agent's /admin/policy (the agent keeps its owner pause). */
+  function validPolicy(b) {
+    if (!b || typeof b !== "object" || Array.isArray(b)) return "policy must be an object";
+    const bad = Object.keys(b).filter((k) => !["cpus", "mem_gb", "idle_only", "paused", "floors"].includes(k));
+    if (bad.length) return `unknown policy key: ${bad[0]}`;
+    const int = (v, hi) => Number.isInteger(v) && v >= 1 && v <= hi;
+    if ("cpus" in b && !int(b.cpus, 256)) return "cpus must be an integer 1-256";
+    if ("mem_gb" in b && !int(b.mem_gb, 1024)) return "mem_gb must be an integer 1-1024";
+    if (("idle_only" in b && typeof b.idle_only !== "boolean") || ("paused" in b && typeof b.paused !== "boolean")) return "idle_only and paused must be booleans";
+    if ("floors" in b && !(b.floors && typeof b.floors === "object" && Object.keys(b.floors).every((k) => k === "host_disk_gb" && Number.isFinite(b.floors[k]) && b.floors[k] >= 0))) return "floors accepts only host_disk_gb >= 0";
+    return null;
+  }
+  async function pushPolicy(name) {
+    const a = own(agents(), name);
+    try {
+      const r = await agentCall(a, "POST", "/admin/policy", a.policy);
+      if (r.ok) { delete a.policy_pending; store.save(); }
+      return r.ok;
+    } catch { return false; }
+  }
+  async function setPolicy(name, body) {
+    const a = own(agents(), name);
+    if (!a) return { status: 404, body: { error: "unknown agent" } };
+    const err = validPolicy(body);
+    if (err) return { status: 400, body: { error: err } };
+    a.policy = { ...(a.policy ?? {}), ...body, ...(body.floors ? { floors: { ...(a.policy?.floors ?? {}), ...body.floors } } : {}) };
+    a.policy_pending = true; store.save();
+    const pushed = await pushPolicy(name);
+    return { status: pushed ? 200 : 202, body: { ok: true, policy: a.policy, pushed } };
   }
 
   function bootstrapScript(token, url) {
@@ -521,13 +589,17 @@ bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TM
     [route("POST", "/sandboxes/:id/stop"), fd(async ({ id }) => forward(id, "POST", `/sandboxes/${encodeURIComponent(id)}/stop`))], // #5274
     [route("DELETE", "/sandboxes/:id"), fd(async ({ id }) => forward(id, "DELETE", `/sandboxes/${encodeURIComponent(id)}`, DESTROY_TIMEOUT_MS))],
     [route("GET", "/status"), fd(async () => ({ status: 200, body: await status() }))],
-    [route("GET", "/agents"), fd(async () => { // #5535: each sandbox carries disk_used_mb from its agent's sandbox_disk_mb when the agent reports it
-      const caps = await capacities(), byName = new Map(caps.map((c) => [c.name, c])), out = {};
-      for (const [id, s] of Object.entries(sbx())) { const mb = byName.get(s?.agent)?.sandbox_disk_mb?.[id]; out[id] = Number.isFinite(mb) ? { ...s, disk_used_mb: mb } : s; }
-      // #5735: each agent's lane sandboxes used/ceiling, and the lane sandboxes across all batches and agents
-      const remote_lanes = Object.keys(sbx()).filter(isLane).length;
+    [route("GET", "/agents"), fd(async (_p, _b, url) => { // #5535: each sandbox carries disk_used_mb from its agent's sandbox_disk_mb when the agent reports it
+      const acct = url.searchParams.get("account"); // #5886: ?account= is the per-account view; `account` and `policy` ride on enrolled records that have them
+      const caps = (await capacities()).filter((c) => acct === null || own(agents(), c.name)?.account === acct).map((c) => { const a = own(agents(), c.name); return { ...c, ...(a?.account ? { account: a.account } : {}), ...(a?.policy ? { policy: a.policy } : {}) }; }), byName = new Map(caps.map((c) => [c.name, c])), out = {};
+      for (const [id, s] of Object.entries(sbx())) { if (acct !== null && !byName.has(s?.agent)) continue; const mb = byName.get(s?.agent)?.sandbox_disk_mb?.[id]; out[id] = Number.isFinite(mb) ? { ...s, disk_used_mb: mb } : s; }
+      const remote_lanes = Object.keys(sbx()).filter(isLane).length; // #5735: lane sandboxes across all batches and agents
       return { status: 200, body: { agents: caps.map((c) => ({ ...c, lanes: laneView(c.name), ...diskReport(c) })), sandboxes: out, remote_lanes } };
     })],
+    [route("POST", "/device/code"), { fn: async () => deviceStart(), auth: "none" }], // #5886
+    [route("POST", "/device/token"), { fn: async (_p, body) => deviceToken(body), auth: "none" }],
+    [route("POST", "/device/approve"), fd(async (_p, body) => deviceApprove(body))],
+    [route("PUT", "/agents/:name/policy"), fd(async ({ name }, body) => setPolicy(name, body))],
     [route("POST", "/codes"), fd(async () => ({ status: 200, body: issueCode() }))],
     [route("GET", "/agent/creds/github"), { fn: async () => ({ status: 200, body: { token: await githubToken() } }), auth: "agent" }],
     [route("GET", "/agent/creds/claude"), { fn: async (_p, _b, _u, req) => claudeToken(req), auth: "agent" }],
@@ -593,7 +665,7 @@ bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TM
         if (r.auth === "ci" && !ciOk(req)) return send(res, 401, { error: "unauthorized", hop: "router", reason: "router auth: bad or missing token" });
         if (r.auth === "agent" && !agentFor(req)) return send(res, 401, { error: "unauthorized", hop: "router", reason: "router auth: bad or missing token" });
         if (r.auth === "enroll" && !enrollOk(url.searchParams.get("token"))) return send(res, 401, "unauthorized\n");
-        const body = req.method === "POST" ? await readJson(req) : null;
+        const body = req.method === "POST" || req.method === "PUT" ? await readJson(req) : null;
         if (typeof body?.repo?.slug === "string") meta.repo = body.repo.slug.slice(0, 200);
         if (typeof body?.id === "string") meta.id = body.id;
         const out = await r.fn(p, body, url, req);
