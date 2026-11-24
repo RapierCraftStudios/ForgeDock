@@ -275,6 +275,23 @@ describe("#5859 agent restart: correlated sandbox loss is sandbox.lost, not engi
     assert.ok(probes >= 3, "admission waited for the agent's healthy probe");
   });
 
+  // #5967 R5/R8: a host-memory OOM restart of the agent VM ends N sandboxes together; the VM-restart class is sandbox.lost (not a second pool.vm_restart code).
+  it("N sandboxes ending together on an agent VM restart are sandbox.lost deferrals, no breaker trip (#5967)", async () => {
+    const issues = [1, 2, 3, 4, 5];
+    const script = Object.fromEntries(issues.map((n) => [n, [LOST(n), MERGED]]));
+    const store = memStore();
+    let probes = 0;
+    const r = await harness({ script, issues, parallel: 5, store, envHold: undefined,
+      extra: { envHold: null, breaker: BREAKER, remote: { agentHealthy: async () => ++probes > 1 } } });
+    assert.ok(!r.updates.some((u) => u.outcome === "breaker"));
+    assert.deepEqual([...new Set(r.updates.filter((u) => u.code === "sandbox.lost").map((u) => u.issue))].sort((x, y) => x - y), issues);
+    assert.ok(!r.updates.some((u) => u.code === "engine-error"));
+    const st = store.load();
+    assert.deepEqual(st.errorTimes, []);
+    assert.equal(st.breaker, null);
+    for (const n of issues) assert.equal(r.byIssue[n].outcome, "merged");
+  });
+
   it("agent restart: failure after healthy is an ordinary engine-error", async () => {
     const store = memStore();
     const r = await harness({ script: { 1: [LOST(1), LOST(1), MERGED], 2: [LOST(2), MERGED], 3: [LOST(3), MERGED] }, issues: [1, 2, 3], parallel: 3, store,

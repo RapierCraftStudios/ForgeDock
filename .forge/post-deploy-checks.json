@@ -190,5 +190,11 @@
     "pass": "exit 0",
     "timeout": 120,
     "for": "7d"
+  },
+  "legion-vm-oom": {
+    "run": "test \"$(gh api \"repos/{owner}/{repo}/issues/comments?since=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)&per_page=100\" --paginate --jq '[.[]|select(.body|startswith(\"<!-- FORGE:TRAJECTORY -->\"))|select(.body|contains(\"sandbox.lost\"))]|length' | awk '{s+=$1} END{print s+0}')\" -eq 0",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "7d"
   }
 }

@@ -124,6 +124,7 @@ export async function runPoolCli(argv, deps = {}) {
         if (a.transport) console.log(`${a.name}: transport ${a.transport}`); // #5882
         const n = a.net; // #5923
         if (n?.mirrored) console.log(`${a.name}: net mirrored, port range ${n.port_range ?? "?"}, NAT pin ${n.nat_pin ? "present" : "MISSING"}${n.degraded ? " DEGRADED" : ""}`);
+        if (Number.isFinite(a.host_mem_free_gb)) console.error(`${a.name}: host_mem_free_gb ${a.host_mem_free_gb}${Array.isArray(a.vmmem) && a.vmmem.length ? `, other VMs: ${a.vmmem.map((v) => `${v.name} ${v.gb} GB`).join(", ")}` : ""}${a.host_mem_low ? " WARNING: host memory below the floor, new sandboxes are refused" : ""}`); // #5967
         if (!Number.isFinite(a.host_disk_free_gb)) continue;
         console.error(`${a.name}: host_disk_free_gb ${a.host_disk_free_gb}${Number.isFinite(a.host_disk_growth_gb_per_h) ? `, growth ${a.host_disk_growth_gb_per_h} GB/h` : ""}${a.disk_warning ? ` WARNING: ${a.disk_warning}` : ""}`);
       }
