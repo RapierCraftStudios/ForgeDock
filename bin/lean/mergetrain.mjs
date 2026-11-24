@@ -38,14 +38,14 @@ export function judgeChecks(states, { required = [], policy = "required" } = {})
 export const p50 = (xs) => { const s = [...xs].sort((a, b) => a - b); return s.length ? s[Math.ceil(s.length / 2) - 1] : null; };
 
 /** 90th percentile (nearest rank); null when empty. */
-export const p90 = (xs) => { const s = [...xs].sort((a, b) => a - b); return s.length ? s[Math.ceil(s.length * 0.9) - 1] : null; };
+export const waitP90 = (xs) => { const s = [...xs].sort((a, b) => a - b); return s.length ? s[Math.ceil(s.length * 0.9) - 1] : null; };
 
 /** The batch report line, or null when the train never held a PR. */
 export function formatTrainSummary(stats) {
   if (!stats || (!stats.merged && !Object.keys(stats.handedBack ?? {}).length && !stats.syncs && !stats.batches && !stats.waits?.length)) return null;
   const hb = Object.entries(stats.handedBack ?? {}).sort(([a], [b]) => a.localeCompare(b));
   const total = hb.reduce((n, [, c]) => n + c, 0);
-  const w = p50(stats.waits ?? []), w90 = p90(stats.waits ?? []), ls = stats.laneSide;
+  const w = p50(stats.waits ?? []), w90 = waitP90(stats.waits ?? []), ls = stats.laneSide;
   return `merge train: merged ${stats.merged ?? 0}, handed back ${total}${hb.length ? ` (${hb.map(([k, c]) => `${k} ${c}`).join(", ")})` : ""}, wait p50 ${w === null ? "n/a" : `${(w / 60000).toFixed(1)} min`} p90 ${w90 === null ? "n/a" : `${(w90 / 60000).toFixed(1)} min`}, base-syncs ${stats.syncs ?? 0} (lane ${ls?.syncs ?? 0}), base.conflict ${stats.baseConflicts ?? stats.handedBack?.["base.conflict"] ?? 0} (lane ${ls?.baseConflicts ?? 0})${stats.batches ? `, batches ${stats.batches}, candidate CI runs ${stats.candidateRuns ?? 0}${stats.candidateRed ? ` (${stats.candidateRed} red)` : ""}${stats.bisections ? `, bisections ${stats.bisections}` : ""}${stats.culprits ? `, culprits ${stats.culprits}` : ""}${stats.redBase ? `, red base ${stats.redBase}` : ""}` : ""}`;
 }
 

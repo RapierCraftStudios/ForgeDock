@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { codeForTerminalReason } from "../engine/outcome-codes.mjs";
-import { createMergeTrain, formatTrainSummary, judgeChecks, p50, p90, rollupStates } from "./mergetrain.mjs";
+import { createMergeTrain, formatTrainSummary, judgeChecks, p50, waitP90, rollupStates } from "./mergetrain.mjs";
 
 const H = "a".repeat(40);
 /** A fake gh over `prs`: {pr: {state, head, mergeable, mergeState, base, branch, checks}}; records every call. */
@@ -332,7 +332,7 @@ describe("mergetrain phase 3 (#5839)", () => {
     const st = t.stats();
     assert.equal(st.baseConflicts, 1); assert.deepEqual(st.laneSide, { syncs: 2, baseConflicts: 1 });
     assert.match(formatTrainSummary({ ...st, waits: [60000, 120000, 600000] }), /p90 10\.0 min.*base\.conflict 1 \(lane 1\)/);
-    assert.equal(p90([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), 9);
+    assert.equal(waitP90([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), 9);
   });
   it("snapshot round-trips the record and counts; a phase-2 snapshot restores as zero", () => {
     const t = createMergeTrain({ gh: async () => "", repo: "o/r" });
