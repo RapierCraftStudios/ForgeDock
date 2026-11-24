@@ -7,9 +7,8 @@
 // PRs are handed back as needs-human `ci.red` / `base.conflict` / `merge.head_mismatch` (in-batch recovery requeues a fix
 // lane). No batching, no bisection. All I/O goes through the injected `gh`; state is plain JSON (batch state.json `train`).
 
-import { clearPipelineLabels } from "./statuscomment.mjs";
+import { closeMergedIssue } from "./lean.mjs";
 
-const MERGED_LABEL = "workflow:merged";
 const CONFLICT_RE = /not mergeable|merge conflict|conflict/i;
 const HEAD_RE = /head branch was modified|match-head-commit|expected head|does not match/i;
 const FAIL = new Set(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
@@ -69,13 +68,7 @@ export function createMergeTrain({ gh, repo, now = () => Date.now(), saved = nul
     return { kind: "merged", issue: e.issue, pr: e.pr, detail, entry: e };
   };
 
-  /** The lane's post-merge steps for a plain merge: close the issue, `workflow:merged`, delete the branch (all best effort). */
-  async function postMerge(e) {
-    try { await gh(["issue", "close", String(e.issue), "-R", repo, "--reason", "completed"]); } catch { /* the issue stays open for the sweep */ }
-    await clearPipelineLabels({ gh, repo, issue: e.issue });
-    try { await gh(["issue", "edit", String(e.issue), "-R", repo, "--add-label", MERGED_LABEL]); } catch { /* best effort */ }
-    if (e.branch) { try { await gh(["api", "-X", "DELETE", `repos/${repo}/git/refs/heads/${e.branch}`]); } catch { /* already gone */ } }
-  }
+  const postMerge = (e) => closeMergedIssue({ gh, repo, issue: e.issue, branch: e.branch }); // the lane's shared post-merge helper
 
   /** One poll: at most one merge per base; returns the events (merged / handback) it produced. */
   async function tick() {

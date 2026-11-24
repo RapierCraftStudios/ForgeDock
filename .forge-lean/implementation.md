@@ -16,3 +16,7 @@ orchestration.merge_train: off|on, default off.
 
 ## Sibling-enumeration check
 Inspected the ten flagged test locations; none enumerates bin/lean modules or symbols, so mergetrain is not a member of any. Recorded each in result.json `not_members`.
+
+## Conformance fix (#5836)
+- Extracted `closeMergedIssue({gh, repo, issue, label, branch})` in `bin/lean/lean.mjs`; the lane's close step uses it (`label: false`, identical call) and `mergetrain.mjs` imports it for the train's post-merge close/label/branch-delete instead of its own copy.
+- Added lean tests that the plain-merge gate keeps the lane waiting (never `pr-ready`) for split, e2e, numbered sequence files and close-time records (pending follow-up). Verified they fail when `trainPlain()` is forced true.

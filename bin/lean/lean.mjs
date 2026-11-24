@@ -337,6 +337,16 @@ const defaultCredExec = (args) => {
  *                                   posts FORGE:DECISION and resumes the open PR on the rerun path with a recovery note. `final`
  *                                   (default true) is false when the runner may launch another attempt: the lane then never relabels (#4302)
  */
+/** #5836: the post-merge steps shared by the lane and the merge train: close the issue as completed, then (label) `workflow:merged` and (branch) delete the lane branch on origin. All best effort. */
+export async function closeMergedIssue({ gh, repo, issue, label = true, branch = null }) {
+  try { await gh(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]); } catch { /* the issue stays open for the sweep */ }
+  if (label) {
+    await clearPipelineLabels({ gh, repo, issue });
+    try { await gh(["issue", "edit", String(issue), "-R", repo, "--add-label", "workflow:merged"]); } catch { /* best effort */ }
+  }
+  if (branch) { try { await gh(["api", "-X", "DELETE", `repos/${repo}/git/refs/heads/${branch}`]); } catch { /* already gone */ } }
+}
+
 export async function runCore(o) {
   const armed = applyArmOverrides(o, o.issue); o = armed.options; // #5206: the arm's overrides shape the lane before any config is parsed
   o = { ...o, io: resolvingIo(o.io, { exists: existsSync, checksCli: CHECKS_CLI, forgedockCli: FORGEDOCK_CLI }) }; // #5727: every executed command names this install's forgedock entry points
@@ -4310,7 +4320,7 @@ export async function runCore(o) {
       try { await post("FORGE:TRACKED", `## Left open: live acceptance deferred on a default-on change\nMerged by PR #${pr}, but the rollout is live and these requirements still need live verification:\n${closing.blocks.map((b) => `- ${b.id} (flag ${b.flag})`).join("\n")}\n\nKeep the flag default-off until they are verified, or verify them and close.${closing.tracked.length ? ` Tracked in ${closing.tracked.join(", ")}.` : ""}`); } catch { /* the trajectory decision records it too */ }
     }
     // #5152: a merged change is `completed` even when partial: the remainder is tracked (FORGE:TRACKED), not dropped
-    if (!keepOpen && !(await closeBlockers("completed", pr)).length) await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {}); // #5505: not while another own PR is open
+    if (!keepOpen && !(await closeBlockers("completed", pr)).length) await closeMergedIssue({ gh: ghw, repo, issue, label: false }); // #5505: not while another own PR is open
     if (closing.transferred) { // #5339: record what is transferred, not met
       try { await post("FORGE:TRACKED", `## Left open: transferred, not met\nMerged by PR #${pr}, but these end-to-end/manual requirements were not run in the lane:\n${(closing.transfer ?? closing.open).map((r) => `- ${r.id}: ${r.transferred ? `transferred to epic #${r.transferred} (post-deploy journey)` : "no epic to take it"}`).join("\n")}${closing.tracked.length ? `\n\nTracked in ${closing.tracked.join(", ")}.` : ""}`); } catch { /* the PR body carries them too */ }
     } else if (closing.liveBlocked) { /* #5285: posted above */ } else if (closing.checklist) { // #5240: partial: left open; the unticked criteria, tracked follow-ups and any inert rollout are the record
