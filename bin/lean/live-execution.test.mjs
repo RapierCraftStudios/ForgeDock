@@ -94,3 +94,29 @@ describe("#5746 live max_remote 0 in remote mode", () => {
     assert.deepEqual(r.place(1), { where: "local", reason: "max_remote 0 (live override)" });
   });
 });
+
+describe("#5746 live max_remote below the pinned value warns once after N hours", () => {
+  it("warns once past the threshold, not before, and re-arms when restored", () => {
+    let t = 0, o = { maxRemote: 0 };
+    const warned = [];
+    const r = liveRemote({ onBudget: "stop" }, { exec: { mode: "remote", maxRemote: 3 }, readOverride: () => o, place: () => ({ where: "remote", reason: "r" }),
+      belowPinnedHours: 2, now: () => t, onBelowPinned: (w) => warned.push(w) });
+    void r.max;
+    t = 2 * 3600000; void r.max;
+    assert.equal(warned.length, 0);
+    t += 1; void r.max; void r.max;
+    assert.deepEqual(warned, [{ maxRemote: 0, pinned: 3, hours: 2 }]);
+    o = { maxRemote: 3 }; void r.max;
+    o = { maxRemote: 1 }; void r.max;
+    t += 3 * 3600000; void r.max;
+    assert.equal(warned.length, 2);
+  });
+  it("no warning without an override or with an override at or above the pinned value", () => {
+    let t = 0, o = null;
+    const warned = [];
+    const r = liveRemote({}, { exec: { mode: "remote", maxRemote: 2 }, readOverride: () => o, place: () => ({ where: "remote" }), belowPinnedHours: 1, now: () => t, onBelowPinned: (w) => warned.push(w) });
+    void r.max; t = 10 * 3600000; void r.max;
+    o = { maxRemote: 4 }; void r.max; t *= 2; void r.max;
+    assert.equal(warned.length, 0);
+  });
+});

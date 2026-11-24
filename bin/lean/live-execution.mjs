@@ -110,14 +110,25 @@ export function lazyWeight({ initial = null, compute = null } = {}) {
  * `placeLane` with the remote or hybrid facts); mode `local` places every new lane on the host. `onChange(exec)` is
  * called once each time the effective `{mode, maxRemote}` differs from the last one seen (the pinned one first).
  */
-export function liveRemote(base, { exec, readOverride = () => null, place, onChange = null }) {
+export const BELOW_PINNED_WARN_HOURS = 6;
+export function liveRemote(base, { exec, readOverride = () => null, place, onChange = null, onBelowPinned = null, belowPinnedHours = BELOW_PINNED_WARN_HOURS, now = Date.now }) {
   const keyOf = (e) => `${e.mode}|${e.maxRemote}`;
   let last = keyOf(effectiveExecution(exec, null));
   let live = null; // the override applied by the last current() call
+  let belowSince = null, belowWarned = false; // #5746: since when a live max_remote has been below the pinned value
+  const noteBelow = () => {
+    const pinned = exec?.maxRemote;
+    if (!(live?.maxRemote !== undefined && Number.isInteger(pinned) && live.maxRemote < pinned)) { belowSince = null; belowWarned = false; return; }
+    const t = now();
+    belowSince ??= t;
+    const hours = Number(belowPinnedHours) > 0 ? Number(belowPinnedHours) : BELOW_PINNED_WARN_HOURS;
+    if (!belowWarned && t - belowSince > hours * 3600000) { belowWarned = true; try { onBelowPinned?.({ maxRemote: live.maxRemote, pinned, hours }); } catch { /* advisory */ } }
+  };
   const current = () => {
     let o = null;
     try { o = readOverride() ?? null; } catch { o = null; }
     live = sanitizeOverride(o);
+    noteBelow();
     const e = effectiveExecution(exec, o);
     const k = keyOf(e);
     if (k !== last) { last = k; try { onChange?.(e); } catch { /* advisory */ } }
