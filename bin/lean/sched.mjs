@@ -259,3 +259,18 @@ export function remoteLines(st, { agentOf = null } = {}) {
   if (down.length) out.push(`pool: unreachable (${down.map((e) => `batch ${e.batch}${e.reason ? `: ${e.reason}` : ""}`).join("; ")})`);
   return out;
 }
+
+/** #5847: batch-start report of the effective concurrency K, the host cap and which source set it; pure and read-only. */
+export function describeConcurrency({ parallel, parallelFrom = "default", registryCap = null, globalParallel = null, derivedCap = null, yamlFound = true, cwd = "." } = {}) {
+  const pos = (n) => (Number.isInteger(n) && n > 0 ? n : null);
+  const [reg, glob, derived] = [pos(registryCap), pos(globalParallel), pos(derivedCap)];
+  let cap = null, source = "none";
+  if (reg !== null) { cap = reg; source = "forgedock sched cap"; }
+  else if (glob !== null && (derived === null || glob <= derived)) { cap = glob; source = "forge.yaml orchestration.global_parallel"; }
+  else if (derived !== null) { cap = derived; source = "host-derived limit"; }
+  const line = `concurrency: K=${parallel} (host cap ${cap ?? "none"} from ${source}) [K from ${parallelFrom}]`;
+  const warnings = [];
+  if (cap !== null && Number(parallel) > cap) warnings.push(`warning: K=${parallel} exceeds the host cap ${cap} (${source}); lanes beyond ${cap} queue. Raise it with: forgedock sched cap ${parallel}`);
+  if (!yamlFound) warnings.push(`warning: no forge.yaml in ${cwd}; defaults apply (global_parallel unset, host-derived admission limits)`);
+  return { line, warnings };
+}
