@@ -9,7 +9,7 @@ import { tmpDir } from "../tests/_tmp.mjs";
 import { TRIGGERS } from "../lean/fixround.mjs";
 import {
   TRIGGER_CAUSE, RETRY_CAUSES, WEEK_MS, codeCause, issueSlices, sliceRetries, issueQuality, acceptanceOf, efficiencyMetrics,
-  batchEfficiency, windowEfficiency, formatEfficiencyLines, parseWindows, compareEfficiency, formatCompareLines,
+  COMPARE_KEYS, batchEfficiency, windowEfficiency, formatEfficiencyLines, parseWindows, compareEfficiency, formatCompareLines,
 } from "./efficiency.mjs";
 import { comparePivot, parseArgs, runStats } from "./index.mjs";
 import { runLogPath } from "../engine/runlog.mjs";
@@ -319,8 +319,9 @@ describe("#4491 before/after compare", () => {
     const { root, runs } = setup();
     const c = await compareEfficiency({ batchRoot: root, runsDir: runs, repo: SLUG, pivot: PIVOT, now: PIVOT + 3 * DAY });
     assert.deepEqual(Object.keys(c.matched), ["M"]); // issues 7 and 8 (no log, size unknown) are in no bucket
-    assert.deepEqual(c.matched.M.pre, { n: 2, turns_per_merge: 50, implement_wall_p50_min: 40, tool_calls_per_turn_p50: 1, rereads_per_merge: 3 });
-    assert.deepEqual(c.matched.M.post, { n: 1, turns_per_merge: 20, implement_wall_p50_min: 20, tool_calls_per_turn_p50: 1.5, rereads_per_merge: 0 });
+    assert.equal(c.matched.M.pre.context_restarts_per_merge, 0); assert.equal(typeof c.matched.M.pre.usd_per_merge, "number");
+    assert.deepEqual((({ usd_per_merge, context_restarts_per_merge, ...x }) => x)(c.matched.M.pre), { n: 2, turns_per_merge: 50, implement_wall_p50_min: 40, tool_calls_per_turn_p50: 1, rereads_per_merge: 3 });
+    assert.deepEqual((({ usd_per_merge, context_restarts_per_merge, ...x }) => x)(c.matched.M.post), { n: 1, turns_per_merge: 20, implement_wall_p50_min: 20, tool_calls_per_turn_p50: 1.5, rereads_per_merge: 0 });
     assert.equal(c.matched.M.delta.tool_calls_per_turn_p50, 0.5);
     assert.equal(c.matched.M.delta.turns_per_merge, -30);
   });
@@ -328,9 +329,9 @@ describe("#4491 before/after compare", () => {
     const { root, runs } = setup();
     const lines = formatCompareLines(await compareEfficiency({ batchRoot: root, runsDir: runs, repo: SLUG, pivot: PIVOT, now: PIVOT + 3 * DAY }));
     assert.equal(lines[0], "compare: pivot 2026-10-20T00:00:00.000Z, 3.0 days each side (pre 1 batches, post 1 batches)");
-    assert.match(lines[1], /^compare pre: n=3 turns\/merge 33\.3, implement wall p50 40\.0 min, calls\/turn p50 1\.00, re-reads\/merge 3\.00, merge rate 75%, conformance pass 33%$/);
-    assert.match(lines[3], /^compare delta: turns\/merge -?\d+\.\d, implement wall p50 -20\.0 min, .*merge rate \+25 pts, conformance pass \+67 pts$/);
-    assert.match(lines[4], /^compare matched M: pre n=2 post n=1; delta turns\/merge -30\.0, implement wall p50 -20\.0 min, calls\/turn p50 \+0\.50, re-reads\/merge -3\.00$/);
+    assert.match(lines[1], /^compare pre: n=3 turns\/merge 33\.3, restarts\/merge 0\.00, \$\/merge \$0\.67, implement wall p50 40\.0 min, calls\/turn p50 1\.00, re-reads\/merge 3\.00, merge rate 75%, conformance pass 33%$/);
+    assert.match(lines[3], /^compare delta: turns\/merge -?\d+\.\d, restarts\/merge [-+]?0\.00, .*implement wall p50 -20\.0 min, .*merge rate \+25 pts, conformance pass \+67 pts$/);
+    assert.match(lines[4], /^compare matched M: pre n=2 post n=1; delta turns\/merge -30\.0, restarts\/merge [-+]?0\.00, \$\/merge [-+]?\d+\.\d\d, implement wall p50 -20\.0 min, calls\/turn p50 \+0\.50, re-reads\/merge -3\.00$/);
     assert.ok(!lines.some((l) => /NaN|undefined/.test(l)), lines.join("\n"));
   });
   it("case-insensitive repo: a lowercase --repo matches the plans and reads the run logs under their spelling", async () => {
@@ -343,7 +344,7 @@ describe("#4491 before/after compare", () => {
   it("compare rejects a pivot in the future and prints a bare n/a delta for empty cohorts", async () => {
     await assert.rejects(compareEfficiency({ batchRoot: tmpDir("eff-cmp-x-"), runsDir: tmpDir("eff-cmp-y-"), pivot: NOW + DAY, now: NOW }), /pivot/);
     const empty = formatCompareLines(await compareEfficiency({ batchRoot: tmpDir("eff-cmp-x-"), runsDir: tmpDir("eff-cmp-y-"), pivot: NOW - DAY, now: NOW }));
-    assert.equal(empty[3], "compare delta: turns/merge n/a, implement wall p50 n/a, calls/turn p50 n/a, re-reads/merge n/a, merge rate n/a, conformance pass n/a");
+    assert.equal(empty[3], "compare delta: turns/merge n/a, restarts/merge n/a, $/merge n/a, implement wall p50 n/a, calls/turn p50 n/a, re-reads/merge n/a, merge rate n/a, conformance pass n/a");
   });
   it("compare and offline flags: parsing, pivot resolution and the offline CLI skips gh", async () => {
     const o = parseArgs(["--efficiency", "--compare", "v1.32.0", "--offline"]);
@@ -408,5 +409,21 @@ describe("#5349 wait attribution in the efficiency report", () => {
     const m = efficiencyMetrics({ entries: [row(2)], logs });
     assert.equal(m.wait.n, 0);
     assert.ok(formatEfficiencyLines(m).includes("wait (non-model time): n/a"));
+  });
+});
+
+describe("#5829 context restarts per merge", () => {
+  it("counts context_restart builder attempts per merged lane and compares them with $/merge", () => {
+    const logs = new Map([[1, [start("2026-10-01T00:00:00Z"), att("implement", { trigger: "build", cost_usd: 2 }), att("implement", { trigger: "context_restart", cost_usd: 1 }),
+      att("implement", { trigger: "context_restart", cost_usd: 1 }), term("merged", "completed", { turns: { size: "S" } })]]]);
+    const m = efficiencyMetrics({ entries: [{ row: { issue: 1, outcome: "merged" }, settleAt: null }], logs, issues: new Map([[1, { body: "x", labels: [], comments: [] }]]), repo: "o/r", now: NOW });
+    assert.equal(m.context_restarts_per_merge, 2);
+    assert.equal(m.per_issue[0].context_restarts, 2);
+    assert.ok(COMPARE_KEYS.includes("context_restarts_per_merge") && COMPARE_KEYS.includes("usd_per_merge"));
+  });
+  it("a lane with no restart reports 0", () => {
+    const logs = new Map([[1, [start("2026-10-01T00:00:00Z"), att("implement", { trigger: "build" }), term("merged", "completed")]]]);
+    const m = efficiencyMetrics({ entries: [{ row: { issue: 1, outcome: "merged" }, settleAt: null }], logs, issues: new Map(), repo: "o/r", now: NOW });
+    assert.equal(m.context_restarts_per_merge, 0);
   });
 });
