@@ -15,6 +15,7 @@ import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 import { syncBuiltinESMExports } from "node:module";
+import { diffTouchesGuard } from "./basered.mjs";
 import { runCore, contractHash, isProtectedLaneBranch, classifyBlock, builderFixable } from "./lean.mjs";
 import { parseFactsComment, normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { makeLedger } from "./ledger.mjs";
@@ -6849,6 +6850,21 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     assert.equal(w.merges.length, 0);
     assert.equal(comments.length, 1); assert.match(comments[0], /FORGE:BASE_RED/);
     assert.equal(builders(w).length, 2, "no builder fix round spent on a base failure");
+  });
+
+  it("#5913 a lane whose diff touches the failing guard's files is not deferred on base.red", async () => {
+    const w = world({ changed: ["app/routers/listing_feeds.py", "test/foo.test.js"] });
+    w.io.runCommand = async () => ({ rc: 1, output: "bare 429 at app/routers/listing_feeds.py" });
+    const r = await run(w, { verify: { invariants: ["bash scripts/guard.sh"] } });
+    assert.notEqual(r.code, "base.red"); assert.equal(r.code, "ci.red", "still gated: a guard that keeps failing blocks the merge");
+    assert.equal(w.merges.length, 0);
+  });
+
+  it("#5913 diffTouchesGuard is true only when a changed file is named by the failing guard", () => {
+    const failed = [{ command: "bash scripts/guard.sh", output: "bare 429 at app/routers/listing_feeds.py" }];
+    assert.equal(diffTouchesGuard({ changed: ["./app/routers/listing_feeds.py"], failed }), true);
+    assert.equal(diffTouchesGuard({ changed: ["src/foo.js"], failed }), false);
+    assert.equal(diffTouchesGuard({ changed: [], failed }), false);
   });
 
   it("#5239 verify.guard_block false keeps a failing invariant advisory", async () => {

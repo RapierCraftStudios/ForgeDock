@@ -883,7 +883,10 @@ rc_is "manual: CHANGES REQUESTED blocks" "$RC" 3; not_merged "manual: CHANGES RE
 gate_reset; mkctx 1 FULL "" ""; echo true > "$FIX/pipeline-42"; mgm "$GATE" --issue 42
 rc_is "manual: pipeline --issue refused" "$RC" 3; has "manual: pipeline --issue" "manual-pr refused"; not_merged "manual: pipeline --issue"
 gate_reset; mkctx 1 FULL "" ""; echo true > "$FIX/pipeline-42"; mgm "$GATE" --issue 42 --owner-requested
-rc_is "manual: owner flag does not override a pipeline --issue" "$RC" 3; not_merged "manual: owner vs pipeline issue"
+rc_is "manual: owner-requested explicit --issue on a pipeline issue runs the remaining gates" "$RC" 0; merged "manual: owner vs pipeline issue"
+[ ! -f "$FIX/trail-args" ] && ok || bad "manual: owner pipeline issue ran the verifier"
+gate_reset; mkctx 1 FULL "" ""; echo true > "$FIX/pipeline-42"; echo 1 > "$FIX/ci-rc"; printf 'CI_GATE: FAIL\n' > "$FIX/ci-out"; mgm "$GATE" --issue 42 --owner-requested
+rc_is "manual: owner-requested pipeline issue still blocked by red CI" "$RC" 3; has "manual: owner pipeline CI red" "ci gate not green"; not_merged "manual: owner pipeline CI red"
 gate_reset; mkctx 1 FULL "" ""; echo 55 > "$FIX/closing"; echo true > "$FIX/pipeline-55"; mgm "$GATE"
 rc_is "manual: closing a pipeline issue refused" "$RC" 3; has "manual: closing ref" "manual-pr refused"; not_merged "manual: closing ref"
 gate_reset; mkctx 1 FULL "" ""; echo 55 > "$FIX/closing"; echo true > "$FIX/pipeline-55"; mgm "$GATE" --owner-requested

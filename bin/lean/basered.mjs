@@ -40,6 +40,13 @@ export function baseRedPaths(rows = []) {
   return { src: src.slice(0, 20), tests: tests.slice(0, 20) };
 }
 
+/** #5913: true when the lane's changed files include a file the failing guard names (guarded code first, else its tests): the lane is then the base fix, not a bystander. */
+export function diffTouchesGuard({ changed = [], failed = [] } = {}) {
+  const { src, tests } = baseRedPaths(failed);
+  const have = new Set((changed ?? []).map((f) => String(f).trim().replace(/^\.\//, "")).filter(Boolean));
+  return [...src, ...tests].some((p) => have.has(p));
+}
+
 /** Issue number a commit stands for: a closing keyword, else an `issue-N` branch name (merge commit), else the last `(#N)` of the subject. */
 export function issueOf(subject = "", body = "") {
   const text = `${subject}\n${body}`;
