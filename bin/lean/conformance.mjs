@@ -1561,12 +1561,14 @@ export function isE2eCommand(command, e2e = null) {
   if (typeof e2e?.isSpec === "function" && cmd.split(/\s+/).some((t) => t && e2e.isSpec(t.replace(/^["']+|["']+$/g, "")))) return true;
   return E2E_CMD_RE.test(cmd);
 }
+/** #5754: a criterion verified against the running live stack/service/environment/cluster: observable only in production, so post-deploy at freeze instead of builder resumes. Checked after the local-runnable exclusion. */
+const LIVE_STACK_RE = /\b(?:against|on|in)\s+(?:the\s+)?live\s+(?:stack|service|environment|cluster)\b|\breal traffic\s+(?:against|on)\s+(?:the\s+)?live\b/i;
 /** #5468: a `[type:e2e]`/`[type:manual]` quote whose observable only exists in production (live URL, deploy, prod probe); local stack, browser and sandbox wording is runnable pre-merge. */
 export function prodOnlyE2e(quote) {
   const q = String(quote ?? "");
   if (LIVE_INFRA_RE.test(q)) return true; // #5547
   if (/\b(?:localhost|127\.0\.0\.1|local stack|playwright|browser|sandbox|staging)\b/i.test(q)) return false;
-  return /https?:\/\//i.test(q) || /\b(?:after (?:the )?deploy|production|prod probe|live (?:domain|site)|prod)\b/i.test(q) || PROD_WINDOW_RE.test(q);
+  return /https?:\/\//i.test(q) || /\b(?:after (?:the )?deploy|production|prod probe|live (?:domain|site)|prod)\b/i.test(q) || PROD_WINDOW_RE.test(q) || LIVE_STACK_RE.test(q);
 }
 /** #5547: criteria whose run needs a live benchmark, a paid run, remote infra or host-level load: observable only outside the lane, by shape not by repo name. */
 const LIVE_INFRA_RE = /\b(?:live|paid|remote)\s+(?:benchmarks?|runs?|infra(?:structure)?|hosts?)\b|\bbench(?:mark)?[\w.-]*\.(?:mjs|js|py|sh)\b|\bre-?run\b[^.]{0,60}\bbench(?:mark)?\b|\b(?:sandbox pool|(?:remote|rented|cloud|gpu) (?:infra|hosts?|runners?|clusters?|boxe?s?|machines?|gpus?|pool)|on (?:a|the) (?:remote|rented|cloud|gpu) \w+)\b|\bsynthetic load\b|\b\d+\s*[×x]\s*(?:nproc|cores?|cpus?)\b|\bCPU hogs?\b|\bhost[- ]level (?:load|run)\b|\b[≤<]=?\s*[\d.]+\s*[×x]\s*(?:the\s+)?(?:control\s+)?cost\b/i;
