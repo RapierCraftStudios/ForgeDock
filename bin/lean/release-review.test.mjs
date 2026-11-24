@@ -266,6 +266,7 @@ describe("fixStep", () => {
 
   it("only pending CI (#5519): blocks without a CI issue or lane; a real failure alongside still files", async () => {
     const s = fakeSeam();
+    s.summary = async () => ({ code: 0, data: { verdict: "BLOCK DEPLOY", marker: "FORGE:GATE_FAILURE", ciFailing: 1, ciPendingOnly: true }, lines: [] });
     const r = await fixStep(ctx(s, { review: { result: { ...failed, blocking: [], filed: [], ciFailing: 1, ciPendingOnly: true } } }));
     assert.match(r.reason, /still pending/);
     assert.deepEqual(s.log, []);
@@ -274,8 +275,22 @@ describe("fixStep", () => {
     assert.ok(s2.log.some((e) => e[0] === "fix-issue"));
   });
 
+  it("#5912: a stale pending-only GATE_FAILURE is re-summarised on resume and passes once CI is green", async () => {
+    const s = fakeSeam();
+    const r = await fixStep(ctx(s, { review: { result: { ...failed, blocking: [], filed: [], ciFailing: 3, ciPendingOnly: true } } }));
+    assert.equal(r.verdict, "APPROVE FOR DEPLOY");
+    assert.deepEqual(s.log, [["summary", []]]);
+  });
+
+  it("#5912: a GATE_FAILURE with a blocking finding is not re-summarised away", async () => {
+    const s = fakeSeam();
+    await fixStep(ctx(s, { review: { result: { ...failed, ciFailing: 0, ciPendingOnly: false } } }));
+    assert.ok(!s.log.some((e) => e[0] === "summary") || s.log.some((e) => e[0] === "fix-issue"));
+    assert.ok(s.log.some((e) => e[0] === "fix-issue"));
+  });
+
   it("blocks when the verdict is not a pass but there is nothing to fix", async () => {
-    assert.match((await fixStep(ctx(fakeSeam(), { review: { result: { ...failed, blocking: [], ciFailing: 0 } } }))).reason, /nothing to fix|neither/);
+    assert.match((await fixStep(ctx(Object.assign(fakeSeam(), { summary: async () => ({ code: 0, data: { verdict: "BLOCK DEPLOY", marker: "FORGE:GATE_FAILURE", ciFailing: 0 }, lines: [] }) }), { review: { result: { ...failed, blocking: [], ciFailing: 0 } } }))).reason, /nothing to fix|neither/);
   });
 });
 

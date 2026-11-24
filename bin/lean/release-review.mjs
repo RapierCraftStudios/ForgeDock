@@ -234,6 +234,13 @@ export async function fixStep(ctx) {
   if (!r?.pr) return blocked("no review result recorded by the review step");
   const seam = seamOf(ctx);
   const cfg = parseFixConfig(ctx.config?.fix);
+  // #5912: a resume reads the result saved while CI was still running. A CI-only failure at an unmoved head is re-summarised once, so CI
+  // that finished green since posts GATE_PASS instead of the stale "still pending" block.
+  if (r.marker !== "FORGE:GATE_PASS" && !r.blocking?.length && !r.guards?.length && (r.ciPendingOnly || !(r.ciFailing > 0)) && (await seam.headOf(r.pr)) === r.head) {
+    const s = await resummarise(ctx, seam, r);
+    if (s.err) return blocked(s.err);
+    r = s.r;
+  }
   while (r.marker !== "FORGE:GATE_PASS") {
     // Only cancelled duplicate runs are red (#5502): nothing to fix. The summary reruns them once; re-summarise without spending the round.
     if (!r.blocking?.length && r.ciFailing > 0 && r.ciCancelOnly) {
