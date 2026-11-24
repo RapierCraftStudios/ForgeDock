@@ -856,6 +856,40 @@ export async function wslNetworkFixup({ run: runCmd = run, log = console, idle =
   return "applied";
 }
 
+/**
+ * #5882: outbound-only transport. Long-polls the router (`GET /agent/poll`, which doubles as the heartbeat), runs each queued
+ * request against this agent's own bearer-checked HTTP API and posts the answer to `/agent/reply/:rid`. The router never dials in.
+ * `dispatch` defaults to a loopback call on cfg.listen; tests inject their own.
+ */
+export function startPoll(cfg, { log = console, fetchFn = globalThis.fetch, waitS = 25, dispatch = null, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  let stopped = false, backoff = 1000;
+  const host = !cfg.listen?.host || cfg.listen.host === "0.0.0.0" ? "127.0.0.1" : cfg.listen.host;
+  const local = dispatch ?? ((m, path, body) => call(`http://${host}:${cfg.listen.port}`, m, path, { body, token: cfg.token, timeoutMs: 180000 }));
+  const reply = (rid, r) => call(cfg.router_url, "POST", `/agent/reply/${encodeURIComponent(rid)}`, { body: { status: r.status, data: r.data, retry_after: r.retryAfter ?? null }, token: cfg.token, timeoutMs: 30000, fetchFn });
+  async function serve({ rid, method, path, body }) {
+    let r;
+    if (typeof path !== "string" || !/^\/(?!\/)/.test(path) || !["GET", "POST", "DELETE"].includes(method)) r = { status: 400, data: { error: "bad request" } };
+    else r = await local(method, path, body).catch((e) => ({ status: 502, data: { error: `agent local dispatch failed: ${e.message}` } }));
+    await reply(rid, r).catch((e) => log.warn?.(`poll reply ${rid}: ${e.message}`));
+  }
+  const done = (async () => {
+    while (!stopped) {
+      try {
+        const r = await call(cfg.router_url, "GET", `/agent/poll?wait=${waitS}`, { token: cfg.token, timeoutMs: (waitS + 15) * 1000, fetchFn });
+        if (r.status !== 204 && (!r.ok || !r.data?.rid)) throw new Error(`poll HTTP ${r.status}`);
+        backoff = 1000;
+        if (r.status !== 204) serve(r.data).catch((e) => log.warn?.(`poll serve: ${e.message}`));
+      } catch (e) {
+        if (stopped) break;
+        log.warn?.(`router poll failed: ${e.message}; retry in ${backoff}ms`);
+        await sleep(backoff);
+        backoff = Math.min(backoff * 2, 30000);
+      }
+    }
+  })();
+  return { stop: () => { stopped = true; }, done };
+}
+
 export function startAgent(cfg, deps) {
   const agent = createAgent(cfg, deps);
   const server = createServer(agent.handle);
@@ -866,5 +900,7 @@ export function startAgent(cfg, deps) {
   wslNetworkFixup({ idle: () => agent.capacity().active === 0 })
     .catch((e) => console.error("wsl network fixup failed", e))
     .finally(() => agent.prepullImages());
-  return { agent, server, close: () => { clearInterval(timer); server.close(); } };
+  // #5882: outbound mode keeps the local listener for the lanes' credential calls (bind it to the docker bridge, not a public interface).
+  const poll = cfg.outbound ? startPoll(cfg, { log: deps?.log }) : null;
+  return { agent, server, close: () => { clearInterval(timer); poll?.stop(); server.close(); } };
 }

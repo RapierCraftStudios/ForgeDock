@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Linux side of the agent install. Runs as root inside the dedicated `computeshare` WSL distro (or any systemd Linux host).
-# Required env: ROUTER_URL ENROLL_TOKEN AGENT_NAME AGENT_URL ALLOW_CPUS ALLOW_MEM_GB BUNDLE
+# Required env: ROUTER_URL ENROLL_TOKEN AGENT_NAME AGENT_URL (empty with OUTBOUND=1: the agent polls the router, #5882) ALLOW_CPUS ALLOW_MEM_GB BUNDLE
 set -euo pipefail
-: "${ROUTER_URL:?}" "${ENROLL_TOKEN:?}" "${AGENT_NAME:?}" "${AGENT_URL:?}" "${ALLOW_CPUS:?}" "${ALLOW_MEM_GB:?}" "${BUNDLE:?}"
+: "${ROUTER_URL:?}" "${ENROLL_TOKEN:?}" "${AGENT_NAME:?}" "${AGENT_URL?}" "${ALLOW_CPUS:?}" "${ALLOW_MEM_GB:?}" "${BUNDLE:?}"
 # Never resolve tools through the Windows PATH that WSL appends (e.g. Docker Desktop's docker CLI).
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 NODE_VERSION=22.12.0
@@ -54,18 +54,19 @@ install -d -m 0700 /etc/computeshare /var/lib/computeshare
 if [ ! -s /etc/computeshare/agent.token ]; then
   log "enrolling ${AGENT_NAME} (${AGENT_URL}) with ${ROUTER_URL}"
   resp=$(curl -fsS -X POST "${ROUTER_URL}/enroll" -H 'content-type: application/json' \
-    -d "$(jq -n --arg t "$ENROLL_TOKEN" --arg n "$AGENT_NAME" --arg u "$AGENT_URL" '{token:$t,name:$n,url:$u}')")
+    -d "$(jq -n --arg t "$ENROLL_TOKEN" --arg n "$AGENT_NAME" --arg u "$AGENT_URL" '{token:$t,name:$n} + (if $u == "" then {} else {url:$u} end)')")
   umask 077
   echo "$resp" | jq -r .agent_token > /etc/computeshare/agent.token
   [ -s /etc/computeshare/agent.token ] && [ "$(cat /etc/computeshare/agent.token)" != null ] || { echo "enrollment failed: $resp" >&2; rm -f /etc/computeshare/agent.token; exit 1; }
 fi
 
-jq -n --arg name "$AGENT_NAME" --arg router "$ROUTER_URL" --argjson port "$PORT" --argjson cpus "$ALLOW_CPUS" --argjson mem "$ALLOW_MEM_GB" '{
-  name: $name, listen: {host: "0.0.0.0", port: $port}, token_file: "/etc/computeshare/agent.token",
+OUTBOUND="${OUTBOUND:-0}"
+jq -n --arg name "$AGENT_NAME" --arg router "$ROUTER_URL" --arg outbound "$OUTBOUND" --arg lhost "${AGENT_LISTEN_HOST:-172.17.0.1}" --argjson port "$PORT" --argjson cpus "$ALLOW_CPUS" --argjson mem "$ALLOW_MEM_GB" '{
+  name: $name, listen: {host: (if $outbound == "1" then $lhost else "0.0.0.0" end), port: $port}, token_file: "/etc/computeshare/agent.token",
   router_url: $router, code_root: "/opt/computeshare",
   state_dir: "/var/lib/computeshare",
   allow_cpus: $cpus, allow_mem_gb: $mem, lease_ttl_s: 600, max_lifetime_s: 21600, keep_exited_s: 7200, reap_interval_s: 30
-}' > /etc/computeshare/agent.json
+} + (if $outbound == "1" then {outbound: true} else {} end)' > /etc/computeshare/agent.json
 chmod 0600 /etc/computeshare/agent.json
 
 log "building lane image (first run takes several minutes)"
