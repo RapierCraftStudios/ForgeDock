@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgent, safeName } from "../pool/agent.mjs";
+import { depcacheLines } from "../pool/cli.mjs";
 import { createRouter } from "../pool/router.mjs";
 import { httpTransport } from "../lean/sandbox-remote.mjs";
 import { tmpDir } from "./_tmp.mjs";
@@ -1205,4 +1206,9 @@ test("an explicit agent_id gives the agent its own cache volume, labelled with t
   docker.createVolume = async (n, l) => { created.push([n, l]); };
   await agent.launch({ spec: spec("c1"), cpus: 1, mem_gb: 1 });
   assert.deepEqual(created[0], ["cs-cache-donor.1-o-r", ["computeshare.cache=1", "computeshare.agent=donor.1"]]);
+});
+
+test("pool status prints per-repo depcache bytes", () => {
+  const lines = depcacheLines([{ name: "legion", cache_volumes: { "cs-cache-alterlab": { size_gb: 324, depcache_gb: { "rapiercraftstudios_alterlab": 322, other: 1.5 } } } }, { name: "bare", cache_volumes: { v: { size_gb: 1 } } }]);
+  assert.deepEqual(lines, ["legion cs-cache-alterlab: depcache rapiercraftstudios_alterlab 322 GB, other 1.5 GB"]);
 });

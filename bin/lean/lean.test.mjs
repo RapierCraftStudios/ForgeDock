@@ -6715,7 +6715,7 @@ describe("shared dependency cache wiring (#4220)", () => {
     assert.equal((await run(w, { dir })).terminalReason, "merged");
     assert.equal(d.calls.length, 1);
     assert.equal(d.calls[0].wt, "/wt/lean-7");
-    assert.match(d.calls[0].repoKey, /^[A-Za-z0-9._-]+-[0-9a-f]{8}$/);
+    assert.equal(d.calls[0].repoKey, "o_r"); // #5901: the repo slug, not the checkout path
     assert.equal(d.calls[0].worktreeAdded, true);
     const ev = readLog(dir, 7).filter((e) => e.event === "DEPS_PREPARED");
     assert.deepEqual(ev.map((e) => [e.status, e.eco, e.key]), [["hit", "pnpm", "0123456789abcdef"]]);
