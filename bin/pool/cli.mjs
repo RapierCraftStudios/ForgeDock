@@ -15,7 +15,7 @@ import { call as httpCall } from "./http.mjs";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const loadJson = (p) => JSON.parse(readFileSync(p, "utf8"));
 
-const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB --agent-url URL] | status | upgrade [agent] | remove <agent>  [--config path]";
+const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB --agent-url URL | --outbound | --one-liner] | status | upgrade [agent] | remove <agent>  [--config path]";
 const HELP_FLAGS = ["--help", "-h"];
 // Flags each verb accepts: `value` flags consume the next token, `bool` flags stand alone. Anything else dash-prefixed is rejected (#5008).
 const VERB_FLAGS = {
@@ -24,8 +24,8 @@ const VERB_FLAGS = {
   status: { value: ["--config"], bool: [] },
   upgrade: { value: ["--config"], bool: [] },
   remove: { value: ["--config"], bool: [] },
-  enroll: { value: ["--config", "--cpus", "--mem", "--agent-url"], bool: [] },
-  "install-command": { value: ["--config", "--cpus", "--mem", "--agent-url"], bool: [] },
+  enroll: { value: ["--config", "--cpus", "--mem", "--agent-url"], bool: ["--outbound", "--one-liner"] },
+  "install-command": { value: ["--config", "--cpus", "--mem", "--agent-url"], bool: ["--outbound", "--one-liner"] },
   resize: { value: ["--config", "--cpus", "--mem", "--vm-cpus", "--vm-mem", "--vm-swap"], bool: ["--drain"] },
 };
 
@@ -87,7 +87,10 @@ export async function runPoolCli(argv, deps = {}) {
       const cfg = routerConfig();
       const r = await call(`http://${cfg.listen.host}:${cfg.listen.port}`, "GET", "/agents", { token: cfg.forgedock_token });
       console.log(JSON.stringify(r.data, null, 2));
-      for (const a of r.data?.agents ?? []) { // #5891: the host drive per agent, on stderr so the JSON above stays parseable
+      for (const a of r.data?.agents ?? []) {
+        if (a.transport) console.log(`${a.name}: transport ${a.transport}`); // #5882
+        const n = a.net; // #5923
+        if (n?.mirrored) console.log(`${a.name}: net mirrored, port range ${n.port_range ?? "?"}, NAT pin ${n.nat_pin ? "present" : "MISSING"}${n.degraded ? " DEGRADED" : ""}`);
         if (!Number.isFinite(a.host_disk_free_gb)) continue;
         console.error(`${a.name}: host_disk_free_gb ${a.host_disk_free_gb}${Number.isFinite(a.host_disk_growth_gb_per_h) ? `, growth ${a.host_disk_growth_gb_per_h} GB/h` : ""}${a.disk_warning ? ` WARNING: ${a.disk_warning}` : ""}`);
       }
@@ -100,6 +103,21 @@ export async function runPoolCli(argv, deps = {}) {
       const r = await call(`http://${cfg.listen.host}:${cfg.listen.port}`, "POST", "/codes", { token: cfg.forgedock_token });
       if (!r.ok) throw new Error(`router refused: HTTP ${r.status}`);
       const size = `${flag("cpus") ? `&cpus=${Number(flag("cpus"))}` : ""}${flag("mem") ? `&mem=${Number(flag("mem"))}` : ""}`;
+      const sizeFlags = `${flag("cpus") ? ` --cpus ${Number(flag("cpus"))}` : ""}${flag("mem") ? ` --mem ${Number(flag("mem"))}` : ""}`;
+      if (rest.includes("--outbound") || rest.includes("--one-liner")) { // #5883: Linux/macOS one command, served by GET /install (always outbound)
+        console.log(`curl -fsSL '${cfg.public_url}/install' | sh -s -- --code '${r.data.code}'${sizeFlags}`);
+        console.error("(run as root: as a sudo user, write `| sudo sh -s -- ...`)");
+        if (!rest.includes("--outbound")) {
+          console.error(`(one-time code, expires ${r.data.expires_at}; outbound-only: the agent polls ${cfg.public_url}; uninstall: curl -fsSL '${cfg.public_url}/install' | sh -s -- --uninstall)`);
+          break;
+        }
+        console.error("(or, from a ForgeDock checkout on Linux:)");
+      }
+      if (rest.includes("--outbound")) { // #5882: the agent dials this router; no agent URL, no inbound port
+        console.log(`OUTBOUND=1 pool/install/install-agent-linux.sh --router '${cfg.public_url}' --token '${r.data.code}'${flag("cpus") ? ` --cpus ${Number(flag("cpus"))}` : ""}${flag("mem") ? ` --mem ${Number(flag("mem"))}` : ""}`);
+        console.error(`(one-time code, expires ${r.data.expires_at}; outbound-only: the agent polls ${cfg.public_url})`);
+        break;
+      }
       const agentUrl = flag("agent-url"); // #5856: a host reachable only through an SSH tunnel (no Tailscale) enrolls with its tunnel URL
       if (agentUrl) {
         let u; try { u = new URL(agentUrl); } catch { u = null; }

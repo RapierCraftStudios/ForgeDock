@@ -8,6 +8,8 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 export const CACHE_LABEL = "computeshare.cache=1";
+/** #5881: owner label; the reaper and sweeps touch only containers and volumes carrying their own agent's label. */
+export const agentLabel = (id) => `computeshare.agent=${id}`;
 const DAY = 86400000;
 
 /**

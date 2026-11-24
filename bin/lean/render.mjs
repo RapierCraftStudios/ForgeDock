@@ -168,10 +168,15 @@ export function renderTestAdequacy(rows) {
 export function renderReview(rv, contract, adequacy = null) {
   const rows = contract.requirements.map((r) => {
     const x = (rv.requirements ?? []).find((y) => y.id === r.id) ?? {};
+    if (r.disposition === "guidance") return `| ${esc(r.id)} | ${esc(`guidance (non-binding): ${r.why ?? ""}`)} | ${esc(x.note || x.evidence)} |  |`; // #5750: stance and reason
     const oob = r.verify === "out_of_band" ? ` (out of band${r.evidence ? `: ${r.evidence}` : ""})` : "";
     return `| ${esc(r.id)} | ${oob ? esc(`${x.status ?? ""}${oob}`) : esc(x.status)}${r.tracked ? ` (tracked ${r.tracked})` : ""} | ${esc(x.evidence)} | ${esc(x.validated_by)} |`;
   }).join("\n");
-  const cov = rv.issue_coverage ?? [];
+  const guidance = contract.requirements.filter((r) => r.disposition === "guidance");
+  const guide = new Set(guidance.map((r) => r.id)), guideQuotes = new Set(guidance.map((r) => r.quote));
+  // #5750: guidance rows are non-binding, so they are not counted as covered issue requirements (matched by contract_ids, else by quote)
+  const isGuide = (c) => c.guidance === true || (Array.isArray(c.contract_ids) && c.contract_ids.length ? c.contract_ids.every((id) => guide.has(id)) : guideQuotes.has(c.quote));
+  const cov = (rv.issue_coverage ?? []).filter((c) => !isGuide(c));
   return `## Conformance Review\n**Verdict:** CONFORMS (computed by the engine from the rows below)\n\n| Requirement | Status | Evidence | Validated by |\n| --- | --- | --- | --- |\n${rows}\n\n**Issue coverage:** ${cov.filter((c) => c.status === "covered").length}/${cov.length} issue requirement(s) covered by the contract\n**Scope:** ${(rv.scope ?? []).map((s) => `\`${escl(s.file)}\` ← ${escl(s.authorized_by)}`).join(", ") || NR}\n**Preserve:** ${(rv.preserve ?? []).map((p) => `${escl(p.id)} ${escl(p.status)}`).join(", ") || "none"}\n**Regressions:** none${renderTestAdequacy(adequacy)}\n\n**Notes:** ${escl(rv.summary)}`;
 }
 

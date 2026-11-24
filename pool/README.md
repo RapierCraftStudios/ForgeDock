@@ -6,6 +6,12 @@ ForgeDock's built-in remote compute pool (imported from computeshare; AGPL-3.0-o
 - `pool/image/` lane image recipe (Dockerfile, shims, entrypoint, `cs-cred` credential relay, `cs-relay` read-only capability relay: allowlisted commands executed on the dispatching host, #4778).
 - `pool/install/` agent installers (Windows/WSL, native Linux, router).
   Native Linux agent (root, systemd): `pool/install/install-agent-linux.sh --router URL --token CODE [--name N --cpus N --mem GB --dry-run]`.
+  One command on Linux or macOS (#5883, outbound, no inbound port): `forgedock pool enroll --one-liner` prints
+  `curl -fsSL '<router>/install' | sh -s -- --code '<code>' [--cpus N --mem GB]` (run as root, e.g. `| sudo sh -s -- ...`). Rerunning is safe:
+  an enrolled host reuses its code and agent token. macOS needs a running Docker Desktop or colima and installs a LaunchDaemon.
+  Uninstall: `curl -fsSL '<router>/install' | sh -s -- --uninstall` (or `pool/install/uninstall-agent-linux.sh` / `uninstall-agent-macos.sh`,
+  `--dry-run` to preview). It removes the service, this agent's labelled containers, volumes and lane images and its files; docker and node
+  only when `/etc/computeshare/installed-by` records that the installer added them. Never a `docker system prune`.
 - `pool/services/` opt-in caching proxies (npm, PyPI, apt) and a read-only git mirror (`docker-compose.yml`); nothing starts them. See `docs/ENV-LIBRARY.md`.
 - Tests: `bin/tests/computeshare.test.mjs`.
 

@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { resolveLane, makeLaneCache } from "./lane.mjs";
 import { orchestrate, deferPolicy, DEFER_BACKOFF_S, formatOutcomeLists, CAPACITY_FALLBACK_AFTER, isTransientEngineError, transientRetryDelayMs, DEFAULT_TRANSIENT_RETRIES } from "./orchestrate.mjs";
-import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane, detachedLanes } from "./batch.mjs";
+import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane, detachedLanes, stackedOnOf } from "./batch.mjs";
 import { makeLedger } from "./ledger.mjs";
 import { providerLanes } from "./execution.mjs";
 import { orchestrateFromCli, runFromCli, readOrchestration, makeRelabelNeedsHuman, makeMarkRecovering, makeDispatchCheck } from "../engine-cli.mjs";
@@ -267,9 +267,11 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.equal(isLaneAlive(42, "lane", { kill: () => true, procDir: proc }), true);
     writeFileSync(join(pd, "stat"), "42 (no) de) Z 1 42 42 0 -1\n");
     assert.equal(isLaneAlive(42, "lane", { kill: () => true, procDir: proc }), false);
-    assert.deepEqual(readOrchestration(root), { breaker: { errors: 3, window_min: 30 }, maxDeferrals: 3, transientRetries: 4, blockedLabel: "blocked", globalParallel: null, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] } });
+    assert.deepEqual(stackedOnOf({ stacked: { 7: { dependency: 6, branch: "b", sha: "abcdef1" } } }, 7), { dependency: 6, branch: "b", sha: "abcdef1" }, "#5832: stackedOn read from batch state");
+    assert.equal(stackedOnOf({}, 7), null);
+    assert.deepEqual(readOrchestration(root), { breaker: { errors: 3, window_min: 30 }, maxDeferrals: 3, transientRetries: 4, blockedLabel: "blocked", globalParallel: null, stacking: "off", recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] }, mergeTrain: "off", mergeTrainBatch: 4 });
     writeFileSync(join(root, "forge.yaml"), "orchestration:\n  breaker:\n    errors: 5\n    window_min: 10\n  max_deferrals: 2\n  global_parallel: 4\n  transient_retries: 2\n");
-    assert.deepEqual(readOrchestration(root), { breaker: { errors: 5, window_min: 10 }, maxDeferrals: 2, transientRetries: 2, blockedLabel: "blocked", globalParallel: 4, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] } });
+    assert.deepEqual(readOrchestration(root), { breaker: { errors: 5, window_min: 10 }, maxDeferrals: 2, transientRetries: 2, blockedLabel: "blocked", globalParallel: 4, stacking: "off", recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] }, mergeTrain: "off", mergeTrainBatch: 4 });
   });
 
   it("run-issue --result-file writes the lane result, also when the run throws", async () => {
@@ -383,6 +385,31 @@ describe("#4318: the batch dispatcher's signal relabel and the needs-human relab
         assert.equal(await h.run(), "skipped");
         assert.deepEqual(h.calls, ["view"]);
       }
+    });
+    it("relabel skips an open issue whose fix PR merged on a non-lean head", async () => {
+      const calls = [];
+      const gh = async (a) => {
+        calls.push(a.slice(0, 2).join(" "));
+        if (a[1] === "view" && a[0] === "issue") return JSON.stringify({ state: "OPEN", body: "", labels: [], closedByPullRequestsReferences: [{ number: 41 }] });
+        if (a[0] === "pr") return JSON.stringify({ state: "MERGED", mergedAt: "2026-11-17T15:43:35Z" });
+        return "";
+      };
+      for (const parked of [null, { code: "env.validate_timeout" }]) assert.equal(await makeRelabelNeedsHuman({ gh, repo: "o/r", now: () => 1000 })({ issue: 7, evidence: "why", parked }), "skipped");
+      assert.ok(!calls.includes("issue edit"));
+      const labelled = async (a) => (a[0] === "issue" && a[1] === "view" ? JSON.stringify({ state: "OPEN", body: "", labels: [{ name: "workflow:merged" }] }) : "");
+      assert.equal(await makeRelabelNeedsHuman({ gh: labelled, repo: "o/r", now: () => 1000 })({ issue: 7, evidence: "why" }), "skipped");
+    });
+    it("relabel still parks an issue reopened after merge", async () => {
+      const calls = [];
+      const gh = async (a) => {
+        calls.push(a.slice(0, 2).join(" "));
+        if (a[0] === "issue" && a[1] === "view") return JSON.stringify({ state: "OPEN", body: "", labels: [], closedByPullRequestsReferences: [{ number: 41 }] });
+        if (a[0] === "pr") return JSON.stringify({ state: "MERGED", mergedAt: "2026-11-17T15:43:35Z" });
+        if (a[0] === "api" && a[1].endsWith("/events")) return "reopened\t2026-11-18T00:00:00.000Z\t";
+        return "";
+      };
+      assert.equal(await makeRelabelNeedsHuman({ gh, repo: "o/r", now: () => 1000 })({ issue: 7, evidence: "why" }), true);
+      assert.ok(calls.includes("issue edit"));
     });
     it("an expired lease relabels: the label first, then the comment", async () => {
       const h = hook({ state: "OPEN", body: LIVE(500) });
