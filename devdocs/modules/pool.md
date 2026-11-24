@@ -10,6 +10,14 @@ last_compacted: "2026-11-15"
 
 Rolling per-module knowledge log. Hard cap: 150 lines.
 
+## Entry 2026-11-24 — One-command installers: /install, Linux/macOS uninstall (#5883, parent #5857)
+
+- `GET /install` (router, `auth: none`) serves `installScript()`: a POSIX sh script with only `cfg.public_url` baked in, never a token. `curl -fsSL <router>/install | sh -s -- --code CODE [--name N --cpus N --mem GB]`; the code goes to `/bootstrap/bundle.tar.gz?token=` (checked, not consumed) and `/enroll` (consumed). Detects `uname` Linux|Darwin and runs `install-agent-linux.sh` or `install-agent-macos.sh` with `--outbound` (always). `--uninstall` runs the shipped `uninstall-agent-{linux,macos}.sh` from the installed code root (bundle fallback when `--code` is given). `--dry-run` prints the plan (code redacted).
+- Idempotent: with an agent token present (`/etc/computeshare/agent.token`, macOS `/usr/local/etc/computeshare/agent.token`) the bootstrap and the installers reuse the installed code (no bundle download, so a used code works) and never re-enroll.
+- Install marker `/etc/computeshare/installed-by` (macOS `/usr/local/etc/computeshare/installed-by`): one line per component the installer added (`docker`, `node`, `sysctl`, `fstrim.timer` only if this install enabled it). `uninstall-agent-linux.sh` stops and removes `computeshare-agent.service`, removes this agent's containers and volumes by `computeshare.agent=<id>` label (id from agent.json `agent_id`/`name`), `forgedock-lane` images, `/opt/computeshare`, `/etc/computeshare`, `/var/lib/computeshare`, the sysctl drop-in; `/opt/node`, fstrim.timer and docker only when marked. Never `docker system prune`. No user is created, so none is removed. `--dry-run` prints `would run:`/`would remove:` lines; a clean host is a no-op.
+- macOS: needs a running Docker Desktop / colima (never installed); node and code under `/usr/local/computeshare`, state `/usr/local/var/computeshare`, LaunchDaemon `io.forgedock.computeshare-agent` with the console user's `DOCKER_HOST`; agent listens on 127.0.0.1 (lanes use host.docker.internal). `uninstall-agent-macos.sh` boots it out and removes plist, dirs and labelled docker objects.
+- `forgedock pool enroll --outbound` prints the curl|sh line first, then the unchanged `OUTBOUND=1 ...` line; `--one-liner` prints only the curl|sh line. Scripts honour `CS_PREFIX` (tests only). Tests: `bin/tests/pool-install.test.mjs`.
+
 ## Entry 2026-11-23 — Outbound-only agent transport (#5882, parent #5857)
 
 - An agent enrolled without `url` (`POST /enroll` {token,name}) is stored `{name, transport:"poll", token}`; the router never dials it. `agentCall` (`bin/pool/router.mjs`) enqueues the request and awaits the reply (rejects at once when the agent has not polled for `poll_offline_s`, default 60, so callers answer 502 / `ok:false` in `capacities()`).

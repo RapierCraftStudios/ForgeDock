@@ -14,6 +14,12 @@ log() { echo "[computeshare] $*"; }
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
 pidof systemd >/dev/null || [ "$(ps -p 1 -o comm=)" = systemd ] || { echo "systemd is not PID 1; enable it in /etc/wsl.conf and restart the distro" >&2; exit 1; }
 
+# #5883: what this installer added to the host (one per line: docker, node, sysctl, fstrim.timer). uninstall-agent-linux.sh removes
+# only what the marker lists; lines from earlier runs are kept, so a rerun never forgets a component it found already installed.
+install -d -m 0700 /etc/computeshare /var/lib/computeshare
+MARKER=/etc/computeshare/installed-by
+mark() { grep -qx "$1" "$MARKER" 2>/dev/null || echo "$1" >> "$MARKER"; }
+
 log "base packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
@@ -28,11 +34,13 @@ if [ ! -x /usr/bin/dockerd ]; then
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${DOCKER_DISTRO} ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
   apt-get update -qq
   apt-get install -y -qq docker-ce docker-ce-cli containerd.io >/dev/null
+  mark docker
 fi
 # WSL mirrored networking usually has no IPv6 route; dockerd would still dial registries over IPv6 and fail.
 if grep -qi microsoft /proc/sys/kernel/osrelease && [ -z "$(ip -6 route show default 2>/dev/null)" ]; then
   printf 'net.ipv6.conf.all.disable_ipv6=1\nnet.ipv6.conf.default.disable_ipv6=1\n' > /etc/sysctl.d/90-computeshare-noipv6.conf
   sysctl -q -p /etc/sysctl.d/90-computeshare-noipv6.conf
+  mark sysctl
   systemctl restart docker 2>/dev/null || true
 fi
 systemctl enable --now docker >/dev/null
@@ -43,6 +51,7 @@ if [ ! -x /opt/node/bin/node ] || [ "$(/opt/node/bin/node --version)" != "v${NOD
   case "$(uname -m)" in aarch64|arm64) NODE_ARCH=arm64 ;; *) NODE_ARCH=x64 ;; esac
   curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" | tar -xJ -C /opt
   mv "/opt/node-v${NODE_VERSION}-linux-${NODE_ARCH}" /opt/node
+  mark node
 fi
 
 log "agent code"
@@ -51,7 +60,7 @@ tar -xzf "$BUNDLE" -C /opt/computeshare.new
 rm -rf /opt/computeshare && mv /opt/computeshare.new /opt/computeshare
 
 install -d -m 0700 /etc/computeshare /var/lib/computeshare
-if [ ! -s /etc/computeshare/agent.token ]; then
+if [ ! -s /etc/computeshare/agent.token ]; then # a rerun keeps its agent token: never re-enrolled (#5883)
   log "enrolling ${AGENT_NAME} (${AGENT_URL}) with ${ROUTER_URL}"
   resp=$(curl -fsS -X POST "${ROUTER_URL}/enroll" -H 'content-type: application/json' \
     -d "$(jq -n --arg t "$ENROLL_TOKEN" --arg n "$AGENT_NAME" --arg u "$AGENT_URL" '{token:$t,name:$n} + (if $u == "" then {} else {url:$u} end)')")
