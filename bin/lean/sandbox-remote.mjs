@@ -25,8 +25,11 @@ import { scopedEnv } from "./execution.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { laneEnvFor, readEnvSnapshots } from "../env/env.mjs";
 import { resolveCredential } from "./credentials.mjs";
+import { seedMirror } from "./mirror-bundle.mjs";
 import { relayCommandNames, runRelayed, servicePending } from "./relay.mjs";
 
+/** #5949: one log line for a launch's seed stats: bytes sent, and the time saved against shipping the whole repo at the same rate. */
+const seedLine = (s) => (s.fallback ? `fell back to GitHub (${s.reason})` : s.upToDate ? "mirror already up to date, nothing sent" : `${s.full ? "full" : "incremental"} bundle, ${s.bytes} bytes in ${s.chunks} chunks, ${s.ms} ms${Number.isFinite(s.saved_ms) ? `, about ${Math.round(s.saved_ms / 1000)} s saved` : ""}`);
 const REDACTED = "[redacted]";
 const PREFETCH_MAX_B64 = 96 * 1024; // one env string stays under Linux MAX_ARG_STRLEN (128 KB)
 /** Replace every value of `secrets` (4+ chars, longest first) in `text`. */
@@ -113,6 +116,20 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
       if (!r.ok) throw fail("agent disk", r);
       if (!Array.isArray(r.data?.agents)) throw new Error("agent disk: malformed router answer");
       return r.data.agents.map((a) => ({ name: String(a?.name ?? "?"), disk_free_gb: Number.isFinite(a?.disk_free_gb) ? a.disk_free_gb : null }));
+    },
+    /** #5949: the agent mirror's ref tips for a repo ({mirrors: {slug: {ref: sha} | "absent"}, upload_offset?}); 404/405 = an older router/agent (unsupported). */
+    async mirrors(id, q) {
+      const r = await call("GET", `${p(id)}/mirrors?${new URLSearchParams(Object.entries(q).filter(([, v]) => v !== null && v !== undefined).map(([k, v]) => [k, String(v)]))}`);
+      if (r.status === 404 || r.status === 405) throw Object.assign(fail("mirrors", r), { unsupported: true });
+      if (!r.ok) throw fail("mirrors", r);
+      return r.data ?? {};
+    },
+    /** #5949: one bundle chunk or the finish call; a 409 carries the agent's resume offset. */
+    async seed(id, body) {
+      const r = await call("POST", `${p(id)}/seed`, body);
+      if (r.status === 404 || r.status === 405) throw Object.assign(fail("seed", r), { unsupported: true });
+      if (!r.ok) throw Object.assign(fail("seed", r), Number.isInteger(r.data?.offset) ? { offset: r.data.offset } : {});
+      return r.data ?? {};
     },
     /** #5735: lane sandboxes per pool agent (`GET /agents` -> `agents[].lanes {used, ceiling}`) and across all batches (`remote_lanes`; else the `fdrsbx-` keys of `sandboxes`). A bad answer throws. */
     async agentLanes() {
@@ -253,8 +270,21 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
       // #4912: a ready warm sandbox first; none, an error or a transport without claim is the cold start.
       let claimed = null;
       if (warm && typeof transport.claim === "function") { try { claimed = await transport.claim(spec); } catch { claimed = null; } }
+      // #5949: seed the pool agent's mirror from this host first (repo_source dispatcher|github|auto); failure falls back to GitHub, or fails under `dispatcher`.
+      let seed = null;
+      const source = ["dispatcher", "github"].includes(settings.repoSource) ? settings.repoSource : "auto";
+      if (!claimed && repo && settings.repoDir && source !== "github" && typeof transport.seed === "function") {
+        try { seed = await seedMirror({ transport, id, slug: repo, cacheKey: spec.cache?.key ?? repo, repoDir: settings.repoDir, now }); }
+        catch (e) {
+          if (source === "dispatcher") throw Object.assign(new Error(`repo seeding failed (repo_source=dispatcher): ${redact(e?.message ?? e, [...known]).slice(0, 200)}`), { code: "pool.seed_failed", transient: e?.transient === true });
+          seed = { sent: false, fallback: true, reason: redact(e?.message ?? e, [...known]).slice(0, 160) };
+        }
+      }
       if (!claimed) await transport.launch(spec);
-      return { provider: name, id, issue, startedAt, minutes: 0 };
+      if (seed) {
+        try { const f = batch.logFile(issue); mkdirSync(dirname(f), { recursive: true }); appendFileSync(f, `[seed] ${seedLine(seed)}\n`); } catch { /* logging only */ }
+      }
+      return { provider: name, id, issue, startedAt, minutes: 0, ...(seed ? { seed } : {}) };
     },
     async status(h) {
       let s;

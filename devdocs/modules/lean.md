@@ -812,6 +812,12 @@ push/gh/merge retry patterns).
 
 ## Entries
 
+## Entry 2026-11-24 — dispatcher-side repo seeding (#5949)
+
+- `remoteProvider.start` (`bin/lean/sandbox-remote.mjs`) seeds the pool agent's repo mirror before `launch` (pool provider, `execution.repo_source` dispatcher|github|auto, parsed by `parseExecution` as `repoSource`, default auto). `seedMirror` (`bin/lean/mirror-bundle.mjs`) asks `transport.mirrors` for the agent's ref tips, builds `git bundle create - <origin refs> ^<agent tips>` from the dispatcher's clone (everything when absent; nothing sent when up to date) and uploads it in 384 KB checksummed chunks via `transport.seed`, resuming from the agent's offset.
+- Seed stats (`bytes`, `chunks`, `ms`, estimated `saved_ms` = the whole repo at the upload's own rate) ride on the handle (`handle.seed`) and one `[seed]` line in the lane log. Failure under `auto` is a fallback to the GitHub path (`seed.fallback`); under `dispatcher` the launch throws `pool.seed_failed`.
+
+
 ## Entry 2026-10-19 — Dossier created (#4185)
 
 Initial dossier written with NORTHSTAR.md and the devdocs freshness gate.

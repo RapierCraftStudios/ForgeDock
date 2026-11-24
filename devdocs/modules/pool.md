@@ -10,6 +10,14 @@ last_compacted: "2026-11-15"
 
 Rolling per-module knowledge log. Hard cap: 150 lines.
 
+## Entry 2026-11-24 — dispatcher-seeded repo mirrors (#5949)
+
+- A lane no longer depends on the pool host's own GitHub link. Agent `GET /mirrors?slug=&cache_key=[&upload=]` returns `{mirrors: {<slug>: {<ref>: <sha>} | "absent"}, upload_offset?}` (`bin/pool/agent.mjs`); `POST /mirrors/seed` takes a base64 chunk `{slug, cache_key, upload (bundle sha256), offset, data_b64, sha256}` (a wrong offset is 409 with the resume `offset`) or `{finish: {size}}`.
+- `bin/pool/mirror-seed.mjs` applies the bundle in a helper container on the cache volume: copy of `/cache/git/<slug>.git` (or a fresh bare repo) -> `git fetch <bundle>` -> `fsck --connectivity-only` -> rename, under a per-slug flock; a `cs-seeded` marker is written. Any failure removes the tmp copy and leaves the mirror untouched.
+- Router: `GET /sandboxes/:id/mirrors` and `POST /sandboxes/:id/seed` relay to the agent chosen for that sandbox id (remembered so `launch` prefers it), over direct and poll transports; chunks over 768 KB (base64) are 413. Older router/agent: 404/405 means the dispatcher falls back.
+- `pool/image/entrypoint.sh`: a seeded mirror is cloned `--shared` with no GitHub fetch when it already has the lane ref (else a best-effort fetch, 3 tries); origin is reset to GitHub, so pushes stay there. Unseeded mirrors keep the old clone/fetch path.
+- `execution.repo_source: dispatcher | github | auto` (default auto): github never seeds; dispatcher fails the launch when seeding fails; auto falls back to the GitHub path.
+
 ## Entry 2026-11-21 — Per-host lane ceiling (#5735)
 
 - Decision: `devdocs/decisions/5735-host-lane-ceiling.md`.
