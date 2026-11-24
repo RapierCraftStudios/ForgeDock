@@ -2159,6 +2159,79 @@ describe("conformance shadow mode (the default)", () => {
     assert.match(restart, /validate G1/); assert.match(restart, /fixing one failure/);
     assert.doesNotMatch(restart, /The engine froze \.forge-lean\/contract\.json/);
   });
+  it("#5829 builder continues past 120K on a 1M model and emits tokens before and after", async () => {
+    const w = world(), dir = tmpDir("core-ctx1m-"), orig = w.io.runner, seen = [];
+    w.io.runner = async (c) => {
+      if (c.role === "builder") seen.push(c.contextMax ?? 0);
+      const r = await orig(c); return c.role === "builder" && c.contextMax > 0 ? { ...r, endTokens: 600000 } : r;
+    };
+    const r = await run(w, { dir, builderModel: "claude-opus-5-5[1m]", builderRouting: { mode: "off" }, contextRestartCostUsd: 10 });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(seen[1], 900000, "the gate lets the session run past the 500000 ceiling to the real limit");
+    const log = readLog(dir, 7);
+    assert.ok(log.some((e) => e.event === "CONTEXT_CONTINUED" && e.tokens_before === 500000 && e.tokens_after === 600000));
+    assert.ok(!log.some((e) => e.event === "CONTEXT_CEILING"), "no restart");
+    assert.equal(r.context.restarts, 0); assert.equal(r.context.continues, 1);
+  });
+  it("#5829 a 1M model with no explicit ceiling gets about 500K; at the real limit the builder restarts via the digest", async () => {
+    const w = world({ dirty: true }), dir = tmpDir("core-ctxlim-"), orig = w.io.runner, seen = []; let n = 0;
+    w.io.runner = async (c) => {
+      if (c.role === "builder") seen.push({ contextMax: c.contextMax ?? 0, resume: c.resume ?? null, prompt: c.prompt });
+      if (c.role === "builder" && n++ === 1) throw Object.assign(new Error("ctx"), { code: "CLI_CONTEXT", context: 950000, contextMax: 450000, turns: 80, usage: null });
+      return orig(c);
+    };
+    const r = await run(w, { dir, builderModel: "claude-opus-5-5[1m]", builderRouting: { mode: "off" }, contextRestartCostUsd: 0.01 });
+    assert.equal(seen[1].contextMax, 500000, "model-aware default ceiling");
+    assert.equal(seen[2].resume, null); assert.match(seen[2].prompt, /The engine froze \.forge-lean\/contract\.json/);
+    assert.equal(r.context.restarts, 1);
+  });
+  it("#5829 a session continued past the ceiling that reaches the real limit restarts via the digest", async () => {
+    const w = world({ dirty: true }), dir = tmpDir("core-ctxreal-"), orig = w.io.runner, seen = []; let n = 0;
+    w.io.runner = async (c) => {
+      if (c.role === "builder") seen.push({ contextMax: c.contextMax ?? 0, resume: c.resume ?? null, prompt: c.prompt });
+      if (c.role === "builder" && n++ === 1) throw Object.assign(new Error("ctx"), { code: "CLI_CONTEXT", context: 900000, contextMax: 900000, turns: 90, usage: null });
+      return orig(c);
+    };
+    await run(w, { dir, builderModel: "claude-opus-5-5[1m]", builderRouting: { mode: "off" }, contextRestartCostUsd: 10 });
+    assert.equal(seen[1].contextMax, 900000); assert.equal(seen[2].resume, null); assert.match(seen[2].prompt, /The engine froze/);
+    assert.ok(readLog(dir, 7).some((e) => e.event === "CONTEXT_CEILING" && e.real_limit === true && e.context_tokens === 900000));
+  });
+  it("#5829 a session stopped at the ceiling is compacted in place and continues with tokens before and after; a failed compaction falls back to the digest restart", async () => {
+    for (const ok of [true, false]) {
+      const w = world({ dirty: true }), dir = tmpDir("core-ctxcompact-"), orig = w.io.runner, seen = []; let n = 0;
+      w.io.runner = async (c) => {
+        if (c.role === "builder") seen.push({ prompt: c.prompt, resume: c.resume ?? null });
+        if (c.role === "builder" && c.prompt === "/compact") { if (!ok) throw new Error("compact unavailable"); return { ...(await orig(c)), endTokens: 30000 }; }
+        if (c.role === "builder" && n++ === 1) throw Object.assign(new Error("ctx"), { code: "CLI_CONTEXT", sessionId: "sess-1", context: 130000, turns: 40, usage: null });
+        return orig(c);
+      };
+      const r = await run(w, { dir, contextCeilingTokens: 120000 }), log = readLog(dir, 7);
+      assert.equal(seen[2].prompt, "/compact"); assert.equal(seen[2].resume, "sess-1");
+      if (ok) {
+        assert.ok(log.some((e) => e.event === "CONTEXT_COMPACTED" && e.tokens_before === 130000 && e.tokens_after === 30000));
+        assert.equal(seen[3].resume, "sess-1", "the same session continues"); assert.equal(r.context.restarts, 0); assert.equal(r.context.compactions, 1);
+      } else {
+        assert.ok(log.some((e) => e.event === "CONTEXT_COMPACT_FAILED")); assert.equal(seen[3].resume, null); assert.match(seen[3].prompt, /The engine froze/); assert.equal(r.context.restarts, 1);
+      }
+    }
+  });
+  it("#5829 builder still kills and restarts at the ceiling on a small-window model", async () => {
+    const w = world({ dirty: true }), dir = tmpDir("core-ctxsmall-"), orig = w.io.runner, seen = []; let n = 0;
+    w.io.runner = async (c) => {
+      if (c.role === "builder") seen.push({ contextMax: c.contextMax ?? 0, resume: c.resume ?? null });
+      if (c.role === "builder" && n++ === 1) throw Object.assign(new Error("ctx"), { code: "CLI_CONTEXT", context: 130000, turns: 40, usage: null });
+      return orig(c);
+    };
+    const r = await run(w, { dir, builderModel: "claude-sonnet-5-5", builderRouting: { mode: "off" }, contextCeilingTokens: 120000 });
+    assert.equal(seen[1].contextMax, 120000); assert.equal(seen[2].resume, null);
+    assert.ok(readLog(dir, 7).some((e) => e.event === "CONTEXT_CEILING" && e.context_tokens === 130000));
+    assert.equal(r.context.restarts, 1); assert.equal(r.context.continues, 0);
+  });
+  it("#5829 lane summary reports restarts, turns and cost", async () => {
+    const r = await run(world());
+    assert.deepEqual(Object.keys(r.context).sort(), ["compactions", "continues", "cost_usd", "restarts", "turns"]);
+    assert.equal(r.context.restarts, 0); assert.equal(typeof r.context.turns, "number"); assert.equal(typeof r.context.cost_usd, "number");
+  });
   it("#4328 freeze-time preflight: a validate needing a module the host lacks gets the one contract correction, before any build", async () => {
     const pyC = { ...CONTRACT, validate: [{ id: "V1", command: `python3 -c "import yaml"` }] }, uvC = { ...CONTRACT, validate: [{ id: "V1", command: `uv run python -c "import yaml"` }] };
     const probe = (w) => { const ran = []; w.io.probeCommand = async (a) => { ran.push(a); return { rc: /^'python3' .*'yaml'/.test(a.command) ? 3 : 0, output: "" }; }; return ran; };
@@ -8115,6 +8188,14 @@ describe("#4362 attempt triggers", () => {
     assert.deepEqual(impl.map((e) => [e.attempt, e.trigger, e.restart_of ?? null]), [[1, "plan", null], [2, "build", null], [2, "context_restart", "build"]]);
     assert.equal(impl[1].usage.cache_read_input_tokens, 4000000, "the stopped session's tokens are recorded");
     assert.equal(r.firstPass, true);
+  });
+
+  it("#5829: no ceiling configured and a builder model without a known window keeps the 120000 ceiling instead of switching it off", async () => {
+    const w = world(); const orig = w.io.runner, caps = [];
+    w.io.runner = async (c) => { if (c.role === "builder") caps.push(c.contextMax ?? 0); return orig(c); };
+    assert.equal((await run(w, { dir: tmpDir("core-ctx-"), builderModel: "mystery-1", builderRouting: { mode: "off" } })).terminalReason, "merged");
+    assert.equal(caps[0], 0, "the plan call runs uncapped");
+    assert.equal(caps[1], 120000, "the build call carries the default ceiling");
   });
 
   it("#4390: context restarts are bounded; after three the call runs uncapped, and 0 disables the ceiling", async () => {
