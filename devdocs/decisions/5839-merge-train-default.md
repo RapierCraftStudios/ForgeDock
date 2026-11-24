@@ -35,3 +35,12 @@ Baseline: the serial lane merge measured in epic #5823 (off). Target: 1.5-2x mer
 | stacked PR | stacked syncs stay in-lane | they move the dependency head, not the base queue |
 
 The record is persisted in the train snapshot (and the lane result), so a resumed batch replays it.
+
+## Measured values
+
+Not yet measured: no live A/B has run, so no before/after numbers are recorded and none are invented. Fill this table from the `throughput:` and `merge train:` report lines of the two batches (off, on), then decide the default against the 1.5-2x target.
+
+| Setting | merged/hour | slot-hours per merge | post-merge fix sessions | base.conflict (train / lane) |
+|---|---|---|---|---|
+| off (baseline, epic #5823) | pending | pending | pending | n/a |
+| on | pending | pending | pending | pending |
