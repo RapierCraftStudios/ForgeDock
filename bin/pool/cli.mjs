@@ -87,6 +87,7 @@ export async function runPoolCli(argv, deps = {}) {
       const cfg = routerConfig();
       const r = await call(`http://${cfg.listen.host}:${cfg.listen.port}`, "GET", "/agents", { token: cfg.forgedock_token });
       console.log(JSON.stringify(r.data, null, 2));
+      for (const a of r.data?.agents ?? []) if (a.transport) console.log(`${a.name}: transport ${a.transport}`); // #5882
       break;
     }
     case "enroll":
