@@ -7,16 +7,16 @@
  * The command gets FORGE_PAGE_ROUTES, FORGE_PAGE_VIEWPORTS and FORGE_CAPTURE_DIR and must write `<dir>/<slug>-<viewport>.png`
  * (slug: "/" -> home, "/a/b" -> a-b). All effects (run, stat, git) are injected.
  */
-import { pageFiles, pageRouteOf } from "./pagegate.mjs";
+import { designOnlyFiles, pageFiles, pageRouteOf } from "./pagegate.mjs";
 
 export const VISUAL_REF = "refs/heads/forge-visual";
 export const MIN_SHOT_BYTES = 1000; // a smaller PNG is a blank page
 
 export const routeSlug = (route) => String(route).replace(/^\/+|\/+$/g, "").replace(/[^A-Za-z0-9._-]+/g, "-") || "home";
 
-/** The URL paths of the changed public pages. */
+/** The URL paths of the changed public pages and design_only pages (#5793); only Next app-router page files have a route. */
 export function changedRoutes(files, cfg, { readFile = null } = {}) {
-  return [...new Set(pageFiles(files, cfg, { readFile }).map(pageRouteOf).filter(Boolean))];
+  return [...new Set([...pageFiles(files, cfg, { readFile }), ...designOnlyFiles(files, cfg)].map(pageRouteOf).filter(Boolean))];
 }
 
 /**

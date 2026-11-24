@@ -188,3 +188,17 @@ describe("copy-only edits to existing pages (#5648)", () => {
     assert.equal(designGate({ files: [P], cfg }).route, true);
   });
 });
+
+describe("designFailures dedupe against the page gate (#5729)", () => {
+  const page = "web/src/app/(site)/pricing/page.tsx";
+  const diff = `+++ b/${page}\n-<a href="/x">x</a>\n+<a href="/y">x</a>\n`;
+  const base = { cfg, files: [page], added: [], diff, readFile: () => "line\n".repeat(60) };
+  it("href-only edit is exempt from design_spec_missing", () => {
+    assert.ok(!designFailures(base).some((r) => r.kind === "design_spec_missing"));
+  });
+  it("a rewrite keeps one design_spec_missing unless the page gate covers the file", () => {
+    const rw = { ...base, diff: `+++ b/${page}\n+<div className="x">hi</div>\n` };
+    assert.equal(designFailures(rw).filter((r) => r.kind === "design_spec_missing").length, 1);
+    assert.equal(designFailures({ ...rw, covered: [page] }).filter((r) => r.kind === "design_spec_missing").length, 0);
+  });
+});

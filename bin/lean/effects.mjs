@@ -15,7 +15,9 @@ import { makeProjector } from "../engine/projector.mjs";
 import { makeLedger, countLiveLanes, ledgerRoot } from "./ledger.mjs";
 import { makeDepCache } from "./depcache.mjs";
 import { makeHeavyIo } from "./heavy.mjs";
-import { diskLow } from "./admission.mjs";
+import { diskLow, ADMISSION_DEFAULTS } from "./admission.mjs";
+import { writeAtomic } from "./batch.mjs";
+import { schedDir } from "./sched.mjs";
 import { gatherContextFacts } from "./context.mjs";
 import { makePitfallStore } from "./pitfalls.mjs";
 import { enumeratingTests, missingEntries } from "./enumerating.mjs";
@@ -30,6 +32,7 @@ import { parseVersioned } from "./seqversioned.mjs";
 import { followupMap } from "./conformance.mjs";
 import { toolStats } from "./toolstats.mjs";
 import { detectApiShape } from "./apishape.mjs";
+import { verifyLaneWorktree, quarantineDir } from "./laneconfine.mjs";
 
 /** #5531: children started by this process's gh/script helpers still running; the schedd kills them on close so none outlives the daemon. */
 const liveChildren = new Set();
@@ -134,7 +137,7 @@ export const leanSettingsFlags = ({ subagentModel = null, reread = false, guard 
 export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable, subagentModel = null, sandboxed = inSandbox() } = {}) {
   return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, rereadNudge = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, session = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null, bin: pinnedBin = null, fullSession = false }) => {
     // #5205: a rotation relaunch pins the real claude past the tokenbaton shim; absent, the usual resolution
-    const bin = pinnedBin || resolveClaudeCliBinary(cwd) || "claude";
+    const bin = pinnedBin || resolveClaudeCliBinary(cwd) || resolveSpawn("claude", []).bin; // win32: a probe miss must not fall back to a bare name (spawn ENOENT)
     const caps = getClaudeCliCapabilities(cwd);
     // #4391: custom subagents (the explorer) for the builder session; null leaves argv unchanged
     // #5516: fullSession keeps slash commands/Skill/Task (the release test gate invokes /test-gate); otherwise the lean minimal group
@@ -264,9 +267,54 @@ export function guardHeavyDisk(heavy, { host, minFreeGb = () => null, gc = async
   };
 }
 
+/**
+ * Lane ramp stamps (#5845): lanes are separate processes, so the lanes admitted within the ramp window are files in
+ * `schedDir()/lane-ramp/` (one `<pid>.json` per lane, `{pid, at, mb}`, so concurrent lanes never overwrite each other),
+ * plus `peaks.json` (recent peak RSS in MB, newest last). Every read fails open to null/0 and drops dead or expired stamps.
+ */
+const PEAKS_KEPT = 20;
+export function makeRampStore({ dir = join(schedDir(), "lane-ramp"), now = () => Date.now(), pid = process.pid, defaultMb = ADMISSION_DEFAULTS.lane_mem_mb } = {}) {
+  const live = (rampS) => {
+    const out = [];
+    for (const f of readdirSync(dir)) {
+      if (!/^\d+\.json$/.test(f)) continue;
+      const file = join(dir, f);
+      try {
+        const st = JSON.parse(readFileSync(file, "utf8"));
+        const stale = now() - st.at >= Math.max(rampS, 1) * 1000 * 2; // kept for one extra window so a slightly longer ramp still sees it
+        if (stale || !pidAlive(st.pid)) { rmSync(file, { force: true }); continue; }
+        if (now() - st.at < rampS * 1000) out.push(st);
+      } catch { /* unreadable stamp: ignore */ }
+    }
+    return out;
+  };
+  const peaks = () => { try { return (JSON.parse(readFileSync(join(dir, "peaks.json"), "utf8")).peaks ?? []).filter(Number.isFinite); } catch { return []; } };
+  const footprint = () => {
+    const p = peaks();
+    if (!p.length) return defaultMb;
+    const sorted = [...p].sort((a, b) => a - b);
+    return Math.max(defaultMb, Math.ceil(sorted[Math.floor(sorted.length / 2)]), Math.ceil(sorted[sorted.length - 1] * 0.9)); // conservative: near the max, never under the default
+  };
+  const guard = (fn, fallback) => (...a) => { try { return fn(...a); } catch { return fallback; } };
+  return {
+    rampingMb: guard((rampS) => live(rampS).reduce((t, st) => t + (Number(st.mb) > 0 ? Number(st.mb) : defaultMb), 0), null),
+    rampingLanes: guard((rampS) => live(rampS).length, null),
+    laneFootprintMb: guard(footprint, null),
+    /** Called once this lane passed admission: it will grow for the next ramp window. */
+    recordAdmission: guard((mb = footprint()) => { writeAtomic(join(dir, `${pid}.json`), JSON.stringify({ pid, at: now(), mb })); return true; }, false),
+    /** Called at lane end with the lane's peak RSS in MB. */
+    recordPeakRss: guard((mb) => {
+      if (!(Number(mb) > 0)) return false;
+      writeAtomic(join(dir, "peaks.json"), JSON.stringify({ peaks: [...peaks(), Math.ceil(Number(mb))].slice(-PEAKS_KEPT) }));
+      return true;
+    }, false),
+  };
+}
+
 /** Real host probes for admission (#4105). MemAvailable from /proc/meminfo (fallback os.freemem), statfs for tmp. */
 export function makeHostProbe() {
   return {
+    ...makeRampStore(),
     memAvailableMb() {
       try {
         const m = /^MemAvailable:\s+(\d+)\s+kB/m.exec(readFileSync("/proc/meminfo", "utf8"));
@@ -664,6 +712,8 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
         return { ok: false, output: `${e.stdout ?? ""}${e.stderr ?? ""}`.slice(0, 6000) };
       }
     },
+    /** #5825: is the lane folder a worktree of this repo (toplevel + common dir), and moving aside a folder that is not. */
+    confine: { verify: ({ wt, cwd }) => verifyLaneWorktree({ git: run("git"), exists: async (p) => existsSync(p), wt, cwd }), quarantine: async ({ wt }) => quarantineDir(wt) },
     /** #4162: processes left running inside a lane worktree (Linux /proc). */
     proc: { inDir: async (dir) => procsInDir(dir), alive: pidAlive, kill: (pid, sig) => { try { process.kill(pid, sig); } catch { /* already gone */ } } },
     fs: {

@@ -139,3 +139,32 @@ describe("sparse lane worktrees (#4221)", () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
+
+describe("sparse pattern file path on Windows (#5825)", () => {
+  it("a drive-letter path from `rev-parse --git-path` is written as is, never joined under the worktree", async () => {
+    const big = `100644 blob ${"a".repeat(40)} ${2 * MiB}\tbig.bin`;
+    const wrote = [];
+    const fake = async (args) => (args[0] === "ls-tree" ? big : args[0] === "rev-parse" ? "C:/r/.git/worktrees/lean-5/info/sparse-checkout\n" : "");
+    const r = await addLaneWorktree(fake, async (p) => { wrote.push(p); }, { cwd: "C:\r", wt: "C:\r\.claude\worktrees\lean-5", addArgs: ["worktree", "add", "C:\r\.claude\worktrees\lean-5", "main"], ref: "main" });
+    assert.equal(r.sparse, true);
+    assert.deepEqual(wrote, ["C:/r/.git/worktrees/lean-5/info/sparse-checkout"]);
+  });
+
+  // forge#5890
+  it("5890: a spawn ENOENT on ls-tree raises the typed sandbox.repo_missing error and never reaches worktree add", async () => {
+    const calls = [];
+    const fake = async (a) => { calls.push(a[0]); throw Object.assign(new Error("spawn git ENOENT"), { code: "ENOENT", syscall: "spawn git" }); };
+    await assert.rejects(addLaneWorktree(fake, async () => {}, { cwd: "/gone", wt: "/gone/wt", addArgs: ["worktree", "add", "/gone/wt", "main"], ref: "main" }),
+      (e) => e.deferCode === "sandbox.repo_missing" && e.retryInSeconds === 120 && !!e.deferDetail);
+    assert.deepEqual(calls, ["ls-tree"]);
+  });
+  it("5890: a non-spawn ls-tree failure still falls back to a full checkout; a spawn error from worktree add is typed", async () => {
+    const calls = [];
+    const fake = async (a) => { calls.push(a[0]); if (a[0] === "ls-tree") throw Object.assign(new Error("fatal"), { status: 128 }); return ""; };
+    const r = await addLaneWorktree(fake, async () => {}, { cwd: "/r", wt: "/r/wt", addArgs: ["worktree", "add", "/r/wt", "main"], ref: "main" });
+    assert.equal(r.sparse, false);
+    assert.deepEqual(calls, ["ls-tree", "worktree"]);
+    const bad = async () => { throw Object.assign(new Error("spawn git EACCES"), { code: "EACCES", syscall: "spawn git" }); };
+    await assert.rejects(addLaneWorktree(bad, null, { cwd: "/r", wt: "/r/wt", addArgs: ["worktree", "add", "/r/wt", "main"], ref: "main" }), (e) => e.deferCode === "sandbox.repo_missing");
+  });
+});

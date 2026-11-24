@@ -155,14 +155,20 @@ export const isPipelineLabel = (name) => { const n = String(name ?? ""); return 
 export const pipelineLabels = (labels) => (labels ?? []).map((l) => (typeof l === "string" ? l : l?.name)).filter(isPipelineLabel);
 
 /**
- * Remove the pipeline labels from an issue. `labels` is what the caller already read (names or `{name}`); null re-reads them.
- * Best effort, returns the removed names ([] when none or on failure).
+ * Remove the pipeline labels from an issue, one call per label so one failing removal leaves the others removed (#5759).
+ * `labels` is what the caller already read (names or `{name}`); null re-reads them. Returns the removed names; `onFail(names, err)`
+ * receives the labels whose removal (or the re-read, names []) failed.
  */
-export async function clearPipelineLabels({ gh, repo, issue, labels = null }) {
+export async function clearPipelineLabels({ gh, repo, issue, labels = null, onFail = null }) {
+  const removed = [], failed = [];
+  let names;
   try {
-    const names = pipelineLabels(labels ?? JSON.parse(String(await gh(["issue", "view", String(issue), "-R", repo, "--json", "labels"])))?.labels);
-    if (!names.length) return [];
-    await gh(["issue", "edit", String(issue), "-R", repo, "--remove-label", names.join(",")]);
-    return names;
-  } catch { return []; }
+    names = pipelineLabels(labels ?? JSON.parse(String(await gh(["issue", "view", String(issue), "-R", repo, "--json", "labels"])))?.labels);
+  } catch (e) { try { onFail?.([], e); } catch { /* reporting is best effort */ } return []; }
+  let last = null;
+  for (const name of names) {
+    try { await gh(["issue", "edit", String(issue), "-R", repo, "--remove-label", name]); removed.push(name); } catch (e) { failed.push(name); last = e; }
+  }
+  if (failed.length) { try { onFail?.(failed, last); } catch { /* reporting is best effort */ } }
+  return removed;
 }

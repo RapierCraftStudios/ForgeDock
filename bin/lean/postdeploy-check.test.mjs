@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { e2eCheckFor, mergeCheckEntries, parseChecks, itemCheckIds, measureFollowup, monitorRecord, CHECK_ID_RE, tickItems } from "./postdeploy-check.mjs";
+import { e2eCheckFor, mergeCheckEntries, parseChecks, itemCheckIds, measureFollowup, monitorRecord, CHECK_ID_RE, tickItems, runNamedChecks } from "./postdeploy-check.mjs";
 import { postDeployOnly } from "./prefilter.mjs";
 import { validateContract, applyAmendments, precheck, followupItems } from "./conformance.mjs";
 import { PROBE_MARKER } from "./probe.mjs";
@@ -333,5 +333,36 @@ describe("generated e2e checks (#5468)", () => {
     assert.ok(CHECK_ID_RE.test(a.id));
     const merged = parseChecks(mergeCheckEntries(JSON.stringify({ smoke: "echo ok" }), { [a.id]: a.entry }));
     assert.ok(merged.smoke && merged[a.id]);
+  });
+});
+
+describe("post-deploy check expect field (#5704)", () => {
+  const cfg = { env: [], timeoutS: 30 };
+  const spawnBy = (codes, seen = []) => async ({ run }) => { seen.push(run); return { code: codes[run] ?? 0, stdout: `out:${run}`, stderr: "", timedOut: false }; };
+
+  it("parses an optional expect; entries without it are unchanged; a blank or non-string expect drops the entry", () => {
+    const c = parseChecks(JSON.stringify({ quiet: { run: "./no-alert.sh", expect: " ./rule-loaded.sh " }, plain: { run: "./x" }, bad: { run: "./y", expect: "" }, bad2: { run: "./z", expect: 3 } }));
+    assert.equal(c.quiet.expect, "./rule-loaded.sh");
+    assert.deepEqual(c.plain, { run: "./x", pass: { kind: "exit" }, timeoutS: null });
+    assert.ok(!c.bad && !c.bad2);
+  });
+
+  it("a passing run with a failing expect is a fail carrying the expect output; both passing is a pass", async () => {
+    const checks = parseChecks(JSON.stringify({ quiet: { run: "./no-alert.sh", expect: "./rule-loaded.sh" } }));
+    const seen = [];
+    const [f] = await runNamedChecks({ ids: ["quiet"], checks, cwd: "/tmp", config: cfg, env: {}, spawn: spawnBy({ "./rule-loaded.sh": 1 }, seen) });
+    assert.equal(f.result, "fail");
+    assert.match(f.output, /expect \(positive evidence\) failed[\s\S]*out:\.\/rule-loaded\.sh/);
+    assert.deepEqual(seen, ["./no-alert.sh", "./rule-loaded.sh"]);
+    const [p] = await runNamedChecks({ ids: ["quiet"], checks, cwd: "/tmp", config: cfg, env: {}, spawn: spawnBy({}) });
+    assert.equal(p.result, "pass");
+  });
+
+  it("a failing run never runs expect; an entry without expect runs once", async () => {
+    const seen = [];
+    const checks = parseChecks(JSON.stringify({ quiet: { run: "./no-alert.sh", expect: "./rule-loaded.sh" }, plain: "./x" }));
+    const rows = await runNamedChecks({ ids: ["quiet", "plain"], checks, cwd: "/tmp", config: cfg, env: {}, spawn: spawnBy({ "./no-alert.sh": 2 }, seen) });
+    assert.deepEqual(rows.map((r) => r.result), ["fail", "pass"]);
+    assert.deepEqual(seen, ["./no-alert.sh", "./x"]);
   });
 });

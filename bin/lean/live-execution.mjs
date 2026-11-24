@@ -87,6 +87,12 @@ export function formatOverride(o) {
   return [s.maxRemote !== undefined ? `max_remote ${s.maxRemote}` : null, s.mode ? `placement ${s.mode}` : null].filter(Boolean).join(", ") || "no change";
 }
 
+/** #5933: what `--set-max-remote <id> 0` does on a remote batch; null unless the patch sets 0 without a placement change. */
+export function drainNote(patch) {
+  const s = sanitizeOverride(patch) ?? {};
+  return s.maxRemote === 0 && !s.mode ? "remote starts paused; nothing runs locally" : null;
+}
+
 /**
  * #5735: the `--set-max-remote` note from the pool router's lane view (`httpTransport.agentLanes()`: {agents: [{name, used,
  * ceiling|null}], total}): the remote lane total across batches, per-agent used/ceiling, and a leading warning when every

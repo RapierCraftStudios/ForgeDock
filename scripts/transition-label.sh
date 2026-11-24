@@ -471,6 +471,17 @@ fi
 if [ "$TARGET_STATE" = "awaiting-merge" ]; then
   echo "Clearing needs-human (best-effort, scoped to awaiting-merge)..."
   gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "needs-human" 2>/dev/null || true
+elif [ "$TARGET_STATE" = "merged" ]; then
+  # forge#5759: a merged issue keeps no park labels (needs-human, needs-human:*, parked:*, remediation-queue); one call per label so
+  # one failure leaves the rest removed
+  echo "Clearing park labels (best-effort, merged)..."
+  IFS=',' read -ra MERGED_CURRENT <<< "${CURRENT_ISSUE_LABELS:-}"
+  for lbl in "${MERGED_CURRENT[@]}"; do
+    case "$lbl" in
+      needs-human|needs-human:*|parked:*|remediation-queue)
+        gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --remove-label "$lbl" 2>/dev/null || echo "WARN: could not remove '$lbl' from issue #$ISSUE_NUMBER" >&2 ;;
+    esac
+  done
 else
   echo "Skipping needs-human clear — TARGET_STATE is '$TARGET_STATE', not 'awaiting-merge'."
 fi

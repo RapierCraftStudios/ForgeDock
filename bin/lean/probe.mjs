@@ -218,6 +218,23 @@ export function renderProbeComment({ probe, fix, defaultBranch, defaultSha, r })
   ].join("\n");
 }
 
+export const POST_DEPLOY_FAILED_LABEL = "post-deploy-failed";
+const AWAITING_PROMOTION = "awaiting-promotion";
+
+/** #5704: drop `awaiting-promotion` (the fix is live); best effort, a missing label or no rights changes nothing. */
+export async function clearAwaitingPromotion({ io, repo, issue }) {
+  try { await io.gh(["issue", "edit", String(issue), "-R", repo, "--remove-label", AWAITING_PROMOTION]); } catch { /* not labelled or no rights */ }
+}
+
+/** #5704: the fix is live and its verification failed: `awaiting-promotion` -> `post-deploy-failed` (label created on first use); best effort. */
+export async function markPostDeployFailed({ io, repo, issue }) {
+  await clearAwaitingPromotion({ io, repo, issue });
+  const add = () => io.gh(["issue", "edit", String(issue), "-R", repo, "--add-label", POST_DEPLOY_FAILED_LABEL]);
+  try { await add(); } catch {
+    try { await io.gh(["label", "create", POST_DEPLOY_FAILED_LABEL, "-R", repo, "--force", "--color", "D93F0B", "--description", "Fix is live but its post-deploy verification failed. Managed by ForgeDock."]); await add(); } catch { /* the comment still shows it */ }
+  }
+}
+
 /** Read the issue (REST, for author_association) and its comments. */
 async function readIssue(issue, repo, io) {
   const iss = JSON.parse(String(await io.gh(["api", `repos/${repo}/issues/${issue}`])));
@@ -253,6 +270,7 @@ export async function probeIssue({ issue, repo, cwd = process.cwd(), io, default
     try { await io.gh(["issue", "reopen", String(issue), "-R", repo]); } catch (e) { note = `; reopen failed: ${String(e?.message ?? e).slice(0, 120)}`; }
   }
   await io.gh(["issue", "comment", String(issue), "-R", repo, "--body", body]);
+  await (r.result === "fail" ? markPostDeployFailed : clearAwaitingPromotion)({ io, repo, issue }); // #5704
   return row(r.result, detail + note, { fix, defaultBranch });
 }
 

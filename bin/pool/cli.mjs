@@ -15,18 +15,21 @@ import { call as httpCall } from "./http.mjs";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const loadJson = (p) => JSON.parse(readFileSync(p, "utf8"));
 
-const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB] | status | limit <agent> --lanes N|none | upgrade [agent] | remove <agent>  [--config path]";
+const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB --agent-url URL | --outbound | --one-liner] | status [--json] | limit <agent> --lanes N|none | pause | resume | uninstall --yes | upgrade [agent] | remove <agent>  [--config path]";
 const HELP_FLAGS = ["--help", "-h"];
 // Flags each verb accepts: `value` flags consume the next token, `bool` flags stand alone. Anything else dash-prefixed is rejected (#5008).
 const VERB_FLAGS = {
   router: { value: ["--config"], bool: [] },
   agent: { value: ["--config"], bool: [] },
-  status: { value: ["--config"], bool: [] },
+  status: { value: ["--config"], bool: ["--json"] },
+  pause: { value: ["--config"], bool: [] },
+  resume: { value: ["--config"], bool: [] },
+  uninstall: { value: ["--config"], bool: ["--yes"] },
   upgrade: { value: ["--config"], bool: [] },
   remove: { value: ["--config"], bool: [] },
   limit: { value: ["--config", "--lanes"], bool: [] },
-  enroll: { value: ["--config", "--cpus", "--mem"], bool: [] },
-  "install-command": { value: ["--config", "--cpus", "--mem"], bool: [] },
+  enroll: { value: ["--config", "--cpus", "--mem", "--agent-url"], bool: ["--outbound", "--one-liner"] },
+  "install-command": { value: ["--config", "--cpus", "--mem", "--agent-url"], bool: ["--outbound", "--one-liner"] },
   resize: { value: ["--config", "--cpus", "--mem", "--vm-cpus", "--vm-mem", "--vm-swap"], bool: ["--drain"] },
 };
 
@@ -39,6 +42,26 @@ function rejectUnknownFlags(cmd, rest) {
     if (spec.bool.includes(t)) continue;
     if (t.startsWith("-") && !/^-\d/.test(t)) throw new Error(`usage: unknown flag ${t} for 'forgedock pool ${cmd}'. ${USAGE.slice("usage: ".length)}`);
   }
+}
+
+const num = (x) => (Number.isFinite(x) ? String(Math.round(x * 10) / 10) : "-");
+/** #5885: one row per host: used/borrowable/total cpus and memory, lane counts, pause state and why lanes are throttled or drained. */
+export function statusTable(agents) {
+  const head = ["HOST", "CPUS used/borrow/total", "MEM GB used/borrow/total", "ACTIVE", "THROTTLED", "PAUSED", "REASON"];
+  const rows = agents.map((a) => {
+    const name = a.name ?? a.host ?? "?";
+    if (a.ok === false) return [name, "-", "-", "-", "-", "-", `unreachable${a.error ? `: ${a.error}` : ""}`];
+    const used = (tot, free) => (Number.isFinite(tot) && Number.isFinite(free) ? tot - Math.max(0, free) : null);
+    const borrow = (b, free) => num(b ?? free);
+    const paused = a.owner_paused ? "owner" : a.paused ? (a.pending_resize ? "resize" : "yes") : "no";
+    const why = [a.owner_paused ? "paused by owner" : null, a.paused && !a.owner_paused && a.pending_resize ? "draining for resize" : null,
+      a.idle_gate ? `owner busy: ${a.idle_gate}` : null, a.last_drain ? `last drain ${a.last_drain.sandbox} at ${a.last_drain.at}: ${a.last_drain.reason}` : null].filter(Boolean).join("; ");
+    return [name, `${num(used(a.cpus_total, a.cpus_free))}/${borrow(a.cpus_borrowable, a.cpus_free)}/${num(a.cpus_total)}`,
+      `${num(used(a.mem_total_gb, a.mem_free_gb))}/${borrow(a.mem_borrowable_gb, a.mem_free_gb)}/${num(a.mem_total_gb)}`,
+      String(a.active ?? "-"), String(a.throttled ?? 0), paused, why || "-"];
+  });
+  const w = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
+  return [head, ...rows].map((r) => r.map((c, i) => (i === r.length - 1 ? c : c.padEnd(w[i]))).join("  ")).join("\n");
 }
 
 /** The `forgedock pool` verbs (and the `computeshare` script). Throws on usage or router errors; `deps` injects the HTTP client and config. */
@@ -87,10 +110,19 @@ export async function runPoolCli(argv, deps = {}) {
     case "status": {
       const cfg = routerConfig();
       const r = await call(`http://${cfg.listen.host}:${cfg.listen.port}`, "GET", "/agents", { token: cfg.forgedock_token });
-      console.log(JSON.stringify(r.data, null, 2));
+      if (rest.includes("--json")) console.log(JSON.stringify(r.data, null, 2));
+      else if (!r.ok) throw new Error(`router refused: HTTP ${r.status} ${JSON.stringify(r.data)}`);
+      else console.log(statusTable(r.data?.agents ?? []));
       // #5735: lane sandboxes used/ceiling per agent, and the lane total across all batches
       for (const a of Array.isArray(r.data?.agents) ? r.data.agents : []) if (a?.lanes) console.log(`${a.name}: lanes ${a.lanes.used}/${a.lanes.ceiling ?? "-"}`);
       if (Number.isInteger(r.data?.remote_lanes)) console.log(`remote lanes across batches: ${r.data.remote_lanes}`);
+      for (const a of r.data?.agents ?? []) {
+        if (a.transport) console.log(`${a.name}: transport ${a.transport}`); // #5882
+        const n = a.net; // #5923
+        if (n?.mirrored) console.log(`${a.name}: net mirrored, port range ${n.port_range ?? "?"}, NAT pin ${n.nat_pin ? "present" : "MISSING"}${n.degraded ? " DEGRADED" : ""}`);
+        if (!Number.isFinite(a.host_disk_free_gb)) continue;
+        console.error(`${a.name}: host_disk_free_gb ${a.host_disk_free_gb}${Number.isFinite(a.host_disk_growth_gb_per_h) ? `, growth ${a.host_disk_growth_gb_per_h} GB/h` : ""}${a.disk_warning ? ` WARNING: ${a.disk_warning}` : ""}`);
+      }
       break;
     }
     case "limit": {
@@ -106,6 +138,28 @@ export async function runPoolCli(argv, deps = {}) {
       console.log(`${name}: max_lanes ${max_lanes ?? "none"}`);
       break;
     }
+    case "pause":
+    case "resume": {
+      // #5885: the host owner stops (or restarts) new lanes on this box; running lanes finish. Loopback to the local agent, not via the router.
+      const cfg = agentConfig();
+      const host = !cfg.listen?.host || cfg.listen.host === "0.0.0.0" ? "127.0.0.1" : cfg.listen.host;
+      const r = await call(`http://${host}:${cfg.listen.port}`, "POST", `/${cmd}`, { token: cfg.token, timeoutMs: 10000 });
+      if (!r.ok) throw new Error(`agent refused ${cmd}: HTTP ${r.status} ${JSON.stringify(r.data)}`);
+      console.log(cmd === "pause" ? `${cfg.name ?? "agent"}: paused; no new lanes start here (${r.data?.active ?? 0} running lane(s) finish). Undo with \`forgedock pool resume\`.` : `${cfg.name ?? "agent"}: resumed; lanes may start here again.`);
+      break;
+    }
+    case "uninstall": {
+      // #5885: the owner removes this box's agent. Destructive, so it needs --yes; running lanes are not waited for.
+      const win = (deps.platform ?? process.platform) === "win32";
+      const run = deps.spawn ?? spawnSync;
+      if (!rest.includes("--yes")) { console.log(win ? "would run pool/install/uninstall-agent.ps1 (removes the keep-alive task, firewall rules and the computeshare WSL distro)" : "would stop and disable computeshare-agent, delete its systemd unit and /etc/computeshare"); console.log("re-run with --yes to proceed"); break; }
+      const steps = win
+        ? [["powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(repoRoot, "pool", "install", "uninstall-agent.ps1")]]]
+        : [["systemctl", ["disable", "--now", "computeshare-agent"]], ["rm", ["-f", "/etc/systemd/system/computeshare-agent.service"]], ["systemctl", ["daemon-reload"]], ["rm", ["-rf", flag("config") ? dirname(flag("config")) : "/etc/computeshare"]]];
+      for (const [bin, args] of steps) { const r = run(bin, args, { stdio: "inherit" }); if (r.status !== 0) throw new Error(`${bin} ${args[0]} exited ${r.status}`); }
+      console.log("agent uninstalled from this box. Remove it from the router with: forgedock pool remove <agent>");
+      break;
+    }
     case "enroll":
     case "install-command": {
       // Prints a command carrying a one-time code (single use, expires in 30 min), never the long-lived enroll token.
@@ -113,6 +167,29 @@ export async function runPoolCli(argv, deps = {}) {
       const r = await call(`http://${cfg.listen.host}:${cfg.listen.port}`, "POST", "/codes", { token: cfg.forgedock_token });
       if (!r.ok) throw new Error(`router refused: HTTP ${r.status}`);
       const size = `${flag("cpus") ? `&cpus=${Number(flag("cpus"))}` : ""}${flag("mem") ? `&mem=${Number(flag("mem"))}` : ""}`;
+      const sizeFlags = `${flag("cpus") ? ` --cpus ${Number(flag("cpus"))}` : ""}${flag("mem") ? ` --mem ${Number(flag("mem"))}` : ""}`;
+      if (rest.includes("--outbound") || rest.includes("--one-liner")) { // #5883: Linux/macOS one command, served by GET /install (always outbound)
+        console.log(`curl -fsSL '${cfg.public_url}/install' | sh -s -- --code '${r.data.code}'${sizeFlags}`);
+        console.error("(run as root: as a sudo user, write `| sudo sh -s -- ...`)");
+        if (!rest.includes("--outbound")) {
+          console.error(`(one-time code, expires ${r.data.expires_at}; outbound-only: the agent polls ${cfg.public_url}; uninstall: curl -fsSL '${cfg.public_url}/install' | sh -s -- --uninstall)`);
+          break;
+        }
+        console.error("(or, from a ForgeDock checkout on Linux:)");
+      }
+      if (rest.includes("--outbound")) { // #5882: the agent dials this router; no agent URL, no inbound port
+        console.log(`OUTBOUND=1 pool/install/install-agent-linux.sh --router '${cfg.public_url}' --token '${r.data.code}'${flag("cpus") ? ` --cpus ${Number(flag("cpus"))}` : ""}${flag("mem") ? ` --mem ${Number(flag("mem"))}` : ""}`);
+        console.error(`(one-time code, expires ${r.data.expires_at}; outbound-only: the agent polls ${cfg.public_url})`);
+        break;
+      }
+      const agentUrl = flag("agent-url"); // #5856: a host reachable only through an SSH tunnel (no Tailscale) enrolls with its tunnel URL
+      if (agentUrl) {
+        let u; try { u = new URL(agentUrl); } catch { u = null; }
+        if (!u || !["http:", "https:"].includes(u.protocol)) throw new Error("--agent-url must be an http(s) URL, e.g. http://127.0.0.1:7711");
+        console.log(`AGENT_URL='${u.origin}' pool/install/install-agent-linux.sh --router '${cfg.public_url}' --token '${r.data.code}'${flag("cpus") ? ` --cpus ${Number(flag("cpus"))}` : ""}${flag("mem") ? ` --mem ${Number(flag("mem"))}` : ""}`);
+        console.error(`(one-time code, expires ${r.data.expires_at}; the router reaches the agent at ${u.origin})`);
+        break;
+      }
       console.log(`powershell -NoProfile -ExecutionPolicy Bypass -Command "irm '${cfg.public_url}/bootstrap/install.ps1?token=${r.data.code}${size}' | iex"`);
       console.error(`(one-time code, expires ${r.data.expires_at})`);
       break;

@@ -22,9 +22,9 @@ const TEXT_MAX = 200;
 const ANCHORS_MAX = 10;
 const MARKER_RE = /^<!--\s*FORGE:DECISION\s+(\{.*\})\s*-->/;
 
-const one = (v, max = TEXT_MAX) => {
+const one = (v, max = TEXT_MAX, ellipsis = true) => {
   const t = typeof v === "string" ? noComments(v, " ").replace(/\s+/g, " ").trim() : "";
-  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+  return t.length > max ? (ellipsis ? `${t.slice(0, max - 1)}…` : t.slice(0, max).trimEnd()) : t;
 };
 const strs = (v, max = ANCHORS_MAX, len = 200) => [...new Set((Array.isArray(v) ? v : []).map((x) => one(x, len)).filter(Boolean))].slice(0, max);
 const cleanAnchor = (a) => String(a).replace(/^\.\//, "").replace(/^\/+/, "");
@@ -89,7 +89,7 @@ export function parseRequirementDecision(body) {
     const raw = JSON.parse(m[1]);
     const id = typeof raw?.requirement === "string" ? raw.requirement.trim() : "";
     if (!/^R\d+$/.test(id) || raw.disposition !== "post-deploy") return null;
-    const quote = one(raw.quote, 400); // #5773: the row's quote, so the decision survives a renumbering
+    const quote = one(raw.quote, 400, false); // #5773: the row's quote, so the decision survives a renumbering; #5786: clipped with no ellipsis so it stays a prefix of the row quote
     return { requirement: id, disposition: "post-deploy", why: one(raw.why), ...(quote ? { quote } : {}) };
   } catch { return null; }
 }

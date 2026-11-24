@@ -8,8 +8,10 @@ import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { resolveLane, makeLaneCache } from "./lane.mjs";
 import { orchestrate, deferPolicy, DEFER_BACKOFF_S, formatOutcomeLists, CAPACITY_FALLBACK_AFTER, isTransientEngineError, transientRetryDelayMs, DEFAULT_TRANSIENT_RETRIES } from "./orchestrate.mjs";
-import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane, detachedLanes } from "./batch.mjs";
+import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane, detachedLanes, stackedOnOf } from "./batch.mjs";
 import { makeLedger } from "./ledger.mjs";
+import { placeLane } from "./execution.mjs";
+import { liveRemote } from "./live-execution.mjs";
 import { providerLanes } from "./execution.mjs";
 import { orchestrateFromCli, runFromCli, readOrchestration, makeRelabelNeedsHuman, makeMarkRecovering, makeDispatchCheck } from "../engine-cli.mjs";
 // Windows hosts: these tests exercise POSIX-only behaviour (file modes, tmpfs, systemd units, sh/bash scripts, file-URL paths); Linux CI runs them.
@@ -269,9 +271,11 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.equal(isLaneAlive(42, "lane", { kill: () => true, procDir: proc }), true);
     writeFileSync(join(pd, "stat"), "42 (no) de) Z 1 42 42 0 -1\n");
     assert.equal(isLaneAlive(42, "lane", { kill: () => true, procDir: proc }), false);
-    assert.deepEqual(readOrchestration(root), { breaker: { errors: 3, window_min: 30 }, maxDeferrals: 3, transientRetries: 4, blockedLabel: "blocked", globalParallel: null, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] } });
+    assert.deepEqual(stackedOnOf({ stacked: { 7: { dependency: 6, branch: "b", sha: "abcdef1" } } }, 7), { dependency: 6, branch: "b", sha: "abcdef1" }, "#5832: stackedOn read from batch state");
+    assert.equal(stackedOnOf({}, 7), null);
+    assert.deepEqual(readOrchestration(root), { breaker: { errors: 3, window_min: 30 }, maxDeferrals: 3, transientRetries: 4, blockedLabel: "blocked", globalParallel: null, stacking: "off", recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] }, mergeTrain: "off", mergeTrainBatch: 4 });
     writeFileSync(join(root, "forge.yaml"), "orchestration:\n  breaker:\n    errors: 5\n    window_min: 10\n  max_deferrals: 2\n  global_parallel: 4\n  transient_retries: 2\n");
-    assert.deepEqual(readOrchestration(root), { breaker: { errors: 5, window_min: 10 }, maxDeferrals: 2, transientRetries: 2, blockedLabel: "blocked", globalParallel: 4, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] } });
+    assert.deepEqual(readOrchestration(root), { breaker: { errors: 5, window_min: 10 }, maxDeferrals: 2, transientRetries: 2, blockedLabel: "blocked", globalParallel: 4, stacking: "off", recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] }, mergeTrain: "off", mergeTrainBatch: 4 });
   });
 
   it("run-issue --result-file writes the lane result, also when the run throws", async () => {
@@ -385,6 +389,31 @@ describe("#4318: the batch dispatcher's signal relabel and the needs-human relab
         assert.equal(await h.run(), "skipped");
         assert.deepEqual(h.calls, ["view"]);
       }
+    });
+    it("relabel skips an open issue whose fix PR merged on a non-lean head", async () => {
+      const calls = [];
+      const gh = async (a) => {
+        calls.push(a.slice(0, 2).join(" "));
+        if (a[1] === "view" && a[0] === "issue") return JSON.stringify({ state: "OPEN", body: "", labels: [], closedByPullRequestsReferences: [{ number: 41 }] });
+        if (a[0] === "pr") return JSON.stringify({ state: "MERGED", mergedAt: "2026-11-17T15:43:35Z" });
+        return "";
+      };
+      for (const parked of [null, { code: "env.validate_timeout" }]) assert.equal(await makeRelabelNeedsHuman({ gh, repo: "o/r", now: () => 1000 })({ issue: 7, evidence: "why", parked }), "skipped");
+      assert.ok(!calls.includes("issue edit"));
+      const labelled = async (a) => (a[0] === "issue" && a[1] === "view" ? JSON.stringify({ state: "OPEN", body: "", labels: [{ name: "workflow:merged" }] }) : "");
+      assert.equal(await makeRelabelNeedsHuman({ gh: labelled, repo: "o/r", now: () => 1000 })({ issue: 7, evidence: "why" }), "skipped");
+    });
+    it("relabel still parks an issue reopened after merge", async () => {
+      const calls = [];
+      const gh = async (a) => {
+        calls.push(a.slice(0, 2).join(" "));
+        if (a[0] === "issue" && a[1] === "view") return JSON.stringify({ state: "OPEN", body: "", labels: [], closedByPullRequestsReferences: [{ number: 41 }] });
+        if (a[0] === "pr") return JSON.stringify({ state: "MERGED", mergedAt: "2026-11-17T15:43:35Z" });
+        if (a[0] === "api" && a[1].endsWith("/events")) return "reopened\t2026-11-18T00:00:00.000Z\t";
+        return "";
+      };
+      assert.equal(await makeRelabelNeedsHuman({ gh, repo: "o/r", now: () => 1000 })({ issue: 7, evidence: "why" }), true);
+      assert.ok(calls.includes("issue edit"));
     });
     it("an expired lease relabels: the label first, then the comment", async () => {
       const h = hook({ state: "OPEN", body: LIVE(500) });
@@ -1591,6 +1620,42 @@ describe("#5138: live max_remote and placement of a running batch", () => {
     const rows = await done;
     assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged", "merged"]);
     assert.deepEqual(seen.find(([n]) => n === 3)[1], [3]);
+  });
+  const liveDrain = (state) => liveRemote({ isRemote: () => true, capacity: () => null }, { exec: { mode: "remote", maxRemote: 2 }, readOverride: () => ({ maxRemote: state.m }), place: (e) => placeLane({ exec: e }) });
+  it("#5933 remote batch at max_remote 0 holds lanes pending", async () => {
+    const st = { m: 0 }, seen = [];
+    const done = orchestrate({ issues: [1], parallel: 2, pollMs: 1, readBody: async () => "", sleep: tick, remote: liveDrain(st),
+      runOne: async (n, _ln, ctx = {}) => { seen.push([n, ctx.placement?.where]); return { terminalReason: "merged", pr: 100 + n }; } });
+    for (let i = 0; i < 20; i++) await tick();
+    assert.deepEqual(seen, [], "nothing runs, locally or remotely, at max_remote 0");
+    st.m = 1;
+    await done;
+    assert.deepEqual(seen, [[1, "remote"]]);
+  });
+  it("#5933 lowering max_remote to 0 leaves a running lane running", async () => {
+    const st = { m: 2 }, seen = [];
+    let open, running = false;
+    const gate = new Promise((r) => { open = r; });
+    const done = orchestrate({ issues: [1, 2], parallel: 2, pollMs: 1, readBody: async () => "", sleep: tick, remote: liveDrain(st),
+      runOne: async (n, _ln, ctx = {}) => { seen.push([n, ctx.placement?.where]); if (n === 1) { running = true; await gate; } return { terminalReason: "merged", pr: 100 + n }; } });
+    await until(() => running);
+    st.m = 0;
+    for (let i = 0; i < 20; i++) await tick();
+    assert.ok(!seen.some(([n, w]) => w === "local"), "no lane lands on the host");
+    open();
+    await new Promise((r) => setTimeout(r, 5));
+    st.m = 2;
+    const rows = await done;
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+  });
+  it("#5933 --set-max-remote 0 prints drain semantics", async () => {
+    const root = tmpDir("batch-drain-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: ["1"] });
+    const lines = [], l = console.log;
+    console.log = (...x) => { lines.push(x.join(" ")); };
+    try { await orchestrateFromCli(["--set-max-remote", "b1", "0"], { batchRoot: root }); } finally { console.log = l; }
+    assert.match(lines.join("\n"), /remote starts paused; nothing runs locally/);
   });
   it("--set-max-remote / --set-placement write the batch's execution file; bad values and provider-less remote refused", async () => {
     const root = tmpDir("batch-live-exec-");

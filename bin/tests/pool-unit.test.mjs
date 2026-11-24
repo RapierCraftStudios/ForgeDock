@@ -2,13 +2,15 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { runPoolCli } from "../pool/cli.mjs";
 import { restartCheck, lastExitReason } from "../pool/health.mjs";
 // Windows hosts: these tests exercise POSIX-only behaviour (file modes, tmpfs, systemd units, sh/bash scripts, file-URL paths); Linux CI runs them.
 const POSIX_ONLY = process.platform === "win32" && "POSIX-only behaviour";
 
-const root = new URL("../../", import.meta.url).pathname;
-const read = (p) => readFileSync(root + p, "utf8");
+// fileURLToPath, forward slashes: a URL pathname is /C:/... on win32; bash (Git Bash) and fs both take C:/...
+const root = fileURLToPath(new URL("../../", import.meta.url)).replace(/\\/g, "/");
+const read = (p) => readFileSync(root + p, "utf8").replace(/\r\n/g, "\n"); // a CRLF checkout (core.autocrlf) reads as LF
 
 describe("pool unit hardening (#4673)", () => {
   it("router sets a distinctive process title", async () => {
@@ -32,7 +34,7 @@ describe("pool unit hardening (#4673)", () => {
   });
   it("StartLimitIntervalSec=0 lands in [Unit], not [Service], of every generated unit", { skip: POSIX_ONLY }, () => {
     for (const [f, mode] of [["install-router.sh", "user"], ["install-agent.sh", "system"], ["install-schedd.sh", "user"]]) {
-      const heredoc = read(`pool/install/${f}`).match(/<<-?\s*\\?'?(\w+)'?\n(\[Unit\][\s\S]*?)\n\1\n/)[2];
+      const heredoc = [...read(`pool/install/${f}`).matchAll(/<<-?\s*\\?'?(\w+)'?\n(\[Unit\][\s\S]*?)\n\1\n/g)].map((m) => m[2]).find((h) => /unit_hardening/.test(h));
       const script = `. ${root}pool/install/unit-hardening.sh; cat <<EOF\n${heredoc}\nEOF`;
       const unit = spawnSync("bash", ["-c", script], { encoding: "utf8" }).stdout;
       const sections = {};

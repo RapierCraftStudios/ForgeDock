@@ -10,6 +10,7 @@ import { guardChain, isPassThroughWrapper, SHIM_LOOP_MAX, SHIM_DEPTH_MAX, classi
 import { checkAdmission, ADMISSION_DEFAULTS, localLaneCap } from "./admission.mjs";
 import { formatAlertLines, formatWaitSummary } from "./orchestrate.mjs";
 import { readHeavy, readAdmission, liveLaneCap } from "../engine-cli.mjs";
+import { makeRampStore } from "./effects.mjs";
 
 // Injected pids, clock and host: `live` is the set of pids the registry sees as alive; `mem` the MemAvailable in MB.
 const world = ({ mem = 12000, cores = 4, swapFree = 0 } = {}) => {
@@ -399,5 +400,91 @@ describe("#5148 dynamic-name pass-through wrapper", () => {
     const r = spawnSync("systemd-run", ["--user", "--scope", "-q", "-p", "TasksMax=64", "env", `PATH=${bin}:${wrap}:${real}:/usr/bin:/bin`, "FORGE_HEAVY_DISABLED=1", join(bin, "docker"), "ps"], { encoding: "utf8", timeout: 30000 });
     assert.equal(r.status, 0, r.stderr);
     assert.ok(lines(log).length < 13);
+  });
+});
+
+// #5845: a fake host whose ramp stamps are an in-memory list on a fake clock; each admitted lane adds a stamp and its memory only
+// shows up in MemAvailable once the ramp window has passed.
+const rampHost = ({ mem = 16384, footprint = null, clock = { t: 0 } } = {}) => {
+  const stamps = [];
+  const live = (s) => stamps.filter((x) => clock.t - x.at < s * 1000);
+  const h = {
+    memAvailableMb: () => mem, freeMb: async () => 50000, tmpPaths: () => ["/tmp"],
+    rampingMb: (s) => live(s).reduce((t, x) => t + x.mb, 0), rampingLanes: (s) => live(s).length,
+    ...(footprint ? { laneFootprintMb: () => footprint } : {}),
+  };
+  const admit = async (cfg = {}) => {
+    const a = await checkAdmission({ cfg: { max_new_per_ramp: 0, ...cfg }, host: h });
+    if (a.ok) stamps.push({ at: clock.t, mb: footprint ?? ADMISSION_DEFAULTS.lane_mem_mb });
+    return a;
+  };
+  return { h, admit, stamps, clock };
+};
+
+describe("admission ramp (#5845)", () => {
+  it("admission ramp: 20 lanes against 16 GB stop once projected memory falls below footprint plus reserve", async () => {
+    const r = rampHost();
+    const results = [];
+    for (let i = 0; i < 20; i++) results.push(await r.admit());
+    // 16384 − n·2048 ≥ 2048 + 2048 → n ≤ 6 lanes ramping, so the 7th is admitted and the 8th is refused
+    assert.equal(results.filter((a) => a.ok).length, 7);
+    assert.equal(results.findIndex((a) => !a.ok), 7);
+  });
+
+  it("admission ramp: projected memory", async () => {
+    const r = rampHost();
+    for (let i = 0; i < 20; i++) await r.admit();
+    assert.equal((await r.admit()).ok, false);
+    r.clock.t += 61_000; // the ramp window passed: those lanes are in MemAvailable now (fixed here), admission resumes
+    assert.equal((await r.admit()).ok, true);
+  });
+
+  it("admission ramp: rate limit", async () => {
+    const r = rampHost({ mem: 1_000_000 });
+    const res = [];
+    for (let i = 0; i < 6; i++) res.push(await r.admit({ max_new_per_ramp: 3 }));
+    assert.deepEqual(res.map((a) => a.ok), [true, true, true, false, false, false]);
+    assert.match(res[3].detail, /3 lanes admitted in the last 60s >= 3/);
+    r.clock.t += 60_000;
+    assert.equal((await r.admit({ max_new_per_ramp: 3 })).ok, true);
+  });
+
+  it("admission ramp: learned footprint", async () => {
+    const def = rampHost({ mem: 8192 }), big = rampHost({ mem: 8192, footprint: 3072 });
+    let nd = 0, nb = 0;
+    while ((await def.admit()).ok && nd < 50) nd++;
+    while ((await big.admit()).ok && nb < 50) nb++;
+    assert.ok(nb < nd, `a larger learned footprint admits fewer lanes (${nb} < ${nd})`);
+    const dir = tmpDir("ramp-"), clock = { t: 5_000_000 };
+    const st = makeRampStore({ dir, now: () => clock.t });
+    assert.equal(st.laneFootprintMb(), 2048, "no record: the default");
+    st.recordPeakRss(3000); st.recordPeakRss(3500);
+    assert.equal(st.laneFootprintMb(), 3500, "the median or 90% of the max, whichever is larger");
+    st.recordPeakRss(100);
+    assert.ok(st.laneFootprintMb() >= 2048, "never under the default");
+    assert.equal(st.rampingLanes(60), 0);
+    assert.equal(st.recordAdmission(), true);
+    assert.equal(st.rampingLanes(60), 1); assert.equal(st.rampingMb(60), st.laneFootprintMb());
+    clock.t += 61_000;
+    assert.equal(st.rampingLanes(60), 0, "a stamp past the ramp window no longer counts");
+  });
+
+  it("admission ramp: refusal detail", async () => {
+    const r = rampHost({ mem: 6000 });
+    r.stamps.push({ at: 0, mb: 4096 });
+    const a = await r.admit();
+    assert.equal(a.ok, false);
+    assert.equal(a.detail, "host busy: projected mem 1.9G (free 5.9G − ramping 4G) < need 4G; retry in 60s");
+  });
+
+  it("admission ramp: missing or throwing probes stay fail-open and unchanged", async () => {
+    const base = { memAvailableMb: () => 8192, freeMb: async () => 50000, tmpPaths: () => ["/tmp"] };
+    assert.equal((await checkAdmission({ host: base })).ok, true);
+    const throwing = { ...base, rampingMb: () => { throw new Error("x"); }, rampingLanes: () => NaN, laneFootprintMb: () => { throw new Error("y"); } };
+    assert.equal((await checkAdmission({ host: throwing })).ok, true);
+    assert.equal((await checkAdmission({ host: { ...base, memAvailableMb: () => 1000 } })).detail, "host busy: mem 1.0G < 2G; retry in 60s");
+    assert.equal(localLaneCap({ cfg: {}, cores: 16, memAvailableMb: 16384 }), 7);
+    assert.equal(localLaneCap({ cfg: {}, cores: 16, memAvailableMb: 16384, rampingMb: 6144 }), 4, "ramping memory lowers the live cap");
+    assert.equal(makeRampStore({ dir: join(tmpDir("ramp-"), "none", "x") }).rampingMb(60), null, "an unreadable stamp dir is unknown, not zero");
   });
 });

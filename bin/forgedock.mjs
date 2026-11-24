@@ -95,7 +95,7 @@ import { checkContext, refreshContextFlow } from "./review-context.mjs";
 import { runConfigCommand } from "./config-history.mjs";
 import { validateForgeYaml } from "./config-schema.mjs";
 import { botTokenStatus } from "./bot-token-status.mjs";
-import { assessForgeHome, isProblem as forgeHomeIsProblem, describe as describeForgeHome, readUserForgeHomeWin, clearUserForgeHomeWin } from "./forge-home-check.mjs";
+import { assessForgeHome, isProblem as forgeHomeIsProblem, describe as describeForgeHome, readUserForgeHomeWin, clearUserForgeHomeWin, hookScriptTree } from "./forge-home-check.mjs";
 import { applyAuthEnv, startAuthRefresh, doctorAppAuth, AUTH_REFRESH_COMMANDS } from "./auth/app-token.mjs";
 import {
   parseNameStatusDiff,
@@ -2497,7 +2497,7 @@ async function doctor(fix = false, verbose = false) {
    * "already registered" regardless of whether its script path still
    * resolves, so a dangling entry must be explicitly cleared before forge()
    * will register a fresh one. (forge#1895)
-   * @returns {{state: 'ok'|'no-entry'|'unparseable'|'dangling'|'error', path: (string|null), command?: string, ephemeral?: boolean, error: (string|null)}}
+   * @returns {{state: 'ok'|'foreign'|'no-entry'|'unparseable'|'dangling'|'error', path: (string|null), command?: string, ephemeral?: boolean, error: (string|null)}}
    */
   function detectSessionStartHookPath() {
     try {
@@ -2526,7 +2526,9 @@ async function doctor(fix = false, verbose = false) {
         return { state: "unparseable", path: null, command: hookCommand, error: null };
       }
       if (existsSync(hookScriptPath)) {
-        return { state: "ok", path: hookScriptPath, error: null };
+        // Exists, but may belong to an old checkout rather than the active install (#5796).
+        const tree = hookScriptTree({ scriptPath: hookScriptPath, sourceDir: FORGE_HOME, persistedHome: join(HOME, ".forge") });
+        return { state: tree === "foreign" ? "foreign" : "ok", path: hookScriptPath, error: null };
       }
       return {
         state: "dangling",
@@ -2566,7 +2568,7 @@ async function doctor(fix = false, verbose = false) {
     console.log(`  ${CYAN}↻${RESET}  Repairing command links + SessionStart hook...`);
     try {
       const staleHook = detectSessionStartHookPath();
-      if (staleHook.state === "dangling") {
+      if (staleHook.state === "dangling" || staleHook.state === "foreign") {
         removeSessionStartHook(settingsPath);
       }
       await forge(ctx());
@@ -2924,7 +2926,7 @@ async function doctor(fix = false, verbose = false) {
   {
     let hookPathResult = detectSessionStartHookPath();
     let hookPathWasBroken = false;
-    if (hookPathResult.state === "dangling" && fix) {
+    if ((hookPathResult.state === "dangling" || hookPathResult.state === "foreign") && fix) {
       hookPathWasBroken = true;
       await runInstallRepairOnce();
       hookPathResult = detectSessionStartHookPath();
@@ -2939,6 +2941,11 @@ async function doctor(fix = false, verbose = false) {
       warn(
         "SessionStart hook script path",
         `Could not parse a script path out of the registered hook command ("${hookPathResult.command}"). Run: npx forgedock install`,
+      );
+    } else if (hookPathResult.state === "foreign") {
+      warn(
+        "SessionStart hook script path",
+        `${hookPathResult.path} is outside the active ForgeDock install (${FORGE_HOME}) and ~/.forge — the hook runs a different tree. Run: npx forgedock doctor --fix  (or: npx forgedock install)`,
       );
     } else if (hookPathResult.state === "ok") {
       if (fix && hookPathWasBroken) {
@@ -4007,7 +4014,7 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "first-run", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "acceptance", "interfaces", "docs", "review-staging", "release", "intake", "gc", "env", "sandbox", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "close", "acceptance", "interfaces", "docs", "review-staging", "release", "intake", "gc", "env", "sandbox", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
   "ci-step", "ci-hook", "tests",
   "version", "--version", "-v",
 ]);
@@ -4520,6 +4527,17 @@ switch (command) {
       exitCode = await replanFromCli(restArgs);
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "close": { // #5704: `forgedock close reconcile [--repo R] [--dry-run]`
+    const { closeReconcileFromCli } = await import("./engine-cli.mjs");
+    try {
+      await closeReconcileFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}
+`);
       exitCode = 1;
     }
     break;

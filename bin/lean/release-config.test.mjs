@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { parsePolicy, validatePolicy, readPolicy, INIT_PROFILE, checkConfigFromCli, dockerfileCoverage, dockerfileSources, initFromCli, POLICY_PATH } from "./release-config.mjs";
 import { releaseFromCli } from "./release.mjs";
+import { DEFAULT_RISK_RULES } from "./release-classify.mjs";
 
 const OK = `schema: 1
 branches: {default: main, integration: staging}
@@ -44,6 +45,18 @@ describe("validate", () => {
     assert.match(check(OK.replace("ci_tier: T3", "ci_tier: T9")).join(), /ci_tier T9/);
     assert.match(check(OK.replace(", integration: staging", "")).join(), /branches.integration is not set/);
     assert.match(check(OK.replace("affects: [api, web]", "affects: [api, ghost]")).join(), /unit ghost/);
+  });
+});
+
+describe("risk.rules requires (#5700)", () => {
+  it("DEFAULT_RISK_RULES passes validatePolicy", () => {
+    const r = parsePolicy(OK);
+    assert.deepEqual(validatePolicy({ ...r.policy, risk: { rules: DEFAULT_RISK_RULES } }), []);
+  });
+  it("accepts rule-level requires and rejects when.requires", () => {
+    const rule = (body) => OK + `risk: {rules: [${body}]}\n`;
+    assert.deepEqual(check(rule('{when: {paths: ["x/**"]}, risk: high, requires: rollout-declaration}')), []);
+    assert.match(check(rule('{when: {paths: ["x/**"], requires: rollout-declaration}, risk: high}')).join(), /requires: unknown key/);
   });
 });
 

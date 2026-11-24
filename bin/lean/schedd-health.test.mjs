@@ -57,6 +57,13 @@ describe("schedd heartbeat and watchdog (#4780)", () => {
     assert.match(lines.at(-1), /start failed: no unit/);
   });
 
+  it("#5938: the watchdog logs one verdict line per batch and leaves the heartbeat behaviour alone", async () => {
+    const dir = tmpDir("hb-verdict-"), lines = [];
+    const r = await watchdog({ dir, now: () => 0, alive: () => false, log: (m) => lines.push(m), batchVerdicts: () => ["batch b1: healthy", "batch b2: stalled -> no action, needs you (x)"] });
+    assert.equal(r.status, "down");
+    assert.deepEqual(lines, ["schedd watchdog: batch b1: healthy", "schedd watchdog: batch b2: stalled -> no action, needs you (x)"]);
+  });
+
   it("bestEffortRenice never throws", () => {
     assert.equal(bestEffortRenice(() => { throw new Error("EACCES"); }), false);
     assert.equal(bestEffortRenice(() => {}), true);
