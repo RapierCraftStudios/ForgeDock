@@ -1797,10 +1797,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       try { sock = await schedd.connectDaemon({ dir: deps.scheddDir ?? (await import("./lean/sched.mjs")).schedDir(), spawnDaemon: null }); } catch { sock = null; }
       if (sock) {
         let r = null;
-        try { r = await schedd.request(sock, { op: "clear-breaker", id: b.id }, undefined, { timeoutMs: 15000 }); } catch { r = null; }
+        try { const waitMs = 2 * (deps.pollMs || 15000); r = await schedd.request(sock, { op: "clear-breaker", id: b.id, waitMs }, undefined, { timeoutMs: waitMs + 5000 }); } catch { r = null; }
         if (r?.hosted) {
-          sink.line(`batch ${b.id}: ${r.acknowledged ? (r.cleared ? "breaker cleared" : "no breaker was tripped") : "breaker cleared in state.json; the live runner did not acknowledge"}${r.acknowledged ? " (live runner acknowledged)" : ""}`);
-          return { ok: true, batch: b.id, cleared: Boolean(r.cleared), acknowledged: Boolean(r.acknowledged) };
+          sink.line(`batch ${b.id}: ${r.acknowledged ? (r.cleared ? "breaker cleared" : "no breaker was tripped") : "pending: the runner will clear it on its next pass"}${r.acknowledged ? " (live runner acknowledged)" : ""}`);
+          return { ok: true, batch: b.id, cleared: Boolean(r.cleared), acknowledged: Boolean(r.acknowledged), ...(r.pending ? { pending: true } : {}) };
         }
       }
     }
@@ -2309,7 +2309,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       trusted: (n) => trustedOf.get(n) === true,
       autoChildren,
       ...(autoMod.addsEpicChildren(autoChildren.mode) ? { getChildren: async () => ({ list: await autoMod.readChildList({ gh: (a) => leanIo.gh(a), repo, fields: childFields ??= await autoMod.hostListFields((a) => leanIo.gh(a)) }), elsewhere: autoMod.liveElsewhere({ batchMod, root, self: batch.id, repo }) }) } : {}),
-      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getClearBreaker: batch.readClearBreaker, ackClearBreaker: batch.ackClearBreaker, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, expireHolds: batch.expireHolds, getHoldInfo: batch.readHoldInfo, getGates: batch.readGates, baseWait: baseWaits.size ? baseWaitOf(baseWaits, { io, leanIo, cwd }) : null, ...lanes,
+      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getClearBreaker: batch.peekClearBreaker, consumeClearBreaker: batch.readClearBreaker, ackClearBreaker: batch.ackClearBreaker, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, expireHolds: batch.expireHolds, getHoldInfo: batch.readHoldInfo, getGates: batch.readGates, baseWait: baseWaits.size ? baseWaitOf(baseWaits, { io, leanIo, cwd }) : null, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(Number.isInteger(orch.transientRetries) ? { transientRetries: orch.transientRetries } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, rotator, batchId: batch.id, drift, lifecycle, integration,
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd), host: { cores: () => cpus().length, memAvailableMb, rampingMb: rampProbe.rampingMb } }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       // #5174: hold new local admissions while loadavg/cores is above engine.overload_load_per_core (host-wide batches only)

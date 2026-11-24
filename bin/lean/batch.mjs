@@ -225,6 +225,8 @@ export function openBatch(root, id) {
     },
     /** #5947: `--clear-breaker` for a hosted runner: the request file (a timestamp) is consumed by the runner, which answers in `clear-breaker.ack`. */
     requestClearBreaker: () => { try { rmSync(f("clear-breaker.ack"), { force: true }); } catch { /* best effort */ } const at = Date.now(); put(f("clear-breaker"), `${at}\n`); return at; },
+    /** #5964: the pending request's `at` without deleting it (the runner consumes it after deciding); null when none. */
+    peekClearBreaker: () => { try { const at = Number(readFileSync(f("clear-breaker"), "utf8").trim()); return Number.isFinite(at) && at > 0 ? at : true; } catch { return null; } },
     readClearBreaker: () => { try { readFileSync(f("clear-breaker"), "utf8"); rmSync(f("clear-breaker"), { force: true }); return true; } catch { return false; } },
     ackClearBreaker: (info = {}) => put(f("clear-breaker.ack"), JSON.stringify({ at: Date.now(), ...info }) + "\n"),
     readClearBreakerAck: () => readJson(f("clear-breaker.ack")),
