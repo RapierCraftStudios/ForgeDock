@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, existsSync, utimesSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, utimesSync } from "node:fs";
 import { join } from "node:path";
-import { planCacheCap, planIdleEviction, sweepVolume, CACHE_LABEL } from "../pool/cache-sweep.mjs";
+import { planCacheCap, planIdleEviction, sweepVolume, PACKAGE_STORES, CACHE_LABEL } from "../pool/cache-sweep.mjs";
 import { createAgent } from "../pool/agent.mjs";
 import { tmpDir } from "./_tmp.mjs";
 
@@ -36,14 +36,29 @@ describe("sweepVolume age-out", () => {
   it("deletes package cache, depcache and env entries older than the max age", () => {
     const root = tmpDir("cs-sweep-");
     const old = (Date.now() - 40 * DAY) / 1000;
-    for (const f of ["uv/a/x.bin", "npm/y.bin"]) { mkdirSync(join(root, f, ".."), { recursive: true }); writeFileSync(join(root, f), "x"); utimesSync(join(root, f), old, old); }
+    for (const f of ["forge-depcache/stores/uv-cache/a/x.bin", "pnpm-store/y.bin"]) { mkdirSync(join(root, f, ".."), { recursive: true }); writeFileSync(join(root, f), "x"); utimesSync(join(root, f), old, old); }
     for (const d of ["forge-depcache/pnpm-0123456789abcdef", "env/snap-old", "env/snap-new"]) mkdirSync(join(root, d), { recursive: true });
     for (const d of ["forge-depcache/pnpm-0123456789abcdef", "env/snap-old"]) utimesSync(join(root, d), old, old);
     const r = sweepVolume({ root, maxAgeDays: 14, keep: [] });
-    assert.ok(!existsSync(join(root, "uv/a/x.bin")) && !existsSync(join(root, "npm/y.bin")));
+    assert.ok(!existsSync(join(root, "forge-depcache/stores/uv-cache/a/x.bin")) && !existsSync(join(root, "pnpm-store/y.bin")));
     assert.ok(!existsSync(join(root, "forge-depcache/pnpm-0123456789abcdef")) && !existsSync(join(root, "env/snap-old")));
     assert.ok(existsSync(join(root, "env/snap-new")));
     assert.equal(r.errors.length, 0);
+  });
+  it("ages out old files under every PACKAGE_STORES dir, the layout the lanes really use (#5955)", () => {
+    const root = tmpDir("cs-sweep-");
+    const old = (Date.now() - 40 * DAY) / 1000;
+    for (const d of PACKAGE_STORES) { const f = join(root, d, "k/blob"); mkdirSync(join(f, ".."), { recursive: true }); writeFileSync(f, "x".repeat(2000)); utimesSync(f, old, old); }
+    const r = sweepVolume({ root, maxAgeDays: 14, keep: [] });
+    for (const d of PACKAGE_STORES) assert.ok(!existsSync(join(root, d, "k/blob")), d);
+    assert.equal(r.errors.length, 0);
+  });
+  it("PACKAGE_STORES covers every store depcache.mjs points the lane env at (#5955)", () => {
+    const src = readFileSync(new URL("../lean/depcache.mjs", import.meta.url), "utf8");
+    const names = [...src.matchAll(/store\("([\w-]+)"\)/g)].map((m) => m[1]);
+    assert.ok(names.length >= 5);
+    for (const n of names) assert.ok(PACKAGE_STORES.includes(n === "pnpm-store" ? "forge-depcache/stores/pnpm-store" : `forge-depcache/stores/${n}`), n);
+    assert.ok(PACKAGE_STORES.includes("pnpm-store"));
   });
   it("cap shrinks work dirs oldest-first but keeps live ones; reports last use", () => {
     const root = tmpDir("cs-sweep-");
