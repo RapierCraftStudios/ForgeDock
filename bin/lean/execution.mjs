@@ -98,6 +98,12 @@ const CLONE_RETRY_S = 120;
 export const SANDBOX_CLONE_CODE = "sandbox.clone";
 /** #4866: a sandbox clone failure is a retryable `deferred` `sandbox.clone`, never an engine-error (so the breaker never sees it). */
 const cloneDeferred = (id, detail) => ({ terminalReason: "deferred", code: SANDBOX_CLONE_CODE, retryInSeconds: CLONE_RETRY_S, detail: `sandbox ${id} could not clone the repo: ${detail}; retry in ${CLONE_RETRY_S}s` });
+// #5923: a hung github.com connection (ls-remote/fetch, or a connect timeout inside a clone) is egress, not a plain clone failure.
+const EGRESS_RE = /Connection timed out|Failed to connect to|\b(ls-remote|fetch)\b[^\n]*\b(time[ds]?\s?out|timeout|hung|hang)|\b(time[ds]?\s?out|timeout)\b[^\n]*\b(ls-remote|fetch)\b/i;
+export const isEgressTimeout = (text) => EGRESS_RE.test(String(text ?? ""));
+/** Outcome code of a sandbox whose git egress hung to a timeout; local like sandbox.clone. */
+export const SANDBOX_EGRESS_TIMEOUT_CODE = "sandbox.egress_timeout";
+const egressDeferred = (id, detail) => ({ terminalReason: "deferred", code: SANDBOX_EGRESS_TIMEOUT_CODE, retryInSeconds: CLONE_RETRY_S, detail: `sandbox ${id} git egress timed out: ${detail}; retry in ${CLONE_RETRY_S}s` });
 const errLine = (t) => String(t ?? "").split("\n")[0].slice(0, 300);
 const errText = (e) => String(e?.stderr || e?.message || e).split("\n")[0].slice(0, 300);
 
@@ -739,7 +745,8 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
     : { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_UNREACHABLE, retryInSeconds: 60,
       detail: `sandbox ${h.id} ${errText(e)}; kept for adopt on resume` });
   const tailOf = async (h) => { try { return typeof logTail === "function" ? String(await logTail(h) ?? "") : ""; } catch { return ""; } };
-  const settleClone = (r, id) => (r?.terminalReason === "engine-error" && r.code === undefined && isCloneFailure(r.detail) ? cloneDeferred(id, errLine(r.detail)) : r);
+  const settleClone = (r, id) => (r?.terminalReason === "engine-error" && r.code === undefined && isEgressTimeout(r.detail) ? egressDeferred(id, errLine(r.detail))
+    : r?.terminalReason === "engine-error" && r.code === undefined && isCloneFailure(r.detail) ? cloneDeferred(id, errLine(r.detail)) : r);
   // #5669: a halted batch (schedd handover) stops polling; the sandbox is neither torn down nor released, so the next daemon adopts it.
   const wait = async (h, g = guard({ waited: 0, tries: 0 }), sig = null) => {
     for (;;) {
@@ -760,6 +767,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
             detail: `${why}: usage limit hit; resets at ${lim.resetAt ?? "unknown"}` };
         }
         // #5859: tagged with its pool agent so the runner can tell an agent/VM restart (many lost on one agent) from one dead sandbox
+        if (isEgressTimeout(tail)) return egressDeferred(h.id, why);
         return isCloneFailure(tail) ? cloneDeferred(h.id, why) : { terminalReason: "engine-error", detail: why, lostWithoutResult: true, ...(typeof h?.agent === "string" && h.agent ? { agent: h.agent } : {}) };
       }
       await sleep(pollMs);

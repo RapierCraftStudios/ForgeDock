@@ -44,6 +44,48 @@ if grep -qi microsoft /proc/sys/kernel/osrelease && [ -z "$(ip -6 route show def
   systemctl restart docker 2>/dev/null || true
 fi
 systemctl enable --now docker >/dev/null
+# #5923: WSL mirrored networking leaves the guest a narrow source-port range that docker's MASQUERADE ignores; pin it (idempotent, re-run when docker restarts).
+if grep -qi microsoft /proc/sys/kernel/osrelease; then
+  cat > /usr/local/sbin/cs-nat-portrange <<'CS_NAT_SCRIPT'
+#!/bin/sh
+# cs-nat-portrange: pin docker NAT source ports to the guest ip_local_port_range (WSL mirrored networking)
+set -eu
+set -- $(sysctl -n net.ipv4.ip_local_port_range) || exit 0
+lo=$1; hi=$2
+[ "$lo" -gt 32768 ] || [ "$hi" -lt 60999 ] || exit 0
+docker network ls --filter driver=bridge -q | while read -r id; do
+  info=$(docker network inspect -f '{{.Name}}|{{index .Options "com.docker.network.bridge.name"}}|{{range .IPAM.Config}}{{.Subnet}} {{end}}' "$id") || continue
+  name=${info%%|*}; rest=${info#*|}; bridge=${rest%%|*}; subnets=${rest#*|}
+  if [ -z "$bridge" ]; then if [ "$name" = bridge ]; then bridge=docker0; else bridge="br-$(echo "$id" | cut -c1-12)"; fi; fi
+  for subnet in $subnets; do
+    case "$subnet" in *:*) continue ;; esac
+    for proto in tcp udp; do
+      iptables -t nat -C POSTROUTING -s "$subnet" ! -o "$bridge" -p "$proto" -j MASQUERADE --to-ports "$lo-$hi" 2>/dev/null ||
+        iptables -t nat -I POSTROUTING 1 -s "$subnet" ! -o "$bridge" -p "$proto" -j MASQUERADE --to-ports "$lo-$hi"
+    done
+  done
+done
+CS_NAT_SCRIPT
+  chmod 0755 /usr/local/sbin/cs-nat-portrange
+  cat > /etc/systemd/system/cs-nat-portrange.service <<'CS_NAT_UNIT'
+[Unit]
+Description=Pin docker NAT source ports to the WSL guest port range
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/cs-nat-portrange
+
+[Install]
+WantedBy=docker.service
+CS_NAT_UNIT
+  systemctl daemon-reload
+  systemctl enable cs-nat-portrange.service >/dev/null 2>&1 || true
+  systemctl restart cs-nat-portrange.service || true
+  mark nat-pin
+fi
 
 if [ ! -x /opt/node/bin/node ] || [ "$(/opt/node/bin/node --version)" != "v${NODE_VERSION}" ]; then
   log "node ${NODE_VERSION}"
