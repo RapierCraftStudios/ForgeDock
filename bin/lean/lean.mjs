@@ -434,6 +434,7 @@ export async function runCore(o) {
   };
   let pageVisual = null; // #5770: the engine's visual capture {sha, screenshots, errors, rows}, kept for the page gate and the PR body
 
+  const ctxStats = { restarts: 0, continues: 0, turns: 0 }; // #5829: reported on the lane result
   const builderTriggers = []; // #4362: implement-attempt triggers in order, for the lane's first-pass flag
   let usageUnknown = false, inflight = null; // #5334: a killed session streamed nothing; the builder call in flight (flushed when a signal ends the run)
   const impl = { cost: 0, models: new Set() }; // #4397: implement spend and reported models, for the verifier
@@ -1165,7 +1166,6 @@ export async function runCore(o) {
   let laneCeiling = contextCeilingTokens ?? DEFAULT_CEILING; // #5346: set to the lane size's ceiling once the contract is frozen; #5829: model-aware when no explicit one
   let ceilingExplicit = contextCeilingTokens != null || contextCeilingBySize != null; // #5829
   let laneModelInfo = null; // #5829: the routed model's static window and cache-read price (null = unknown: kill-and-restart at the ceiling)
-  const ctxStats = { restarts: 0, continues: 0, turns: 0 }; // #5829: reported on the lane result
   const UNCEILED = ["plan", "contract_correction", "block_correction"], CONTEXT_RESTARTS_MAX = 3;
   /** #5812: the planning session's last-turn context, the files it read and its final reply, for the route hand-off. */
   let planSession = null;
