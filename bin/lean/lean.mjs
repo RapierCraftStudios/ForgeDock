@@ -87,7 +87,7 @@ import { makeTurnBudget, TURN_BUDGET_DEFAULTS, scaledExtra, laneSize, recoverySi
 import { pendingPitfall, pitfallRecord, foldPitfalls, selectPitfalls, failureLog } from "./pitfalls.mjs";
 import { unjustified } from "./enumerating.mjs";
 import { applyEnumerating, renameDuplicates, verifyApplied } from "./mechfix.mjs"; // #5348
-import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
+import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB, isSpawnError, repoMissing } from "./worktree.mjs";
 import { ceilingEnv, listedWorktree } from "./laneconfine.mjs";
 import { claimWarm, refillWarm, warmTreeCount, NO_HOOKS } from "./warmtree.mjs";
 import { ciSignal, cancelDecision, eventLog } from "./ci-watch.mjs";
@@ -1575,6 +1575,13 @@ export async function runCore(o) {
 
   try {
     // ---- 1. claim ----
+    // #5890: a missing or non-git repo cwd ends the lane deferred (sandbox.repo_missing), before any lane git call
+    if (io.fs?.exists) {
+      let why = null;
+      if (!(await io.fs.exists(cwd))) why = `repo directory ${cwd} does not exist`;
+      else { try { await io.git(["rev-parse", "--git-dir"], { cwd }); } catch (e) { if (isSpawnError(e) || /not a git repository/i.test(String(e?.stderr ?? e?.message ?? ""))) why = `${cwd} is not a usable git repository`; } }
+      if (why) throw Object.assign(new Error(why), { deferCode: OUTCOME_CODES.SANDBOX_REPO_MISSING, deferDetail: `${why}; the lane is requeued`, retryInSeconds: 120 });
+    }
     // #5435: the lane fetch is independent of the claim's GitHub writes; start it now and await it before the resume probe.
     const fetchP = step("fetch", async () => { try { await io.git(["fetch", "origin", lane], { cwd }); } catch { /* offline: use the local ref */ } });
     await step("claim", async () => {
@@ -4463,6 +4470,7 @@ export async function runCore(o) {
       const when = e.resetAt || (Number.isFinite(e.resetAtEpochMs) ? new Date(e.resetAtEpochMs).toISOString() : "unknown");
       return finish("deferred", `usage limit hit; resets at ${when}`, { code: OUTCOME_CODES.RATE_LIMITED, resetAt: when, resetAtEpochMs: Number.isFinite(e.resetAtEpochMs) ? e.resetAtEpochMs : null, backendId: laneBackendId(process.env, rotator) }, OUTCOME_CODES.RATE_LIMITED);
     }
+    if (!e?.deferCode && isSpawnError(e) && String(e?.path ?? e?.spawnargs?.[0] ?? e?.message).match(/git/i)) repoMissing(e); // #5890: a raw spawn ENOENT/EACCES is never an untyped engine-error
     if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode, ...(e.retryInSeconds ? { retryInSeconds: e.retryInSeconds } : {}), ...(e.backendId ? { backendId: e.backendId } : {}), ...(e.cliResult != null ? { cliResult: e.cliResult } : {}), ...(typeof e.cliIsError === "boolean" ? { cliIsError: e.cliIsError } : {}), ...(e.account ? { account: e.account } : {}), ...quotaFacts(e) }, e.deferCode); // #5168: backendId keys the account hold; #5236 reset
     // #4505: a turn overrun is mechanical: a non-human end the batch recovers, needs-human only once a budget recovery failed too
     if (e?.laneCode === OUTCOME_CODES.BUDGET_EXCEEDED && !(recover?.final && recover.code === OUTCOME_CODES.BUDGET_EXCEEDED)) {
