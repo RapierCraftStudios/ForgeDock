@@ -87,7 +87,11 @@ export async function runPoolCli(argv, deps = {}) {
       const cfg = routerConfig();
       const r = await call(`http://${cfg.listen.host}:${cfg.listen.port}`, "GET", "/agents", { token: cfg.forgedock_token });
       console.log(JSON.stringify(r.data, null, 2));
-      for (const a of r.data?.agents ?? []) if (a.transport) console.log(`${a.name}: transport ${a.transport}`); // #5882
+      for (const a of r.data?.agents ?? []) {
+        if (a.transport) console.log(`${a.name}: transport ${a.transport}`); // #5882
+        const n = a.net; // #5923
+        if (n?.mirrored) console.log(`${a.name}: net mirrored, port range ${n.port_range ?? "?"}, NAT pin ${n.nat_pin ? "present" : "MISSING"}${n.degraded ? " DEGRADED" : ""}`);
+      }
       break;
     }
     case "enroll":

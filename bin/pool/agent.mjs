@@ -14,7 +14,7 @@ import { repoRoot, versionOf, laneImageTag, laneBuildArgs } from "./version.mjs"
 import { jsonStore } from "./store.mjs";
 import { makeWarm } from "./warm.mjs";
 import { resolveLaneImage, laneImageNow, laneToolsTag, isLaneToolsTagOf } from "./lane-tools.mjs";
-import { hostDiskFree } from "./health.mjs";
+import { hostDiskFree, ensureNatPin, netState } from "./health.mjs";
 import { laneDiskUsedGb, planDiskCap, fstrimDue, runFstrim } from "./disk.mjs";
 import { planIdleEviction, CACHE_LABEL, agentLabel } from "./cache-sweep.mjs";
 
@@ -103,7 +103,7 @@ export async function buildWithRetry(build, { sleep = (ms) => new Promise((r) =>
   }
 }
 
-export function createAgent(cfg, { docker, now = () => Date.now(), log = console, live = liveHeadroom, hostDisk = null, vm = vmSize, trim = runFstrim } = {}) {
+export function createAgent(cfg, { docker, now = () => Date.now(), log = console, live = liveHeadroom, hostDisk = null, net = netState, vm = vmSize, trim = runFstrim } = {}) {
   const stateDir = cfg.state_dir;
   const store = jsonStore(join(stateDir, "state.json"), { sandboxes: {} });
   const sb = () => store.data.sandboxes;
@@ -197,6 +197,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     return hostDiskCache.v;
   });
   /** Under the floor now, or once the running sandboxes plus the new one grow the vhdx by sandbox_disk_growth_gb each. */
+  let netCache = { at: -Infinity, v: null };
+  const readNet = () => { if (now() - netCache.at > 60000) netCache = { at: now(), v: net() }; return netCache.v; };
   const hostDiskLow = (free, active) => { const floor = cfg.min_host_disk_free_gb ?? 25; return free < floor || free - (cfg.sandbox_disk_growth_gb ?? 3.5) * (active + 1) < floor; };
   // #5884: lane disk cap (cfg.lane_disk_cap_gb, unset = off, nothing added to /capacity): sandbox dirs plus cache volumes.
   function laneDiskView() {
@@ -289,7 +291,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const u = used();
     const active = Object.values(sb()).filter((s) => s.state !== "exited").length;
     const e = effectiveCapacity();
-    return { host: cfg.name ?? hostname(), ...running, vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.log && upgrade.state === "failed" ? { upgrade_log: upgrade.log } : {}), ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10 }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...diskView(), ...laneDiskView(), ...hostDiskView(active), paused: Boolean(cfg.paused), live: live(cfg), usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
+    return { host: cfg.name ?? hostname(), ...running, vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.log && upgrade.state === "failed" ? { upgrade_log: upgrade.log } : {}), ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10 }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...diskView(), ...laneDiskView(), ...hostDiskView(active), net: readNet(), paused: Boolean(cfg.paused), live: live(cfg), usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
   }
 
   /** The image a spec's lanes run (the per-repo lane_tools tag when tools are listed), without building it. */
@@ -839,10 +841,11 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
  * WSL with mirrored networking often has no IPv6 default route, yet dockerd still dials registries over IPv6 and fails
  * ("network is unreachable"). Turn IPv6 off inside the distro (persistently) and restart docker while it is idle.
  */
-export async function wslNetworkFixup({ run: runCmd = run, log = console, idle = () => true } = {}) {
+export async function wslNetworkFixup({ run: runCmd = run, log = console, idle = () => true, pin = ensureNatPin } = {}) {
   let release = "";
   try { release = readFileSync("/proc/sys/kernel/osrelease", "utf8"); } catch { return "not linux"; }
   if (!/microsoft/i.test(release)) return "not wsl";
+  try { const p = pin(); if (p?.applied) log.info?.(`WSL mirrored: pinned docker NAT source ports to ${p.range} (${p.applied} rules)`); } catch (e) { log.warn?.(`NAT port pin failed: ${e.message}`); }
   try {
     const { stdout } = await runCmd("ip", ["-6", "route", "show", "default"]);
     if (String(stdout).trim()) return "ipv6 route present";
