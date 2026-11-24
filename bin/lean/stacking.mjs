@@ -93,3 +93,48 @@ export function stackedBaseBlock({ prBase, lane, stackedBranch = null, dependenc
   if (prBase !== lane) return `merge.stacked_base: PR base ${prBase || "?"} is not the lane ${lane}`;
   return null;
 }
+
+/** #5833 (phase 3): cascade kinds recorded on a stacked dependent's row (`cascade`, `cascades`). */
+export const CASCADES = ["rebase", "reverify", "restart", "replan"];
+
+/**
+ * Which cascade a stacked dependent needs now, or null (nothing moved). `depState`: open | merged | closed (closed = ended without a merge).
+ * merged -> rebase onto the lane; closed -> replan on the lane base; open with a moved head -> reverify (clean rebase) or restart (conflict).
+ * @param {{depState:string, depHeadSha?:string|null, stackedSha?:string|null, rebaseConflict?:boolean}} a
+ */
+export function cascadeDecision({ depState, depHeadSha = null, stackedSha = null, rebaseConflict = false }) {
+  if (depState === "merged") return "rebase";
+  if (depState === "closed") return "replan";
+  if (depState !== "open" || !depHeadSha || !stackedSha || depHeadSha === stackedSha) return null;
+  return rebaseConflict ? "restart" : "reverify";
+}
+
+/**
+ * The checks the dependency's final diff invalidates: a command naming a path (token with `/`) is kept when a changed path equals it or
+ * lies under it (or it lies under the changed path); a command naming no path cannot be scoped and is always kept.
+ * @param {{changedPaths:string[], checks:string[]}} a
+ */
+export function invalidatedChecks({ changedPaths = [], checks = [] }) {
+  const norm = (t) => t.replace(/^["']|["']$/g, "").replace(/^\.\//, "").replace(/\/+$/, "");
+  return checks.filter((c) => {
+    const toks = String(c).split(/\s+/).map(norm).filter((t) => t.includes("/") && !t.startsWith("-") && !/^[a-z]+:\/\//.test(t));
+    if (!toks.length) return true;
+    return toks.some((t) => changedPaths.some((p) => p === t || p.startsWith(`${t}/`) || t.startsWith(`${p}/`)));
+  });
+}
+
+/** Batch-report metric: cascades per stacked dependent and the cost of the rework (rows carry `stacked`, `cascades`, `cascade_cost_usd`, `cascade_minutes`). */
+export function cascadeRate(rows = []) {
+  const st = rows.filter((r) => r?.stacked);
+  const list = st.map((r) => (Array.isArray(r.cascades) ? r.cascades : r.cascade ? [r.cascade] : []));
+  const cascades = list.reduce((s, l) => s + l.length, 0);
+  const round = (x, k) => Math.round(x * k) / k;
+  return { stacked: st.length, cascades, perStacked: st.length ? round(cascades / st.length, 100) : 0,
+    reworkCostUsd: round(st.reduce((s, r) => s + (Number(r.cascade_cost_usd) || 0), 0), 1e6), reworkMinutes: round(st.reduce((s, r) => s + (Number(r.cascade_minutes) || 0), 0), 10) };
+}
+
+/** One report line, or null when nothing was stacked. */
+export function formatCascadeSummary(rows) {
+  const m = cascadeRate(rows);
+  return m.stacked ? `stacked lanes: ${m.stacked} dependent(s), ${m.cascades} cascade(s) (${m.perStacked}/dependent), rework $${m.reworkCostUsd.toFixed(2)} / ${m.reworkMinutes} min` : null;
+}

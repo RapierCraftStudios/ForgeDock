@@ -91,7 +91,7 @@ export function equivalentRuns(frozen, sub) {
   return a.size > 0 && a.size === b.size && [...a].every(([id, ok]) => ok && b.get(id) === true);
 }
 
-const DRIFT_RE = /(?:generated|artifact|snapshot)s?\b[^\n]*\b(?:out of date|out-of-date|stale|differ|drift|not up to date)|\b(?:out of date|stale)\b[^\n]*\b(?:generated|regenerate)|run [`'"]?[^\n]*\bgenerate[\w:-]*[`'"]? to (?:update|regenerate)/i;
+const DRIFT_RE = /(?:generated|artifact|snapshot)s?\b[^\n]*\b(?:out of date|out-of-date|stale|differ|drift|not up to date)|\b(?:out of date|stale)\b[^\n]*\b(?:generated|regenerate)|run [`'"]?[^\n]*\bgenerate[\w:-]*[`'"]? to (?:update|regenerate)|\bmissing or out[ -]of[ -]date\b|\brun [`'"]?[^\n)]*--(?:render|write|update)\b/i; // #5730: "missing or out of date (run --render-agent-md)"
 /** True when a validate failure's output reads as a stale generated artifact (a regenerate case), not a failing test. */
 export const isDriftFailure = (output) => DRIFT_RE.test(String(output ?? ""));
 

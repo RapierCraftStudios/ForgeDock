@@ -328,6 +328,10 @@ orchestration:
   # is PR-ready (review passed, precheck green) builds on that lane head and opens a stacked PR
   # on the dependency's branch. The merge step (guard merge.stacked_base) refuses while the PR
   # base is not the lane or the dependency is unmerged; after it merged the PR moves onto the lane.
+  # Cascades (#5833): while it waits, a moved dependency head is rebased onto and re-verified (a conflict
+  # restarts the dependent from its frozen contract), a dependency closed without merging drops the
+  # stacked PR/branch and re-plans the dependent on the lane base, and after the merge only the checks
+  # the dependency's diff touches re-run. Rows carry `cascade`; the batch report counts cascades per dependent.
   # A plan lane's other ends do not count toward the breaker, relaunch or requeue budgets.
   stacking: off
 
@@ -1731,7 +1735,7 @@ execution:
 | Key | Type | Required | Description |
 |-----|------|----------|-------------|
 | `mode` | string | No | `local` (default): lanes are detached host processes, as before. `remote`: lanes run in sandboxes of `provider`. `hybrid`: each lane is placed from facts (forge#4256, below). |
-| `max_remote` | integer | No | Remote lanes of the batch that may run at once. They take no slot of the host lane cap (`orchestration.global_parallel`, `forgedock sched cap`); the batch `--parallel` still applies. `0` (default) keeps lanes local. |
+| `max_remote` | integer | No | Remote lanes of the batch that may run at once. They take no slot of the host lane cap (`orchestration.global_parallel`, `forgedock sched cap`); the batch `--parallel` still applies. `0` (default) keeps lanes local. The pool router's per-agent lane ceiling (`forgedock pool limit <agent> --lanes N`) caps lane sandboxes on a host across all batches and defers the rest. |
 | `heavy` | boolean | No | Hybrid placement override (forge#4523). `true`: every lane that passes rules 1-3 is placed remote. `false`: the detected validation weight is ignored (rule 5 still applies). Unset: detect. It changes placement only: no pre-PR commands run, and host admission (`max_load_per_core`) is unchanged. |
 | `provider` | string | No | `container` (reference: an ephemeral local container), `remote` (a runner pool or remote session over HTTP, forge#4254), `pool` (the built-in pool router on this host, forge#4546: `remote` with `endpoint` and `token_env` defaulted from the router config, `COMPUTESHARE_CONFIG` or `~/.config/computeshare/router.json`, and its `forgedock.token`; the repo's `forge.yaml` is sent to every sandbox, so no router `repos` map is needed; missing router config and no `endpoint` fails with `execution.provider.misconfigured`) or `local`. The default is `container` off `local` mode; `remote` and `pool` are used only when named. Unknown names fail the batch start. |
 | `image` | string | No | Container provider image; it must provide `git` and `forgedock`. Started with `--pull never`. |
@@ -2949,6 +2953,9 @@ Keys of the pool agent's JSON config (`forgedock pool agent`), not of `forge.yam
 | `cache_idle_days` | number | `30` | A volume with no launch for this long and no referencing sandbox is removed. Evicted only when its last use is known (`/cache/.last-used`, written by the lane entrypoint). |
 | `cache_never_evict` | list of volume names | `[]` | Volumes (e.g. `cs-cache-marcode`) that are never swept or evicted. |
 | `cache_sweep_interval_s` | number | `3600` | Gap between cache sweeps. |
+| `lane_disk_cap_gb` | number | unset (off) | #5884: hard cap on lane disk (running sandbox dirs plus this agent's cache volumes). At or over it `/capacity` has `disk_capped: true`, a launch answers 503 `pool.disk_cap` (a deferral, like `pool.disk_low`) and the router skips the host. Fields `lane_disk_used_gb`/`lane_disk_cap_gb` appear only when set. A dedicated volume or filesystem quota for the state dir is the operator-side alternative. |
+| `disk_prune_at_pct` | number | `80` | From this percent of `lane_disk_cap_gb` each reap prunes this agent's stopped containers, dangling images and build cache (agent-label scoped) and runs a cache sweep, then an fstrim. |
+| `fstrim_interval_s` | number | `21600` | Gap between best-effort `fstrim -v <docker root>` runs (`sudo -n` when not root; failure is a log line). `fstrim: false` turns it off; `docker_root` overrides `/var/lib/docker`. The WSL installer also enables `sparseVhd=true` in `.wslconfig` and `wsl --manage --set-sparse`. |
 | `agent_id` | string | `name` | Owner label `computeshare.agent=<id>` (#5881) on every container and cache volume the agent creates. Reap, orphan-volume, cache and work sweeps touch only resources carrying it, so a co-resident agent or foreign containers are never removed; unlabelled pre-existing items are left alone. Setting it also namespaces the cache volume (`cs-cache-<id>-<key>`) so two agents never share `/cache/work`. |
 
 A failed or timed-out sweep (10 min limit) shows as `cache_sweep_error` in the agent's `/capacity`, next to `cache_volumes` (size per volume).

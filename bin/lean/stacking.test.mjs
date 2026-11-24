@@ -3,7 +3,7 @@
 // #5831: stacked lanes phase 1 — the pure helpers.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeStacking, planAdmissible, formatPlanned, parsePlanned, planStale, stackAdmissible, formatStackedOn, parseStackedOn, validStackedOn, stackedBaseBlock } from "./stacking.mjs";
+import { normalizeStacking, planAdmissible, formatPlanned, parsePlanned, planStale, stackAdmissible, formatStackedOn, parseStackedOn, validStackedOn, stackedBaseBlock, cascadeDecision, invalidatedChecks, cascadeRate, formatCascadeSummary, CASCADES } from "./stacking.mjs";
 
 const SAT = new Set(["merged", "invalid"]);
 const base = { n: 2, edges: [1], results: new Map(), pending: [1, 2], running: new Map(), planTried: new Set(), satisfied: SAT };
@@ -70,5 +70,29 @@ describe("stacked builds, phase 2 (#5832)", () => {
     assert.match(stackedBaseBlock({ ...g, prBase: "staging", dependencyMerged: false }), /unmerged/);
     assert.equal(stackedBaseBlock({ ...g, prBase: "staging", dependencyMerged: true }), null);
     assert.equal(stackedBaseBlock({ prBase: "staging", lane: "staging", dependencyMerged: false }), null, "not stacked");
+  });
+});
+
+describe("cascades (#5833)", () => {
+  it("cascadeDecision: merged -> rebase, closed -> replan, moved head -> reverify or restart on a conflict, nothing moved -> null", () => {
+    assert.equal(cascadeDecision({ depState: "merged" }), "rebase");
+    assert.equal(cascadeDecision({ depState: "closed" }), "replan");
+    assert.equal(cascadeDecision({ depState: "open", depHeadSha: "b", stackedSha: "a" }), "reverify");
+    assert.equal(cascadeDecision({ depState: "open", depHeadSha: "b", stackedSha: "a", rebaseConflict: true }), "restart");
+    assert.equal(cascadeDecision({ depState: "open", depHeadSha: "a", stackedSha: "a" }), null);
+    assert.equal(cascadeDecision({ depState: "unknown", depHeadSha: "b", stackedSha: "a" }), null);
+    assert.deepEqual(CASCADES, ["rebase", "reverify", "restart", "replan"]);
+  });
+  it("invalidatedChecks keeps path-scoped checks the diff touches and every unscoped check", () => {
+    const checks = ["node --test bin/lean/stacking.test.mjs", "node --test docs/x.test.mjs", "pnpm lint", "eslint src/"];
+    assert.deepEqual(invalidatedChecks({ changedPaths: ["bin/lean/stacking.mjs", "src/a.ts"], checks }), ["pnpm lint", "eslint src/"]);
+    assert.deepEqual(invalidatedChecks({ changedPaths: ["bin/lean/stacking.test.mjs"], checks }), ["node --test bin/lean/stacking.test.mjs", "pnpm lint", "eslint src/"]);
+    assert.deepEqual(invalidatedChecks({ changedPaths: [], checks }), ["pnpm lint", "eslint src/"]);
+  });
+  it("cascadeRate: cascades per stacked dependent and the rework cost; non-stacked rows are ignored", () => {
+    const rows = [{ issue: 1, outcome: "merged" }, { issue: 2, stacked: true, cascades: ["reverify", "rebase"], cascade_cost_usd: 0.5, cascade_minutes: 3 }, { issue: 3, stacked: true }];
+    assert.deepEqual(cascadeRate(rows), { stacked: 2, cascades: 2, perStacked: 1, reworkCostUsd: 0.5, reworkMinutes: 3 });
+    assert.equal(formatCascadeSummary([{ issue: 1 }]), null);
+    assert.match(formatCascadeSummary(rows), /2 dependent\(s\), 2 cascade\(s\)/);
   });
 });

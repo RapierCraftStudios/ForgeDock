@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { openBatch, isLaneAlive, listBatches, SECRET_ENV, scanStats } from "./batch.mjs";
 import { killTrackedChildren, runWithInput, trackedChildCount } from "./effects.mjs";
-import { findUnhosted, startDaemon, scheddPaths, connectDaemon, request, unitState, SCHEDD_SCRIPT, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals, readInstalledVersion } from "./schedd.mjs";
+import { findUnhosted, startDaemon, scheddPaths, connectDaemon, request, unitState, SCHEDD_SCRIPT, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals, readInstalledVersion, batchVerdicts } from "./schedd.mjs";
 import { schedDir } from "./sched.mjs";
 import { readHeartbeat } from "./schedd-health.mjs";
 import { formatTable, orchestrate } from "./orchestrate.mjs";
@@ -146,6 +146,25 @@ describe("schedd host scheduler (#4192)", () => {
       const id = done[0].batch;
       await withRoot(h, () => capture(() => orchestrateFromCli(["--set-parallel", id, "5"], h.client)));
       assert.equal(openBatch(h.root, id).readParallel(), 5);
+    } finally { await h.cleanup(); }
+  });
+
+  it("#5947 clear-breaker on a hosted batch reaches the live runner, which acknowledges it (no daemon restart)", async () => {
+    const h = host();
+    try {
+      const d = await h.daemon();
+      const all = capture(() => h.inWork(() => orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client)));
+      await until(() => h.launched().length === 1 && h.lanePids().length === 1);
+      const [id] = listBatches(h.root);
+      const r = await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "clear-breaker", id }, undefined, { timeoutMs: 20000 });
+      assert.equal(r.type, "ok");
+      assert.equal(r.hosted, true);
+      assert.equal(r.acknowledged, true, "the hosted runner consumed the request and acked");
+      assert.equal(openBatch(h.root, id).readClearBreakerAck().cleared, false, "no breaker was tripped");
+      assert.equal(existsSync(join(h.root, id, "clear-breaker")), false, "the request file is consumed");
+      assert.equal((await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "status" })).pid, d.pid, "same daemon");
+      writeFileSync(h.release, "");
+      await all;
     } finally { await h.cleanup(); }
   });
 
@@ -483,6 +502,28 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
       utimesSync(join(b.dir, "state.json"), old, old); // the wedged runner still dispatched nothing
       await until(() => existsSync(join(b.dir, "health.json")) && readFileSync(join(b.dir, "health.json"), "utf8").includes("dispatch-stalled"), 8000);
       assert.equal(calls.length, 1, "a hosted runner is not re-hosted again");
+    } finally { await d.close(); }
+  });
+
+  it("#5938: a stored stall clears within one tick (STALL CLEARED) once the batch is at K; status shows running/K and the split; the watchdog verdict is healthy", async () => {
+    const dir = tmpDir("schedd-stall-clear-"), root = join(dir, "batches"), id = "b20261122-000000-5938", lines = [];
+    const b = openBatch(root, id);
+    b.writePlan({ daemon: true, repo: "o/r", created: new Date(Date.now() - 90 * 60000).toISOString() });
+    b.store.save({ v: 1, order: [1, 2, 3], results: {}, running: {}, pending: [1, 2, 3], parallel: 2 });
+    const old = new Date(Date.now() - 30 * 60000);
+    utimesSync(join(b.dir, "state.json"), old, old);
+    assert.match(batchVerdicts(root, { windowMin: 10 })[0], /stalled/);
+    writeFileSync(join(b.dir, "health.json"), JSON.stringify({ stall: { at: new Date().toISOString(), sig: "1,2,3", detail: "old" } }) + "\n");
+    b.store.save({ v: 1, order: [1, 2, 3], results: {}, running: { 1: { startedAt: 1 }, 2: { startedAt: 1, remote: true } }, pending: [1, 2, 3], parallel: 2 });
+    utimesSync(join(b.dir, "state.json"), old, old);
+    const runBatch = async ({ sink }) => { sink.batch({ id, dir: b.dir }); return await new Promise(() => {}); };
+    const d = await startDaemon({ dir, root, runBatch, log: (m) => lines.push(m), resumeOnStart: true, stallCheckMs: 50, stallMin: 10 });
+    try {
+      await until(() => !readFileSync(join(b.dir, "health.json"), "utf8").includes("stall\""), 8000);
+      assert.match(readFileSync(join(b.dir, "batch.log"), "utf8"), /STALL CLEARED/);
+      assert.equal(batchVerdicts(root, { windowMin: 10 })[0], `batch ${id}: healthy`);
+      const st = await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "status" });
+      assert.deepEqual(st.batches.find((x) => x.id === id).lanes, { running: 2, k: 2, local: 1, remote: 1 });
     } finally { await d.close(); }
   });
 

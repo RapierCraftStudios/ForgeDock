@@ -39,6 +39,7 @@ describe("orchestrate stacking (#5831)", () => {
     assert.deepEqual(h.calls.map((c) => [c.n, !!c.ctx.plan]), [[1, false], [2, true], [2, false]]);
     assert.deepEqual(h.calls[2].ctx.planned, { contractHash: HASH, baseSha: SHA });
     assert.deepEqual(h.updates.filter((u) => u.issue === 2).map((u) => u.outcome), ["planned", "merged"]);
+    assert.ok(h.updates.find((u) => u.issue === 2 && u.outcome === "merged").plan_minutes >= 0, "#5834: plan lane minutes ride the final row");
     assert.deepEqual(h.events.filter((e) => e.event?.startsWith("STACK_")).map((e) => e.event), ["STACK_PLAN_START", "STACK_PLANNED"]);
   });
   it("plan: one plan lane per issue; a failed plan lane is plan-failed, not counted, and the build lane runs without ctx.planned", async () => {
@@ -91,6 +92,8 @@ describe("orchestrate stacked builds, phase 2 (#5832)", () => {
     assert.equal(ev.issue, 2); assert.equal(ev.stacked, true);
     const row = h.updates.find((u) => u.issue === 2 && u.outcome === "merged");
     assert.equal(row.stacked, true); assert.equal(row.stackedOn.dependency, 1);
+    assert.deepEqual(row.deps, [1], "#5834: the row carries its in-batch edges");
+    assert.ok(Number.isFinite(row.admitted_at) && row.ended_at >= row.admitted_at, "#5834: admission and end timestamps");
   });
   it("full: nothing is stacked before the dependency is PR-ready (it falls back to waiting for the merge)", async () => {
     let ready = false;
@@ -118,5 +121,24 @@ describe("orchestrate stacked builds, phase 2 (#5832)", () => {
     assert.deepEqual(saved.stackedTried, [2]);
     assert.equal(saved.stacked[2].dependency, 1);
   });
+  it("cascade (#5833): a stack.replan end requeues the dependent as a normal lane; the row records the cascade and its rework", async () => {
+    let gate; const g = new Promise((r) => { gate = r; });
+    const calls = [];
+    const runOne = async (n, lane, ctx = {}) => {
+      calls.push({ n, ctx });
+      if (n === 1) { await g; return { terminalReason: "merged", cost_usd: 0 }; }
+      if (ctx.plan) return { terminalReason: "planned", planned: { contractHash: HASH, baseSha: SHA } };
+      if (ctx.stackedOn) { gate(); return { terminalReason: "deferred", code: "stack.replan", cascade: "replan", cascades: ["replan"], cascade_cost_usd: 0.25, cascade_minutes: 2, cost_usd: 0.25, detail: "dependency ended unsatisfied" }; }
+      return { terminalReason: "merged", cost_usd: 0 };
+    };
+    const updates = [], events = [];
+    const store = { load: () => null, save: () => {}, log: (r) => events.push(r) };
+    await orchestrate({ issues: [1, 2], parallel: 2, readBody: body, runOne, stacking: "full", readPrReady: async () => RD, store, onUpdate: (r) => updates.push(r), maxDeferrals: 2 });
+    const cas = updates.find((u) => u.issue === 2 && u.cascade);
+    assert.equal(cas.cascade, "replan"); assert.equal(cas.stacked, true); assert.equal(cas.cascade_cost_usd, 0.25);
+    assert.ok(events.some((e) => e.event === "STACK_CASCADE" && e.issue === 2 && e.cascade === "replan"));
+    const later = calls.filter((c) => c.n === 2 && !c.ctx.plan && !c.ctx.stackedOn);
+    assert.equal(later.length, 1, "rebuilt as a normal lane");
+    assert.equal(updates.filter((u) => u.issue === 2).pop().outcome, "merged");
+  });
 });
-

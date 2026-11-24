@@ -124,10 +124,27 @@ describe("#5592 gh helpers", () => {
     assert.deepEqual(pipelineLabels([{ name: "bug" }, "needs-human", { name: "parked:x" }]), ["needs-human", "parked:x"]);
     const log = [];
     assert.deepEqual(await clearPipelineLabels({ gh: ghWith([], log), repo: "o/r", issue: 7 }), ["parked:ci.red", "needs-human"]);
-    assert.deepEqual(log.at(-1), ["issue", "edit", "7", "-R", "o/r", "--remove-label", "parked:ci.red,needs-human"]);
+    assert.deepEqual(log.slice(-2), [["issue", "edit", "7", "-R", "o/r", "--remove-label", "parked:ci.red"], ["issue", "edit", "7", "-R", "o/r", "--remove-label", "needs-human"]]);
     const log2 = [];
     assert.deepEqual(await clearPipelineLabels({ gh: ghWith([], log2), repo: "o/r", issue: 7, labels: [{ name: "bug" }] }), []);
     assert.equal(log2.length, 0, "nothing to remove: no gh call");
     assert.deepEqual(await clearPipelineLabels({ gh: async () => { throw new Error("boom"); }, repo: "o/r", issue: 7, labels: ["needs-human"] }), [], "best effort");
+  });
+  it("clearPipelineLabels removes the rest when one removal fails and reports it", async () => {
+    const edits = [];
+    const gh = async (a) => { if (a[1] === "edit") { if (a.at(-1) === "remediation-queue") throw new Error("not found"); edits.push(a.at(-1)); } return ""; };
+    const reported = [];
+    const out = await clearPipelineLabels({ gh, repo: "o/r", issue: 7, labels: ["needs-human:external", "remediation-queue", "parked:x"], onFail: (n) => reported.push(...n) });
+    assert.deepEqual(out, ["needs-human:external", "parked:x"]);
+    assert.deepEqual(edits, ["needs-human:external", "parked:x"]);
+    assert.deepEqual(reported, ["remediation-queue"]);
+  });
+  it("clearPipelineLabels reports failed removals to the reporter", async () => {
+    const seen = [];
+    await clearPipelineLabels({ gh: async () => { throw new Error("boom"); }, repo: "o/r", issue: 7, labels: ["needs-human"], onFail: (n, e) => seen.push([n, e.message]) });
+    assert.deepEqual(seen, [[["needs-human"], "boom"]]);
+    const read = [];
+    await clearPipelineLabels({ gh: async () => { throw new Error("read"); }, repo: "o/r", issue: 7, onFail: (n) => read.push(n) });
+    assert.deepEqual(read, [[]]);
   });
 });

@@ -11,6 +11,7 @@
  *   {op:"attach", id, resume?}    → (`resume` also clears a pending cancel, #4592) log.jsonl rows replayed, then live rows/lines and done; a finished batch replays report.json
  *                                   ({type:"done", replay:true}) unless it has unrun added issues; a batch nobody hosts is resumed here
  *   {op:"set-parallel", id, k}    → {type:"ok", parallel}
+ *   {op:"clear-breaker", id}      → {type:"ok", cleared, acknowledged, hosted} (#5947): a hosted runner resets its in-memory breaker (request file + ack); otherwise state.json is rewritten
  *   {op:"set-execution", id, maxRemote?, mode?} → {type:"ok", execution} (#5138): live max_remote / placement (remote|hybrid|local); remote/hybrid refused for a batch with no provider
  *   {op:"requeue", id, issues, reason, by} → {type:"ok", requeued, refused, hosted, reopened} (#4550): see batch.requeue; a finished batch is hosted again
  *   {op:"add", id, issues}        → {type:"ok", added, skipped, hosted} (#4408): merged into the batch's `add` file, which a
@@ -41,7 +42,7 @@
  * `interrupted: upgrade vX→vY` row (orchestrate.mjs).
  * `runBatch({argv, cwd, env, sink, keepBreaker, signal})` is injected (engine-cli `runBatch`); `sink` gets `batch(b)`, `row(r)`, `line(text)`.
  */
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { execFileSync, spawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
@@ -49,13 +50,35 @@ import { createHash } from "node:crypto";
 import { delimiter, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { schedDir, pidAlive } from "./sched.mjs";
-import { DEFAULT_STALL_MIN, FIRST_HOUR_FILE, FIRST_HOUR_MIN, decideStallAction, evaluateDispatchStall, firstHourReport, readHealth, recordStallAlert, recordStallRecovery, writeFirstHour } from "./batch-health.mjs";
+import { DEFAULT_STALL_MIN, FIRST_HOUR_FILE, FIRST_HOUR_MIN, batchVerdict, clearStaleStall, decideStallAction, evaluateDispatchStall, firstHourReport, readHealth, recordStallAlert, recordStallRecovery, runningSplit, writeFirstHour } from "./batch-health.mjs";
 import { probeBatchEnv } from "./lanecheck.mjs";
 import { HEARTBEAT_MS, writeHeartbeat, clearHeartbeat } from "./schedd-health.mjs";
 import { batchRoot, listBatches, openBatch, SECRET_ENV } from "./batch.mjs";
 import { killTrackedChildren } from "./effects.mjs";
 import { applySetExecution } from "./live-execution.mjs";
 import { liveOverload } from "./hostload.mjs";
+
+/** #5938: epoch ms of the newest lane log of a running issue (a lane heartbeat), or null. */
+export function lanesAlive(b, state) {
+  let best = null;
+  for (const n of Object.keys(state?.running ?? {})) { try { const m = statSync(b.logFile(n)).mtimeMs; if (best === null || m > best) best = m; } catch { /* no lane log yet */ } }
+  return best;
+}
+
+/** #5938: one verdict line per unfinished daemon batch (offline, from saved state): healthy, stalled -> action, or stalled -> no action. */
+export function batchVerdicts(root, { now = Date.now(), windowMin = DEFAULT_STALL_MIN } = {}) {
+  const out = [];
+  for (const id of listBatches(root)) {
+    try {
+      const b = openBatch(root, id);
+      if (!b.readPlan()?.daemon || b.isTerminal()) continue;
+      const state = b.store.peek(), stall = evaluateDispatchStall(state, { held: b.readHeld(), parallel: b.readParallel(), hosted: false, lastProgressMs: b.lastProgressMs(), now, windowMin, lanesAliveMs: lanesAlive(b, state) });
+      const decision = stall ? decideStallAction(stall, { recovery: readHealth(b.dir)?.stallRecovery ?? null, hosted: false }) : null;
+      out.push(batchVerdict(id, stall, decision));
+    } catch { /* one unreadable batch has no verdict */ }
+  }
+  return out;
+}
 
 /** #5471: `schedd status` warning lines for issues pending in two or more hosted batches. */
 export function sharedPendingLines(batches) {
@@ -310,10 +333,14 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     for (const id of [...ids].sort()) {
       await yieldLoop();
       const isHosted = hosted.has(id) || starting.has(id);
-      let last = null, pending = [], pend = [];
-      try { const b = openBatch(root, id); last = b.lastProgressMs(); pending = b.unrunAdds(); pend = b.pendingIssues(); } catch { /* a half-written batch */ }
+      let last = null, pending = [], pend = [], split = null, alive = null;
+      try {
+        const b = openBatch(root, id); last = b.lastProgressMs(); pending = b.unrunAdds(); pend = b.pendingIssues();
+        const st = b.store.peek(); split = runningSplit(st, b.readParallel());
+        alive = lanesAlive(b, st); // #5938: lane output is a heartbeat
+      } catch { /* a half-written batch */ }
       if (!isHosted && !pending.length) continue;
-      out.push({ id, running: isHosted, lastProgressAt: last === null ? null : new Date(last).toISOString(), lastProgressAgeSec: last === null ? null : Math.max(0, Math.round((now - last) / 1000)), pendingAdds: pending, pending: pend });
+      out.push({ id, running: isHosted, lastProgressAt: last === null ? null : new Date(last).toISOString(), lastProgressAgeSec: last === null ? null : Math.max(0, Math.round((now - last) / 1000)), ...(split ? { lanes: { running: split.running, k: split.k, local: split.local, remote: split.remote } } : {}), lanesAliveAgeSec: alive === null ? null : Math.max(0, Math.round((now - alive) / 1000)), pendingAdds: pending, pending: pend });
     }
     return out;
   };
@@ -334,6 +361,27 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
       b.setParallel(Number(req.k));
       return send({ type: "ok", parallel: Number(req.k) }, true);
+    }
+    if (req.op === "clear-breaker") {
+      // #5947: a hosted runner holds the breaker in memory; it consumes the request file and acks. An unhosted (or silent) batch gets the state.json rewrite.
+      const b = openBatch(root, req.id);
+      if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
+      const isHosted = hosted.has(req.id);
+      let acknowledged = false, cleared = false;
+      if (isHosted) {
+        const at = b.requestClearBreaker();
+        for (let i = 0; i < 140 && !acknowledged; i++) {
+          const a = b.readClearBreakerAck();
+          if (a && a.at >= at) { acknowledged = true; cleared = Boolean(a.cleared); } else await new Promise((r) => setTimeout(r, 50));
+        }
+      }
+      if (!acknowledged) {
+        b.readClearBreaker(); // drop an unconsumed request so it cannot clear a later trip
+        const st = b.store.load();
+        cleared = Boolean(st?.breaker);
+        if (st) b.store.save({ ...st, breaker: null, errorTimes: [] });
+      }
+      return send({ type: "ok", cleared, acknowledged, hosted: isHosted }, true);
     }
     if (req.op === "set-execution") {
       // #5138: live max_remote / placement mode; the hosted runner re-reads the batch's `execution` file on every admission.
@@ -520,7 +568,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
         const created = Date.parse(plan.created ?? "");
         if (b.isTerminal() && (!Number.isFinite(created) || now - created >= 24 * 3600_000)) continue; // nothing left to report or re-host
         const reported = !!b.readReport(), cancelled = !!b.readCancel(), state = b.store.peek(), isHosted = hosted.has(id) || starting.has(id);
-        const stallOpts = { held: b.readHeld(), parallel: b.readParallel(), hosted: isHosted, lastProgressMs: b.lastProgressMs(), now, windowMin: stallMin, cancelled, reported };
+        const stallOpts = { held: b.readHeld(), parallel: b.readParallel(), hosted: isHosted, lastProgressMs: b.lastProgressMs(), now, windowMin: stallMin, cancelled, reported, lanesAliveMs: lanesAlive(b, state) };
         let stall = evaluateDispatchStall(state, stallOpts);
         if (stall && preflight) { // #5745: name the preflight gate holding admission (advisory; dispatch decisions are unchanged)
           let gates = [];
@@ -538,7 +586,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
           log(`schedd: batch ${id} abandoned (not hosted, ${state.pending.length} pending, no progress for ${Math.round((now - last) / 86400_000)} days)`);
           continue;
         }
-        if (!stall) continue;
+        if (!stall) { if (clearStaleStall(b, { now })) log(`schedd: batch ${id} STALL CLEARED`); continue; } // #5938: re-evaluated every tick; a stored stall that no longer holds is cleared
         // #5806: the batch env is probed first (a PATH without gh/git/node stalls every resume the same way); the first stall of a
         // ready set is recovered once (health.json stallRecovery survives a daemon restart), a repeat alerts with the probed cause.
         let probe = null;

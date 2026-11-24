@@ -12,17 +12,20 @@ import { join } from "node:path";
 
 const TIMEOUT_RC = 124, MISSING_RC = 127;
 const FILE_RE = /(?:^|[\s"'`(=:])((?:\.{0,2}\/)?[\w.-]+(?:\/[\w.-]+)+\.(?:py|mjs|cjs|js|jsx|ts|tsx|go|rs|rb|sh|ya?ml|json))\b/g;
+const ENV_RE = /ModuleNotFoundError|ImportError|fail(?:s|ed)? closed|unknown revision|bad revision|not a valid ref|Needed a single revision/i;
+const OUTPUT_TAIL = 4096, DAY_MS = 86400000;
 const TEST_RE = /(?:^|[/_.-])(?:tests?|spec)(?:[/_.-]|$)/i;
 
 /** Split failed `{command, rc}` rows by their base run `{command, rc}`: base red only when the base run itself failed (a timeout or missing runner is no evidence, so the failure stays the lane's). */
 export function classifyBaseRed({ failed = [], baseRuns = [] } = {}) {
   const byCmd = new Map((baseRuns ?? []).map((b) => [b?.command, b]));
-  const laneOwn = [], baseRed = [];
+  const laneOwn = [], baseRed = [], env = [];
   for (const f of failed ?? []) {
     const b = byCmd.get(f.command), rc = Number(b?.rc);
-    (b && Number.isInteger(rc) && rc !== 0 && rc !== TIMEOUT_RC && rc !== MISSING_RC ? baseRed : laneOwn).push(f);
+    if (!(b && Number.isInteger(rc) && rc !== 0 && rc !== TIMEOUT_RC && rc !== MISSING_RC)) laneOwn.push(f);
+    else (ENV_RE.test(String(b.output ?? "")) ? env : baseRed).push(f); // an environment signature in the base output is no evidence the base is red
   }
-  return { laneOwn, baseRed };
+  return { laneOwn, baseRed, env };
 }
 
 /** Repo-relative file paths named in a command and its failure output, non-test paths first (the guarded code, not the guard). */
@@ -65,18 +68,20 @@ export async function attribute({ failed = [], git, base } = {}) {
   return null;
 }
 
-/** Run each command once on a detached worktree of `mergeBase`, returning `[{command, rc}]`; removed afterwards. Empty when the worktree cannot be made (every failure then stays the lane's). */
+/** Run each command once on a detached worktree of `mergeBase`, returning `[{command, rc, output}]` (output: ~4KB tail), with BASE_SHA and LANE_CHECK_BASE set to the merge base sha so diff-scoped guards see an empty diff; removed afterwards. Empty when the worktree cannot be made (every failure then stays the lane's). */
 export async function runOnBase({ commands = [], git, runCommand, mergeBase, cwd, env, timeoutMs, fs = nodeFs } = {}) {
   let dir = null;
   const out = [];
   try {
     dir = fs.mkdtempSync(join(tmpdir(), "basered-"));
     await git(["worktree", "add", "--detach", dir, mergeBase]);
+    let sha = ""; try { sha = String(await git(["rev-parse", mergeBase])).trim(); } catch { /* fall back to the ref */ }
+    env = { ...(env ?? {}), BASE_SHA: sha || mergeBase, LANE_CHECK_BASE: sha || mergeBase };
     try { if (fs.existsSync(join(cwd, "node_modules"))) fs.symlinkSync(join(cwd, "node_modules"), join(dir, "node_modules")); } catch { /* best effort */ }
     for (const command of commands) {
       let r;
       try { r = await runCommand({ command, cwd: dir, timeoutMs, env }); } catch (e) { r = { rc: MISSING_RC, output: String(e?.message ?? e) }; }
-      out.push({ command, rc: Number.isInteger(r?.rc) ? r.rc : 1 });
+      out.push({ command, rc: Number.isInteger(r?.rc) ? r.rc : 1, output: String(r?.output ?? "").slice(-OUTPUT_TAIL) });
     }
   } catch { /* no base tree: no verdict */ } finally {
     if (dir) {
@@ -87,10 +92,15 @@ export async function runOnBase({ commands = [], git, runCommand, mergeBase, cwd
   return out;
 }
 
-/** Comment body that marks the introducing issue (or the new tracking issue) as the cause of a red base. */
-export function baseRedNote({ base, att, laneIssue, commands }) {
+/** Dedupe key line (base + sha12) searched for before a new issue is filed. */
+export function baseRedKey(base, sha) { return sha ? `<!-- FORGE:BASE_RED_KEY ${base}@${String(sha).slice(0, 12)} -->` : ""; }
+
+/** Comment body that marks the introducing issue (or the new tracking issue) as the cause of a red base; `outputs` maps command to the base run's output tail. */
+export function baseRedNote({ base, att, laneIssue, commands, outputs = {}, sha }) {
   const cmds = commands.map((c) => `- \`${c}\``).join("\n");
-  return `<!-- FORGE:BASE_RED -->\n## Base is red\nThese guard command(s) fail on \`${base}\`${att ? ` at \`${att.sha.slice(0, 12)}\` or earlier; last change to the files they name: \`${att.sha.slice(0, 12)}\` ${att.subject}` : ""}:\n${cmds}\n\nLane #${laneIssue} is deferred behind the fix; it is not needs-human. Fix the base (or reopen this issue) and the lane resumes.`;
+  const tails = commands.filter((c) => outputs?.[c]).map((c) => `Base output of \`${c}\` (tail):\n\`\`\`\n${String(outputs[c]).slice(-OUTPUT_TAIL).replace(/```/g, "’’’")}\n\`\`\``).join("\n\n");
+  const key = baseRedKey(base, att?.sha ?? sha);
+  return `<!-- FORGE:BASE_RED -->\n${key ? `${key}\n` : ""}## Base is red\nThese guard command(s) fail on \`${base}\`${att ? ` at \`${att.sha.slice(0, 12)}\` or earlier; last change to the files they name: \`${att.sha.slice(0, 12)}\` ${att.subject}` : ""}:\n${cmds}\n\n${tails ? `${tails}\n\n` : ""}Lane #${laneIssue} is deferred behind the fix; it is not needs-human. Fix the base (or reopen this issue) and the lane resumes.`;
 }
 
 /**
@@ -98,8 +108,31 @@ export function baseRedNote({ base, att, laneIssue, commands }) {
  * issue gets a comment and is reopened when closed; no issue number files a new `base-red` tracking issue. Returns the
  * issue number, or null when GitHub could not be written (the lane still defers).
  */
-export async function reportBaseRed({ ghc, repo, base, att, laneIssue, commands }) {
-  const body = baseRedNote({ base, att, laneIssue, commands });
+export async function reportBaseRed({ ghc, repo, base, att, laneIssue, commands, outputs, baseSha, commitDate }) {
+  return fileBaseRed({ ghc, repo, att, key: baseRedKey(base, att?.sha ?? baseSha), commitDate, body: baseRedNote({ base, att, laneIssue, commands, outputs, sha: baseSha }), title: `fix: ${base} is red on guard command ${commands[0] ?? ""}` });
+}
+
+/**
+ * #5838: the merge train found `checks` red on the bare `base` tip `baseSha` while bisecting batch `batch`: a red base, not a
+ * culprit, so no PR is handed back. Filed through the same red-base path (a `base-red` tracking issue); returns its number or null.
+ */
+export async function reportTrainBaseRed({ ghc, repo, base, baseSha, checks = [], batch }) {
+  const list = checks.map((c) => `- \`${c.name}\`${c.url ? ` ${c.url}` : ""}`).join("\n");
+  const key = baseRedKey(base, baseSha);
+  const body = `<!-- FORGE:BASE_RED -->\n${key ? `${key}\n` : ""}## Base is red\nThese required check(s) fail on the bare \`${base}\` tip \`${String(baseSha ?? "").slice(0, 12)}\`, found while bisecting merge-train batch ${batch}:\n${list}\n\nNo PR of the batch is handed back; they stay in the train and merge once the base is fixed.`;
+  return fileBaseRed({ ghc, repo, att: null, key, body, title: `fix: ${base} is red on required check ${checks[0]?.name ?? ""}` });
+}
+
+/** Issues carrying `key`, newest first: [{number, state, closedAt, createdAt}]. Empty on any failure. */
+async function findKeyed({ ghc, repo, key }) {
+  try {
+    const raw = await ghc(["issue", "list", "-R", repo, "--state", "all", "--search", `${key.replace(/^<!-- | -->$/g, "")} in:body`, "--json", "number,state,closedAt,createdAt,body", "--limit", "20"]);
+    const rows = JSON.parse(String(raw));
+    return (Array.isArray(rows) ? rows : []).filter((r) => String(r?.body ?? "").includes(key)).sort((x, y) => Number(y.number) - Number(x.number));
+  } catch { return []; }
+}
+
+async function fileBaseRed({ ghc, repo, att, body, title, key, commitDate }) {
   try {
     if (att?.issue) {
       let state = "";
@@ -108,7 +141,19 @@ export async function reportBaseRed({ ghc, repo, base, att, laneIssue, commands 
       await ghc(["issue", "comment", String(att.issue), "-R", repo, "--body", body]);
       return att.issue;
     }
-    const url = String(await ghc(["issue", "create", "-R", repo, "--title", `fix: ${base} is red on guard command ${commands[0] ?? ""}`.slice(0, 120), "--body", body])).trim();
+    if (key) {
+      const hits = await findKeyed({ ghc, repo, key }), cut = Date.parse(commitDate ?? "");
+      const open = hits.find((h) => String(h.state).toUpperCase() === "OPEN");
+      const reopen = !open && hits.find((h) => Number.isFinite(cut) && Date.parse(h.closedAt) > cut);
+      const recent = !open && !reopen && hits.find((h) => Date.now() - Date.parse(h.createdAt) < DAY_MS); // at most one new issue per base+SHA per day
+      const hit = open ?? reopen ?? recent;
+      if (hit) {
+        if (hit === reopen) await ghc(["issue", "reopen", String(hit.number), "-R", repo]);
+        await ghc(["issue", "comment", String(hit.number), "-R", repo, "--body", body]);
+        return Number(hit.number);
+      }
+    }
+    const url = String(await ghc(["issue", "create", "-R", repo, "--title", title.slice(0, 120), "--body", body])).trim();
     const n = url.match(/\/issues\/(\d+)/);
     return n ? Number(n[1]) : null;
   } catch { return null; }
