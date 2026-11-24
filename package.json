@@ -1,6 +1,6 @@
 {
   "name": "forgedock",
-  "version": "1.61.2",
+  "version": "1.63.0",
   "description": "An AI engineering team that ships to production",
   "bin": {
     "forgedock": "bin/forgedock.mjs"

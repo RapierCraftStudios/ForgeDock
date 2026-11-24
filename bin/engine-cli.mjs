@@ -6,6 +6,7 @@
  */
 import { validateForgeYaml, formatFinding } from "./config-schema.mjs";
 import { parseDocsConfig } from "./lean/docsgate.mjs";
+import { normalizeStacking, parsePlanned, formatPlanned, parseStackedOn, formatStackedOn } from "./lean/stacking.mjs";
 import { parseOutcomeEvidenceConfig } from "./lean/outcomeevidence.mjs";
 import { parsePagesConfig, PAGE_RE, designHold } from "./lean/pagegate.mjs";
 import { parseDesignConfig } from "./lean/design-gate.mjs";
@@ -508,10 +509,10 @@ export function readExecution(cwd = process.cwd()) {
 export function executionModeExplicit(cwd = process.cwd()) {
   try { return ["local", "remote", "hybrid"].includes(String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.execution?.mode ?? "").trim()); } catch { return false; }
 }
-/** #5748: `exec` with the public-repo default (actions provider) applied; visibility is read once per repo and fails closed to private. */
+/** #5748/#5900: `exec` with the opt-in public-repo default (`execution.public_default: actions`) applied; without the opt-in no API call and no change. Visibility is read once per repo and fails closed to private. */
 const visibilityCache = new Map();
 export async function withPublicDefault(exec, { repo, gh, deps = {}, cwd = process.cwd() } = {}) {
-  if (executionModeExplicit(cwd)) return exec;
+  if (exec?.publicDefault !== "actions" || executionModeExplicit(cwd)) return exec;
   const execMod = await import("./lean/execution.mjs");
   const key = String(repo ?? "");
   let isPublic = deps.repoPublic;
@@ -984,7 +985,7 @@ export function lastLocalRun(dir) {
  */
 export async function runFromCli(argv, deps = {}) {
   const issue = parseInt(argv[0], 10);
-  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> [--lane <lane>] [--lane-override] [--path core|full] [--recover <code> [--recover-attempt n] [--recover-nonfinal]] [--retry] [--wait-lease] [--local]");
+  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> [--lane <lane>] [--lane-override] [--path core|full] [--recover <code> [--recover-attempt n] [--recover-nonfinal]] [--plan] [--planned <hash>:<sha>] [--retry] [--wait-lease] [--local]");
   assertOpenCodeNativeRuntime({ operation: "forgedock run-issue" });
   const lane = flag(argv, "--lane");
   if (argv.includes("--lane") && (!lane || lane.startsWith("--"))) throw new Error("--lane requires a value: staging or milestone/<slug>");
@@ -994,7 +995,7 @@ export async function runFromCli(argv, deps = {}) {
   const backend = flag(argv, "--backend");
   const model = flag(argv, "--model");
   // Boolean flag: only counts at a flag position, never as another flag's value.
-  const retry = argv.some((a, i) => a === "--retry" && !["--lane", "--repo", "--backend", "--model", "--path", "--result-file", "--placement", "--placement-reason", "--recover", "--recover-attempt"].includes(argv[i - 1]));
+  const retry = argv.some((a, i) => a === "--retry" && !["--lane", "--repo", "--backend", "--model", "--path", "--result-file", "--placement", "--placement-reason", "--recover", "--recover-attempt", "--planned", "--stacked-on"].includes(argv[i - 1]));
   // forge#3574: --wait-lease blocks (bounded by the lease TTL) until a live
   // holder's lease expires or becomes reclaimable. Same flag-position guard.
   const waitLease = argv.some((a, i) => a === "--wait-lease" && !["--lane", "--repo", "--backend", "--model"].includes(argv[i - 1]));
@@ -1017,6 +1018,10 @@ export async function runFromCli(argv, deps = {}) {
     ? { where: placementWhere, reason: String(flag(argv, "--placement-reason") ?? "").slice(0, 300), mode: readExecution()?.mode ?? "local" } : null;
   // #4267: a batch recovery lane for a mechanical needs-human (`--recover <code> [--recover-attempt n]`); #4302: `--recover-nonfinal`
   // marks an attempt the runner may follow with another, so the lane leaves the needs-human relabel to the runner.
+  // #5831: stacked lanes: `--plan` plans a dependent (contract frozen, no build); `--planned <hash>:<sha>` hands its plan to the build lane
+  const plan = argv.includes("--plan");
+  const planned = parsePlanned(flag(argv, "--planned"));
+  const stackedOn = parseStackedOn(flag(argv, "--stacked-on")); // #5832: `<dependency>:<sha>:<branch>`
   const recoverCode = flag(argv, "--recover");
   const recoverAttempt = Number(flag(argv, "--recover-attempt"));
   const recover = recoverCode && !recoverCode.startsWith("--") ? { code: recoverCode, attempt: Number.isInteger(recoverAttempt) && recoverAttempt > 0 ? recoverAttempt : 1, final: !argv.includes("--recover-nonfinal") } : null;
@@ -1109,7 +1114,7 @@ export async function runFromCli(argv, deps = {}) {
     try {
       lres = await runCore({ issue, repo: leanRepo, deferPostRun: true, ...(adopt ? { adopt: true } : {}), ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       ...(rotatorKind({ execution: readExecution(process.cwd()), env }) ? { accountRotator: rotatorKind({ execution: readExecution(process.cwd()), env }) } : {}), // #5094, #5205: detected
-      onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}),
+      onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}), ...(plan ? { plan: true } : {}), ...(planned ? { planned } : {}), ...(stackedOn ? { stackedOn } : {}), ...(stackedOn ? { stackedOn } : {}),
       emitTelemetry: deps.emitTelemetry ?? composeEmit(makeEmitTelemetry({ repo: leanRepo }), makeEventEmitter({ repo: leanRepo, config: readEvents() }).emit),
       admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readConformanceKinds() ? { conformanceKinds: readConformanceKinds() } : {}), ...(readConformanceMutation() ? { conformanceMutation: "report" } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readSequenceVersioned() ? { sequenceVersioned: readSequenceVersioned() } : {}), ...(readSharedSurfaces() ? { sharedSurfaces: readSharedSurfaces() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readReproQuality() ? { reproQuality: readReproQuality() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readExperiment() ? { experiment: readExperiment() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readOrchestration().mergeTrain === "on" ? { mergeTrain: "on" } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}), hostFallback: readHostFallback(), ...readRelayCaps(), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}), ...(readBaseMerge() ? { baseMerge: readBaseMerge() } : {}), ...(readFollowupsDefaultMilestone() ? { followupsDefaultMilestone: readFollowupsDefaultMilestone() } : {}), ...(readFollowupsRollupLabel() ? { followupsRollupLabel: readFollowupsRollupLabel() } : {}), ...(readCiFailFast() ? { ci: { fail_fast: readCiFailFast() } } : {}), ...(Number.isInteger(Number(readLeanSetting("contract_max_corrections"))) && Number(readLeanSetting("contract_max_corrections")) >= 1 ? { contractMaxCorrections: Number(readLeanSetting("contract_max_corrections")) } : {}), ...(Number.isInteger(Number(readLeanSetting("review_max_resumes"))) && Number(readLeanSetting("review_max_resumes")) >= 1 ? { reviewMaxResumes: Number(readLeanSetting("review_max_resumes")) } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
@@ -1969,7 +1974,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, deferPostRun: true, // #5437: orchestrate runs result.postRun once the slot is free
-      laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
+      laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), ...(ctx.plan ? { plan: true } : {}), ...(ctx.planned ? { planned: ctx.planned } : {}), ...(ctx.stackedOn ? { stackedOn: ctx.stackedOn } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
       ...(rotatorKind({ execution: readExecution(cwd), env }) ? { accountRotator: rotatorKind({ execution: readExecution(cwd), env }) } : {}), // #5094, #5205: detected
       admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readConformanceKinds(cwd) ? { conformanceKinds: readConformanceKinds(cwd) } : {}), ...(readConformanceMutation(cwd) ? { conformanceMutation: "report" } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readSequenceVersioned(cwd) ? { sequenceVersioned: readSequenceVersioned(cwd) } : {}), ...(readSharedSurfaces(cwd) ? { sharedSurfaces: readSharedSurfaces(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readReproQuality(cwd) ? { reproQuality: readReproQuality(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readExperiment(cwd) ? { experiment: readExperiment(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readOrchestration(cwd).mergeTrain === "on" ? { mergeTrain: "on" } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), hostFallback: readHostFallback(cwd), ...readRelayCaps(), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}), ...(readBaseMerge(cwd) ? { baseMerge: readBaseMerge(cwd) } : {}), ...(readFollowupsDefaultMilestone(cwd) ? { followupsDefaultMilestone: readFollowupsDefaultMilestone(cwd) } : {}), ...(readFollowupsRollupLabel(cwd) ? { followupsRollupLabel: readFollowupsRollupLabel(cwd) } : {}), ...(readCiFailFast(cwd) ? { ci: { fail_fast: readCiFailFast(cwd) } } : {}), ...(Number.isInteger(Number(readLeanSetting("contract_max_corrections", cwd))) && Number(readLeanSetting("contract_max_corrections", cwd)) >= 1 ? { contractMaxCorrections: Number(readLeanSetting("contract_max_corrections", cwd)) } : {}), ...(Number.isInteger(Number(readLeanSetting("review_max_resumes", cwd))) && Number(readLeanSetting("review_max_resumes", cwd)) >= 1 ? { reviewMaxResumes: Number(readLeanSetting("review_max_resumes", cwd)) } : {}) }) };
   } else {
@@ -1987,12 +1992,16 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     if (uncapped) (deps.out ?? ((l) => console.log(l)))(uncapped);
     // #4256: the placement orchestrate decided for a lane (ctx.placement) reaches it as --placement/--placement-reason.
     // #4267: a recovery lane (ctx.recover) reaches it as --recover/--recover-attempt.
-    const placementOf = new Map(), recoverOf = new Map();
-    const laneArgs = (n, ln) => { const pl = placementOf.get(n), rc = recoverOf.get(n); return ["--repo", repo, ...(ln ? ["--lane", ln] : []), ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : []),
-      ...(pl ? ["--placement", pl.where, "--placement-reason", pl.reason ?? ""] : []), ...(rc ? ["--recover", rc.code, "--recover-attempt", String(rc.attempt ?? 1), ...(rc.final === false ? ["--recover-nonfinal"] : [])] : [])]; };
+    const placementOf = new Map(), recoverOf = new Map(), planOf = new Map(), plannedOf = new Map(), stackedOf = new Map(); // #5831, #5832
+    const laneArgs = (n, ln) => { const pl = placementOf.get(n), rc = recoverOf.get(n), pn = plannedOf.get(n), so = stackedOf.get(n); return ["--repo", repo, ...(ln ? ["--lane", ln] : []), ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : []),
+      ...(pl ? ["--placement", pl.where, "--placement-reason", pl.reason ?? ""] : []), ...(rc ? ["--recover", rc.code, "--recover-attempt", String(rc.attempt ?? 1), ...(rc.final === false ? ["--recover-nonfinal"] : [])] : []),
+      ...(planOf.get(n) ? ["--plan"] : []), ...(pn ? ["--planned", formatPlanned(pn)] : []), ...(so ? ["--stacked-on", formatStackedOn(so)] : [])]; };
     const withPlacement = (l) => ({ runOne: (n, ln, ctx = {}) => {
       if (ctx.placement) placementOf.set(n, ctx.placement); else placementOf.delete(n);
       if (ctx.recover) recoverOf.set(n, ctx.recover); else recoverOf.delete(n);
+      if (ctx.plan) planOf.set(n, true); else planOf.delete(n);
+      if (ctx.planned) plannedOf.set(n, ctx.planned); else plannedOf.delete(n);
+      if (ctx.stackedOn) stackedOf.set(n, ctx.stackedOn); else stackedOf.delete(n);
       return l.runOne(n, ln, ctx);
     }, adopt: l.adopt });
     const execMod = await import("./lean/execution.mjs");
@@ -2079,6 +2088,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     epics: epicsOf(argv) };
   // #4304: recovery lanes run on the core path only (run-issue throws on --recover with full), so a full-path repo gets none.
   const recoveryOn = Boolean(orch.recovery?.maxAttempts) && (deps.enginePath !== undefined ? deps.enginePath : readEnginePath(cwd)) !== "full";
+  const stackingOn = (orch.stacking === "plan" || orch.stacking === "full") && (deps.enginePath !== undefined ? deps.enginePath : readEnginePath(cwd)) !== "full"; // #5831: plan lanes run on the core path only
   if (orch.recovery?.maxAttempts && !recoveryOn) sink.line("recovery: off (engine.path is full; recovery lanes run on the core path only)");
   // #5315: a forge.yaml key that is unknown, ignored by this engine path, mistyped or a deprecated alias is named at batch start, never silent.
   try { for (const f of validateForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"), { path: deps.enginePath !== undefined ? deps.enginePath : readEnginePath(cwd) })) sink.line(`config: ${formatFinding(f)}`); } catch { /* no forge.yaml: nothing to validate */ }
@@ -2261,6 +2271,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       ...(remote ? { remote } : {}),
       // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
       ...(recoveryOn ? { recovery: orch.recovery } : {}),
+      ...(stackingOn ? { stacking: orch.stacking, ...(orch.stacking === "full" ? { readPrReady: async (n) => (await makeProjector(io, { repo }).readState(n))?.prReady ?? null } : {}) } : {}), // #5831, #5832: PR-ready is read from the dependency lane's FORGE:STATE
       decide: deps.decide ?? (async (d) => {
         if (d?.issue == null) { sink.line(`decision: ${d?.what} (why: ${d?.why}; alternative: ${d?.alternative})`); return; }
         const body = `## Decision (batch ${batch.id})\n**What**: ${d.what}\n**Why**: ${d.why}\n**Alternative**: ${d.alternative}`;
@@ -2343,6 +2354,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   report.push(await budgetReportLine({ cwd, repo, gh: (a) => leanIo.gh(a) })); // #5278: month usage, projection and any auto switch to local-first
   const adequacyLine = formatTestAdequacySummary(rows); // #5449
   if (adequacyLine) report.push(adequacyLine);
+  try { const cl = (await import("./lean/stacking.mjs")).formatCascadeSummary(rows); if (cl) report.push(cl); } catch { /* #5833: the cascade line never fails a batch */ }
   const shadowLine = formatShadowSummary(rows); // #4398
   if (shadowLine) report.push(shadowLine);
   const decompLine = formatDecompositionSummary(rows); // #4396
@@ -2368,7 +2380,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   // #4917: a batch with any pending issue is not finished: no report, so a resume or the daemon picks it up
   let unfinished = false;
   try { unfinished = (batch.pendingIssues().length > 0 || batch.unrunAdds().length > 0 || batch.unrunRequeues().length > 0) && !batch.readCancel(); } catch { unfinished = false; } // a cancel ends the batch for good
-  if (!unfinished) try { batch.writeReport({ rows, crossLane, ok, reclaimed, ...(dag?.edges ? { dag: { planned: dag.edges.length, falseHolds: removedEdges } } : {}), report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
+  if (!unfinished) try { batch.writeReport({ rows, crossLane, ok, reclaimed, ...(rows.some((r) => r.stacked) ? { cascades: (await import("./lean/stacking.mjs")).cascadeRate(rows) } : {}), ...(dag?.edges ? { dag: { planned: dag.edges.length, falseHolds: removedEdges } } : {}), report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
   try { await healthCheck("end"); } catch { /* #5167: health never fails a batch */ }
   return { rows, crossLane, batch: batch.id, reclaimed, ok };
 }
@@ -2449,18 +2461,21 @@ export function makeDispatchCheck({ gh, repo, owner: batchOwner = null, batchId 
 }
 
 /**
- * #4318: the batch runner's needs-human relabel. Re-reads the issue first: closed, or a live FORGE:STATE lease (the runner
- * never holds one, so it is another actor's) → "skipped". Label first: a failed label add → "failed" with no comment (a
+ * #4318: the batch runner's needs-human relabel. Re-reads the issue first: closed, a live FORGE:STATE lease (the runner
+ * never holds one, so it is another actor's), or a merged fix not reopened since (#5759) → "skipped". Label first: a failed label add → "failed" with no comment (a
  * resume retries); then the capped FORGE:NEEDS_HUMAN comment, whose failure keeps the label → true.
  */
 export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
   return async ({ issue, evidence, parked = null }) => {
     const { stateOf } = await import("./lean/context.mjs");
     try {
-      const v = JSON.parse(await gh(["issue", "view", String(issue), "-R", repo, "--json", "state,body"]));
+      const v = JSON.parse(await gh(["issue", "view", String(issue), "-R", repo, "--json", "state,body,labels,closedByPullRequestsReferences"]));
       if (String(v?.state ?? "").toUpperCase() === "CLOSED") return "skipped";
       const lease = stateOf(v?.body)?.lease;
       if (lease && Number(lease.until) > now()) return "skipped";
+      // #5759: a fix that already merged (any head) is not parked; an issue reopened after the merge still is
+      const { mergedEvidence } = await import("./lean/merged-park.mjs");
+      if (await mergedEvidence({ gh, repo, issue, view: v })) return "skipped";
     } catch { /* unreadable: relabel as before */ }
     // #4656: a mechanical park carries its code and PR on `parked:<code>` and joins the remediation queue, not the human queue.
     if (parked?.code) {
@@ -2879,6 +2894,7 @@ export function readOrchestration(cwd = process.cwd()) {
   const gp = int(o.global_parallel, null);
   const recoveryMax = int(o.recovery_max_attempts ?? o.max_attempts, 1);
   return { mergeTrain: String(o.merge_train ?? "off").trim().toLowerCase() === "on" ? "on" : "off", /* #5836 */ breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), transientRetries: int(o.transient_retries, 4), blockedLabel: String(o.blocked_label ?? "blocked").trim(), globalParallel: gp >= 1 ? gp : null,
+    stacking: normalizeStacking(o.stacking), // #5831
     recovery: { maxAttempts: recoveryMax, mechanicalMaxAttempts: Math.max(int(o.recovery_mechanical_max_attempts ?? o.mechanical_max_attempts, 2), recoveryMax) }, // #4725: env/base/sequence codes have their own budget
     // #4525: parked-PR base sync. The parser flattens one level, so `base_sync.enabled|union_globs` arrive as `enabled|union_globs` (or flat `base_sync_*`).
     baseSync: { enabled: String(o.base_sync_enabled ?? o.enabled ?? "true").trim().toLowerCase() !== "false",

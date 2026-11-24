@@ -242,6 +242,29 @@ describe("providerLanes: sandbox ledger and teardown on every exit path (#4253)"
     assert.equal(led.read(), null);
   });
 
+  it("#5859 lost without a result: the engine-error carries the pool agent; usage-limit and clone-failure mappings stay", async () => {
+    const lost = async (tail, agent = "legion") => {
+      const prov = fakeProvider({ finish: () => null });
+      const start = prov.start; prov.start = async (o) => ({ ...(await start(o)), agent });
+      const lanes = providerLanes({ provider: prov, laneArgs: () => [], ledgerFor: ledgerIn(tmpDir("exec-lost-")), pollMs: 1, now: () => 1000, sleep: async () => {}, logTail: async () => tail });
+      const r = await lanes.runOne(7, "staging", {});
+      await r.postRun?.();
+      return r;
+    };
+    const r = await lost("");
+    assert.equal(r.terminalReason, "engine-error");
+    assert.equal(r.agent, "legion");
+    assert.equal(r.lostWithoutResult, true);
+    assert.match(r.detail, /^sandbox fake-7 exited without a result$/, "detail text unchanged");
+    const lim = await lost("x\n[lane] deferred: usage limit hit; resets at 3:20pm (UTC)\n");
+    assert.equal(lim.terminalReason, "deferred");
+    assert.equal(lim.code, "rate_limited");
+    assert.equal(lim.lostWithoutResult, undefined);
+    const clone = await lost("git clone failed: early EOF");
+    assert.equal(clone.terminalReason, "deferred");
+    assert.equal(clone.lostWithoutResult, undefined);
+  });
+
   it("#4685 start refused with HTTP 401: deferred sandbox.auth with a long retry, never needs-human", async () => {
     const { r } = await run({ startThrows: 401 });
     assert.equal(r.terminalReason, "deferred");
@@ -1323,6 +1346,7 @@ describe("providerLanes: a halted batch keeps its sandbox for adopt (#5669)", ()
 });
 
 describe("public-repo default placement (#5748)", () => {
+  const OPT = parseExecution({ public_default: "actions" }); // #5900: the actions default is opt-in
   it("actions is a known provider; plan, job_limit, ci_reserve and dispatcher parse", () => {
     assert.ok(SANDBOX_PROVIDERS.includes("actions"));
     assert.equal(providerByName("actions", { batch: { id: "b" }, repo: "o/r", exec: {}, actionsApi: async () => null }).name, "actions");
@@ -1330,24 +1354,32 @@ describe("public-repo default placement (#5748)", () => {
     assert.deepEqual([e.plan, e.jobLimit, e.ciReserve, e.dispatcher], ["team", 30, 4, "forgedock[bot]"]);
     for (const k of ["jobLimit", "ciReserve", "plan", "dispatcher"]) assert.ok(!(k in parseExecution({ plan: "x", job_limit: "0", ci_reserve: "-1", dispatcher: "a b" })));
   });
-  it("public + mode unset -> actions, capped at job limit minus reserve; private or unknown visibility unchanged", () => {
-    const d = resolveDefaultExecution(undefined, { isPublic: true });
+  it("#5900: without execution.public_default a public repo keeps its placement (no silent switch to actions on upgrade)", () => {
+    assert.equal(resolveDefaultExecution(undefined, { isPublic: true }), undefined);
+    const base = parseExecution({ image: "i:1" });
+    assert.equal(resolveDefaultExecution(base, { isPublic: true }), base);
+    assert.ok(!("publicDefault" in parseExecution({ public_default: "pool" })));
+    assert.equal(placeLane({ exec: resolveDefaultExecution(undefined, { isPublic: true }) }).where, "local");
+  });
+  it("opt-in public + mode unset -> actions, capped at job limit minus reserve; private or unknown visibility unchanged", () => {
+    const d = resolveDefaultExecution(OPT, { isPublic: true });
     assert.equal(d.provider, "actions"); assert.equal(placement(d), "remote"); assert.equal(d.maxRemote, 15);
     assert.equal(placeLane({ exec: d }).where, "remote");
-    assert.equal(resolveDefaultExecution(parseExecution({ plan: "team", ci_reserve: "10" }), { isPublic: true }).maxRemote, 50);
-    const base = parseExecution({ image: "i:1" });
+    assert.equal(resolveDefaultExecution(parseExecution({ public_default: "actions", plan: "team", ci_reserve: "10" }), { isPublic: true }).maxRemote, 50);
+    const base = parseExecution({ image: "i:1", public_default: "actions" });
     assert.equal(resolveDefaultExecution(base, { isPublic: false }), base);
     assert.equal(resolveDefaultExecution(base, {}), base);
     assert.equal(resolveDefaultExecution(undefined, { isPublic: false }), undefined);
+    assert.equal(resolveDefaultExecution(OPT, { isPublic: false }), OPT);
   });
   it("an explicit mode always wins, local included", () => {
     for (const mode of ["local", "remote", "hybrid"]) {
-      const e = { ...parseExecution({ mode, max_remote: "2", provider: "pool" }), modeExplicit: true };
+      const e = { ...parseExecution({ mode, max_remote: "2", provider: "pool", public_default: "actions" }), modeExplicit: true };
       assert.equal(resolveDefaultExecution(e, { isPublic: true }), e);
     }
   });
   it("a defaulted lane that needs a host capability still places local", () => {
-    assert.equal(placeLane({ exec: resolveDefaultExecution(undefined, { isPublic: true }), needs: ["sops"] }).where, "local");
+    assert.equal(placeLane({ exec: resolveDefaultExecution(OPT, { isPublic: true }), needs: ["sops"] }).where, "local");
   });
   it("repoIsPublic reads private:false and fails closed", async () => {
     assert.equal(await repoIsPublic({ repo: "o/r", gh: async () => JSON.stringify({ private: false }) }), true);

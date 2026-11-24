@@ -155,15 +155,56 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     log.info?.(`claude login limited: account=${n} agent=${agent} until=${new Date(until).toISOString()}`);
     return { status: 200, body: { account: n, until: new Date(until).toISOString() } };
   }
-  const agentCall = (a, method, path, body, timeoutMs) => call(a.url, method, path, { body, token: a.token, timeoutMs, fetchFn });
+  // #5882: outbound-only agents (no url) dial the router: GET /agent/poll long-polls for the next queued request (the poll is also
+  // the heartbeat) and POST /agent/reply/:rid answers it. In memory only: a router restart drops queued requests, like relayQ.
+  const pollSt = new Map(), pollReplies = new Map(); // agent -> {q, waiter, seen}; rid -> {agent, done}
+  const POLL_MAX_WAIT_S = 55, pollOfflineMs = (cfg.poll_offline_s ?? 60) * 1000;
+  const pollState = (name) => { let st = pollSt.get(name); if (!st) pollSt.set(name, st = { q: [], waiter: null, seen: 0 }); return st; };
+  const pollOnline = (name) => { const st = pollSt.get(name); return Boolean(st && (st.waiter || now() - st.seen <= pollOfflineMs)); };
+  function pollCall(a, method, path, body, timeoutMs = 15000) {
+    if (!pollOnline(a.name)) return Promise.reject(new Error("agent offline (no recent poll)"));
+    return new Promise((resolve, reject) => {
+      const st = pollState(a.name), rid = randomBytes(12).toString("hex");
+      const timer = setTimeout(() => { pollReplies.delete(rid); st.q = st.q.filter((x) => x.rid !== rid); reject(new Error("agent did not answer in time")); }, timeoutMs);
+      pollReplies.set(rid, { agent: a.name, done: (r) => { clearTimeout(timer); resolve(r); } });
+      st.q.push({ rid, method, path, ...(body !== undefined ? { body } : {}) });
+      st.waiter?.();
+    });
+  }
+  async function agentPoll(req, url) {
+    const name = agentFor(req), st = pollState(name);
+    const w = Number(url.searchParams.get("wait") ?? 25), waitS = Number.isFinite(w) ? Math.min(Math.max(w, 0), POLL_MAX_WAIT_S) : 25;
+    st.waiter?.(); // a newer poll from the same agent supersedes the older one
+    st.seen = now();
+    if (!st.q.length && waitS > 0) await new Promise((res) => {
+      let t = null;
+      const done = () => { clearTimeout(t); if (st.waiter === done) st.waiter = null; res(); };
+      t = setTimeout(done, waitS * 1000);
+      st.waiter = done;
+    });
+    st.seen = now();
+    const item = st.q.shift();
+    return item ? { status: 200, body: item } : { status: 204 };
+  }
+  function agentReply(req, { rid }, body) {
+    const r = pollReplies.get(rid);
+    if (!r || r.agent !== agentFor(req)) return { status: 404, body: { error: "unknown request" } };
+    pollReplies.delete(rid);
+    const status = Number.isInteger(body?.status) ? body.status : 502;
+    r.done({ status, ok: status >= 200 && status < 300, data: body?.data ?? null, retryAfter: body?.retry_after ?? null });
+    return { status: 200, body: { ok: true } };
+  }
+  const agentCall = (a, method, path, body, timeoutMs) => a.transport === "poll"
+    ? pollCall(a, method, path, body, timeoutMs)
+    : call(a.url, method, path, { body, token: a.token, timeoutMs, fetchFn });
 
   async function capacities() {
     const out = [];
     for (const [name, a] of Object.entries(agents())) {
       try {
         const r = await agentCall(a, "GET", "/capacity", undefined, 5000);
-        out.push(r.ok ? { name, ok: true, ...r.data } : { name, ok: false, error: `HTTP ${r.status}` });
-      } catch (e) { out.push({ name, ok: false, error: String(e.message ?? e) }); }
+        out.push(r.ok ? { name, ok: true, ...(a.transport ? { transport: a.transport } : {}), ...r.data } : { name, ok: false, error: `HTTP ${r.status}` });
+      } catch (e) { out.push({ name, ok: false, ...(a.transport ? { transport: a.transport } : {}), error: String(e.message ?? e) }); }
     }
     return out;
   }
@@ -171,7 +212,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   /** Agent liveness for the scheduler (#4547): an agent is online when it answers and is not paused. */
   async function status() {
     const caps = await capacities();
-    const agentsView = caps.map((c) => ({ name: c.name, ok: c.ok, paused: Boolean(c.paused) }));
+    const agentsView = caps.map((c) => ({ name: c.name, ok: c.ok, paused: Boolean(c.paused), transport: c.transport ?? "direct" }));
     return { online: agentsView.filter((a) => a.ok && !a.paused).length, total: agentsView.length, agents: agentsView };
   }
 
@@ -224,7 +265,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     const size = sizeFor(spec);
     const sized = (await capacities()).filter((c) => c.ok && !c.paused && fitsPriority(c, spec, size));
     const diskLow = sized.filter((c) => c.host_disk_low === true).map((c) => c.name); // #5733: never POST to a host whose drive is short
-    const fits = sized.filter((c) => c.host_disk_low !== true).sort((a, b) => headroom(b, spec) - headroom(a, spec) || b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
+    const capped = sized.filter((c) => c.disk_capped === true && c.host_disk_low !== true).map((c) => c.name); // #5884: lane disk at its hard cap
+    const fits = sized.filter((c) => c.host_disk_low !== true && c.disk_capped !== true).sort((a, b) => headroom(b, spec) - headroom(a, spec) || b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
     let busy = null; // the last agent 503 (e.g. lane_tools image building): its body and Retry-After are passed back
     for (const c of fits) {
       const r = await agentCall(own(agents(), c.name), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...size }, 120000);
@@ -234,6 +276,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     }
     if (busy) return { status: 503, body: { ...agentBody(busy.r, busy.name), agent: busy.name }, retryAfter: busy.r.retryAfter ?? cfg.retry_after_s ?? 60 };
     if (diskLow.length) return { status: 503, body: { error: "no host has free disk", code: "pool.disk_low", agents: diskLow }, retryAfter: cfg.disk_low_retry_after_s ?? 300 }; // a capacity deferral, not a failure
+    if (capped.length) return { status: 503, body: { error: "no host has lane disk below its cap", code: "pool.disk_cap", agents: capped }, retryAfter: cfg.disk_low_retry_after_s ?? 300 };
     return { status: 503, body: { error: "no host has a free reservation", lane: size }, retryAfter: cfg.retry_after_s ?? 60 };
   }
 
@@ -286,14 +329,15 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   function enroll(body) {
     if (!enrollOk(body?.token)) return { status: 401, body: { error: "bad enrollment token", hop: "router", reason: "router auth: bad enrollment token" } };
     const name = String(body.name ?? "").toLowerCase().replace(/[^a-z0-9-]/g, "");
-    let url;
-    try { url = new URL(String(body.url)); } catch { return { status: 400, body: { error: "url required" } }; }
+    // #5882: no url means an outbound-only agent that polls this router (no inbound port on its host).
+    let url = null;
+    if (body.url) { try { url = new URL(String(body.url)); } catch { return { status: 400, body: { error: "url must be a valid URL (or omitted for an outbound agent)" } }; } }
     if (!name) return { status: 400, body: { error: "name required" } };
     enrollOk(body.token, true);
     const token = randomBytes(32).toString("hex");
-    agents()[name] = { url: url.origin, token, enrolledAt: new Date(now()).toISOString() };
+    agents()[name] = url ? { url: url.origin, token, enrolledAt: new Date(now()).toISOString() } : { name, transport: "poll", token, enrolledAt: new Date(now()).toISOString() };
     store.save();
-    log.info?.(`enrolled agent ${name} at ${url.origin}`);
+    log.info?.(`enrolled agent ${name} ${url ? `at ${url.origin}` : "(outbound poll)"}`);
     return { status: 200, body: { name, agent_token: token } };
   }
 
@@ -363,6 +407,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     [route("POST", "/agent/creds/claude/limited"), { fn: async (_p, body, _u, req) => claudeLimited(req, body), auth: "agent" }], // #5205
     [route("POST", "/agent/relay/:id"), { fn: async (p, body, _u, req) => relayPost(req, p, body), auth: "agent" }], // #4778
     [route("GET", "/agent/relay/:id/:rid"), { fn: async (p, _b, _u, req) => relayPoll(req, p), auth: "agent" }],
+    [route("GET", "/agent/poll"), { fn: async (_p, _b, url, req) => agentPoll(req, url), auth: "agent" }], // #5882
+    [route("POST", "/agent/reply/:rid"), { fn: async (p, body, _u, req) => agentReply(req, p, body), auth: "agent" }],
     [route("GET", "/agent/bundle"), { fn: async () => ({ bundle: true }), auth: "agent" }],
     [route("GET", "/agent/images/:ref"), { fn: async ({ ref }) => ({ image: ref }), auth: "agent" }],
     [route("POST", "/agents/:name/upgrade"), fd(async ({ name }) => {

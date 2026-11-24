@@ -98,4 +98,9 @@ describe("list-not-array warning (#5504)", () => {
     assert.deepEqual(validateForgeYaml(BASE + "orchestration:\n  merge_train: off\n"), []);
     assert.deepEqual(codes(BASE + "orchestration:\n  merge_train: maybe\n"), ["wrong-type:orchestration.merge_train"]);
   });
+
+  it("orchestration.stacking (#5831) accepts off|plan|full and rejects another value", () => {
+    for (const v of ["off", "plan", "full"]) assert.deepEqual(validateForgeYaml(BASE + `orchestration:\n  stacking: ${v}\n`), [], v);
+    assert.ok(codes(BASE + "orchestration:\n  stacking: yes\n").length > 0);
+  });
 });
