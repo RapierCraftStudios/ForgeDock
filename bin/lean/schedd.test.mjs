@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { openBatch, isLaneAlive, listBatches, SECRET_ENV, scanStats } from "./batch.mjs";
 import { killTrackedChildren, runWithInput, trackedChildCount } from "./effects.mjs";
-import { findUnhosted, startDaemon, scheddPaths, connectDaemon, request, unitState, SCHEDD_SCRIPT, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals, readInstalledVersion } from "./schedd.mjs";
+import { findUnhosted, startDaemon, scheddPaths, connectDaemon, request, unitState, SCHEDD_SCRIPT, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals, readInstalledVersion, batchVerdicts } from "./schedd.mjs";
 import { schedDir } from "./sched.mjs";
 import { readHeartbeat } from "./schedd-health.mjs";
 import { formatTable, orchestrate } from "./orchestrate.mjs";
@@ -146,6 +146,61 @@ describe("schedd host scheduler (#4192)", () => {
       const id = done[0].batch;
       await withRoot(h, () => capture(() => orchestrateFromCli(["--set-parallel", id, "5"], h.client)));
       assert.equal(openBatch(h.root, id).readParallel(), 5);
+    } finally { await h.cleanup(); }
+  });
+
+  it("#5964 a hosted clear-breaker not acked within its wait answers pending, and the request is still honoured by the runner (never dropped)", async () => {
+    const h = host();
+    try {
+      await h.daemon();
+      const all = capture(() => h.inWork(() => orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client)));
+      await until(() => h.launched().length === 1 && h.lanePids().length === 1);
+      const [id] = listBatches(h.root);
+      const b = openBatch(h.root, id);
+      // a 1 ms wait only polls the ack once, so the reply is pending unless the runner happened to ack in that instant: retry until it does not
+      let r = null;
+      for (let i = 0; i < 40 && !r?.pending; i++) r = await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "clear-breaker", id, waitMs: 1 }, undefined, { timeoutMs: 20000 });
+      assert.deepEqual({ hosted: r.hosted, acknowledged: r.acknowledged, pending: r.pending }, { hosted: true, acknowledged: false, pending: true });
+      // the old code deleted the request here and rewrote state.json, so no ack would ever follow
+      await until(() => b.readClearBreakerAck() && !existsSync(join(h.root, id, "clear-breaker")));
+      writeFileSync(h.release, "");
+      await all;
+    } finally { await h.cleanup(); }
+  });
+
+  it("#5964 cli prints pending message when the hosted runner has not acked within its wait", async () => {
+    const h = host();
+    try {
+      await h.daemon();
+      const all = capture(() => h.inWork(() => orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client)));
+      await until(() => h.launched().length === 1 && h.lanePids().length === 1);
+      const [id] = listBatches(h.root);
+      const lines = []; let r = null;
+      for (let i = 0; i < 40 && !r?.pending; i++) { lines.length = 0; r = await runBatch({ argv: ["--clear-breaker", id], deps: { batchRoot: h.root, scheddDir: h.sched, pollMs: 1 }, sink: { line: (l) => lines.push(l) } }); }
+      assert.equal(r.pending, true);
+      assert.match(lines[0], /pending: the runner will clear it on its next pass/);
+      assert.doesNotMatch(lines[0], /did not acknowledge/);
+      writeFileSync(h.release, "");
+      await all;
+    } finally { await h.cleanup(); }
+  });
+
+  it("#5947 clear-breaker on a hosted batch reaches the live runner, which acknowledges it (no daemon restart)", async () => {
+    const h = host();
+    try {
+      const d = await h.daemon();
+      const all = capture(() => h.inWork(() => orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client)));
+      await until(() => h.launched().length === 1 && h.lanePids().length === 1);
+      const [id] = listBatches(h.root);
+      const r = await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "clear-breaker", id }, undefined, { timeoutMs: 20000 });
+      assert.equal(r.type, "ok");
+      assert.equal(r.hosted, true);
+      assert.equal(r.acknowledged, true, "the hosted runner consumed the request and acked");
+      assert.equal(openBatch(h.root, id).readClearBreakerAck().cleared, false, "no breaker was tripped");
+      assert.equal(existsSync(join(h.root, id, "clear-breaker")), false, "the request file is consumed");
+      assert.equal((await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "status" })).pid, d.pid, "same daemon");
+      writeFileSync(h.release, "");
+      await all;
     } finally { await h.cleanup(); }
   });
 
@@ -486,6 +541,28 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await d.close(); }
   });
 
+  it("#5938: a stored stall clears within one tick (STALL CLEARED) once the batch is at K; status shows running/K and the split; the watchdog verdict is healthy", async () => {
+    const dir = tmpDir("schedd-stall-clear-"), root = join(dir, "batches"), id = "b20261122-000000-5938", lines = [];
+    const b = openBatch(root, id);
+    b.writePlan({ daemon: true, repo: "o/r", created: new Date(Date.now() - 90 * 60000).toISOString() });
+    b.store.save({ v: 1, order: [1, 2, 3], results: {}, running: {}, pending: [1, 2, 3], parallel: 2 });
+    const old = new Date(Date.now() - 30 * 60000);
+    utimesSync(join(b.dir, "state.json"), old, old);
+    assert.match(batchVerdicts(root, { windowMin: 10 })[0], /stalled/);
+    writeFileSync(join(b.dir, "health.json"), JSON.stringify({ stall: { at: new Date().toISOString(), sig: "1,2,3", detail: "old" } }) + "\n");
+    b.store.save({ v: 1, order: [1, 2, 3], results: {}, running: { 1: { startedAt: 1 }, 2: { startedAt: 1, remote: true } }, pending: [1, 2, 3], parallel: 2 });
+    utimesSync(join(b.dir, "state.json"), old, old);
+    const runBatch = async ({ sink }) => { sink.batch({ id, dir: b.dir }); return await new Promise(() => {}); };
+    const d = await startDaemon({ dir, root, runBatch, log: (m) => lines.push(m), resumeOnStart: true, stallCheckMs: 50, stallMin: 10 });
+    try {
+      await until(() => !readFileSync(join(b.dir, "health.json"), "utf8").includes("stall\""), 8000);
+      assert.match(readFileSync(join(b.dir, "batch.log"), "utf8"), /STALL CLEARED/);
+      assert.equal(batchVerdicts(root, { windowMin: 10 })[0], `batch ${id}: healthy`);
+      const st = await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "status" });
+      assert.deepEqual(st.batches.find((x) => x.id === id).lanes, { running: 2, k: 2, local: 1, remote: 1 });
+    } finally { await d.close(); }
+  });
+
   it("#5806: a hosted runner wedged in setup restarts the daemon once (decision logged); the same stall again alerts and never loops", async () => {
     const dir = tmpDir("schedd-stall-setup-"), root = join(dir, "batches"), id = "b20261121-000000-5806";
     const b = openBatch(root, id);
@@ -714,6 +791,59 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
       assert.equal(respawns, 1);
       assert.equal(d2.running, true, "the next daemon took the lock");
     } finally { await d2?.close?.(); }
+  });
+
+  it("#5966: a handover under an active unit exits non-zero after close, and the hard bound fires when a batch stop hangs", async () => {
+    for (const hang of [false, true]) {
+      const dir = tmpDir("schedd-exit-"), root = join(dir, "batches"), lines = [], exits = [];
+      let version = "1.51.0";
+      const d = await startDaemon({ dir, root, log: (m) => lines.push(m), resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => "active",
+        exit: (c) => exits.push(c), stopMs: hang ? 60_000 : 1000, hardExitMs: 200,
+        runBatch: ({ sink, signal }) => { sink.batch({ id: "x", dir }); return new Promise((_, rej) => { if (!hang) signal.addEventListener("abort", () => rej(Object.assign(new Error("stopped"), { code: "batch.stopped" }))); }); } });
+      request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: ["x"], cwd: dir, env: {} }).catch(() => {});
+      await until(() => lines.some((l) => l.includes("listening")));
+      version = "1.52.0";
+      await until(() => exits.length > 0);
+      assert.deepEqual(exits, [1], `hang=${hang}`);
+      assert.equal(d.stopCode(), 1);
+      if (hang) assert.ok(lines.some((l) => l.includes("did not finish within")), lines.join("\n"));
+      await d.close();
+    }
+  });
+
+  it("#5966 R1: without a unit, a handover whose successor never listens keeps hosting (re-hosted here); if that fails it exits non-zero", async () => {
+    const dir = tmpDir("schedd-nosucc-"), root = join(dir, "batches"), lines = [], exits = [];
+    let version = "1.51.0", spawns = 0;
+    const d = await startDaemon({ dir, root, log: (m) => lines.push(m), resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => null,
+      exit: (c) => exits.push(c), respawn: () => { spawns++; }, probe: async () => false, successorMs: 50, successorPollMs: 10, runBatch: async () => ({}) });
+    version = "1.52.0";
+    await until(() => d.rehosted());
+    const d2 = d.rehosted();
+    try {
+      assert.equal(d2.running, true, "a daemon hosts again and holds the lock");
+      assert.equal(readFileSync(scheddPaths(dir).lock, "utf8").trim(), String(process.pid));
+      assert.deepEqual(exits, [], "no exit while hosting continues");
+      assert.equal(spawns, 2, "the successor was started twice");
+      assert.ok(lines.some((l) => l.includes("hosting the batches again")));
+    } finally { await d2.close(); }
+    // re-host impossible -> exit non-zero
+    const dir2 = tmpDir("schedd-nosucc2-"), exits2 = [];
+    let v2 = "1.51.0";
+    await startDaemon({ dir: dir2, root: join(dir2, "batches"), log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => v2, unit: () => null,
+      exit: (c) => exits2.push(c), respawn: () => {}, probe: async () => false, successorMs: 30, successorPollMs: 10, rehost: async () => null, runBatch: async () => ({}) });
+    v2 = "1.52.0";
+    await until(() => exits2.length > 0);
+    assert.deepEqual(exits2, [1]);
+  });
+
+  it("#5966: a stall-recovery restart also exits (shared self-stop path)", async () => {
+    const dir = tmpDir("schedd-stallexit-"), root = join(dir, "batches"), exits = [];
+    let version = "1.51.0";
+    const d = await startDaemon({ dir, root, log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => "active", exit: (c) => exits.push(c), runBatch: async () => ({}) });
+    version = "1.52.0";
+    await until(() => exits.length > 0);
+    assert.deepEqual(exits, [1]);
+    await d.closed;
   });
 
   it("#5204: readInstalledVersion reads this install's package.json version, null when unreadable", () => {

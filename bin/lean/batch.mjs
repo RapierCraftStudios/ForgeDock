@@ -110,7 +110,7 @@ const readAdded = (file) => {
 };
 
 /** `outcome`s `--requeue` may move back to pending (#4550); #5168: a final `engine-error` too (the runner clears its engine-error count); #5162: `held` rows too. */
-export const REQUEUABLE = (outcome) => ["needs-human", "engine-error", "held", "invalid", "skipped", "ci-pending", "budget-exceeded", "lane-refused", "deferred"].includes(outcome) || /^dependency-/.test(String(outcome));
+export const REQUEUABLE = (outcome) => ["needs-human", "engine-error", "held", "invalid", "skipped", "ci-pending", "pr-ready", "budget-exceeded", "lane-refused", "deferred"].includes(outcome) || /^dependency-/.test(String(outcome));
 /** Key of one requeue entry; the runner records the applied keys in state.json `requeueApplied`. */
 /** #5832: the `{dependency, branch, sha}` a stacked build of `issue` was admitted on (batch state `stacked`), or null. Rows carry `stacked`/`stackedOn`. */
 export const stackedOnOf = (state, issue) => state?.stacked?.[issue] ?? null;
@@ -223,6 +223,13 @@ export function openBatch(root, id) {
       if (!Number.isInteger(k) || k < 1) throw new Error("parallel must be a positive integer");
       put(f("parallel"), `${k}\n`);
     },
+    /** #5947: `--clear-breaker` for a hosted runner: the request file (a timestamp) is consumed by the runner, which answers in `clear-breaker.ack`. */
+    requestClearBreaker: () => { try { rmSync(f("clear-breaker.ack"), { force: true }); } catch { /* best effort */ } const at = Date.now(); put(f("clear-breaker"), `${at}\n`); return at; },
+    /** #5964: the pending request's `at` without deleting it (the runner consumes it after deciding); null when none. */
+    peekClearBreaker: () => { try { const at = Number(readFileSync(f("clear-breaker"), "utf8").trim()); return Number.isFinite(at) && at > 0 ? at : true; } catch { return null; } },
+    readClearBreaker: () => { try { readFileSync(f("clear-breaker"), "utf8"); rmSync(f("clear-breaker"), { force: true }); return true; } catch { return false; } },
+    ackClearBreaker: (info = {}) => put(f("clear-breaker.ack"), JSON.stringify({ at: Date.now(), ...info }) + "\n"),
+    readClearBreakerAck: () => readJson(f("clear-breaker.ack")),
     /** Live execution override (#5138): the `execution` file `{maxRemote?, mode?, provider?}`, read on every admission; null when missing or invalid. */
     readExecution: () => sanitizeOverride(readJson(f("execution"))),
     /** Merge a validated patch into the `execution` file. @returns the stored override. */

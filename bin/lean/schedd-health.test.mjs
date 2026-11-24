@@ -57,8 +57,30 @@ describe("schedd heartbeat and watchdog (#4780)", () => {
     assert.match(lines.at(-1), /start failed: no unit/);
   });
 
+  it("#5938: the watchdog logs one verdict line per batch and leaves the heartbeat behaviour alone", async () => {
+    const dir = tmpDir("hb-verdict-"), lines = [];
+    const r = await watchdog({ dir, now: () => 0, alive: () => false, log: (m) => lines.push(m), batchVerdicts: () => ["batch b1: healthy", "batch b2: stalled -> no action, needs you (x)"] });
+    assert.equal(r.status, "down");
+    assert.deepEqual(lines, ["schedd watchdog: batch b1: healthy", "schedd watchdog: batch b2: stalled -> no action, needs you (x)"]);
+  });
+
   it("bestEffortRenice never throws", () => {
     assert.equal(bestEffortRenice(() => { throw new Error("EACCES"); }), false);
     assert.equal(bestEffortRenice(() => {}), true);
+  });
+
+  it("#5966: a down daemon while the unit is active alerts, emits an event and restarts the unit, even with no unfinished batches", async () => {
+    const dir = tmpDir("schedd-wd-unit-"), lines = [], events = [];
+    let starts = 0;
+    const run = (unit) => watchdog({ dir, now: () => 0, alive: () => false, unfinished: () => [], start: async () => { starts++; }, unit, emit: (e) => events.push(e), log: (m) => lines.push(m) });
+    const r = await run(() => "active");
+    assert.equal(r.started, true);
+    assert.equal(r.alerted, true);
+    assert.equal(starts, 1);
+    assert.equal(events[0].type, "schedd.unit-no-daemon");
+    assert.ok(lines.some((l) => l.includes("ALERT")));
+    await run(() => "inactive");
+    await run(() => null);
+    assert.equal(starts, 1, "an inactive or absent unit with nothing unfinished is left down");
   });
 });

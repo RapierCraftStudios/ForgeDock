@@ -98,6 +98,12 @@ const CLONE_RETRY_S = 120;
 export const SANDBOX_CLONE_CODE = "sandbox.clone";
 /** #4866: a sandbox clone failure is a retryable `deferred` `sandbox.clone`, never an engine-error (so the breaker never sees it). */
 const cloneDeferred = (id, detail) => ({ terminalReason: "deferred", code: SANDBOX_CLONE_CODE, retryInSeconds: CLONE_RETRY_S, detail: `sandbox ${id} could not clone the repo: ${detail}; retry in ${CLONE_RETRY_S}s` });
+// #5923: a hung github.com connection (ls-remote/fetch, or a connect timeout inside a clone) is egress, not a plain clone failure.
+const EGRESS_RE = /Connection timed out|Failed to connect to|\b(ls-remote|fetch)\b[^\n]*\b(time[ds]?\s?out|timeout|hung|hang)|\b(time[ds]?\s?out|timeout)\b[^\n]*\b(ls-remote|fetch)\b/i;
+export const isEgressTimeout = (text) => EGRESS_RE.test(String(text ?? ""));
+/** Outcome code of a sandbox whose git egress hung to a timeout; local like sandbox.clone. */
+export const SANDBOX_EGRESS_TIMEOUT_CODE = "sandbox.egress_timeout";
+const egressDeferred = (id, detail) => ({ terminalReason: "deferred", code: SANDBOX_EGRESS_TIMEOUT_CODE, retryInSeconds: CLONE_RETRY_S, detail: `sandbox ${id} git egress timed out: ${detail}; retry in ${CLONE_RETRY_S}s` });
 const errLine = (t) => String(t ?? "").split("\n")[0].slice(0, 300);
 const errText = (e) => String(e?.stderr || e?.message || e).split("\n")[0].slice(0, 300);
 
@@ -138,6 +144,7 @@ export function parseExecution(sec = {}) {
   const patRaw = Array.isArray(s.host_capability_patterns) ? s.host_capability_patterns : str(s.host_capability_patterns) ? str(s.host_capability_patterns).split(",") : [];
   const hostCapabilityPatterns = patRaw.map((x) => { const t = str(x), i = t.indexOf(":"); return { name: t.slice(0, i).trim().toLowerCase(), pattern: t.slice(i + 1).trim() }; })
     .filter((x) => CAPABILITY_RE.test(x.name) && x.pattern && safeRegExp(x.pattern));
+  const repoSource = ["dispatcher", "github", "auto"].includes(str(s.repo_source).toLowerCase()) ? str(s.repo_source).toLowerCase() : null; // #5949: where a pool sandbox's repo mirror comes from; unset = auto
   const wsN = Number(str(s.warm_sandboxes));
   const warmSandboxes = str(s.warm_sandboxes) !== "" && Number.isInteger(wsN) && wsN > 0 ? wsN : 0; // #4912: warm sandboxes the pool agent keeps ready; 0 = off
   const lt = validateLaneTools(s.lane_tools); // #5650: invalid entries are dropped here and reported in laneToolsErrors; the remote provider refuses to start with them
@@ -154,7 +161,7 @@ export function parseExecution(sec = {}) {
   const plan = ["free", "pro", "team", "enterprise"].includes(str(s.plan).toLowerCase()) ? str(s.plan).toLowerCase() : null;
   const publicDefault = str(s.public_default).toLowerCase() === "actions" ? "actions" : null; // #5900: opt-in only
   const dispatcher = /^[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?$/.test(str(s.dispatcher)) ? str(s.dispatcher) : null;
-  return { mode, maxRemote, provider, image, secrets, budget, ...(jobLimit ? { jobLimit } : {}), ...(ciReserve !== null ? { ciReserve } : {}), ...(plan ? { plan } : {}), ...(publicDefault ? { publicDefault } : {}), ...(dispatcher ? { dispatcher } : {}), ...(hostFallback !== null ? { hostFallback } : {}), ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(accountRotator ? { accountRotator } : {}), ...(lt.tools.length ? { laneTools: lt.tools } : {}), ...(lt.errors.length ? { laneToolsErrors: lt.errors } : {}) };
+  return { mode, maxRemote, provider, image, secrets, budget, ...(jobLimit ? { jobLimit } : {}), ...(ciReserve !== null ? { ciReserve } : {}), ...(plan ? { plan } : {}), ...(publicDefault ? { publicDefault } : {}), ...(dispatcher ? { dispatcher } : {}), ...(hostFallback !== null ? { hostFallback } : {}), ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(repoSource ? { repoSource } : {}), ...(accountRotator ? { accountRotator } : {}), ...(lt.tools.length ? { laneTools: lt.tools } : {}), ...(lt.errors.length ? { laneToolsErrors: lt.errors } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -244,9 +251,9 @@ export async function repoIsPublic({ repo, gh }) {
   try { return JSON.parse(await gh(["api", `repos/${repo}`]))?.private === false; } catch { return false; }
 }
 
-/** Where a `mode: remote` lane runs: remote only with `max_remote >= 1`. Hybrid is placed per lane by `placeLane` (#4256). */
+/** Where a `mode: remote` lane runs: always remote (#5933: `max_remote 0` pauses starts, it never falls back to the host). Hybrid is placed per lane by `placeLane` (#4256). */
 export function placement(exec) {
-  return exec?.mode === "remote" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1 ? "remote" : "local";
+  return exec?.mode === "remote" ? "remote" : "local";
 }
 
 /** An explicit need written in prose (#5725): `needs: sops`, `needs sops`, `host capability: sops`. */
@@ -381,7 +388,7 @@ const DOCS_LABELS = new Set(["docs", "documentation", "type:docs"]);
 /**
  * Hybrid placement (#4256), pure: facts in, `{where: "local"|"remote", reason}` out. `exec` is parseExecution output,
  * `verifyMode` forge.yaml `verify.mode`, `labels` the issue's label names (the lane kind), `weight` from
- * `validationWeight`, `headroom` from `hostHeadroom`. In order: a non-hybrid mode keeps `placement()`; `max_remote` 0 is
+ * `validationWeight`, `headroom` from `hostHeadroom`. In order: a non-hybrid mode keeps `placement()` (remote mode stays remote at `max_remote` 0: orchestrate holds it pending); `max_remote` 0 is
  * local; `verify.mode: ci` is local (heavy validation already runs, and is billed, on CI); a docs-only lane is local; a
  * heavy-validation lane is remote; a host without headroom sends the lane remote; anything else stays on the host.
  * A `needs` entry (host-only capability, #4542) the provider does not `relays` is local first, in `remote` mode too.
@@ -547,7 +554,7 @@ export function containerProvider({ batch, repo, image, gitDir, cacheDir = `${ho
     async status(h) {
       let s;
       try { s = String(await docker(["inspect", "-f", "{{.State.Status}}", h.id])).trim(); } catch { return "gone"; }
-      return ["running", "created", "restarting"].includes(s) ? "running" : "exited";
+      return ["running", "created", "restarting", "paused"].includes(s) ? "running" : "exited";
     },
     async fetchResult(h) {
       const r = readJson(batch.resultFile(h?.issue));
@@ -661,7 +668,7 @@ export function providerByName(name, opts) {
     // #4685/#5131: an empty env/keychain lookup of `token_env` falls back to `token_file`, then the (matching) router's token file.
     const credentials = (n) => (n === tokenEnv ? resolve().token : resolveCredential(n, { env, keychain })); // per call, keychain memoised (#5159)
     const settings = { ...exec, ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(forgeYaml ? { forgeYaml } : {}),
-      ...(typeof opts?.prefetch === "function" ? { prefetch: opts.prefetch } : {}) }; // #4778: dispatch-time relay pre-fetch
+      ...(typeof opts?.prefetch === "function" ? { prefetch: opts.prefetch } : {}), ...(pool && opts?.cwd ? { repoDir: opts.cwd } : {}) }; // #4778; #5949: the dispatcher's clone seeds the pool mirror: dispatch-time relay pre-fetch
     return remoteProvider({ batch: opts.batch, repo: opts.repo, settings, ...(pool ? { name: "pool" } : {}), env, credentials,
       transport: remoteTransportFor(settings, { transport: opts?.transport, env, credentials, ...(opts?.fetchFn ? { fetchFn: opts.fetchFn } : {}) }), ...(opts?.now ? { now: opts.now } : {}) });
   }
@@ -739,7 +746,8 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
     : { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_UNREACHABLE, retryInSeconds: 60,
       detail: `sandbox ${h.id} ${errText(e)}; kept for adopt on resume` });
   const tailOf = async (h) => { try { return typeof logTail === "function" ? String(await logTail(h) ?? "") : ""; } catch { return ""; } };
-  const settleClone = (r, id) => (r?.terminalReason === "engine-error" && r.code === undefined && isCloneFailure(r.detail) ? cloneDeferred(id, errLine(r.detail)) : r);
+  const settleClone = (r, id) => (r?.terminalReason === "engine-error" && r.code === undefined && isEgressTimeout(r.detail) ? egressDeferred(id, errLine(r.detail))
+    : r?.terminalReason === "engine-error" && r.code === undefined && isCloneFailure(r.detail) ? cloneDeferred(id, errLine(r.detail)) : r);
   // #5669: a halted batch (schedd handover) stops polling; the sandbox is neither torn down nor released, so the next daemon adopts it.
   const wait = async (h, g = guard({ waited: 0, tries: 0 }), sig = null) => {
     for (;;) {
@@ -760,6 +768,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
             detail: `${why}: usage limit hit; resets at ${lim.resetAt ?? "unknown"}` };
         }
         // #5859: tagged with its pool agent so the runner can tell an agent/VM restart (many lost on one agent) from one dead sandbox
+        if (isEgressTimeout(tail)) return egressDeferred(h.id, why);
         return isCloneFailure(tail) ? cloneDeferred(h.id, why) : { terminalReason: "engine-error", detail: why, lostWithoutResult: true, ...(typeof h?.agent === "string" && h.agent ? { agent: h.agent } : {}) };
       }
       await sleep(pollMs);

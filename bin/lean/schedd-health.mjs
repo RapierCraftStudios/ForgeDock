@@ -55,8 +55,16 @@ export function tickText(c) {
  * @returns the check, plus `killed` (and `started` when it started one)
  */
 export async function watchdog({ dir = schedDir(), stallMs = STALL_MS, now = () => Date.now(), alive = pidAlive, kill = (p, s) => process.kill(p, s),
-  sleep = (ms) => new Promise((r) => setTimeout(r, ms)), graceMs = KILL_GRACE_MS, log = (m) => console.log(m), unfinished = () => [], start = null } = {}) {
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)), graceMs = KILL_GRACE_MS, log = (m) => console.log(m), unfinished = () => [], start = null, batchVerdicts = null, unit = null, emit = null } = {}) {
   const c = stallCheck({ dir, stallMs, now, alive });
+  if (batchVerdicts) { try { for (const l of batchVerdicts() ?? []) log(`schedd watchdog: ${l}`); } catch { /* advisory */ } } // #5938: one verdict line per batch
+  // #5966: the unit says active but no daemon answers (no live pid/heartbeat): alert and restart it, whether or not batches are unfinished
+  if (c.status === "down" && start && unit && ["active", "activating"].includes((() => { try { return unit(); } catch { return null; } })())) {
+    log(`schedd watchdog: ALERT unit is active but no daemon answers (schedd status: not running); restarting the unit`);
+    try { emit?.({ type: "schedd.unit-no-daemon", at: now() }); } catch { /* advisory */ }
+    try { await start(); } catch (e) { log(`schedd watchdog: start failed: ${e?.message ?? e}`); return { ...c, killed: null, alerted: true, started: false }; }
+    return { ...c, killed: null, alerted: true, started: true };
+  }
   if (c.status === "down" && start) {
     let ids = [];
     try { ids = unfinished() ?? []; } catch { ids = []; }

@@ -4,7 +4,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { openBatch } from "./batch.mjs";
-import { validateExecutionPatch, sanitizeOverride, effectiveExecution, parseSetExecution, applySetExecution, formatOverride, lazyWeight, liveRemote, LIVE_MODES } from "./live-execution.mjs";
+import { placeLane } from "./execution.mjs";
+import { validateExecutionPatch, sanitizeOverride, effectiveExecution, parseSetExecution, applySetExecution, formatOverride, drainNote, lazyWeight, liveRemote, LIVE_MODES, remoteLaneNote } from "./live-execution.mjs";
 
 describe("#5138 live execution control", () => {
   it("validates patches: max_remote a non-negative integer, mode remote|hybrid|local", () => {
@@ -79,5 +80,38 @@ describe("#5138 live execution control", () => {
     const failing = lazyWeight({ compute: () => { throw new Error("scan"); } });
     failing.get(); await new Promise((r) => setImmediate(r));
     assert.deepEqual(failing.get(), { heavy: false, signals: [] });
+  });
+});
+
+describe("#5735 remoteLaneNote", () => {
+  const lanes = (agents, total) => ({ agents, total });
+  it("warns when max_remote exceeds the summed host lane ceiling and always prints the total", () => {
+    const note = remoteLaneNote(6, lanes([{ name: "legion", used: 2, ceiling: 2 }, { name: "box", used: 0, ceiling: 1 }], 2));
+    const [first, second] = note.split(String.fromCharCode(10));
+    assert.equal(first, "warning: max_remote 6 exceeds the pool host lane ceiling 3; lanes beyond it are deferred");
+    assert.equal(second, "remote lanes across batches: 2 (legion: lanes 2/2, box: lanes 0/1)");
+  });
+  it("no warning when n is within the ceiling or an agent is uncapped", () => {
+    assert.equal(remoteLaneNote(2, lanes([{ name: "legion", used: 1, ceiling: 2 }], 1)), "remote lanes across batches: 1 (legion: lanes 1/2)");
+    const uncapped = remoteLaneNote(9, lanes([{ name: "legion", used: 1, ceiling: 2 }, { name: "box", used: 3, ceiling: null }], 4));
+    assert.doesNotMatch(uncapped, /warning/);
+    assert.match(uncapped, /^remote lanes across batches: 4 /);
+    assert.equal(remoteLaneNote(3, lanes([], 0)), "remote lanes across batches: 0");
+  });
+  it("null or malformed lanes give null or a safe line; never throws", () => {
+    assert.equal(remoteLaneNote(3, null), null);
+    assert.equal(remoteLaneNote(3, undefined), null);
+    assert.equal(remoteLaneNote(3, { agents: "x" }), "remote lanes across batches: 0");
+  });
+});
+
+describe("#5933 drain semantics", () => {
+  it("#5933 liveRemote place by mode", () => {
+    assert.equal(drainNote({ maxRemote: 0 }), "remote starts paused; nothing runs locally");
+    assert.equal(drainNote({ maxRemote: 2 }), null);
+    assert.equal(drainNote({ maxRemote: 0, mode: "local" }), null);
+    const mk = (exec) => liveRemote({}, { exec, place: (e) => placeLane({ exec: e }) });
+    assert.equal(mk({ mode: "remote", maxRemote: 0 }).place(1).where, "remote");
+    assert.equal(mk({ mode: "hybrid", maxRemote: 0 }).place(1).where, "local");
   });
 });

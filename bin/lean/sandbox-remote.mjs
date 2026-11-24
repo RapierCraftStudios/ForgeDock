@@ -25,8 +25,11 @@ import { scopedEnv } from "./execution.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { laneEnvFor, readEnvSnapshots } from "../env/env.mjs";
 import { resolveCredential } from "./credentials.mjs";
+import { seedMirror } from "./mirror-bundle.mjs";
 import { relayCommandNames, runRelayed, servicePending } from "./relay.mjs";
 
+/** #5949: one log line for a launch's seed stats: bytes sent, and the time saved against shipping the whole repo at the same rate. */
+const seedLine = (s) => (s.fallback ? `fell back to GitHub (${s.reason})` : s.upToDate ? "mirror already up to date, nothing sent" : `${s.full ? "full" : "incremental"} bundle, ${s.bytes} bytes in ${s.chunks} chunks, ${s.ms} ms${Number.isFinite(s.saved_ms) ? `, about ${Math.round(s.saved_ms / 1000)} s saved` : ""}`);
 const REDACTED = "[redacted]";
 const PREFETCH_MAX_B64 = 96 * 1024; // one env string stays under Linux MAX_ARG_STRLEN (128 KB)
 /** Replace every value of `secrets` (4+ chars, longest first) in `text`. */
@@ -92,10 +95,10 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
       if (r.status === 404) return "gone";
       if (!r.ok) throw Object.assign(fail("status", r), r.status === 401 ? { transient: true } : {}); // #5053: the sandbox launched, so a 401 is retried like an unreachable pool
       const s = String(r.data?.state ?? "");
-      return s === "running" || s === "pending" || s === "starting" ? "running" : s === "gone" ? "gone" : "exited";
+      return s === "running" || s === "pending" || s === "starting" || s === "paused" ? "running" : s === "gone" ? "gone" : "exited";
     },
     async logs(id, cursor = 0) { const r = await call("GET", `${p(id)}/logs?cursor=${encodeURIComponent(cursor)}`); return r.ok ? { text: String(r.data?.text ?? ""), cursor: r.data?.cursor ?? cursor } : { text: "", cursor }; },
-    async result(id) { const r = await call("GET", `${p(id)}/result`); if (r.status === 401) throw Object.assign(fail("result", r), { transient: true }); if (r.ok && r.data?.drained === true) return { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, retryInSeconds: 60, cost_usd: 0, detail: `sandbox ${id} was drained to free capacity for reserved work (${String(r.data.reason ?? "").slice(0, 120)}); rescheduled` }; /* #5856 */ return r.ok && r.data && typeof r.data === "object" ? r.data : null; },
+    async result(id) { const r = await call("GET", `${p(id)}/result`); if (r.status === 401) throw Object.assign(fail("result", r), { transient: true }); if (r.ok && r.data?.disk_pressure === true) return { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_DISK_PRESSURE, retryInSeconds: 120, cost_usd: 0, detail: `sandbox ${id} was stopped to save the host drive (disk pressure); worktree and volume kept, requeued to resume` }; /* #5891 */ if (r.ok && r.data?.drained === true) return { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, retryInSeconds: 60, cost_usd: 0, detail: `sandbox ${id} was drained to free capacity for reserved work (${String(r.data.reason ?? "").slice(0, 120)}); rescheduled` }; /* #5856 */ return r.ok && r.data && typeof r.data === "object" ? r.data : null; },
     async usage(id) { const r = await call("GET", `${p(id)}/usage`); return r.ok && Number.isFinite(Number(r.data?.minutes)) ? { minutes: Number(r.data.minutes), ...(typeof r.data.agent === "string" && r.data.agent ? { agent: r.data.agent } : {}) } : null; }, // agent: #4549, optional
     async stop(id) { const r = await call("POST", `${p(id)}/stop`); if (r.ok) return true; if (r.status === 404 || r.status === 405) return false; throw fail("stop", r); },
     async destroy(id) { const r = await call("DELETE", p(id)); if (r.ok || r.status === 404) return true; throw fail("destroy", r); },
@@ -113,6 +116,30 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
       if (!r.ok) throw fail("agent disk", r);
       if (!Array.isArray(r.data?.agents)) throw new Error("agent disk: malformed router answer");
       return r.data.agents.map((a) => ({ name: String(a?.name ?? "?"), disk_free_gb: Number.isFinite(a?.disk_free_gb) ? a.disk_free_gb : null }));
+    },
+    /** #5949: the agent mirror's ref tips for a repo ({mirrors: {slug: {ref: sha} | "absent"}, upload_offset?}); 404/405 = an older router/agent (unsupported). */
+    async mirrors(id, q) {
+      const r = await call("GET", `${p(id)}/mirrors?${new URLSearchParams(Object.entries(q).filter(([, v]) => v !== null && v !== undefined).map(([k, v]) => [k, String(v)]))}`);
+      if (r.status === 404 || r.status === 405) throw Object.assign(fail("mirrors", r), { unsupported: true });
+      if (!r.ok) throw fail("mirrors", r);
+      return r.data ?? {};
+    },
+    /** #5949: one bundle chunk or the finish call; a 409 carries the agent's resume offset. */
+    async seed(id, body) {
+      const r = await call("POST", `${p(id)}/seed`, body);
+      if (r.status === 404 || r.status === 405) throw Object.assign(fail("seed", r), { unsupported: true });
+      if (!r.ok) throw Object.assign(fail("seed", r), Number.isInteger(r.data?.offset) ? { offset: r.data.offset } : {});
+      return r.data ?? {};
+    },
+    /** #5735: lane sandboxes per pool agent (`GET /agents` -> `agents[].lanes {used, ceiling}`) and across all batches (`remote_lanes`; else the `fdrsbx-` keys of `sandboxes`). A bad answer throws. */
+    async agentLanes() {
+      const r = await call("GET", "/agents");
+      if (!r.ok) throw fail("agent lanes", r);
+      if (!Array.isArray(r.data?.agents)) throw new Error("agent lanes: malformed router answer");
+      const int = (v) => (Number.isInteger(v) && v >= 0 ? v : null);
+      const agents = r.data.agents.map((a) => ({ name: String(a?.name ?? "?"), used: int(a?.lanes?.used) ?? 0, ceiling: int(a?.lanes?.ceiling) }));
+      const sb = r.data.sandboxes && typeof r.data.sandboxes === "object" ? Object.keys(r.data.sandboxes) : [];
+      return { agents, total: int(r.data.remote_lanes) ?? sb.filter((id) => id.startsWith("fdrsbx-")).length };
     },
     async relayPending(id) { const r = await call("GET", `${p(id)}/relay`); return r.ok && Array.isArray(r.data?.requests) ? r.data.requests : []; },
     async relayAnswer(id, rid, out) { const r = await call("POST", `${p(id)}/relay/${encodeURIComponent(rid)}`, out); if (!r.ok) throw fail("relay answer", r); return true; },
@@ -243,8 +270,21 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
       // #4912: a ready warm sandbox first; none, an error or a transport without claim is the cold start.
       let claimed = null;
       if (warm && typeof transport.claim === "function") { try { claimed = await transport.claim(spec); } catch { claimed = null; } }
+      // #5949: seed the pool agent's mirror from this host first (repo_source dispatcher|github|auto); failure falls back to GitHub, or fails under `dispatcher`.
+      let seed = null;
+      const source = ["dispatcher", "github"].includes(settings.repoSource) ? settings.repoSource : "auto";
+      if (!claimed && repo && settings.repoDir && source !== "github" && typeof transport.seed === "function") {
+        try { seed = await seedMirror({ transport, id, slug: repo, cacheKey: spec.cache?.key ?? repo, repoDir: settings.repoDir, now }); }
+        catch (e) {
+          if (source === "dispatcher") throw Object.assign(new Error(`repo seeding failed (repo_source=dispatcher): ${redact(e?.message ?? e, [...known]).slice(0, 200)}`), { code: "pool.seed_failed", transient: e?.transient === true });
+          seed = { sent: false, fallback: true, reason: redact(e?.message ?? e, [...known]).slice(0, 160) };
+        }
+      }
       if (!claimed) await transport.launch(spec);
-      return { provider: name, id, issue, startedAt, minutes: 0 };
+      if (seed) {
+        try { const f = batch.logFile(issue); mkdirSync(dirname(f), { recursive: true }); appendFileSync(f, `[seed] ${seedLine(seed)}\n`); } catch { /* logging only */ }
+      }
+      return { provider: name, id, issue, startedAt, minutes: 0, ...(seed ? { seed } : {}) };
     },
     async status(h) {
       let s;
