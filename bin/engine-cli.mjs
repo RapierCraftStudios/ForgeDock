@@ -116,6 +116,24 @@ export function makeIo() {
 }
 
 /** forge.yaml `engine.ci_pending_max_minutes` from the cwd checkout; undefined when absent or invalid. */
+/**
+ * #5839: the merge-train A/B reader. Per batch: merged issues per wall-clock hour, slot-hours per merge (summed lane minutes / merged)
+ * and post-merge fix sessions (rows that are fix lanes for a merged PR). Compare a batch with orchestration.merge_train on against off at equal parallelism.
+ */
+export function mergeThroughput(rows, wallMs) {
+  const list = Array.isArray(rows) ? rows : [];
+  const merged = list.filter((r) => r?.outcome === "merged").length;
+  const slotHours = list.reduce((n, r) => n + (Number(r?.minutes) || 0), 0) / 60;
+  const fixes = list.filter((r) => r?.postMergeFix === true || /post-merge fix|broke the merged tree/i.test(String(r?.detail ?? ""))).length;
+  const hours = Number(wallMs) > 0 ? wallMs / 3600000 : null;
+  return { merged, perHour: hours && merged ? Math.round((merged / hours) * 100) / 100 : null, slotHoursPerMerge: merged ? Math.round((slotHours / merged) * 100) / 100 : null, postMergeFixSessions: fixes };
+}
+export function formatMergeThroughput(rows, wallMs) {
+  const t = mergeThroughput(rows, wallMs);
+  if (!t.merged) return null;
+  return `throughput: merged ${t.merged}, ${t.perHour ?? "n/a"}/hour, slot-hours per merge ${t.slotHoursPerMerge ?? "n/a"}, post-merge fix sessions ${t.postMergeFixSessions}`;
+}
+
 export function readCiPendingMaxMinutes(cwd = process.cwd()) {
   try {
     const n = Number(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.ci_pending_max_minutes);
@@ -1791,6 +1809,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { id, patch } = liveExec.parseSetExecution(argv);
     const execution = liveExec.applySetExecution(batchMod.openBatch(root, id), patch);
     sink.line(`batch ${id}: ${liveExec.formatOverride(patch)}`);
+    const drain = liveExec.drainNote(patch);
+    if (drain) sink.line(drain);
     return { ok: true, batch: id, execution };
   }
   if (["--show-env", "--set-env", "--unset-env"].some((f) => argv.includes(f))) return envBatch({ argv, root, print: (l) => sink.line(l) });
@@ -2012,7 +2032,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     execForNeeds = exec ?? null;
     hybrid = exec?.mode === "hybrid" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1;
     let remoteStop = null; // #4612: the sandbox provider's checkpoint stop, used only when the cancel asks for it
-    if (exec && (execMod.placement(exec) === "remote" || hybrid)) {
+    if (exec && ((execMod.placement(exec) === "remote" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1) || hybrid)) {
       // #4253: lanes run in sandboxes, ledger-tracked per lane, admitted against max_remote instead of the host cap.
       let gitDir = null;
       try { gitDir = resolvePath(cwd, String(await leanIo.git(["rev-parse", "--git-common-dir"], { cwd })).trim()); } catch { gitDir = null; }
@@ -2345,6 +2365,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   try { heavyStats = deps.heavyStats !== undefined ? deps.heavyStats : (await import("./lean/heavy.mjs")).openHeavy(schedMod.schedDir()).stats(); } catch { heavyStats = null; }
   const trainLine = train ? (await import("./lean/mergetrain.mjs")).formatTrainSummary(train.stats()) : null; // #5836
   if (trainLine) report.push(trainLine);
+  { const tl = formatMergeThroughput(rows, Date.now() - (Date.parse(batch.startedAt ?? batch.started_at ?? "") || NaN)); if (tl) report.push(tl); } // #5839
   const waitLine = formatWaitSummary(rows, heavyStats);
   if (waitLine) report.push(waitLine);
   report.push(formatLedgerSummary(rows)); // #4908: per-phase wall time, n/a without ledger rows

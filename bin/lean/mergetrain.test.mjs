@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { codeForTerminalReason } from "../engine/outcome-codes.mjs";
-import { createMergeTrain, formatTrainSummary, judgeChecks, p50, rollupStates } from "./mergetrain.mjs";
+import { createMergeTrain, formatTrainSummary, judgeChecks, p50, waitP90, rollupStates } from "./mergetrain.mjs";
 
 const H = "a".repeat(40);
 /** A fake gh over `prs`: {pr: {state, head, mergeable, mergeState, base, branch, checks}}; records every call. */
@@ -96,7 +96,7 @@ describe("mergetrain (#5836)", () => {
   });
   it("pr-ready carries the awaiting_merge code", () => assert.equal(codeForTerminalReason("pr-ready"), "awaiting_merge"));
   it("formats the batch report line", () => {
-    assert.equal(formatTrainSummary({ merged: 3, handedBack: { "ci.red": 1, "base.conflict": 1 }, waits: [60000, 120000], syncs: 2 }), "merge train: merged 3, handed back 2 (base.conflict 1, ci.red 1), wait p50 1.0 min, base-syncs 2");
+    assert.equal(formatTrainSummary({ merged: 3, handedBack: { "ci.red": 1, "base.conflict": 1 }, waits: [60000, 120000], syncs: 2 }), "merge train: merged 3, handed back 2 (base.conflict 1, ci.red 1), wait p50 1.0 min p90 2.0 min, base-syncs 2 (lane 0), base.conflict 1 (lane 0)");
     assert.equal(formatTrainSummary({ merged: 0, handedBack: {}, waits: [], syncs: 0 }), null);
   });
   it("judges policy all and required checks", () => {
@@ -309,5 +309,40 @@ describe("mergetrain bisection (#5838)", () => {
     assert.deepEqual(t2.snapshot().batches[0].bisect.frame, [3, 4]);
     const old = createMergeTrain({ gh: w.gh, repo: "o/r", saved: { entries: [], stats: { merged: 1, handedBack: {}, waits: [], syncs: 0, batches: 1, candidateRuns: 1 }, batches: [] } });
     assert.deepEqual([old.stats().bisections, old.stats().culprits], [0, 0]);
+  });
+});
+
+describe("mergetrain phase 3 (#5839)", () => {
+  it("replays the post-merge record: notes are posted and a keepOpen record leaves the issue open", async () => {
+    const f = fake({ 5: { head: H, checks: [ok("build")] }, 6: { head: H, checks: [ok("build")], base: "main" } });
+    const t = createMergeTrain({ gh: f.gh, repo: "o/r" });
+    t.add(entry(1, 5, { postMerge: { keepOpen: true, notes: [{ marker: "FORGE:TRACKED", body: "left open" }] } }));
+    await t.tick();
+    assert.ok(f.calls.some((a) => a[0] === "issue" && a[1] === "comment" && a.join(" ").includes("FORGE:TRACKED")));
+    assert.ok(!f.calls.some((a) => a[0] === "issue" && a[1] === "close"), "keepOpen: not closed");
+    t.add(entry(2, 6, { lane: "main" }));
+    await t.tick();
+    assert.ok(f.calls.some((a) => a[0] === "issue" && a[1] === "close"), "a plain entry closes");
+  });
+  it("counts base.conflict hand-backs and lane-side counts per batch; p90 in the report line", async () => {
+    const f = fake({ 5: { head: H, mergeable: "CONFLICTING", checks: [ok("build")] } });
+    const t = createMergeTrain({ gh: f.gh, repo: "o/r" }); t.add(entry(1, 5, { laneSide: { syncs: 2, baseConflicts: 1 } }));
+    const ev = await t.tick();
+    assert.equal(ev[0].code, "base.conflict");
+    const st = t.stats();
+    assert.equal(st.baseConflicts, 1); assert.deepEqual(st.laneSide, { syncs: 2, baseConflicts: 1 });
+    assert.match(formatTrainSummary({ ...st, waits: [60000, 120000, 600000] }), /p90 10\.0 min.*base\.conflict 1 \(lane 1\)/);
+    assert.equal(waitP90([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), 9);
+  });
+  it("snapshot round-trips the record and counts; a phase-2 snapshot restores as zero", () => {
+    const t = createMergeTrain({ gh: async () => "", repo: "o/r" });
+    t.add(entry(1, 5, { postMerge: { keepOpen: false, notes: [] }, laneSide: { syncs: 1, baseConflicts: 0 } }));
+    const snap = JSON.parse(JSON.stringify(t.snapshot()));
+    const t2 = createMergeTrain({ gh: async () => "", repo: "o/r", saved: snap });
+    assert.deepEqual(t2.snapshot().entries[0].postMerge, { keepOpen: false, notes: [] }); assert.equal(t2.stats().laneSide.syncs, 1);
+    const old = { entries: [], stats: { merged: 2, handedBack: {}, waits: [], syncs: 1 } };
+    const t3 = createMergeTrain({ gh: async () => "", repo: "o/r", saved: old });
+    assert.deepEqual([t3.stats().baseConflicts, t3.stats().laneSide], [0, { syncs: 0, baseConflicts: 0 }]);
+    t3.restore(old); assert.equal(t3.stats().baseConflicts, 0);
   });
 });

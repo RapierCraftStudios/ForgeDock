@@ -62,9 +62,17 @@ describe("execution config (#4253)", () => {
     assert.equal(parseExecution({ mode: "remote", provider: "My Provider" }).provider, "container");
   });
 
+  it("remote mode with max_remote 0 pauses starts (#5933)", () => {
+    assert.notEqual(placement({ mode: "remote", maxRemote: 0 }), "local");
+    assert.equal(placeLane({ exec: { mode: "remote", maxRemote: 0 } }).where, "remote");
+  });
+  it("#5933 hybrid max_remote 0 stays local", () => {
+    assert.deepEqual(placeLane({ exec: { mode: "hybrid", maxRemote: 0 } }), { where: "local", reason: "max_remote 0" });
+  });
+
   it("placement: remote only for mode remote with max_remote >= 1; hybrid is placed per lane by placeLane (#4256)", () => {
     assert.equal(placement(parseExecution({})), "local");
-    assert.equal(placement(parseExecution({ mode: "remote", max_remote: "0" })), "local");
+    assert.equal(placement(parseExecution({ mode: "remote", max_remote: "0" })), "remote");
     assert.equal(placement(parseExecution({ mode: "hybrid", max_remote: "3" })), "local");
     assert.equal(placement(parseExecution({ mode: "remote", max_remote: "3" })), "remote");
     assert.equal(placement(undefined), "local");
@@ -705,7 +713,7 @@ describe("hybrid placement (#4256)", () => {
     const cases = [
       [{ exec: parseExecution({}) }, "local", "mode local"],
       [{ exec: parseExecution({ mode: "remote", max_remote: "3" }), weight: LIGHT }, "remote", "mode remote"],
-      [{ exec: parseExecution({ mode: "remote", max_remote: "0" }) }, "local", "mode remote"],
+      [{ exec: parseExecution({ mode: "remote", max_remote: "0" }) }, "remote", "mode remote"],
       [{ exec: hy("0"), weight: HEAVY }, "local", "max_remote 0"],
       [{ exec: hy(), verifyMode: "ci", weight: HEAVY, headroom: BUSY }, "local", "verify.mode ci: validation runs on CI, not billed twice"],
       [{ exec: hy(), labels: ["Documentation"], weight: HEAVY, headroom: BUSY }, "local", "docs-only lane"],
