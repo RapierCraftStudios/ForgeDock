@@ -230,7 +230,7 @@ function world(o = {}) {
     waitCiGreen: async () => (w.waits.length ? w.waits.shift() : { rc: 0, text: `CI_GATE_HEAD: ${w.head}` }),
     transitionLabel: async (n, s) => { w.labels.push(s); w.seq.push(`label:${s}`); },
     ...(o.procs ? { proc: { inDir: async () => o.procs, alive: (pid) => w.alive.has(pid), kill: (pid, sig) => { w.kills.push([pid, sig]); w.seq.push(`kill-${sig}`); if (sig === "SIGKILL" || !o.stubborn) w.alive.delete(pid); } } } : {}),
-    fs: { ...(o.wtExists ? { exists: async (p) => posix(p).startsWith("/wt/lean-7") } : {}), stat: async (p) => (posix(p) in w.files ? { mtimeMs: w.mtimes[posix(p)] ?? 1 } : null), read: async (p) => { if (!(posix(p) in w.files)) throw new Error("ENOENT"); return w.files[posix(p)]; }, append: async (p, t) => { w.files[posix(p)] = (w.files[posix(p)] ?? "") + t; }, write: async (p, t) => { w.files[posix(p)] = t; }},
+    fs: { ...(o.wtExists ? { exists: async (p) => posix(p).startsWith("/wt/lean-7") || posix(p) === "/repo" } : {}), stat: async (p) => (posix(p) in w.files ? { mtimeMs: w.mtimes[posix(p)] ?? 1 } : null), read: async (p) => { if (!(posix(p) in w.files)) throw new Error("ENOENT"); return w.files[posix(p)]; }, append: async (p, t) => { w.files[posix(p)] = (w.files[posix(p)] ?? "") + t; }, write: async (p, t) => { w.files[posix(p)] = t; }},
     fileFollowups: async ({ parent, items }) => { w.followups.push({ parent, items }); if (o.followupError) throw Object.assign(new Error(o.followupError), { stdout: o.followupStdout ?? "" });
       if (o.followupRet) return o.followupRet(w.followups.length, items);
       if (w.followups.length <= (o.followupFailTimes ?? 0)) throw new Error("DEFERRED_LOOKUP=FAILED"); if (w.followups.length <= (o.followupMissingTimes ?? 0)) return {}; return Object.fromEntries(items.filter((i) => !(o.followupSkip ?? []).some((q) => JSON.stringify(i).includes(q))).map((i) => [i.key, o.followupIssue ?? 900])); },
@@ -1805,6 +1805,23 @@ describe("worktree salvage and orphaned processes (#4162)", () => {
     assert.equal((await run(w)).terminalReason, "merged");
     assert.equal(salvageRefs(w).length, 0);
   });
+  it("5890 repo_missing: a missing repo cwd ends deferred sandbox.repo_missing with a retry, before fetch or worktree add", async () => {
+    const w = world({ wtExists: true });
+    w.io.fs.exists = async () => false;
+    const r = await run(w, { dir: tmpDir("core-5890-a-") });
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "sandbox.repo_missing");
+    assert.equal(r.retryInSeconds, 120);
+    assert.ok(!w.calls.some((c) => c[0] === "git" && (c[1] === "fetch" || c[1] === "worktree")), "no fetch or worktree call ran");
+  });
+  it("5890 repo_missing: a raw spawn ENOENT from worktree add maps to the same code, never engine-error", async () => {
+    const w = world();
+    const git0 = w.io.git;
+    w.io.git = async (a, o) => { if (a[0] === "worktree" && a[1] === "add") throw Object.assign(new Error("spawn git ENOENT"), { code: "ENOENT", syscall: "spawn git", path: "git" }); return git0(a, o); };
+    const r = await run(w, { dir: tmpDir("core-5890-b-") });
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "sandbox.repo_missing");
+  });
   // #5825: a lane folder that is not this repo's worktree is never salvaged or written to with git
   const NOT_LINKED = { ok: false, why: "the lane folder has no .git link (not a git worktree)", evidence: { worktree: WT } };
   const gitIdx5825 = (w, f) => w.calls.findIndex((c) => c[0] === "git" && f(c.slice(1)));
@@ -1812,7 +1829,7 @@ describe("worktree salvage and orphaned processes (#4162)", () => {
     const dir = tmpDir("core-5825-q-");
     const w = world({ wtExists: true, salvageTrees: [T1] });
     let gone = false; const moved = [];
-    w.io.fs.exists = async (p) => !gone && p.startsWith(WT);
+    w.io.fs.exists = async (p) => p === "/repo" || (!gone && p.startsWith(WT));
     const git0 = w.io.git;
     w.io.git = async (a, o) => { if (a[0] === "worktree" && a[1] === "add") gone = false; return git0(a, o); };
     w.io.confine = { verify: async () => (moved.length ? { ok: true } : NOT_LINKED), quarantine: async ({ wt }) => { moved.push(wt); gone = true; return "/wt/.quarantine/lean-7-1"; } };
@@ -4629,7 +4646,7 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
 
   it("#4103 a leftover unregistered worktree dir is removed (only this issue's lean dir) before add", async () => {
     const w = world(); const removed = [];
-    w.io.fs.exists = async (p) => p === "/wt/lean-7"; w.io.fs.rmdir = async (p) => { removed.push(p); };
+    w.io.fs.exists = async (p) => p === "/repo" || p === "/wt/lean-7"; w.io.fs.rmdir = async (p) => { removed.push(p); };
     await run(w);
     assert.deepEqual(removed, ["/wt/lean-7"]);
     // a registered worktree dir is left to `git worktree remove`
@@ -4648,7 +4665,7 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
   it("#4103 'already exists' on add cleans the leftover and retries; index.lock and packed-refs.lock are retried", async () => {
     for (const msg of ["fatal: '/wt/lean-7' already exists", "fatal: Unable to create '/r/.git/index.lock': File exists.", "error: cannot lock ref: Unable to create '/r/.git/packed-refs.lock': File exists", "fatal: could not lock config file /r/.git/config: File exists"]) {
       const w = world(); let failed = false, gone = false; const removed = [];
-      w.io.fs.exists = async (p) => failed && !gone && p === "/wt/lean-7"; w.io.fs.rmdir = async (p) => { removed.push(p); gone = true; }; // #5825: a removed leftover is gone until the add
+      w.io.fs.exists = async (p) => p === "/repo" || failed && !gone && p === "/wt/lean-7"; w.io.fs.rmdir = async (p) => { removed.push(p); gone = true; }; // #5825: a removed leftover is gone until the add
       const g = w.io.git;
       w.io.git = async (a, o2) => { if (a[0] === "worktree" && a[1] === "add" && !failed) { failed = true; throw Object.assign(new Error(msg), { stderr: msg }); } if (a[0] === "worktree" && a[1] === "add") gone = false; return g(a, o2); };
       const r = await run(w);
@@ -7047,7 +7064,7 @@ describe("test map and repo facts caches (#4272)", () => {
   });
 
   it("neither file present: the same commands, events and prompts as without the feature", async () => {
-    const w = world(); const ran = recorder(w); w.io.fs.exists = async (p) => p === WT;
+    const w = world(); const ran = recorder(w); w.io.fs.exists = async (p) => p === WT || p === "/repo";
     const dir = tmpDir("core-");
     assert.equal((await run(w, { dir, precheck: { commands: ["true", "make lint"] } })).terminalReason, "merged");
     assert.deepEqual(ran, ["true", "make lint"]);
@@ -7062,11 +7079,11 @@ describe("test map and repo facts caches (#4272)", () => {
   it("repo-facts.json present: the builder prompts cite its path, never its content", async () => {
     const w = world(); recorder(w);
     w.files[FACTSF] = JSON.stringify({ version: 1, toolchain: { pm: { name: "pnpm", version: "9.9.9-SECRET" } } });
-    w.io.fs.exists = async (p) => p === WT || p in w.files;
+    w.io.fs.exists = async (p) => p === WT || p === "/repo" || p in w.files;
     assert.equal((await run(w)).terminalReason, "merged");
     const [plan, impl] = builders(w);
     for (const b of [plan, impl]) { assert.ok(b[4].includes(`are cached in ${FACTSF}`)); assert.doesNotMatch(b[4], /9\.9\.9-SECRET/); }
-    const w2 = world(); recorder(w2); w2.files["/repo/.forge/repo-facts.json"] = "{}"; w2.io.fs.exists = async (p) => p === WT || p in w2.files;
+    const w2 = world(); recorder(w2); w2.files["/repo/.forge/repo-facts.json"] = "{}"; w2.io.fs.exists = async (p) => p === WT || p === "/repo" || p in w2.files;
     assert.equal((await run(w2)).terminalReason, "merged");
     assert.ok(builders(w2)[0][4].includes("are cached in /repo/.forge/repo-facts.json"));
   });
