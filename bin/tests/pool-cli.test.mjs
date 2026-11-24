@@ -133,23 +133,35 @@ describe("forgedock pool (#4544)", () => {
     await assert.rejects(run(["pause"], as, { ok: false, status: 401, data: { error: "unauthorized" } }), /agent refused pause: HTTP 401/);
     await assert.rejects(run(["pause", "--force"], as, {}), /usage: unknown flag/);
   });
-  it("uninstall needs --yes, then stops the unit and removes its files (#5885)", async () => {
-    const s = setup();
+  it("uninstall delegates to the shipped script, previews with --dry-run and never takes --config (#5956)", async () => {
     const seen = [];
     const spawn = (bin, args) => { seen.push([bin, ...args].join(" ")); return { status: 0 }; };
-    const run2 = async (argv, deps) => { const out = []; const log = console.log; console.log = (...a) => out.push(a.join(" ")); try { await poolFromCli([...argv, "--config", s.config], { poolDeps: deps }); } finally { console.log = log; } return out.join("\n"); };
+    const run2 = async (argv, deps) => { const out = []; const log = console.log; console.log = (...a) => out.push(a.join(" ")); try { await poolFromCli(argv, { poolDeps: deps }); } finally { console.log = log; } return out.join("\n"); };
     const dry = await run2(["uninstall"], { spawn, platform: "linux" });
-    assert.deepEqual(seen, []);
-    assert.match(dry, /would stop and disable computeshare-agent[\s\S]*--yes/);
+    assert.equal(seen.length, 1);
+    assert.match(seen[0], /^bash \S+uninstall-agent-linux\.sh --dry-run$/);
+    assert.match(dry, /--yes to proceed/);
+    seen.length = 0;
     const out = await run2(["uninstall", "--yes"], { spawn, platform: "linux" });
-    assert.match(seen[0], /^systemctl disable --now computeshare-agent$/);
-    assert.equal(seen.length, 4);
+    assert.equal(seen.length, 1);
+    assert.match(seen[0], /^bash \S+uninstall-agent-linux\.sh$/);
+    assert.ok(!seen.some((c) => /^rm |systemctl/.test(c)));
     assert.match(out, /agent uninstalled/);
+    seen.length = 0;
+    await run2(["uninstall", "--yes"], { spawn, platform: "darwin" });
+    assert.match(seen[0], /^bash \S+uninstall-agent-macos\.sh$/);
     seen.length = 0;
     await run2(["uninstall", "--yes"], { spawn, platform: "win32" });
     assert.match(seen[0], /^powershell .*uninstall-agent\.ps1$/);
+    seen.length = 0;
+    assert.match(await run2(["uninstall"], { spawn, platform: "win32" }), /would run pool\/install\/uninstall-agent\.ps1/);
+    assert.deepEqual(seen, []);
     await assert.rejects(run2(["uninstall", "--yes"], { spawn: () => ({ status: 1 }), platform: "linux" }), /exited 1/);
-    await assert.rejects(run2(["uninstall", "--force"], {}), /usage: unknown flag/);
+    for (const bad of [["--config", "/etc/agent.json"], ["--force"]]) {
+      seen.length = 0;
+      await assert.rejects(run2(["uninstall", "--yes", ...bad], { spawn, platform: "linux" }), /usage: unknown flag/);
+      assert.deepEqual(seen, []);
+    }
   });
   it("an unknown verb is a usage error", async () => {
     await assert.rejects(poolFromCli(["bogus"], { poolDeps: {} }), /usage: forgedock pool/);
