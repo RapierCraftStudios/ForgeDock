@@ -15,7 +15,7 @@ import { call as httpCall } from "./http.mjs";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const loadJson = (p) => JSON.parse(readFileSync(p, "utf8"));
 
-const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB --agent-url URL | --outbound | --one-liner] | status [--json] | pause | resume | uninstall --yes | upgrade [agent] | remove <agent>  [--config path]";
+const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB --agent-url URL | --outbound | --one-liner] | status [--json] | limit <agent> --lanes N|none | pause | resume | uninstall --yes | upgrade [agent] | remove <agent>  [--config path]";
 const HELP_FLAGS = ["--help", "-h"];
 // Flags each verb accepts: `value` flags consume the next token, `bool` flags stand alone. Anything else dash-prefixed is rejected (#5008).
 const VERB_FLAGS = {
@@ -27,6 +27,7 @@ const VERB_FLAGS = {
   uninstall: { value: ["--config"], bool: ["--yes"] },
   upgrade: { value: ["--config"], bool: [] },
   remove: { value: ["--config"], bool: [] },
+  limit: { value: ["--config", "--lanes"], bool: [] },
   enroll: { value: ["--config", "--cpus", "--mem", "--agent-url"], bool: ["--outbound", "--one-liner"] },
   "install-command": { value: ["--config", "--cpus", "--mem", "--agent-url"], bool: ["--outbound", "--one-liner"] },
   resize: { value: ["--config", "--cpus", "--mem", "--vm-cpus", "--vm-mem", "--vm-swap"], bool: ["--drain"] },
@@ -112,6 +113,9 @@ export async function runPoolCli(argv, deps = {}) {
       if (rest.includes("--json")) console.log(JSON.stringify(r.data, null, 2));
       else if (!r.ok) throw new Error(`router refused: HTTP ${r.status} ${JSON.stringify(r.data)}`);
       else console.log(statusTable(r.data?.agents ?? []));
+      // #5735: lane sandboxes used/ceiling per agent, and the lane total across all batches
+      for (const a of Array.isArray(r.data?.agents) ? r.data.agents : []) if (a?.lanes) console.log(`${a.name}: lanes ${a.lanes.used}/${a.lanes.ceiling ?? "-"}`);
+      if (Number.isInteger(r.data?.remote_lanes)) console.log(`remote lanes across batches: ${r.data.remote_lanes}`);
       for (const a of r.data?.agents ?? []) {
         if (a.transport) console.log(`${a.name}: transport ${a.transport}`); // #5882
         const n = a.net; // #5923
@@ -119,6 +123,19 @@ export async function runPoolCli(argv, deps = {}) {
         if (!Number.isFinite(a.host_disk_free_gb)) continue;
         console.error(`${a.name}: host_disk_free_gb ${a.host_disk_free_gb}${Number.isFinite(a.host_disk_growth_gb_per_h) ? `, growth ${a.host_disk_growth_gb_per_h} GB/h` : ""}${a.disk_warning ? ` WARNING: ${a.disk_warning}` : ""}`);
       }
+      break;
+    }
+    case "limit": {
+      // #5735: forgedock pool limit <agent> --lanes N|none: the agent's lane sandbox ceiling across all batches.
+      const name = rest.find((x, i) => !x.startsWith("--") && !["--lanes", "--config"].includes(rest[i - 1]));
+      const v = flag("lanes");
+      if (!name || v === undefined) throw new Error("usage: forgedock pool limit <agent> --lanes N|none");
+      if (v !== "none" && !/^\d+$/.test(v)) throw new Error("usage: --lanes must be a non-negative integer or none");
+      const max_lanes = v === "none" ? null : parseInt(v, 10);
+      const cfg = routerConfig();
+      const r = await call(`http://${cfg.listen.host}:${cfg.listen.port}`, "POST", `/agents/${encodeURIComponent(name)}/limit`, { body: { max_lanes }, token: cfg.forgedock_token, timeoutMs: 30000 });
+      if (!r.ok) throw new Error(`${name}: HTTP ${r.status} ${JSON.stringify(r.data)}`);
+      console.log(`${name}: max_lanes ${max_lanes ?? "none"}`);
       break;
     }
     case "pause":
