@@ -124,6 +124,7 @@
  * then queue order. A sub-issue's estimate is the parent's ÷ N, floored at the M default. Without `estimate` the order is
  * the queue order except that decomposed sub-issues go first. A settled row carries `est_minutes` (estimated vs. actual).
  */
+import { decideClear } from "./clear-breaker.mjs";
 import { parseDependsOn } from "../engine/phases.mjs";
 import { classifyNeedsHuman, recoveryCodeOf, recoveryClassOf, OUTCOME_CODES, ENV_VALIDATE_PLACEMENT, ENV_VALIDATE_TIMEOUT, MECHANICAL_CODES } from "../engine/outcome-codes.mjs";
 import { detectGateDeadlock, formatGateDeadlock } from "./gatewatch.mjs";
@@ -335,7 +336,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
  * @returns {Promise<Array<{issue:number, outcome:string, pr:?number, cost_usd:number, minutes:number, detail?:string}>>}
  */
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), blockedRefreshMs = 60000, onUpdate = () => {}, onCrossLane = () => {},
-  store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000, getClearBreaker = null, ackClearBreaker = null,
+  store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000, getClearBreaker = null, consumeClearBreaker = null, ackClearBreaker = null,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
@@ -1983,7 +1984,17 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       // #4685: a breaker tripped only by link failures (a router restart) closes itself after a cooldown
       if (tripped?.transport && now() - tripped.at >= TRANSPORT_COOLDOWN_MS) { tripped = null; errorTimes = []; transportErrors = 0; save(); }
       // #5947: --clear-breaker on a schedd-hosted batch reaches this runner through the batch's request file
-      if (getClearBreaker) { let req = false; try { req = Boolean(getClearBreaker()); } catch { req = false; } if (req) { const was = Boolean(tripped); tripped = null; errorTimes = []; transportErrors = 0; save(); try { ackClearBreaker?.({ cleared: was }); } catch { /* advisory */ } } }
+      if (getClearBreaker) { // #5964: time-scoped; the request is consumed only after the decision, so a long pass never loses it
+        let req = null; try { req = getClearBreaker(); } catch { req = null; }
+        if (req) {
+          const d = decideClear({ tripped, requestAt: req });
+          const wasTripped = Boolean(tripped);
+          if (d.clear) { const was = wasTripped; tripped = null; errorTimes = []; transportErrors = 0; save(); try { ackClearBreaker?.({ cleared: was }); } catch { /* advisory */ } }
+          else if (d.stale) { try { ackClearBreaker?.({ cleared: false }); } catch { /* advisory */ } }
+          try { consumeClearBreaker?.(); } catch { /* advisory */ }
+          if (d.clear && wasTripped) continue; // admission ran before this check: re-run the pass so the cleared batch resumes instead of falling to the "nothing runnable" skip
+        }
+      }
       if (tripped && !running.size) { await drainAdds(); break; } // breaker: let running lanes finish, keep the rest pending for a resume
       if (cancelled && !running.size) { await drainAdds(); break; } // #4376: cancel: the rest end held for a resume
       if (budgetStop && !running.size) { await drainAdds(); break; } // execution budget (stop): the same, the rest end held

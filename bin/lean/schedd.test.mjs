@@ -149,6 +149,28 @@ describe("schedd host scheduler (#4192)", () => {
     } finally { await h.cleanup(); }
   });
 
+  it("#5964 a hosted clear-breaker nobody acks answers pending and leaves the request file (never dropped, state.json untouched)", async () => {
+    const h = host();
+    try {
+      await h.daemon();
+      const all = capture(() => h.inWork(() => orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client)));
+      await until(() => h.launched().length === 1 && h.lanePids().length === 1);
+      const [id] = listBatches(h.root);
+      const b = openBatch(h.root, id);
+      const before = JSON.stringify(b.store.load());
+      // waitMs 0 is invalid, so use a tiny budget; the runner pass (5 s poll) will not ack in time
+      const r = await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "clear-breaker", id, waitMs: 100 }, undefined, { timeoutMs: 20000 });
+      assert.equal(r.hosted, true);
+      if (!r.acknowledged) {
+        assert.equal(r.pending, true);
+        assert.equal(existsSync(join(h.root, id, "clear-breaker")), true, "the request survives for the runner's next pass");
+        assert.equal(JSON.stringify(b.store.load()), before, "state.json not rewritten for a hosted batch");
+      }
+      writeFileSync(h.release, "");
+      await all;
+    } finally { await h.cleanup(); }
+  });
+
   it("#5947 clear-breaker on a hosted batch reaches the live runner, which acknowledges it (no daemon restart)", async () => {
     const h = host();
     try {
