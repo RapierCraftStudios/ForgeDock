@@ -1165,6 +1165,8 @@ export function interfaceDecisionFailures(contract, result, changedFiles) {
   return out;
 }
 
+const tagText = (q) => String(q ?? "").replace(/`[^`\n]*`/g, (span, at, all) => (/[^\s.,;:)]/.test(all.slice(at + span.length).replace(/`[^`\n]*\[type:[^`\n]*`/g, "")) ? "" : span));
+const wantsE2e = (r) => /\[type:(?:e2e|manual)\]/i.test(tagText(r?.quote));
 /**
  * Deterministic checks before any reviewer tokens are spent: unauthorized files, failed or missing validation,
  * requirements not implemented, deferrals without a tracking issue, and unexempted hotspot growth. Returns {ok, failures[], superseded[]}; each failure carries a
@@ -1185,6 +1187,10 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
     if (r.disposition === "post-deploy" && !(r.check && checkIds.has(r.check))) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "check_unknown", detail: `${r.id} post-deploy check ${r.check ? `'${r.check}'` : "id"} is neither on the default branch nor added by this PR (.forge/post-deploy-checks.json)` });
+  }
+  // #5754: a deliver [type:e2e]/[type:manual] row whose observable exists only in production (live stack, deploy, prod window) cannot be produced by the placement: fail fast with a typed code instead of spending builder resumes
+  for (const r of contract.requirements ?? []) {
+    if (r.disposition === "deliver" && wantsE2e(r) && !isOutOfBand(r) && r.verify !== "in_lane" && prodOnlyE2e(r.quote)) failures.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_placement", detail: `${r.id} is a [type:e2e]/[type:manual] criterion observable only in production or on the live stack, which this lane cannot produce; mark ${r.id} post-deploy so it is transferred to the epic's acceptance instead of spending builder resumes (#5754)` });
   }
   // #4769: a default-off rollout entry added by the diff needs an activation row
   if (newOffKeys?.length) for (const f of activationFailures(contract, newOffKeys)) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, ...f });
@@ -1544,8 +1550,6 @@ export function checkCompleteness(rv, { contract, changedFiles, issueText, pathE
 
 /** #4726, #5339: a requirement quote that carries a `[type:e2e]` or `[type:manual]` criterion. */
 /** #5547: a tag inside a mid-sentence code span (`` `[type:e2e]` row whose ... ``) is a mention of the tag, not the tag; a trailing backticked tag still counts. */
-const tagText = (q) => String(q ?? "").replace(/`[^`\n]*`/g, (span, at, all) => (/[^\s.,;:)]/.test(all.slice(at + span.length).replace(/`[^`\n]*\[type:[^`\n]*`/g, "")) ? "" : span));
-const wantsE2e = (r) => /\[type:(?:e2e|manual)\]/i.test(tagText(r?.quote));
 /** #5339: failure kinds enforced without an `engine.conformance_kinds` entry (the entry still overrides). */
 // #5449: test_missing/test_weak are only generated for bug lanes (testadequacy.mjs), so enforcing the kinds is bug-only.
 const DEFAULT_ENFORCED_KINDS = ["e2e_row", "test_missing", "test_weak"];
@@ -1561,12 +1565,14 @@ export function isE2eCommand(command, e2e = null) {
   if (typeof e2e?.isSpec === "function" && cmd.split(/\s+/).some((t) => t && e2e.isSpec(t.replace(/^["']+|["']+$/g, "")))) return true;
   return E2E_CMD_RE.test(cmd);
 }
+/** #5754: a criterion verified against the running live stack/service/environment/cluster: observable only in production, so post-deploy at freeze instead of builder resumes. Checked after the local-runnable exclusion. */
+const LIVE_STACK_RE = /\b(?:against|on|in)\s+(?:the\s+)?live\s+(?:stack|service|environment|cluster)\b|\breal traffic\s+(?:against|on)\s+(?:the\s+)?live\b/i;
 /** #5468: a `[type:e2e]`/`[type:manual]` quote whose observable only exists in production (live URL, deploy, prod probe); local stack, browser and sandbox wording is runnable pre-merge. */
 export function prodOnlyE2e(quote) {
   const q = String(quote ?? "");
   if (LIVE_INFRA_RE.test(q)) return true; // #5547
   if (/\b(?:localhost|127\.0\.0\.1|local stack|playwright|browser|sandbox|staging)\b/i.test(q)) return false;
-  return /https?:\/\//i.test(q) || /\b(?:after (?:the )?deploy|production|prod probe|live (?:domain|site)|prod)\b/i.test(q) || PROD_WINDOW_RE.test(q);
+  return /https?:\/\//i.test(q) || /\b(?:after (?:the )?deploy|production|prod probe|live (?:domain|site)|prod)\b/i.test(q) || PROD_WINDOW_RE.test(q) || LIVE_STACK_RE.test(q);
 }
 /** #5547: criteria whose run needs a live benchmark, a paid run, remote infra or host-level load: observable only outside the lane, by shape not by repo name. */
 const LIVE_INFRA_RE = /\b(?:live|paid|remote)\s+(?:benchmarks?|runs?|infra(?:structure)?|hosts?)\b|\bbench(?:mark)?[\w.-]*\.(?:mjs|js|py|sh)\b|\bre-?run\b[^.]{0,60}\bbench(?:mark)?\b|\b(?:sandbox pool|(?:remote|rented|cloud|gpu) (?:infra|hosts?|runners?|clusters?|boxe?s?|machines?|gpus?|pool)|on (?:a|the) (?:remote|rented|cloud|gpu) \w+)\b|\bsynthetic load\b|\b\d+\s*[×x]\s*(?:nproc|cores?|cpus?)\b|\bCPU hogs?\b|\bhost[- ]level (?:load|run)\b|\b[≤<]=?\s*[\d.]+\s*[×x]\s*(?:the\s+)?(?:control\s+)?cost\b/i;

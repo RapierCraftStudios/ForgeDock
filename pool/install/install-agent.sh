@@ -14,6 +14,12 @@ log() { echo "[computeshare] $*"; }
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
 pidof systemd >/dev/null || [ "$(ps -p 1 -o comm=)" = systemd ] || { echo "systemd is not PID 1; enable it in /etc/wsl.conf and restart the distro" >&2; exit 1; }
 
+# #5883: what this installer added to the host (one per line: docker, node, sysctl, fstrim.timer). uninstall-agent-linux.sh removes
+# only what the marker lists; lines from earlier runs are kept, so a rerun never forgets a component it found already installed.
+install -d -m 0700 /etc/computeshare /var/lib/computeshare
+MARKER=/etc/computeshare/installed-by
+mark() { grep -qx "$1" "$MARKER" 2>/dev/null || echo "$1" >> "$MARKER"; }
+
 log "base packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
@@ -28,14 +34,58 @@ if [ ! -x /usr/bin/dockerd ]; then
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${DOCKER_DISTRO} ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
   apt-get update -qq
   apt-get install -y -qq docker-ce docker-ce-cli containerd.io >/dev/null
+  mark docker
 fi
 # WSL mirrored networking usually has no IPv6 route; dockerd would still dial registries over IPv6 and fail.
 if grep -qi microsoft /proc/sys/kernel/osrelease && [ -z "$(ip -6 route show default 2>/dev/null)" ]; then
   printf 'net.ipv6.conf.all.disable_ipv6=1\nnet.ipv6.conf.default.disable_ipv6=1\n' > /etc/sysctl.d/90-computeshare-noipv6.conf
   sysctl -q -p /etc/sysctl.d/90-computeshare-noipv6.conf
+  mark sysctl
   systemctl restart docker 2>/dev/null || true
 fi
 systemctl enable --now docker >/dev/null
+# #5923: WSL mirrored networking leaves the guest a narrow source-port range that docker's MASQUERADE ignores; pin it (idempotent, re-run when docker restarts).
+if grep -qi microsoft /proc/sys/kernel/osrelease; then
+  cat > /usr/local/sbin/cs-nat-portrange <<'CS_NAT_SCRIPT'
+#!/bin/sh
+# cs-nat-portrange: pin docker NAT source ports to the guest ip_local_port_range (WSL mirrored networking)
+set -eu
+set -- $(sysctl -n net.ipv4.ip_local_port_range) || exit 0
+lo=$1; hi=$2
+[ "$lo" -gt 32768 ] || [ "$hi" -lt 60999 ] || exit 0
+docker network ls --filter driver=bridge -q | while read -r id; do
+  info=$(docker network inspect -f '{{.Name}}|{{index .Options "com.docker.network.bridge.name"}}|{{range .IPAM.Config}}{{.Subnet}} {{end}}' "$id") || continue
+  name=${info%%|*}; rest=${info#*|}; bridge=${rest%%|*}; subnets=${rest#*|}
+  if [ -z "$bridge" ]; then if [ "$name" = bridge ]; then bridge=docker0; else bridge="br-$(echo "$id" | cut -c1-12)"; fi; fi
+  for subnet in $subnets; do
+    case "$subnet" in *:*) continue ;; esac
+    for proto in tcp udp; do
+      iptables -t nat -C POSTROUTING -s "$subnet" ! -o "$bridge" -p "$proto" -j MASQUERADE --to-ports "$lo-$hi" 2>/dev/null ||
+        iptables -t nat -I POSTROUTING 1 -s "$subnet" ! -o "$bridge" -p "$proto" -j MASQUERADE --to-ports "$lo-$hi"
+    done
+  done
+done
+CS_NAT_SCRIPT
+  chmod 0755 /usr/local/sbin/cs-nat-portrange
+  cat > /etc/systemd/system/cs-nat-portrange.service <<'CS_NAT_UNIT'
+[Unit]
+Description=Pin docker NAT source ports to the WSL guest port range
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/cs-nat-portrange
+
+[Install]
+WantedBy=docker.service
+CS_NAT_UNIT
+  systemctl daemon-reload
+  systemctl enable cs-nat-portrange.service >/dev/null 2>&1 || true
+  systemctl restart cs-nat-portrange.service || true
+  mark nat-pin
+fi
 
 if [ ! -x /opt/node/bin/node ] || [ "$(/opt/node/bin/node --version)" != "v${NODE_VERSION}" ]; then
   log "node ${NODE_VERSION}"
@@ -43,6 +93,7 @@ if [ ! -x /opt/node/bin/node ] || [ "$(/opt/node/bin/node --version)" != "v${NOD
   case "$(uname -m)" in aarch64|arm64) NODE_ARCH=arm64 ;; *) NODE_ARCH=x64 ;; esac
   curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" | tar -xJ -C /opt
   mv "/opt/node-v${NODE_VERSION}-linux-${NODE_ARCH}" /opt/node
+  mark node
 fi
 
 log "agent code"
@@ -51,7 +102,7 @@ tar -xzf "$BUNDLE" -C /opt/computeshare.new
 rm -rf /opt/computeshare && mv /opt/computeshare.new /opt/computeshare
 
 install -d -m 0700 /etc/computeshare /var/lib/computeshare
-if [ ! -s /etc/computeshare/agent.token ]; then
+if [ ! -s /etc/computeshare/agent.token ]; then # a rerun keeps its agent token: never re-enrolled (#5883)
   log "enrolling ${AGENT_NAME} (${AGENT_URL}) with ${ROUTER_URL}"
   resp=$(curl -fsS -X POST "${ROUTER_URL}/enroll" -H 'content-type: application/json' \
     -d "$(jq -n --arg t "$ENROLL_TOKEN" --arg n "$AGENT_NAME" --arg u "$AGENT_URL" '{token:$t,name:$n} + (if $u == "" then {} else {url:$u} end)')")

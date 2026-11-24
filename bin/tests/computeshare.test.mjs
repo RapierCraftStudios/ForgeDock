@@ -405,9 +405,11 @@ const installDir = fileURLToPath(new URL("../../pool/install/", import.meta.url)
 const linuxInstaller = `${installDir}install-agent-linux.sh`;
 
 test("linux installer scripts parse and install the systemd unit without WSL", () => {
-  for (const f of ["install-agent-linux.sh", "install-agent.sh"]) assert.equal(spawnSync("bash", ["-n", `${installDir}${f}`]).status, 0, f);
+  // #5883: the Linux uninstaller and the macOS install/uninstall pair ship beside the Linux installer and must parse too.
+  for (const f of ["install-agent-linux.sh", "install-agent.sh", "uninstall-agent-linux.sh", "install-agent-macos.sh", "uninstall-agent-macos.sh"]) assert.equal(spawnSync("bash", ["-n", `${installDir}${f}`]).status, 0, f);
   assert.ok(!/wsl/i.test(readFileSync(linuxInstaller, "utf8")));
   assert.match(readFileSync(`${installDir}install-agent.sh`, "utf8"), /computeshare-agent\.service/);
+  assert.match(readFileSync(`${installDir}uninstall-agent-linux.sh`, "utf8"), /computeshare-agent\.service/);
 });
 
 test("linux installer --dry-run resolves settings and redacts the token", () => {

@@ -230,7 +230,7 @@ function world(o = {}) {
     waitCiGreen: async () => (w.waits.length ? w.waits.shift() : { rc: 0, text: `CI_GATE_HEAD: ${w.head}` }),
     transitionLabel: async (n, s) => { w.labels.push(s); w.seq.push(`label:${s}`); },
     ...(o.procs ? { proc: { inDir: async () => o.procs, alive: (pid) => w.alive.has(pid), kill: (pid, sig) => { w.kills.push([pid, sig]); w.seq.push(`kill-${sig}`); if (sig === "SIGKILL" || !o.stubborn) w.alive.delete(pid); } } } : {}),
-    fs: { ...(o.wtExists ? { exists: async (p) => posix(p).startsWith("/wt/lean-7") } : {}), stat: async (p) => (posix(p) in w.files ? { mtimeMs: w.mtimes[posix(p)] ?? 1 } : null), read: async (p) => { if (!(posix(p) in w.files)) throw new Error("ENOENT"); return w.files[posix(p)]; }, append: async (p, t) => { w.files[posix(p)] = (w.files[posix(p)] ?? "") + t; }, write: async (p, t) => { w.files[posix(p)] = t; }},
+    fs: { ...(o.wtExists ? { exists: async (p) => posix(p).startsWith("/wt/lean-7") || posix(p) === "/repo" } : {}), stat: async (p) => (posix(p) in w.files ? { mtimeMs: w.mtimes[posix(p)] ?? 1 } : null), read: async (p) => { if (!(posix(p) in w.files)) throw new Error("ENOENT"); return w.files[posix(p)]; }, append: async (p, t) => { w.files[posix(p)] = (w.files[posix(p)] ?? "") + t; }, write: async (p, t) => { w.files[posix(p)] = t; }},
     fileFollowups: async ({ parent, items }) => { w.followups.push({ parent, items }); if (o.followupError) throw Object.assign(new Error(o.followupError), { stdout: o.followupStdout ?? "" });
       if (o.followupRet) return o.followupRet(w.followups.length, items);
       if (w.followups.length <= (o.followupFailTimes ?? 0)) throw new Error("DEFERRED_LOOKUP=FAILED"); if (w.followups.length <= (o.followupMissingTimes ?? 0)) return {}; return Object.fromEntries(items.filter((i) => !(o.followupSkip ?? []).some((q) => JSON.stringify(i).includes(q))).map((i) => [i.key, o.followupIssue ?? 900])); },
@@ -1226,6 +1226,13 @@ describe("core work-on", () => {
       };
       return w;
     };
+    it("merge.stacked_base (#5908): an open dependency PR wins over an older merged PR on the reused branch name; nothing merges or retargets", async () => {
+      const w = cascading(stacked(world(), { depState: "OPEN" }), () => [{ number: 3, state: "MERGED" }, { number: 5, state: "OPEN", headRefOid: STACK.sha }]);
+      const r = await run(w, { stackedOn: STACK, ciMaxMinutes: 0 });
+      assert.equal(w.merges.length, 0, "no gh pr merge");
+      assert.equal(w.stack.base, STACK.branch, "never retargeted");
+      assert.notEqual(r.terminalReason, "merged");
+    });
     it("cascade replan: a dependency that ended without merging drops the stacked PR and branch, defers with stack.replan, never merges", async () => {
       const w = cascading(stacked(world(), { depState: "CLOSED" }), () => [{ number: 5, state: "CLOSED" }]);
       const r = await run(w, { stackedOn: STACK });
@@ -1502,12 +1509,14 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     assert.doesNotMatch(traj(w).join("\n"), /left open as partial/);
   });
 
-  it("#5836 merge train on: close-time records (a still-pending follow-up) keep the lane waiting, never pr-ready", async () => {
+  it("#5839 merge train on: close-time records (a still-pending follow-up) hand over with a keepOpen post-merge record", async () => {
     const k = two("defer", { why: "w" });
     const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], issueStates: { 900: "CLOSED" } });
     w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => [{ name: "build", state: "pending" }];
     const r = await run(w, { mergeTrain: "on", ciMaxMinutes: 5 });
-    assert.equal(r.terminalReason, "ci-pending"); assert.equal(w.merges.length, 0);
+    assert.equal(r.terminalReason, "pr-ready"); assert.equal(w.merges.length, 0);
+    assert.equal(r.postMerge.keepOpen, true); assert.ok(r.postMerge.pendingFollowups.length >= 1);
+    assert.ok(r.postMerge.notes.some((n) => n.marker === "FORGE:FOLLOWUP_PENDING"));
   });
 
   it("a tracking issue that is not open is not a tracking issue: the item stays pending and is recorded", async () => {
@@ -1805,6 +1814,23 @@ describe("worktree salvage and orphaned processes (#4162)", () => {
     assert.equal((await run(w)).terminalReason, "merged");
     assert.equal(salvageRefs(w).length, 0);
   });
+  it("5890 repo_missing: a missing repo cwd ends deferred sandbox.repo_missing with a retry, before fetch or worktree add", async () => {
+    const w = world({ wtExists: true });
+    w.io.fs.exists = async () => false;
+    const r = await run(w, { dir: tmpDir("core-5890-a-") });
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "sandbox.repo_missing");
+    assert.equal(r.retryInSeconds, 120);
+    assert.ok(!w.calls.some((c) => c[0] === "git" && (c[1] === "fetch" || c[1] === "worktree")), "no fetch or worktree call ran");
+  });
+  it("5890 repo_missing: a raw spawn ENOENT from worktree add maps to the same code, never engine-error", async () => {
+    const w = world();
+    const git0 = w.io.git;
+    w.io.git = async (a, o) => { if (a[0] === "worktree" && a[1] === "add") throw Object.assign(new Error("spawn git ENOENT"), { code: "ENOENT", syscall: "spawn git", path: "git" }); return git0(a, o); };
+    const r = await run(w, { dir: tmpDir("core-5890-b-") });
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "sandbox.repo_missing");
+  });
   // #5825: a lane folder that is not this repo's worktree is never salvaged or written to with git
   const NOT_LINKED = { ok: false, why: "the lane folder has no .git link (not a git worktree)", evidence: { worktree: WT } };
   const gitIdx5825 = (w, f) => w.calls.findIndex((c) => c[0] === "git" && f(c.slice(1)));
@@ -1812,7 +1838,7 @@ describe("worktree salvage and orphaned processes (#4162)", () => {
     const dir = tmpDir("core-5825-q-");
     const w = world({ wtExists: true, salvageTrees: [T1] });
     let gone = false; const moved = [];
-    w.io.fs.exists = async (p) => !gone && p.startsWith(WT);
+    w.io.fs.exists = async (p) => p === "/repo" || (!gone && p.startsWith(WT));
     const git0 = w.io.git;
     w.io.git = async (a, o) => { if (a[0] === "worktree" && a[1] === "add") gone = false; return git0(a, o); };
     w.io.confine = { verify: async () => (moved.length ? { ok: true } : NOT_LINKED), quarantine: async ({ wt }) => { moved.push(wt); gone = true; return "/wt/.quarantine/lean-7-1"; } };
@@ -2141,6 +2167,79 @@ describe("conformance shadow mode (the default)", () => {
     assert.ok(restart, "a restart followed the resume");
     assert.match(restart, /validate G1/); assert.match(restart, /fixing one failure/);
     assert.doesNotMatch(restart, /The engine froze \.forge-lean\/contract\.json/);
+  });
+  it("#5829 builder continues past 120K on a 1M model and emits tokens before and after", async () => {
+    const w = world(), dir = tmpDir("core-ctx1m-"), orig = w.io.runner, seen = [];
+    w.io.runner = async (c) => {
+      if (c.role === "builder") seen.push(c.contextMax ?? 0);
+      const r = await orig(c); return c.role === "builder" && c.contextMax > 0 ? { ...r, endTokens: 600000 } : r;
+    };
+    const r = await run(w, { dir, builderModel: "claude-opus-5-5[1m]", builderRouting: { mode: "off" }, contextRestartCostUsd: 10 });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(seen[1], 900000, "the gate lets the session run past the 500000 ceiling to the real limit");
+    const log = readLog(dir, 7);
+    assert.ok(log.some((e) => e.event === "CONTEXT_CONTINUED" && e.tokens_before === 500000 && e.tokens_after === 600000));
+    assert.ok(!log.some((e) => e.event === "CONTEXT_CEILING"), "no restart");
+    assert.equal(r.context.restarts, 0); assert.equal(r.context.continues, 1);
+  });
+  it("#5829 a 1M model with no explicit ceiling gets about 500K; at the real limit the builder restarts via the digest", async () => {
+    const w = world({ dirty: true }), dir = tmpDir("core-ctxlim-"), orig = w.io.runner, seen = []; let n = 0;
+    w.io.runner = async (c) => {
+      if (c.role === "builder") seen.push({ contextMax: c.contextMax ?? 0, resume: c.resume ?? null, prompt: c.prompt });
+      if (c.role === "builder" && n++ === 1) throw Object.assign(new Error("ctx"), { code: "CLI_CONTEXT", context: 950000, contextMax: 450000, turns: 80, usage: null });
+      return orig(c);
+    };
+    const r = await run(w, { dir, builderModel: "claude-opus-5-5[1m]", builderRouting: { mode: "off" }, contextRestartCostUsd: 0.01 });
+    assert.equal(seen[1].contextMax, 500000, "model-aware default ceiling");
+    assert.equal(seen[2].resume, null); assert.match(seen[2].prompt, /The engine froze \.forge-lean\/contract\.json/);
+    assert.equal(r.context.restarts, 1);
+  });
+  it("#5829 a session continued past the ceiling that reaches the real limit restarts via the digest", async () => {
+    const w = world({ dirty: true }), dir = tmpDir("core-ctxreal-"), orig = w.io.runner, seen = []; let n = 0;
+    w.io.runner = async (c) => {
+      if (c.role === "builder") seen.push({ contextMax: c.contextMax ?? 0, resume: c.resume ?? null, prompt: c.prompt });
+      if (c.role === "builder" && n++ === 1) throw Object.assign(new Error("ctx"), { code: "CLI_CONTEXT", context: 900000, contextMax: 900000, turns: 90, usage: null });
+      return orig(c);
+    };
+    await run(w, { dir, builderModel: "claude-opus-5-5[1m]", builderRouting: { mode: "off" }, contextRestartCostUsd: 10 });
+    assert.equal(seen[1].contextMax, 900000); assert.equal(seen[2].resume, null); assert.match(seen[2].prompt, /The engine froze/);
+    assert.ok(readLog(dir, 7).some((e) => e.event === "CONTEXT_CEILING" && e.real_limit === true && e.context_tokens === 900000));
+  });
+  it("#5829 a session stopped at the ceiling is compacted in place and continues with tokens before and after; a failed compaction falls back to the digest restart", async () => {
+    for (const ok of [true, false]) {
+      const w = world({ dirty: true }), dir = tmpDir("core-ctxcompact-"), orig = w.io.runner, seen = []; let n = 0;
+      w.io.runner = async (c) => {
+        if (c.role === "builder") seen.push({ prompt: c.prompt, resume: c.resume ?? null });
+        if (c.role === "builder" && c.prompt === "/compact") { if (!ok) throw new Error("compact unavailable"); return { ...(await orig(c)), endTokens: 30000 }; }
+        if (c.role === "builder" && n++ === 1) throw Object.assign(new Error("ctx"), { code: "CLI_CONTEXT", sessionId: "sess-1", context: 130000, turns: 40, usage: null });
+        return orig(c);
+      };
+      const r = await run(w, { dir, contextCeilingTokens: 120000 }), log = readLog(dir, 7);
+      assert.equal(seen[2].prompt, "/compact"); assert.equal(seen[2].resume, "sess-1");
+      if (ok) {
+        assert.ok(log.some((e) => e.event === "CONTEXT_COMPACTED" && e.tokens_before === 130000 && e.tokens_after === 30000));
+        assert.equal(seen[3].resume, "sess-1", "the same session continues"); assert.equal(r.context.restarts, 0); assert.equal(r.context.compactions, 1);
+      } else {
+        assert.ok(log.some((e) => e.event === "CONTEXT_COMPACT_FAILED")); assert.equal(seen[3].resume, null); assert.match(seen[3].prompt, /The engine froze/); assert.equal(r.context.restarts, 1);
+      }
+    }
+  });
+  it("#5829 builder still kills and restarts at the ceiling on a small-window model", async () => {
+    const w = world({ dirty: true }), dir = tmpDir("core-ctxsmall-"), orig = w.io.runner, seen = []; let n = 0;
+    w.io.runner = async (c) => {
+      if (c.role === "builder") seen.push({ contextMax: c.contextMax ?? 0, resume: c.resume ?? null });
+      if (c.role === "builder" && n++ === 1) throw Object.assign(new Error("ctx"), { code: "CLI_CONTEXT", context: 130000, turns: 40, usage: null });
+      return orig(c);
+    };
+    const r = await run(w, { dir, builderModel: "claude-sonnet-5-5", builderRouting: { mode: "off" }, contextCeilingTokens: 120000 });
+    assert.equal(seen[1].contextMax, 120000); assert.equal(seen[2].resume, null);
+    assert.ok(readLog(dir, 7).some((e) => e.event === "CONTEXT_CEILING" && e.context_tokens === 130000));
+    assert.equal(r.context.restarts, 1); assert.equal(r.context.continues, 0);
+  });
+  it("#5829 lane summary reports restarts, turns and cost", async () => {
+    const r = await run(world());
+    assert.deepEqual(Object.keys(r.context).sort(), ["compactions", "continues", "cost_usd", "restarts", "turns"]);
+    assert.equal(r.context.restarts, 0); assert.equal(typeof r.context.turns, "number"); assert.equal(typeof r.context.cost_usd, "number");
   });
   it("#4328 freeze-time preflight: a validate needing a module the host lacks gets the one contract correction, before any build", async () => {
     const pyC = { ...CONTRACT, validate: [{ id: "V1", command: `python3 -c "import yaml"` }] }, uvC = { ...CONTRACT, validate: [{ id: "V1", command: `uv run python -c "import yaml"` }] };
@@ -3211,11 +3310,24 @@ describe("merge_wait policy", () => {
       const w2 = world(); w2.io.requiredChecks = async () => ["build"]; w2.io.checkStates = async () => states({ build: "pending" });
       assert.equal((await run(w2, { ciMaxMinutes: 5, mergeTrain: "off" })).terminalReason, "ci-pending");
     });
-    it("on, already-green checks merge in the lane", async () => {
+    it("on, already-green checks are handed to the train too (#5839): one queue per base, no lane merge", async () => {
       const w = world(); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "success" });
       const r = await run(w, { mergeTrain: "on" });
+      assert.equal(r.terminalReason, "pr-ready"); assert.equal(w.merges.length, 0);
+      assert.deepEqual(r.postMerge, { keepOpen: false, notes: [] }); assert.equal(r.laneSide.syncs, 0);
+    });
+    it("off, already-green checks merge in the lane (unchanged)", async () => {
+      const w = world(); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "success" });
+      const r = await run(w, { mergeTrain: "off" });
       assert.equal(r.terminalReason, "merged");
       assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
+    });
+    it("on, a conflicting PR is handed over with no base-sync (the train hands back base.conflict)", async () => {
+      const CONFLICTING = { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }; const w = world({ prView: [CONFLICTING, CONFLICTING] }); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "success" });
+      const r = await run(w, { mergeTrain: "on" });
+      assert.equal(r.terminalReason, "pr-ready"); assert.equal(w.merges.length, 0);
+      assert.equal(r.laneSide.baseConflicts, 1);
+      assert.ok(!w.calls.some((c) => Array.isArray(c) && c[0] === "merge" && /origin\//.test(c.join(" "))), "no lane base-sync merge");
     });
     it("on, a red check still gets the lane's own outcome (never pr-ready)", async () => {
       const w = world(); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "failure" });
@@ -3223,14 +3335,15 @@ describe("merge_wait policy", () => {
       assert.equal(w.merges.length, 0);
     });
   });
-  describe("#5836 merge train: plain-merge gate keeps the lane waiting", () => {
+  describe("#5839 merge train: every lane kind but a split hands over", () => {
     const pending = (w) => { w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "pending" }); return w; };
-    it("numbered sequence files keep the lane waiting", async () => {
+    it("numbered sequence files hand over with a post-merge record", async () => {
       const w = pending(world());
       w.io.sequenceCheck = async () => []; w.io.sequenceLease = { acquire: async () => ({ waitMs: 0, timedOut: false, release: () => {} }) };
       w.io.sequenceSnapshot = async () => [{ path: "db/0007_usage.sql", blob: "b1" }];
       const r = await run(w, { mergeTrain: "on", ciMaxMinutes: 5 });
-      assert.notEqual(r.terminalReason, "pr-ready"); assert.equal(w.merges.length, 0);
+      assert.equal(r.terminalReason, "pr-ready"); assert.equal(w.merges.length, 0);
+      assert.equal(typeof r.postMerge.keepOpen, "boolean");
     });
   });
   describe("#4624 merge-time rerun / wait / flaky branch of mergeFixRound", () => {
@@ -4629,7 +4742,7 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
 
   it("#4103 a leftover unregistered worktree dir is removed (only this issue's lean dir) before add", async () => {
     const w = world(); const removed = [];
-    w.io.fs.exists = async (p) => p === "/wt/lean-7"; w.io.fs.rmdir = async (p) => { removed.push(p); };
+    w.io.fs.exists = async (p) => p === "/repo" || p === "/wt/lean-7"; w.io.fs.rmdir = async (p) => { removed.push(p); };
     await run(w);
     assert.deepEqual(removed, ["/wt/lean-7"]);
     // a registered worktree dir is left to `git worktree remove`
@@ -4648,7 +4761,7 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
   it("#4103 'already exists' on add cleans the leftover and retries; index.lock and packed-refs.lock are retried", async () => {
     for (const msg of ["fatal: '/wt/lean-7' already exists", "fatal: Unable to create '/r/.git/index.lock': File exists.", "error: cannot lock ref: Unable to create '/r/.git/packed-refs.lock': File exists", "fatal: could not lock config file /r/.git/config: File exists"]) {
       const w = world(); let failed = false, gone = false; const removed = [];
-      w.io.fs.exists = async (p) => failed && !gone && p === "/wt/lean-7"; w.io.fs.rmdir = async (p) => { removed.push(p); gone = true; }; // #5825: a removed leftover is gone until the add
+      w.io.fs.exists = async (p) => p === "/repo" || failed && !gone && p === "/wt/lean-7"; w.io.fs.rmdir = async (p) => { removed.push(p); gone = true; }; // #5825: a removed leftover is gone until the add
       const g = w.io.git;
       w.io.git = async (a, o2) => { if (a[0] === "worktree" && a[1] === "add" && !failed) { failed = true; throw Object.assign(new Error(msg), { stderr: msg }); } if (a[0] === "worktree" && a[1] === "add") gone = false; return g(a, o2); };
       const r = await run(w);
@@ -7047,7 +7160,7 @@ describe("test map and repo facts caches (#4272)", () => {
   });
 
   it("neither file present: the same commands, events and prompts as without the feature", async () => {
-    const w = world(); const ran = recorder(w); w.io.fs.exists = async (p) => p === WT;
+    const w = world(); const ran = recorder(w); w.io.fs.exists = async (p) => p === WT || p === "/repo";
     const dir = tmpDir("core-");
     assert.equal((await run(w, { dir, precheck: { commands: ["true", "make lint"] } })).terminalReason, "merged");
     assert.deepEqual(ran, ["true", "make lint"]);
@@ -7062,11 +7175,11 @@ describe("test map and repo facts caches (#4272)", () => {
   it("repo-facts.json present: the builder prompts cite its path, never its content", async () => {
     const w = world(); recorder(w);
     w.files[FACTSF] = JSON.stringify({ version: 1, toolchain: { pm: { name: "pnpm", version: "9.9.9-SECRET" } } });
-    w.io.fs.exists = async (p) => p === WT || p in w.files;
+    w.io.fs.exists = async (p) => p === WT || p === "/repo" || p in w.files;
     assert.equal((await run(w)).terminalReason, "merged");
     const [plan, impl] = builders(w);
     for (const b of [plan, impl]) { assert.ok(b[4].includes(`are cached in ${FACTSF}`)); assert.doesNotMatch(b[4], /9\.9\.9-SECRET/); }
-    const w2 = world(); recorder(w2); w2.files["/repo/.forge/repo-facts.json"] = "{}"; w2.io.fs.exists = async (p) => p === WT || p in w2.files;
+    const w2 = world(); recorder(w2); w2.files["/repo/.forge/repo-facts.json"] = "{}"; w2.io.fs.exists = async (p) => p === WT || p === "/repo" || p in w2.files;
     assert.equal((await run(w2)).terminalReason, "merged");
     assert.ok(builders(w2)[0][4].includes("are cached in /repo/.forge/repo-facts.json"));
   });
@@ -8098,6 +8211,14 @@ describe("#4362 attempt triggers", () => {
     assert.deepEqual(impl.map((e) => [e.attempt, e.trigger, e.restart_of ?? null]), [[1, "plan", null], [2, "build", null], [2, "context_restart", "build"]]);
     assert.equal(impl[1].usage.cache_read_input_tokens, 4000000, "the stopped session's tokens are recorded");
     assert.equal(r.firstPass, true);
+  });
+
+  it("#5829: no ceiling configured and a builder model without a known window keeps the 120000 ceiling instead of switching it off", async () => {
+    const w = world(); const orig = w.io.runner, caps = [];
+    w.io.runner = async (c) => { if (c.role === "builder") caps.push(c.contextMax ?? 0); return orig(c); };
+    assert.equal((await run(w, { dir: tmpDir("core-ctx-"), builderModel: "mystery-1", builderRouting: { mode: "off" } })).terminalReason, "merged");
+    assert.equal(caps[0], 0, "the plan call runs uncapped");
+    assert.equal(caps[1], 120000, "the build call carries the default ceiling");
   });
 
   it("#4390: context restarts are bounded; after three the call runs uncapped, and 0 disables the ceiling", async () => {

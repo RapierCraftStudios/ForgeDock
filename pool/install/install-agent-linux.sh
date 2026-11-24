@@ -5,6 +5,8 @@
 # which installs docker, node, enrolls the agent, builds the lane image and installs the computeshare-agent systemd unit.
 # Usage: install-agent-linux.sh --router URL --token CODE [--name N] [--port P] [--cpus N] [--mem GB] [--bundle FILE] [--outbound] [--dry-run]
 # Env equivalents: ROUTER_URL ENROLL_TOKEN AGENT_NAME AGENT_PORT ALLOW_CPUS ALLOW_MEM_GB BUNDLE AGENT_URL OUTBOUND
+# Rerun (#5883): with /etc/computeshare/agent.token present and no --bundle, the installed /opt/computeshare is reused (no download, so a used
+# code works) and nothing is re-enrolled. Uninstall: uninstall-agent-linux.sh (removes only what /etc/computeshare/installed-by records).
 # --outbound (OUTBOUND=1): the agent dials the router (no Tailscale, no inbound port); it enrolls without a URL and listens only on the docker bridge.
 set -euo pipefail
 DRY=0
@@ -51,7 +53,12 @@ fi
 if [ -z "${BUNDLE:-}" ]; then
   BUNDLE="$(mktemp /tmp/computeshare-bundle.XXXXXX.tar.gz)"
   trap 'rm -f "$BUNDLE"' EXIT
-  curl -fsS "${ROUTER_URL}/bootstrap/bundle.tar.gz?token=${ENROLL_TOKEN}" -o "$BUNDLE"
+  if [ -s /etc/computeshare/agent.token ] && [ -f /opt/computeshare/package.json ]; then
+    echo "[computeshare] already enrolled: reinstalling from /opt/computeshare (no bundle download)"
+    tar -czf "$BUNDLE" -C /opt/computeshare .
+  else
+    curl -fsS "${ROUTER_URL}/bootstrap/bundle.tar.gz?token=${ENROLL_TOKEN}" -o "$BUNDLE"
+  fi
 fi
 export ROUTER_URL ENROLL_TOKEN AGENT_NAME AGENT_URL BUNDLE OUTBOUND
 export AGENT_PORT="$PORT" ALLOW_CPUS="$CPUS" ALLOW_MEM_GB="$MEM"
@@ -59,5 +66,11 @@ bash "$HERE/install-agent.sh"
 
 # #5884: periodic discard so freed lane blocks return to the thin disk / VHDX (best effort: absent timer, no systemd or an unsupported fs is not an install failure).
 if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files fstrim.timer >/dev/null 2>&1; then
-  systemctl enable --now fstrim.timer >/dev/null 2>&1 || echo "note: could not enable fstrim.timer (the agent also runs fstrim itself)" >&2
+  if ! systemctl is-enabled fstrim.timer >/dev/null 2>&1; then # #5883: recorded only when this install enabled it, so uninstall leaves an owner's timer alone
+    if systemctl enable --now fstrim.timer >/dev/null 2>&1; then
+      grep -qx fstrim.timer /etc/computeshare/installed-by 2>/dev/null || echo fstrim.timer >> /etc/computeshare/installed-by
+    else
+      echo "note: could not enable fstrim.timer (the agent also runs fstrim itself)" >&2
+    fi
+  fi
 fi

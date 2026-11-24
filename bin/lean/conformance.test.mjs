@@ -2398,3 +2398,37 @@ describe("recurrence counters and design lane precheck (#5751)", () => {
     assert.equal(run({ recurrence: { ...rec, recurs: false } }).ok, true, "no recurrence: no design check");
   });
 });
+
+describe("#5754 live-stack e2e rows convert to post-deploy at freeze", () => {
+  const LIVE = "A burst of 100 requests produces zero 429 lines against the live stack [type:e2e]";
+  const mk = (quote) => ({ ...C, requirements: [{ id: "R1", quote, disposition: "deliver" }], validate: [{ id: "V1", command: "pytest tests/test_x.py" }] });
+  it("converts the live-stack quote through autoPostDeployE2e", () => {
+    assert.equal(prodOnlyE2e(LIVE), true);
+    const out = autoPostDeployE2e(mk(LIVE));
+    assert.deepEqual(out.converted.map((x) => x.id), ["R1"]);
+    assert.equal(out.contract.requirements[0].disposition, "post-deploy");
+    for (const q of ["real traffic against the live stack stays under 1% errors [type:manual]", "passes on the live cluster [type:e2e]"]) assert.equal(prodOnlyE2e(q), true, q);
+  });
+  it("keeps localhost, local stack, sandbox, staging and plain wording as deliver", () => {
+    for (const q of ["100 requests give zero 429 lines against localhost [type:e2e]", "zero 429 lines against the local stack, not the live stack [type:e2e]", "sandbox run against the live stack mock [type:e2e]", "zero 429 on staging, not the live stack [type:e2e]", "the live reload works in the dev stack [type:e2e]"]) {
+      assert.equal(prodOnlyE2e(q), false, q);
+      assert.equal(autoPostDeployE2e(mk(q)).converted.length, 0, q);
+    }
+  });
+});
+
+describe("#5754 precheck fails fast on a deliver row the placement cannot produce", () => {
+  const LIVE = "A burst of 100 requests produces zero 429 lines against the live stack [type:e2e]";
+  const run = (quote, extra = {}) => precheck({ contract: { ...C, requirements: [{ id: "R1", quote, disposition: "deliver", ...extra }], validate: [] }, result: { requirements: [], validation: [] }, changedFiles: [] });
+  it("a live-stack deliver e2e row fails with a typed code before any builder resume", () => {
+    const f = run(LIVE).failures.filter((x) => x.kind === "e2e_placement");
+    assert.equal(f.length, 1);
+    assert.equal(f[0].code, "conformance.e2e_unverified");
+  });
+  it("local, post-deploy, out-of-band and non-e2e rows do not trip it", () => {
+    assert.equal(run("works against the local stack [type:e2e]").failures.some((x) => x.kind === "e2e_placement"), false);
+    assert.equal(run(LIVE, { disposition: "post-deploy" }).failures.some((x) => x.kind === "e2e_placement"), false);
+    assert.equal(run(LIVE, { verify: "out_of_band", evidence: "job" }).failures.some((x) => x.kind === "e2e_placement"), false);
+    assert.equal(run("zero 429 lines against the live stack").failures.some((x) => x.kind === "e2e_placement"), false);
+  });
+});

@@ -198,6 +198,18 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     ? pollCall(a, method, path, body, timeoutMs)
     : call(a.url, method, path, { body, token: a.token, timeoutMs, fetchFn });
 
+  /** #5891: host drive figures per agent, plus a warning when the projected time until the drive is full is under disk_warn_hours (2). */
+  const diskWarned = new Map();
+  function diskReport(c) {
+    if (!Number.isFinite(c.host_disk_free_gb)) return {};
+    const out = { host_disk_free_gb: c.host_disk_free_gb, ...(Number.isFinite(c.host_disk_growth_gb_per_h) ? { host_disk_growth_gb_per_h: c.host_disk_growth_gb_per_h } : {}) };
+    const limit = cfg.disk_warn_hours ?? 2;
+    if (Number.isFinite(c.host_disk_full_in_h) && c.host_disk_full_in_h < limit) {
+      out.disk_warning = `host drive full in ~${c.host_disk_full_in_h} h at ${c.host_disk_growth_gb_per_h} GB/h (${c.host_disk_free_gb} GB free)`;
+      if (now() - (diskWarned.get(c.name) ?? -Infinity) > 600000) { diskWarned.set(c.name, now()); log.warn?.(`${c.name}: ${out.disk_warning}`); }
+    }
+    return out;
+  }
   async function capacities() {
     const out = [];
     for (const [name, a] of Object.entries(agents())) {
@@ -212,7 +224,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   /** Agent liveness for the scheduler (#4547): an agent is online when it answers and is not paused. */
   async function status() {
     const caps = await capacities();
-    const agentsView = caps.map((c) => ({ name: c.name, ok: c.ok, paused: Boolean(c.paused), transport: c.transport ?? "direct" }));
+    const agentsView = caps.map((c) => ({ name: c.name, ok: c.ok, paused: Boolean(c.paused), transport: c.transport ?? "direct", ...diskReport(c) }));
     return { online: agentsView.filter((a) => a.ok && !a.paused).length, total: agentsView.length, agents: agentsView };
   }
 
@@ -360,6 +372,73 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     ].join("\r\n");
   }
 
+  /**
+   * #5883: the POSIX sh one-command installer served at GET /install (no auth: it holds no secret, only this router's URL).
+   * The one-time code arrives as `--code` and is checked only by /bootstrap/bundle.tar.gz and consumed by /enroll.
+   */
+  function installScript() {
+    const q = (s) => `'${String(s ?? "").replace(/'/g, "'\\''")}'`;
+    return `#!/bin/sh
+# computeshare agent one-command installer for Linux (systemd) and macOS (launchd), served by the router (#5883).
+# Install:   curl -fsSL ${q(`${cfg.public_url}/install`)} | sudo sh -s -- --code CODE [--name N] [--cpus N] [--mem GB]
+# Uninstall: curl -fsSL ${q(`${cfg.public_url}/install`)} | sudo sh -s -- --uninstall
+# Rerunning is safe: an enrolled host reuses its installed code and agent token (no download, no re-enrollment).
+set -eu
+ROUTER=${q(cfg.public_url)}
+CODE=""; NAME=""; CPUS=""; MEM=""; UNINSTALL=0; DRY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --code) CODE="\${2:?--code needs a value}"; shift 2 ;;
+    --name) NAME="\${2:?--name needs a value}"; shift 2 ;;
+    --cpus) CPUS="\${2:?--cpus needs a value}"; shift 2 ;;
+    --mem) MEM="\${2:?--mem needs a value}"; shift 2 ;;
+    --uninstall) UNINSTALL=1; shift ;;
+    --dry-run) DRY=1; shift ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+case "$(uname -s)" in
+  Linux) OS=linux; ROOT=/opt/computeshare; TOKEN_FILE=/etc/computeshare/agent.token ;;
+  Darwin) OS=macos; ROOT=/usr/local/computeshare; TOKEN_FILE=/usr/local/etc/computeshare/agent.token ;;
+  *) echo "unsupported OS $(uname -s): Linux or macOS only (Windows: forgedock pool enroll prints a PowerShell command)" >&2; exit 1 ;;
+esac
+if [ "$UNINSTALL" = 1 ]; then ACTION=uninstall; elif [ -s "$TOKEN_FILE" ] && [ -f "$ROOT/pool/install/install-agent-$OS.sh" ]; then ACTION=reinstall; else ACTION=install; fi
+if [ "$DRY" = 1 ]; then
+  echo "os=$OS action=$ACTION router=$ROUTER root=$ROOT name=\${NAME:-<hostname>} cpus=\${CPUS:-<auto>} mem_gb=\${MEM:-<auto>} code=\${CODE:+<redacted>}"
+  exit 0
+fi
+[ "$(id -u)" = 0 ] || { echo "run as root: curl -fsSL '$ROUTER/install' | sudo sh -s -- ..." >&2; exit 1; }
+command -v bash >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1 || { echo "needs bash, curl and tar" >&2; exit 1; }
+TMP=""
+cleanup() { [ -z "$TMP" ] || rm -rf "$TMP"; }
+trap cleanup EXIT
+fetch_bundle() {
+  TMP="$(mktemp -d "\${TMPDIR:-/tmp}/computeshare-install.XXXXXX")"
+  curl -fsS "$ROUTER/bootstrap/bundle.tar.gz?token=$CODE" -o "$TMP/bundle.tar.gz" || { echo "bundle download refused: the code is wrong, used or expired (forgedock pool enroll --outbound prints a new one)" >&2; exit 1; }
+  tar -xzf "$TMP/bundle.tar.gz" -C "$TMP"
+}
+if [ "$ACTION" = uninstall ]; then
+  if [ -f "$ROOT/pool/install/uninstall-agent-$OS.sh" ]; then bash "$ROOT/pool/install/uninstall-agent-$OS.sh"; exit $?; fi
+  if [ -z "$CODE" ]; then echo "[computeshare] $ROOT is not installed here; nothing to uninstall (pass --code to run the full cleanup from a fresh bundle)"; exit 0; fi
+  fetch_bundle
+  bash "$TMP/pool/install/uninstall-agent-$OS.sh"
+  exit $?
+fi
+set -- --router "$ROUTER" --outbound
+if [ -n "$NAME" ]; then set -- "$@" --name "$NAME"; fi
+if [ -n "$CPUS" ]; then set -- "$@" --cpus "$CPUS"; fi
+if [ -n "$MEM" ]; then set -- "$@" --mem "$MEM"; fi
+if [ "$ACTION" = reinstall ]; then
+  echo "[computeshare] already enrolled: reusing $ROOT and its agent token (no bundle download, no re-enrollment)"
+  bash "$ROOT/pool/install/install-agent-$OS.sh" "$@" --token "\${CODE:-enrolled}"
+  exit $?
+fi
+[ -n "$CODE" ] || { echo "--code CODE required (forgedock pool enroll --outbound prints the command)" >&2; exit 2; }
+fetch_bundle
+bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TMP/bundle.tar.gz"
+`;
+  }
+
   /** Stream an allow-listed image (docker save) to an agent whose daemon cannot reach the registry itself. */
   async function sendImage(res, ref) {
     const allowed = cfg.agent_images ?? ["docker:27.5.1-dind"];
@@ -399,7 +478,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     [route("GET", "/agents"), fd(async () => { // #5535: each sandbox carries disk_used_mb from its agent's sandbox_disk_mb when the agent reports it
       const caps = await capacities(), byName = new Map(caps.map((c) => [c.name, c])), out = {};
       for (const [id, s] of Object.entries(sbx())) { const mb = byName.get(s?.agent)?.sandbox_disk_mb?.[id]; out[id] = Number.isFinite(mb) ? { ...s, disk_used_mb: mb } : s; }
-      return { status: 200, body: { agents: caps, sandboxes: out } };
+      return { status: 200, body: { agents: caps.map((c) => ({ ...c, ...diskReport(c) })), sandboxes: out } };
     })],
     [route("POST", "/codes"), fd(async () => ({ status: 200, body: issueCode() }))],
     [route("GET", "/agent/creds/github"), { fn: async () => ({ status: 200, body: { token: await githubToken() } }), auth: "agent" }],
@@ -442,6 +521,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       return c.q ? { status: 200, body: await ciEvents.wait(c.q, c.since, c.waitS) } : c;
     })],
     [route("POST", "/enroll"), { fn: async (_p, body) => enroll(body), auth: "none" }],
+    [route("GET", "/install"), { fn: async () => ({ status: 200, body: installScript() }), auth: "none" }], // #5883: script text only, the code comes as --code
     [route("GET", "/bootstrap/install.ps1"), { fn: async (_p, _b, url) => ({ status: 200, body: bootstrapScript(url.searchParams.get("token"), url) }), auth: "enroll" }],
     [route("GET", "/bootstrap/bundle.tar.gz"), { fn: async () => ({ bundle: true }), auth: "enroll" }],
   ];
