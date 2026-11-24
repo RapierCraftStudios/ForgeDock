@@ -2080,3 +2080,53 @@ describe("#5669: an upgrade handover adopts live lanes instead of requeueing the
     assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[4, "merged"]]);
   });
 });
+
+describe("#5975: batch pause", () => {
+  it("pause file: set, read, clear, expiry and invalid content", () => {
+    const b = openBatch(tmpDir("batch-pause5975-"), "b1");
+    b.writePlan({ argv: [], repo: "o/r" });
+    assert.equal(b.readPause(), null);
+    const rec = b.setPause({ owner: "op@h", reason: "release cut", forMs: 7200000 });
+    assert.equal(rec.reason, "release cut");
+    assert.equal(Date.parse(b.readPause().expiresAt) - Date.parse(b.readPause().since), 7200000);
+    assert.equal(b.expirePause(Date.now()), null, "not due yet");
+    const gone = b.expirePause(Date.now() + 7300000);
+    assert.equal(gone.owner, "op@h");
+    assert.equal(b.readPause(), null, "expiry lifts it");
+    b.setPause({ owner: "op@h", reason: "x" });
+    assert.equal(b.expirePause(Date.now() + 1e12), null, "no expiry never expires");
+    assert.equal(b.clearPause(), true);
+    assert.equal(b.clearPause(), false);
+    writeFileSync(join(b.dir, "pause"), "not json");
+    assert.equal(b.readPause(), null);
+    writeFileSync(join(b.dir, "pause"), "[1]");
+    assert.equal(b.readPause(), null);
+  });
+
+  it("through the CLI: --pause needs --reason, records the expiry, --unpause lifts it; sched show lists it", async () => {
+    const root = tmpDir("batch-pause5975-cli-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: [], repo: "o/r" });
+    b.store.save({ order: [1, 2], pending: [1, 2] });
+    const io = { gh: async () => JSON.stringify({ state: "OPEN" }) };
+    await assert.rejects(orchestrateFromCli(["--pause", "b1"], { batchRoot: root, io }), /--reason/);
+    await assert.rejects(orchestrateFromCli(["--pause", "b1", "--reason", "x", "--for", "soon"], { batchRoot: root, io }), /--for expects/);
+    await assert.rejects(orchestrateFromCli(["--pause", "nope", "--reason", "x"], { batchRoot: root, io }), /no batch nope/);
+    const res = await quiet(() => orchestrateFromCli(["--pause", "b1", "--for", "2h", "--reason", "release cut"], { batchRoot: root, io }));
+    assert.equal(res.pause.reason, "release cut");
+    assert.ok(Date.parse(b.readPause().expiresAt) - Date.parse(b.readPause().since) === 2 * 3600000);
+    const { summaryLines } = await import("./batch-health.mjs");
+    assert.ok(summaryLines(root).some((l) => /batch b1: paused \(release cut, until \d{4}-/.test(l)));
+    await quiet(() => orchestrateFromCli(["--unpause", "b1"], { batchRoot: root, io }));
+    assert.equal(b.readPause(), null);
+    assert.ok(!summaryLines(root).some((l) => /paused/.test(l)));
+  });
+
+  it("a paused batch is not a dispatch stall", async () => {
+    const { evaluateDispatchStall } = await import("./batch-health.mjs");
+    const state = { order: [1], pending: [1], results: {}, running: {}, parallel: 1 };
+    const opts = { hosted: true, lastProgressMs: 0, now: 3600000 * 5, windowMin: 10 };
+    assert.ok(evaluateDispatchStall(state, opts), "unpaused: a stall");
+    assert.equal(evaluateDispatchStall(state, { ...opts, paused: { reason: "x" } }), null);
+  });
+});
