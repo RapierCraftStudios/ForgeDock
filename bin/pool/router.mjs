@@ -280,6 +280,39 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     catch (e) { log.warn?.(`forge.yaml for ${spec.repo.slug} unreadable: ${e.message}`); return spec; }
   }
 
+  // #5735: per-agent lane ceiling across all batches. A lane sandbox is one whose id starts with `fdrsbx-`; other tenants'
+  // sandboxes are never counted or refused. Ceiling: the agent state entry's `max_lanes` (`pool limit`), else router.json
+  // `agents.<name>.max_lanes`; no valid value = no ceiling. In-flight launches reserve their slot synchronously before the
+  // awaited agent call, so concurrent launches cannot overshoot.
+  const isLane = (id) => typeof id === "string" && id.startsWith("fdrsbx-");
+  const validCeiling = (v) => Number.isInteger(v) && v >= 0;
+  function ceilingOf(name) {
+    const st = own(agents(), name)?.max_lanes;
+    if (validCeiling(st)) return st;
+    const c = cfg.agents && Object.hasOwn(cfg.agents, name) ? cfg.agents[name]?.max_lanes : undefined;
+    return validCeiling(c) ? c : null;
+  }
+  const pending = new Map(); // agent -> Set of lane ids reserved by an in-flight launch or claim
+  const lanesOn = (name) => {
+    const ids = new Set(pending.get(name) ?? []);
+    for (const [id, s] of Object.entries(sbx())) if (s?.agent === name && isLane(id)) ids.add(id);
+    return ids.size;
+  };
+  const atCeiling = (name) => { const c = ceilingOf(name); return c !== null && lanesOn(name) >= c; };
+  const reserve = (name, id) => { if (!pending.has(name)) pending.set(name, new Set()); pending.get(name).add(id); };
+  const release = (name, id) => { const s = pending.get(name); s?.delete(id); if (s && !s.size) pending.delete(name); };
+  const laneView = (name) => ({ used: lanesOn(name), ceiling: ceilingOf(name) });
+  function setLimit(name, body) {
+    const a = own(agents(), name);
+    if (!a) return { status: 404, body: { error: "unknown agent" } };
+    const v = body?.max_lanes;
+    if (v !== null && !validCeiling(v)) return { status: 400, body: { error: "max_lanes must be a non-negative integer or null" } };
+    if (v === null) delete a.max_lanes; else a.max_lanes = v;
+    store.save();
+    log.info?.(`agent ${name} max_lanes ${v === null ? "none" : v}`);
+    return { status: 200, body: { name, max_lanes: v, lanes: laneView(name) } };
+  }
+
   /** #5053: an agent's 401 reaches the dispatcher through this router; tag it so it is not mistaken for a router auth failure. */
   const agentBody = (r, name) => (r.status === 401 ? { ...(r.data && typeof r.data === "object" ? r.data : {}), error: "unauthorized", hop: "agent", agent: name, reason: typeof r.data?.reason === "string" ? r.data.reason : "agent auth: router token rejected by agent" } : r.data ?? {});
   // #5856: placement by priority. Agents that report no reservations/borrowable fields are flat (cpus_free), as before.
@@ -313,13 +346,19 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     const diskLow = sized.filter((c) => c.host_disk_low === true).map((c) => c.name); // #5733: never POST to a host whose drive is short
     const capped = sized.filter((c) => c.disk_capped === true && c.host_disk_low !== true).map((c) => c.name); // #5884: lane disk at its hard cap
     const fits = sized.filter((c) => c.host_disk_low !== true && c.disk_capped !== true).sort((a, b) => headroom(b, spec) - headroom(a, spec) || b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
+    const laneId = isLane(spec.id), laneCapped = []; // #5735: agents skipped because their lane ceiling is reached
     let busy = null; // the last agent 503 (e.g. lane_tools image building): its body and Retry-After are passed back
     for (const c of fits) {
-      const r = await agentCall(own(agents(), c.name), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...size }, 120000);
-      if (r.status === 503) { busy = { r, name: c.name }; continue; } // raced with another launch, or still building; try the next host
-      if (r.ok) { sbx()[spec.id] = { agent: c.name, issue: spec.issue ?? null, batch: spec.batch ?? null, createdAt: now(), touched: now() }; store.save(); }
-      return { status: r.status, body: { ...agentBody(r, c.name), agent: c.name } };
+      if (laneId && atCeiling(c.name)) { laneCapped.push({ name: c.name, ...laneView(c.name) }); continue; }
+      if (laneId) reserve(c.name, spec.id);
+      try {
+        const r = await agentCall(own(agents(), c.name), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...size }, 120000);
+        if (r.status === 503) { busy = { r, name: c.name }; continue; } // raced with another launch, or still building; try the next host
+        if (r.ok) { sbx()[spec.id] = { agent: c.name, issue: spec.issue ?? null, batch: spec.batch ?? null, createdAt: now(), touched: now() }; store.save(); }
+        return { status: r.status, body: { ...agentBody(r, c.name), agent: c.name } };
+      } finally { if (laneId) release(c.name, spec.id); }
     }
+    if (laneCapped.length && !busy) return { status: 503, body: { error: "pool.host_lane_ceiling", code: "pool.host_lane_ceiling", agents: laneCapped }, retryAfter: cfg.retry_after_s ?? 60 };
     if (busy) return { status: 503, body: { ...agentBody(busy.r, busy.name), agent: busy.name }, retryAfter: busy.r.retryAfter ?? cfg.retry_after_s ?? 60 };
     if (diskLow.length) return { status: 503, body: { error: "no host has free disk", code: "pool.disk_low", agents: diskLow }, retryAfter: cfg.disk_low_retry_after_s ?? 300 }; // a capacity deferral, not a failure
     if (capped.length) return { status: 503, body: { error: "no host has lane disk below its cap", code: "pool.disk_cap", agents: capped }, retryAfter: cfg.disk_low_retry_after_s ?? 300 };
@@ -331,12 +370,17 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id)) return { status: 400, body: { error: "spec.id required ([A-Za-z0-9._-], max 128)" } };
     if (own(sbx(), spec.id)) return launch(spec); // already placed: the same idempotent path
     const size = sizeFor(spec);
+    const laneId = isLane(spec.id);
     for (const c of (await capacities()).filter((x) => x.ok && !x.paused && inAccount(x, spec))) {
-      const r = await agentCall(own(agents(), c.name), "POST", "/warm/claim", { spec: withForgeYaml(spec), ...size }, 30000);
-      if (!r.ok) continue;
-      sbx()[spec.id] = { agent: c.name, issue: spec.issue ?? null, batch: spec.batch ?? null, createdAt: now(), touched: now() };
-      store.save();
-      return { status: 200, body: { ...(r.data ?? {}), agent: c.name } };
+      if (laneId && atCeiling(c.name)) continue; // #5735: the 404 makes the caller cold-launch, which gets the ceiling 503
+      if (laneId) reserve(c.name, spec.id);
+      try {
+        const r = await agentCall(own(agents(), c.name), "POST", "/warm/claim", { spec: withForgeYaml(spec), ...size }, 30000);
+        if (!r.ok) continue;
+        sbx()[spec.id] = { agent: c.name, issue: spec.issue ?? null, batch: spec.batch ?? null, createdAt: now(), touched: now() };
+        store.save();
+        return { status: 200, body: { ...(r.data ?? {}), agent: c.name } };
+      } finally { if (laneId) release(c.name, spec.id); }
     }
     return { status: 404, body: { error: "no warm sandbox ready" } };
   }
@@ -384,7 +428,9 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     const account = own(codes(), body.token)?.account; // #5886: a device-login code carries its account
     enrollOk(body.token, true);
     const token = randomBytes(32).toString("hex");
-    agents()[name] = { ...(url ? { url: url.origin, token, enrolledAt: new Date(now()).toISOString() } : { name, transport: "poll", token, enrolledAt: new Date(now()).toISOString() }), ...(account ? { account } : {}) };
+    const keep = own(agents(), name)?.max_lanes; // #5735: re-enrollment keeps a `pool limit` ceiling
+    const keepCfg = validCeiling(keep) ? { max_lanes: keep } : {};
+    agents()[name] = { ...(url ? { url: url.origin, token, enrolledAt: new Date(now()).toISOString(), ...keepCfg } : { name, transport: "poll", token, enrolledAt: new Date(now()).toISOString(), ...keepCfg }), ...(account ? { account } : {}) };
     store.save();
     log.info?.(`enrolled agent ${name} ${url ? `at ${url.origin}` : "(outbound poll)"}`);
     return { status: 200, body: { name, agent_token: token } };
@@ -547,7 +593,8 @@ bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TM
       const acct = url.searchParams.get("account"); // #5886: ?account= is the per-account view; `account` and `policy` ride on enrolled records that have them
       const caps = (await capacities()).filter((c) => acct === null || own(agents(), c.name)?.account === acct).map((c) => { const a = own(agents(), c.name); return { ...c, ...(a?.account ? { account: a.account } : {}), ...(a?.policy ? { policy: a.policy } : {}) }; }), byName = new Map(caps.map((c) => [c.name, c])), out = {};
       for (const [id, s] of Object.entries(sbx())) { if (acct !== null && !byName.has(s?.agent)) continue; const mb = byName.get(s?.agent)?.sandbox_disk_mb?.[id]; out[id] = Number.isFinite(mb) ? { ...s, disk_used_mb: mb } : s; }
-      return { status: 200, body: { agents: caps.map((c) => ({ ...c, ...diskReport(c) })), sandboxes: out } };
+      const remote_lanes = Object.keys(sbx()).filter(isLane).length; // #5735: lane sandboxes across all batches and agents
+      return { status: 200, body: { agents: caps.map((c) => ({ ...c, lanes: laneView(c.name), ...diskReport(c) })), sandboxes: out, remote_lanes } };
     })],
     [route("POST", "/device/code"), { fn: async () => deviceStart(), auth: "none" }], // #5886
     [route("POST", "/device/token"), { fn: async (_p, body) => deviceToken(body), auth: "none" }],
@@ -581,6 +628,7 @@ bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TM
       const r = await agentCall(a, "POST", "/admin/resize", body ?? {});
       return { status: r.status, body: r.data };
     })],
+    [route("POST", "/agents/:name/limit"), fd(async ({ name }, body) => setLimit(name, body))], // #5735
     [route("GET", "/agents/:name/usage"), fd(async ({ name }) => {
       const a = own(agents(), name);
       if (!a) return { status: 404, body: { error: "unknown agent" } };
