@@ -4209,8 +4209,8 @@ export async function runCore(o) {
       try {
         const l = JSON.parse(String(await ghc(["pr", "list", "-R", repo, "--head", stackedState.branch, "--state", "all", "--json", "number,state,headRefOid"])) || "[]");
         const open = l.find((x) => x?.state === "OPEN");
+        if (open) return { state: "open", head: open.headRefOid ?? null }; // #5908: an open PR is the current dependency; a stale MERGED PR from a reused branch name must not satisfy it
         if (l.some((x) => x?.state === "MERGED")) return { state: "merged", head: null };
-        if (open) return { state: "open", head: open.headRefOid ?? null };
         return { state: l.length ? "closed" : "unknown", head: null };
       } catch { return { state: "unknown", head: null }; }
     };

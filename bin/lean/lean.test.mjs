@@ -1226,6 +1226,13 @@ describe("core work-on", () => {
       };
       return w;
     };
+    it("merge.stacked_base (#5908): an open dependency PR wins over an older merged PR on the reused branch name; nothing merges or retargets", async () => {
+      const w = cascading(stacked(world(), { depState: "OPEN" }), () => [{ number: 3, state: "MERGED" }, { number: 5, state: "OPEN", headRefOid: STACK.sha }]);
+      const r = await run(w, { stackedOn: STACK, ciMaxMinutes: 0 });
+      assert.equal(w.merges.length, 0, "no gh pr merge");
+      assert.equal(w.stack.base, STACK.branch, "never retargeted");
+      assert.notEqual(r.terminalReason, "merged");
+    });
     it("cascade replan: a dependency that ended without merging drops the stacked PR and branch, defers with stack.replan, never merges", async () => {
       const w = cascading(stacked(world(), { depState: "CLOSED" }), () => [{ number: 5, state: "CLOSED" }]);
       const r = await run(w, { stackedOn: STACK });

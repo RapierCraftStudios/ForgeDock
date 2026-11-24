@@ -234,6 +234,13 @@ export async function fixStep(ctx) {
   if (!r?.pr) return blocked("no review result recorded by the review step");
   const seam = seamOf(ctx);
   const cfg = parseFixConfig(ctx.config?.fix);
+  // #5912: a resume reads the result saved while CI was still running. A CI-only failure at an unmoved head is re-summarised once, so CI
+  // that finished green since posts GATE_PASS instead of the stale "still pending" block.
+  if (r.marker !== "FORGE:GATE_PASS" && !r.blocking?.length && !r.guards?.length && (r.ciPendingOnly || !(r.ciFailing > 0)) && (await seam.headOf(r.pr)) === r.head) {
+    const s = await resummarise(ctx, seam, r);
+    if (s.err) return blocked(s.err);
+    r = s.r;
+  }
   while (r.marker !== "FORGE:GATE_PASS") {
     // Only cancelled duplicate runs are red (#5502): nothing to fix. The summary reruns them once; re-summarise without spending the round.
     if (!r.blocking?.length && r.ciFailing > 0 && r.ciCancelOnly) {
@@ -257,7 +264,7 @@ export async function fixStep(ctx) {
     const rec = collectFindings({ head: r.head, jobs, findings: r.items ?? [], guards: r.guards ?? [] });
     const b = blockingOf(rec);
     if (!b.ci.length && !b.review.length && !b.guards.length && !r.blocking?.length && jobs.pending?.length) return blocked(`required checks of #${r.pr} still running (${jobs.pending.join(", ")}), with no failure to fix yet; re-run the release once CI finishes`);
-    if (!b.ci.length && !b.review.length && !b.guards.length && !r.blocking?.length && !(r.ciFailing > 0)) return blocked(`${r.verdict} with neither a blocking finding nor red CI to fix`);
+    if (!b.ci.length && !b.review.length && !b.guards.length && !r.blocking?.length && !(r.ciFailing > 0)) return blocked(`${r.verdict} (${r.marker}) on #${r.pr} at ${String(r.head).slice(0, 7)} with neither a blocking finding nor red CI to fix: nothing is pending or failing, so the gate summary names the actual blocker; read it and re-run the release`);
     const hashesNow = Object.fromEntries(rec.ci.map((j) => [j.name, j.inputHash ?? inputHash(j.name, r.head)]));
     const brief = compileBrief(rec, { commands: ctx.config?.preflight ? [ctx.config.preflight.command] : [], rerunChecks: jobsToRerun(hashesNow, ctx.state.fixloop?.hashes ?? {}) });
     // Non-blocking and out-of-wave findings become next-plan issues, once per head; they are never part of the fix and never merged after READY (I16).
