@@ -427,3 +427,27 @@ describe("#5829 context restarts per merge", () => {
     assert.equal(m.context_restarts_per_merge, 0);
   });
 });
+
+describe("#5829 restarts and turns per build, before and after, on a sample", () => {
+  // sample: three builds on the old fixed 120K ceiling (two kill-and-restarts each, 60 turns, $4) vs three on the model-aware ceiling (none, 45 turns, $3)
+  const PIVOT = Date.parse("2026-10-20T00:00:00Z"), SLUG = "Own/Repo";
+  const lane = (turns, restarts, cost) => [start("2026-10-01T00:00:00Z", SLUG), att("implement", { trigger: "build", turns, cost_usd: cost - restarts * 0.5 }),
+    ...Array.from({ length: restarts }, () => att("implement", { trigger: "context_restart", turns: 0, cost_usd: 0.5 })), term("merged", "merged", { turns: { size: "M" } })];
+  it("the compare report shows restarts/merge, turns/merge and $/merge falling after the change", async () => {
+    const root = tmpDir("eff-5829-root-"), runs = tmpDir("eff-5829-runs-");
+    const batch = (id, created, rows) => { mkdirSync(join(root, id), { recursive: true }); writeFileSync(join(root, id, "plan.json"), JSON.stringify({ v: 1, id, repo: SLUG, created })); writeFileSync(join(root, id, "report.json"), JSON.stringify({ rows })); };
+    batch("pre", "2026-10-18T00:00:00Z", [1, 2, 3].map((issue) => ({ issue, outcome: "merged" })));
+    batch("post", "2026-10-21T00:00:00Z", [4, 5, 6].map((issue) => ({ issue, outcome: "merged" })));
+    const logs = { 1: lane(60, 2, 4), 2: lane(60, 2, 4), 3: lane(60, 2, 4), 4: lane(45, 0, 3), 5: lane(45, 0, 3), 6: lane(45, 0, 3) };
+    for (const [n, evs] of Object.entries(logs)) writeFileSync(runLogPath(runs, Number(n), SLUG), evs.map((e) => JSON.stringify(e)).join("\n") + "\n");
+    const c = await compareEfficiency({ batchRoot: root, runsDir: runs, repo: SLUG, pivot: PIVOT, now: PIVOT + 3 * DAY });
+    assert.deepEqual([c.pre.context_restarts_per_merge, c.post.context_restarts_per_merge], [2, 0]);
+    assert.deepEqual([c.pre.turns_per_merge, c.post.turns_per_merge], [60, 45]);
+    assert.deepEqual([c.pre.usd_per_merge, c.post.usd_per_merge], [4, 3]);
+    assert.deepEqual([c.delta.context_restarts_per_merge, c.delta.turns_per_merge, c.delta.usd_per_merge], [-2, -15, -1]);
+    const lines = formatCompareLines(c);
+    assert.match(lines[1], /restarts\/merge 2\.00, \$\/merge \$4\.00/);
+    assert.match(lines[2], /restarts\/merge 0\.00, \$\/merge \$3\.00/);
+    assert.match(lines[3], /restarts\/merge -2\.00, \$\/merge -1\.00/);
+  });
+});
