@@ -2637,7 +2637,9 @@ export async function scheddFromCli(argv, deps = {}) {
     for (const b of st.batches) {
       const age = b.lastProgressAgeSec == null ? "no progress yet" : `last progress ${b.lastProgressAgeSec}s ago`;
       const pend = b.pendingAdds?.length ? `, pending adds: ${b.pendingAdds.map((n) => `#${n}`).join(" ")}` : "";
-      console.log(`  ${b.id}${b.running ? "" : " (not hosted)"}: ${age}${pend}`);
+      const ln = b.lanes ? `, running ${b.lanes.running}/${b.lanes.k} (local ${b.lanes.local}, remote ${b.lanes.remote})` : "";
+      const alive = b.lanesAliveAgeSec == null ? "" : `, lanes alive ${b.lanesAliveAgeSec}s ago`;
+      console.log(`  ${b.id}${b.running ? "" : " (not hosted)"}: ${age}${ln}${alive}${pend}`);
     }
     for (const l of schedd.sharedPendingLines(st.batches)) console.log(l); // #5471
     if (st.host) { const h = formatOverload(st.host) ?? formatHostLoad(st.host); if (h) console.log(`schedd: ${st.host.overloaded ? h : `host ${h}`}`); } // #5174
@@ -2655,7 +2657,8 @@ export async function scheddFromCli(argv, deps = {}) {
     const bm = await import("./lean/batch.mjs");
     const unfinished = () => { const root = bm.batchRoot(); return bm.listBatches(root).filter((id) => { try { const b = bm.openBatch(root, id); const br = b.store.peek()?.breaker; return !!b.readPlan()?.daemon && !b.isTerminal() && b.pendingIssues().length > 0 && !(br && !br.transport); } catch { return false; } }); };
     const start = () => { if (schedd.unitState() === null) schedd.defaultSpawn({ dir }); else schedd.startUnit(); };
-    return (deps.watchdog ?? health.watchdog)({ dir, ...(sec > 0 ? { stallMs: sec * 1000 } : {}), unfinished, start });
+    const batchVerdicts = () => schedd.batchVerdicts(bm.batchRoot());
+    return (deps.watchdog ?? health.watchdog)({ dir, ...(sec > 0 ? { stallMs: sec * 1000 } : {}), unfinished, start, batchVerdicts });
   }
   if (argv.length) throw new Error("usage: forgedock schedd [status | watchdog [--stall-sec N]]");
   (deps.renice ?? (await import("./lean/schedd-health.mjs")).bestEffortRenice)(); // #4780: lanes must not starve the scheduler
@@ -2844,7 +2847,9 @@ export async function schedFromCli(argv, deps = {}) {
     console.log(`repo weights: ${ws.length ? ws.map(([r, n]) => `${r}=${n}`).join(", ") : "equal (none set)"}`);
     for (const e of st.slots) console.log(`  running ${who(e)}  dispatcher ${e.pid}${e.lanePid ? ` lane ${e.lanePid}` : ""}`);
     for (const e of st.queue) console.log(`  queued  ${who(e)}  dispatcher ${e.pid}`);
-    for (const l of schedMod.remoteLines(st)) console.log(l); // #4964
+    const batchMod = await import("./lean/batch.mjs");
+    const agentOf = (e) => { const bm = batchMod; const r = bm.openBatch(bm.batchRoot(), e.batch).store.peek()?.running?.[e.issue]; return r?.placement?.agent ?? r?.agent ?? null; };
+    for (const l of schedMod.remoteLines(st, { agentOf })) console.log(l); // #4964
     try { for (const l of (await import("./lean/batch-health.mjs")).summaryLines((await import("./lean/batch.mjs")).batchRoot())) console.log(l); } catch { /* advisory */ } // #5314
     return st;
   }
