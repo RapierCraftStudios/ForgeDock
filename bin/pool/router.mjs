@@ -329,7 +329,6 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     return cpusFree >= size.cpus && memFree >= size.mem_gb;
   };
   const headroom = (c, spec) => (spec?.priority === "borrow" && Number.isFinite(c.cpus_free_unreserved) ? c.cpus_free_unreserved : 0);
-<<<<<<< HEAD
   // #5949: the dispatcher seeds a repo mirror before launch. The agent that will own the sandbox is picked here (the placing agent
   // when it is known, else the best-fitting one) and remembered, so launch() prefers it and the seeded mirror is the one the lane uses.
   const seedPick = new Map(); // sandbox id -> {agent, at}
@@ -353,10 +352,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     try { const r = await agentCall(a, method, path, body, 120000); return { status: r.status, body: agentBody(r, name) }; }
     catch (e) { return { status: 502, body: { error: `agent ${name} unreachable: ${e.message}` } }; }
   }
-=======
   /** #5886: a spec naming an account is placed only on that account's agents; without one, any enrolled agent (as before). */
   const inAccount = (c, spec) => typeof spec?.account !== "string" || own(agents(), c.name)?.account === spec.account;
->>>>>>> origin/staging
   async function launch(spec) {
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id)) return { status: 400, body: { error: "spec.id required ([A-Za-z0-9._-], max 128)" } };
     const known = own(sbx(), spec.id);
