@@ -916,6 +916,62 @@ test("#5856 capacity reports reserved vs borrowable headroom; flat agents add no
   assert.equal(flat.cpus_borrowable, undefined);
 });
 
+test("#5885 capacity says why borrowed lanes are throttled and drained under idle_only; flat agents add no such fields", async () => {
+  let h = { ok: true, load_per_core: 0.1, mem_available_gb: 20 };
+  const { agent } = agentFixture({ idle_only: true, cores: 8, drain_grace_s: 0, live: () => h });
+  await agent.launch({ spec: prio("b1", "borrow"), cpus: 1, mem_gb: 1 });
+  assert.deepEqual([agent.capacity().idle_gate, agent.capacity().throttled, agent.capacity().last_drain], [null, 0, null]);
+  h = { ok: true, load_per_core: 0.9, mem_available_gb: 20 };
+  await agent.reap();
+  let c = agent.capacity();
+  assert.match(c.idle_gate, /^owner load 0\.90\/core/);
+  assert.equal(c.throttled, 1);
+  await agent.reap();
+  c = agent.capacity();
+  assert.equal(c.throttled, 0);
+  assert.equal(c.last_drain.sandbox, "b1");
+  assert.match(c.last_drain.reason, /^owner busy: owner load 0\.90\/core/);
+  assert.ok(!Number.isNaN(Date.parse(c.last_drain.at)));
+  const flat = agentFixture().agent.capacity();
+  for (const k of ["idle_gate", "throttled", "last_drain"]) assert.equal(k in flat, false, k);
+  assert.equal(flat.owner_paused, false);
+});
+
+test("#5885 owner pause refuses launches with 503 until resume, survives a restart and a resize drain", async () => {
+  const { agent, dir } = agentFixture();
+  const req = (method, url, token = "agent-token", body = {}) => new Promise((resolve) => {
+    agent.handle({ method, url, headers: { authorization: `Bearer ${token}` }, socket: {}, async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body)); } }, { writeHead(st) { this.s = st; }, setHeader() {}, end(b) { resolve({ status: this.s, body: b ? JSON.parse(b) : null }); } });
+  });
+  assert.equal((await req("POST", "/pause", "wrong")).status, 401);
+  assert.equal(agent.capacity().owner_paused, false);
+  const p = await req("POST", "/pause");
+  assert.deepEqual([p.status, p.body.owner_paused], [200, true]);
+  assert.deepEqual([agent.capacity().paused, agent.capacity().owner_paused], [true, true]);
+  const refused = await agent.launch({ spec: spec("p1"), cpus: 1, mem_gb: 1 });
+  assert.equal(refused.status, 503);
+  // a restarted agent on the same state dir stays paused
+  const again = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, state_dir: dir, allow_cpus: 4, allow_mem_gb: 8, token: "agent-token" }, { docker: fakeDocker(), log: quiet, live: () => ({ ok: true }), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
+  assert.equal(again.capacity().owner_paused, true);
+  // an idle resize clears the resize pause (cfg.paused) but never the owner's
+  if (!onWsl) { // an idle resize on WSL would rewrite the real .wslconfig
+    assert.equal((await req("POST", "/admin/resize", "agent-token", { cpus: 2, mem_gb: 4 })).status, 202);
+    assert.equal(agent.capacity().paused, true);
+  }
+  const r = await req("POST", "/resume");
+  assert.deepEqual([r.status, r.body.owner_paused], [200, false]);
+  assert.deepEqual([agent.capacity().paused, agent.capacity().owner_paused], [false, false]);
+  assert.equal((await agent.launch({ spec: spec("p2"), cpus: 1, mem_gb: 1 })).status, 201);
+});
+
+test("#5885 resize drain pause is independent of the owner pause", async () => {
+  const { agent } = agentFixture();
+  await agent.launch({ spec: spec("d1"), cpus: 1, mem_gb: 1 });
+  const body = { cpus: 2, mem_gb: 4, drain: true };
+  const res = await new Promise((resolve) => agent.handle({ method: "POST", url: "/admin/resize", headers: { authorization: "Bearer agent-token" }, socket: {}, async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body)); } }, { writeHead(st) { this.s = st; }, setHeader() {}, end(b) { resolve({ status: this.s, body: JSON.parse(b) }); } }));
+  assert.equal(res.status, 202);
+  assert.deepEqual([agent.capacity().paused, agent.capacity().owner_paused], [true, false]);
+});
+
 test("#5856 flat agent ignores priority for admission and adds no cpu weight", async () => {
   const { agent, docker } = agentFixture();
   assert.equal((await agent.launch({ spec: prio("b1", "borrow"), cpus: 4, mem_gb: 8 })).status, 201);

@@ -10,6 +10,13 @@ last_compacted: "2026-11-15"
 
 Rolling per-module knowledge log. Hard cap: 150 lines.
 
+## Entry 2026-11-24 — pool status table, owner pause/resume (#5885, parent #5857)
+
+- `forgedock pool status` prints one row per host from router `GET /agents`: HOST, CPUS and MEM GB as used/borrowable/total (used = total - free; borrowable = `cpus_borrowable`/`mem_borrowable_gb` on weighted agents, else free), ACTIVE, THROTTLED, PAUSED (`no`, `owner`, `resize`, `yes`), REASON (owner pause, resize drain, idle gate, last drain). Unreachable agents show `unreachable: <error>`. The `<name>: transport <t>` lines follow. `--json` prints the raw `/agents` body as before.
+- New `capacity()` fields (also on `/health`): `owner_paused` always; `idle_gate` (the `notIdle` reason or null), `throttled` (count of throttled active lanes) and `last_drain` `{reason, at, sandbox}` only on weighted agents (reservations or `idle_only`), so flat agents gain no priority fields. `paused` is now `cfg.paused || owner_paused`, so the router stops placing on an owner-paused host.
+- `forgedock pool pause` / `resume` run on the host itself: they read agent.json (`--config`, default `/etc/computeshare/agent.json`) and call `POST /pause` / `POST /resume` on the agent's own listen address (127.0.0.1 when it binds 0.0.0.0) with the agent token, never through the router; works for outbound agents too. Pause refuses new launches with 503; running lanes finish. The flag is the file `owner-paused` beside agent.json (state dir when no config path), so it survives restarts; it is separate from the resize drain's `cfg.paused`, which a resize clears.
+- `forgedock pool uninstall [--yes]` removes the agent from this box (Linux: `systemctl disable --now computeshare-agent`, delete the unit and `/etc/computeshare`; Windows: `pool/install/uninstall-agent.ps1`); without `--yes` it only prints what it would do. Tests: `bin/tests/pool-cli.test.mjs`, `bin/tests/computeshare.test.mjs` (#5885).
+
 ## Entry 2026-11-24 — One-command installers: /install, Linux/macOS uninstall (#5883, parent #5857)
 
 - `GET /install` (router, `auth: none`) serves `installScript()`: a POSIX sh script with only `cfg.public_url` baked in, never a token. `curl -fsSL <router>/install | sh -s -- --code CODE [--name N --cpus N --mem GB]`; the code goes to `/bootstrap/bundle.tar.gz?token=` (checked, not consumed) and `/enroll` (consumed). Detects `uname` Linux|Darwin and runs `install-agent-linux.sh` or `install-agent-macos.sh` with `--outbound` (always). `--uninstall` runs the shipped `uninstall-agent-{linux,macos}.sh` from the installed code root (bundle fallback when `--code` is given). `--dry-run` prints the plan (code redacted).
