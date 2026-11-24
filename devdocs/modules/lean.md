@@ -3605,6 +3605,11 @@ Security: the workflow is `workflow_dispatch` only (never `pull_request*`), `per
 A stacked lane (`stackedOn`) no longer only polls for the dependency's merge. Each poll reads the dependency's PRs (`depInfo`: merged | open+head | closed) and `cascadeDecision` (`bin/lean/stacking.mjs`) picks the reaction, emitted as `STACK_CASCADE`: head moved and `git merge --no-commit` of `origin/<dependency branch>` clean -> `baseSync`, a review delta, `stackedOn.sha`/`prReady` updated in FORGE:STATE (`reverify`); conflict -> PR closed, branch deleted, result `deferred` code `stack.restart` (`restart`); closed without a merge -> same drop, code `stack.replan` (`replan`). After the dependency merged: retarget, `base` becomes `origin/<lane>`, and `postMergeGate` runs only `invalidatedChecks` for the diff `<stacked sha>..origin/<lane>` (`rebase`). The result carries `cascade`, `cascades`, `cascade_cost_usd`, `cascade_minutes`. `merge.stacked_base` is unchanged and still the last gate.
 Cite: #5833.
 
+## Entry 2026-11-24 — Release resume after a CI-only GATE_FAILURE (#5912)
+
+`fixStep` (`bin/lean/release-review.mjs`) no longer trusts a result saved while CI was still running. On resume, a non-pass result with no blocking findings or guards, and either pending-only or no red CI, at an unmoved head is re-summarised once (`resummarise`), so CI that finished green posts `GATE_PASS`. A moved head or a CONFIRMED blocking finding is not re-summarised and blocks/fixes as before. `forge/deploy-gate` and the gate-marker check stay out of the required-check counters (`CI_EXCLUDED_CHECKS`): they are outputs of the review. When nothing is pending or failing, the block names the verdict, marker, PR and head instead of "still pending".
+Cite: #5912.
+
 ## Entry 2026-11-24 — Missing repo cwd is `sandbox.repo_missing` (#5890)
 
 A claimed sandbox whose repo directory is missing made git fail with `spawn git ENOENT` (a spawn error reports the missing cwd), and the lane ended an untyped `engine-error` that fed the breaker. `runCore` now checks, right after the claim step starts and before the lane `fetch`, that `cwd` exists (`io.fs.exists`) and `git rev-parse --git-dir` runs there; otherwise it throws `deferCode` `sandbox.repo_missing` (`retryInSeconds` 120). `worktree.mjs` exports `isSpawnError` (code ENOENT/EACCES, syscall `spawn*`, no numeric exit status) and `repoMissing`: `addLaneWorktree` no longer swallows a spawn error from `ls-tree` as "no plan" and tags a spawn error from `worktree add` the same way (a git exit failure still falls back to a full checkout). The lane catch maps any remaining raw git spawn ENOENT/EACCES to the same code. The row is `deferred`, requeued, in `UNCAPPED_DEFERRALS` (`orchestrate.mjs`), and never counted by the breaker or the engine-error relaunch.
@@ -3634,3 +3639,8 @@ Cite: #5923.
 ## Batch start reports effective concurrency (#5847)
 
 `sched.mjs` `describeConcurrency` (pure, read-only) returns `{line, warnings}`; `engine-cli.mjs` `runBatch` prints them via `sink.line` just before `orchestrate()`, on fresh start and resume, inside a try/catch (never blocks a batch). Line: `concurrency: K=<k> (host cap <c|none> from <source>) [K from --parallel|default]`. Cap = registry cap (`forgedock sched cap`) else the lower of forge.yaml `orchestration.global_parallel` and the host-derived `liveLaneCap`; source names the one that set it (`none` when no cap). Warnings: K above the cap (names `forgedock sched cap <k>`), and no `forge.yaml` in the repo root (names the defaults). Cap inputs are read only when the registry is on; the missing-forge.yaml warning is always checked. Admission (`effCap`, `liveLaneCap`) is unchanged.
+
+## Stacked dependency state: an open PR wins over a stale merged one (#5908)
+
+`depInfo` in `bin/lean/lean.mjs` lists every PR on the dependency branch name (`--state all`). It now returns `open` before `merged`, so a merged PR left from an earlier use of a reused branch name no longer satisfies the `merge.stacked_base` guard or ends the wait loop while the current dependency PR is still open. MERGED-only, CLOSED-only and empty/error lists map as before.
+Cite: #5908.
