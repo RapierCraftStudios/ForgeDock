@@ -190,7 +190,9 @@ export const RATE_LIMIT_FALLBACK_S = 15 * 60;
 export const DEFER_BACKOFF_S = 120;
 export const DEFER_BACKOFF_MAX_S = 30 * 60;
 // #4685 + #5161: an engine-error detail that names a link or gateway failure (curl's "returned error: 502", HTTP/1.1 503, ...).
-export const TRANSPORT_TEXT = /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|HTTP 50[234]|returned error: 5\d\d|HTTP\/\d(\.\d)? 5\d\d|Bad Gateway|Service Unavailable|overloaded/i;
+// #5947: git transport failures (a dropped clone/fetch, a half-built mirror): a `net.transient` deferral, never an engine-error.
+export const GIT_TRANSPORT_TEXT = /curl (56|28)\b|early EOF|RPC failed|invalid index-pack output|unexpected disconnect|is not a local repository/i;
+export const TRANSPORT_TEXT = new RegExp(`fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|HTTP 50[234]|returned error: 5\\d\\d|HTTP\\/\\d(\\.\\d)? 5\\d\\d|Bad Gateway|Service Unavailable|overloaded|${GIT_TRANSPORT_TEXT.source}`, "i");
 /** #5161: a transient engine failure (model gateway 5xx, connection reset): retried with backoff, not the single relaunch. */
 export const isTransientEngineError = (detail) => TRANSPORT_TEXT.test(String(detail ?? ""));
 // #5161: transient engine-error retries per issue (forge.yaml `orchestration.transient_retries`) and their backoff: 30s, 2m, 8m, then 15m.
@@ -333,7 +335,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
  * @returns {Promise<Array<{issue:number, outcome:string, pr:?number, cost_usd:number, minutes:number, detail?:string}>>}
  */
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), blockedRefreshMs = 60000, onUpdate = () => {}, onCrossLane = () => {},
-  store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
+  store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000, getClearBreaker = null, ackClearBreaker = null,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
@@ -843,6 +845,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   };
   const requeue = (n, delayMs) => { pending.push(n); enqueued.set(n, now()); if (delayMs > 0) notBefore.set(n, now() + delayMs); else notBefore.delete(n); };
   const TRANSPORT_COOLDOWN_MS = 5 * 60000;
+  const netTransients = new Map(); // #5947: issue -> net.transient deferrals (backoff step)
   let transportErrors = 0; // #4685: engine-errors in the current window that were link failures
   const noteEngineError = (detail = "") => {
     if (!breaker) return;
@@ -898,6 +901,12 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // Apply one lane's result: requeue it (deferred, dependency-open, engine-error) or record its final row.
   const settleLane = async (n, r, rec, pf) => {
     if (halted) return; // #4454: a resume adopts the lane and settles it
+    // #5947: a git transport failure ends the lane as a `net.transient` deferral with backoff; the breaker never sees it.
+    if (!cancelled && (r?.terminalReason ?? "engine-error") === "engine-error" && GIT_TRANSPORT_TEXT.test(String(r?.detail ?? ""))) {
+      const k = (netTransients.get(n) ?? 0) + 1;
+      netTransients.set(n, k);
+      r = { ...r, terminalReason: "deferred", code: OUTCOME_CODES.NET_TRANSIENT, retryInSeconds: Math.round(transientRetryDelayMs(k) / 1000), detail: r.detail };
+    }
     // #5241: the lane ended: its lease goes with it. #5654: also an interrupted or engine-error end, which is requeued at once
     if (releaseLease && (cancelled || (r?.terminalReason ?? "engine-error") === "engine-error" || (r?.terminalReason === "deferred" && r?.code === "run.interrupted"))) { try { await releaseLease(n, rec); } catch { /* best effort: the lease expires */ } }
     // #4304: the pre-filter runs once per issue; a recovery pass's row adds the earlier attempt's cost, which already holds it.
@@ -1969,6 +1978,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (reg) withdrawExcept(wanted);
       // #4685: a breaker tripped only by link failures (a router restart) closes itself after a cooldown
       if (tripped?.transport && now() - tripped.at >= TRANSPORT_COOLDOWN_MS) { tripped = null; errorTimes = []; transportErrors = 0; save(); }
+      // #5947: --clear-breaker on a schedd-hosted batch reaches this runner through the batch's request file
+      if (getClearBreaker) { let req = false; try { req = Boolean(getClearBreaker()); } catch { req = false; } if (req) { const was = Boolean(tripped); tripped = null; errorTimes = []; transportErrors = 0; save(); try { ackClearBreaker?.({ cleared: was }); } catch { /* advisory */ } } }
       if (tripped && !running.size) { await drainAdds(); break; } // breaker: let running lanes finish, keep the rest pending for a resume
       if (cancelled && !running.size) { await drainAdds(); break; } // #4376: cancel: the rest end held for a resume
       if (budgetStop && !running.size) { await drainAdds(); break; } // execution budget (stop): the same, the rest end held
@@ -2004,7 +2015,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (running.size && watchable()) wake = Math.min(wake ?? WATCH_EVERY_MS, WATCH_EVERY_MS); // #4595: re-check the blockers of skipped rows
       if (running.size && envWaiting()) wake = Math.min(wake ?? ehWatchMs, ehWatchMs); // #5805: re-check engine/env holds while lanes run
       if (train?.size()) wake = Math.min(wake ?? trainEveryMs, Math.max(0, trainEveryMs - (now() - lastTrainTick))); // #5836
-      if (tripped) wake = null;
+      if (tripped) wake = getClearBreaker ? Math.min(wake ?? pollMs, pollMs) : null;
       if (getCancelled && running.size && (!cancelled || [...running.keys()].some((n) => { const x = stopSent.get(n); return x && !(x.accepted && x.reported); }))) wake = Math.min(wake ?? pollMs, pollMs); // #5241: a cancel keeps polling a lane whose stop is unconfirmed // #4376: notice a cancel while lanes run
       if (running.size) {
         if (wake === null) await race(running.values());

@@ -70,6 +70,7 @@ export const OUTCOME_CODES = Object.freeze({
   SANDBOX_UNREACHABLE: "sandbox.unreachable", // forge#4672: the sandbox provider stayed unreachable past execution.unreachable_window_min; deferred, the sandbox is kept for adopt
   SANDBOX_LOST: "sandbox.lost", // forge#5859: 3+ sandboxes on one pool agent ended without a result within 60s (agent/VM restart); deferred and requeued once, never counted by the breaker or the engine-error relaunch
   SANDBOX_REPO_MISSING: "sandbox.repo_missing", // forge#5890: the lane repo cwd is missing, not a git repo, or git could not spawn there (ENOENT/EACCES); deferred and requeued, never breaker-counted or relaunched as an engine-error
+  NET_TRANSIENT: "net.transient", // forge#5947: a git clone/fetch hit a transport failure (curl 56/28, early EOF, invalid index-pack output, unexpected disconnect); deferred with backoff, never breaker-counted or relaunched as an engine-error
   LEASE_HELD: "lease.held",
   DEPENDENCY_OPEN: "dependency.open",
   DESIGN_SPEC_REQUIRED: "design.spec_required", // forge#5330: a page under forge.yaml design.routes has no FORGE:DESIGN_SPEC and design.gate is blocking; needs-human until /design approves a spec
