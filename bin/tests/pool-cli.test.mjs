@@ -2,7 +2,7 @@ import { tmpDir } from "./_tmp.mjs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { poolFromCli } from "../engine-cli.mjs";
 
 function setup() {
@@ -65,6 +65,41 @@ describe("forgedock pool (#4544)", () => {
     const s = setup();
     await run(["resize", "a1", "--cpus", "2", "--mem", "4", "--drain"], s, { ok: true, status: 200, data: {} });
     assert.equal(s.calls[0].path, "/agents/a1/resize");
+  });
+  it("status renders a per-host table of used/borrowable capacity and the throttle/drain reason; --json stays raw (#5885)", async () => {
+    const s = setup();
+    const data = { agents: [
+      { name: "legion", ok: true, transport: "outbound", cpus_total: 12, cpus_free: 8, cpus_borrowable: 8, mem_total_gb: 20, mem_free_gb: 14, mem_borrowable_gb: 14, active: 2, throttled: 1, paused: false, owner_paused: false, idle_only: true,
+        idle_gate: "owner load 0.90/core (> 0.5)", last_drain: { reason: "owner busy: owner load 0.90/core (> 0.5)", at: "2026-11-24T10:00:00.000Z", sandbox: "b7" } },
+      { name: "box2", ok: true, cpus_total: 4, cpus_free: 4, mem_total_gb: 8, mem_free_gb: 8, active: 0, paused: true, owner_paused: true },
+      { name: "gone", ok: false, error: "HTTP 502" },
+    ], sandboxes: {} };
+    const { out } = await run(["status"], s, { ok: true, status: 200, data });
+    assert.deepEqual([s.calls[0].method, s.calls[0].path, s.calls[0].token], ["GET", "/agents", "FD-SECRET"]);
+    assert.match(out, /^HOST\s+CPUS used\/borrow\/total\s+MEM GB used\/borrow\/total\s+ACTIVE\s+THROTTLED\s+PAUSED\s+REASON/);
+    const row = (n) => out.split("\n").find((l) => l.startsWith(n));
+    assert.match(row("legion"), /^legion\s+4\/8\/12\s+6\/14\/20\s+2\s+1\s+no\s+owner busy: owner load 0\.90\/core \(> 0\.5\); last drain b7 at 2026-11-24T10:00:00\.000Z: owner busy/);
+    assert.match(row("box2"), /0\/4\/4\s+0\/8\/8\s+0\s+0\s+owner\s+paused by owner/);
+    assert.match(row("gone"), /unreachable: HTTP 502/);
+    assert.match(out, /legion: transport outbound/);
+    assert.doesNotMatch(out, /"agents"/);
+    const raw = await run(["status", "--json"], s, { ok: true, status: 200, data });
+    assert.deepEqual(JSON.parse(raw.out.split("\nlegion: transport")[0]), data);
+    await assert.rejects(run(["status", "--jsn"], s, { ok: true, status: 200, data }), /usage: unknown flag/);
+  });
+  it("pause and resume call the local agent on loopback with its token, not the router (#5885)", async () => {
+    const s = setup();
+    const dir = dirname(s.config);
+    writeFileSync(join(dir, "agent.json"), JSON.stringify({ name: "legion", listen: { host: "0.0.0.0", port: 7711 } }));
+    writeFileSync(join(dir, "agent.token"), "AGENT-SECRET\n");
+    const as = { ...s, config: join(dir, "agent.json") };
+    const p = await run(["pause"], as, { ok: true, status: 200, data: { ok: true, owner_paused: true, active: 1 } });
+    const r = await run(["resume"], as, { ok: true, status: 200, data: { ok: true, owner_paused: false, active: 1 } });
+    assert.deepEqual(s.calls.map((c) => [c.base, c.method, c.path, c.token]), [["http://127.0.0.1:7711", "POST", "/pause", "AGENT-SECRET"], ["http://127.0.0.1:7711", "POST", "/resume", "AGENT-SECRET"]]);
+    assert.match(p.out, /legion: paused; .*1 running lane/);
+    assert.match(r.out, /legion: resumed/);
+    await assert.rejects(run(["pause"], as, { ok: false, status: 401, data: { error: "unauthorized" } }), /agent refused pause: HTTP 401/);
+    await assert.rejects(run(["pause", "--force"], as, {}), /usage: unknown flag/);
   });
   it("an unknown verb is a usage error", async () => {
     await assert.rejects(poolFromCli(["bogus"], { poolDeps: {} }), /usage: forgedock pool/);
