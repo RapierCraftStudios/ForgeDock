@@ -16,6 +16,7 @@ import { makeWarm } from "./warm.mjs";
 import { resolveLaneImage, laneImageNow, laneToolsTag, isLaneToolsTagOf } from "./lane-tools.mjs";
 import { hostDiskFree, ensureNatPin, netState } from "./health.mjs";
 import { laneDiskUsedGb, planDiskCap, fstrimDue, runFstrim } from "./disk.mjs";
+import { makeMirrorSeed, dockerRunner } from "./mirror-seed.mjs";
 import { planIdleEviction, CACHE_LABEL, agentLabel } from "./cache-sweep.mjs";
 
 const LABEL = "computeshare=1";
@@ -103,7 +104,7 @@ export async function buildWithRetry(build, { sleep = (ms) => new Promise((r) =>
   }
 }
 
-export function createAgent(cfg, { docker, now = () => Date.now(), log = console, live = liveHeadroom, hostDisk = null, net = netState, vm = vmSize, trim = runFstrim } = {}) {
+export function createAgent(cfg, { docker, now = () => Date.now(), log = console, live = liveHeadroom, hostDisk = null, net = netState, vm = vmSize, trim = runFstrim, mirrorRunner = null } = {}) {
   const stateDir = cfg.state_dir;
   const store = jsonStore(join(stateDir, "state.json"), { sandboxes: {} });
   const sb = () => store.data.sandboxes;
@@ -379,6 +380,15 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   /** cgroup cpu weight per class (docker --cpu-shares); a borrowed lane yields to a reserved one under contention. */
   const sharesArgs = (prio) => (weighted() ? ["--cpu-shares", String(SHARES()[prio])] : []);
 
+  /** The per-repo cache volume (`/cache`: worktrees, bare mirror, stores). An explicit agent_id gives this agent its own volume. */
+  const cacheVolumeOf = (key) => `cs-cache-${cfg.agent_id ? `${agentId}-` : ""}${String(key ?? "default").toLowerCase().replace(/[^a-z0-9_.-]/g, "-")}`;
+  /** #5949: dispatcher-seeded mirrors (GET /mirrors, POST /mirrors/seed); git runs in a helper container on the cache volume. */
+  const mirrors = makeMirrorSeed({ seedDir: join(stateDir, "seed"), runnerFor: ({ slug, cache_key }) => {
+    const volume = cacheVolumeOf(cache_key ?? slug), run = (mirrorRunner ?? dockerRunner)({ volume, image, seedDir: join(stateDir, "seed") });
+    return async (script, env) => { try { await docker.createVolume?.(volume, [CACHE_LABEL, AGENT]); } catch { /* an unlabelled volume still works */ } cacheUsed.set(volume, now()); return run(script, env); };
+  } });
+  const seedFail = (e) => { if (e.status) throw Object.assign(new Error(e.message), { status: e.status, body: { error: e.message, ...(e.extra ?? {}) } }); throw e; };
+
   async function launch({ spec, cpus, mem_gb, limit = null }) {
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id) || !Array.isArray(spec.command) || !spec.command.length) throw Object.assign(new Error("spec.id ([A-Za-z0-9._-], max 128) and spec.command are required"), { status: 400 });
     let existing = own(spec.id);
@@ -438,8 +448,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const rec = { id: spec.id, name, dir, issue: spec.issue ?? null, slug: spec.repo?.slug ?? null, repo: slugOf(spec), batch: spec.batch ?? null, cpus, mem_gb, result_file: spec.result_file ?? null, state: "starting", startedAt: now(), finishedAt: null, lease: now(), credToken, docker: withDocker, ...(weighted() || spec.priority ? { priority: prio, ...(reservation ? { reservation } : {}) } : {}) };
     sb()[spec.id] = rec;
     store.save();
-    const cacheKey = String(spec.cache?.key ?? spec.repo?.slug ?? "default").toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
-    rec.cacheVolume = `cs-cache-${cfg.agent_id ? `${agentId}-` : ""}${cacheKey}`; // an explicit agent_id gives this agent its own volume: a shared one would let its work sweep delete a co-resident agent's worktrees
+    rec.cacheVolume = cacheVolumeOf(spec.cache?.key ?? spec.repo?.slug); // an explicit agent_id gives this agent its own volume: a shared one would let its work sweep delete a co-resident agent's worktrees
     rec.workDir = workDirOf(name);
     cacheUsed.set(rec.cacheVolume, now());
     try { await docker.createVolume?.(rec.cacheVolume, [CACHE_LABEL, AGENT]); } catch (e) { log.warn?.(`label ${rec.cacheVolume}: ${String(e.stderr || e.message).slice(0, 200)}`); } // an unlabelled volume still works
@@ -901,6 +910,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
 
   const routes = [
     [route("GET", "/health"), async () => ({ status: 200, body: { ok: true, ...capacity() } })],
+    [route("GET", "/mirrors"), async (_p, _b, url) => ({ status: 200, body: await mirrors.tips({ slug: url.searchParams.get("slug"), cache_key: url.searchParams.get("cache_key"), upload: url.searchParams.get("upload") }).catch(seedFail) })], // #5949
+    [route("POST", "/mirrors/seed"), async (_p, body) => { try { return { status: 200, body: body?.finish ? await mirrors.finish(body) : mirrors.chunk(body) }; } catch (e) { return { status: e.status ?? 500, body: { error: e.message, ...(e.extra ?? {}) } }; } }],
     [route("GET", "/capacity"), async () => ({ status: 200, body: capacity() })],
     [route("POST", "/sandboxes"), async (_p, body) => { const r = await launch(body ?? {}); if (Number.isInteger(body?.spec?.warm)) warm.replenish().catch((e) => log.warn?.(`warm replenish: ${e.message}`)); return r; }],
     [route("GET", "/warm"), async () => ({ status: 200, body: { warm: warm.list() } })],

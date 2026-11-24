@@ -812,6 +812,12 @@ push/gh/merge retry patterns).
 
 ## Entries
 
+## Entry 2026-11-24 — dispatcher-side repo seeding (#5949)
+
+- `remoteProvider.start` (`bin/lean/sandbox-remote.mjs`) seeds the pool agent's repo mirror before `launch` (pool provider, `execution.repo_source` dispatcher|github|auto, parsed by `parseExecution` as `repoSource`, default auto). `seedMirror` (`bin/lean/mirror-bundle.mjs`) asks `transport.mirrors` for the agent's ref tips, builds `git bundle create - <origin refs> ^<agent tips>` from the dispatcher's clone (everything when absent; nothing sent when up to date) and uploads it in 384 KB checksummed chunks via `transport.seed`, resuming from the agent's offset.
+- Seed stats (`bytes`, `chunks`, `ms`, estimated `saved_ms` = the whole repo at the upload's own rate) ride on the handle (`handle.seed`) and one `[seed]` line in the lane log. Failure under `auto` is a fallback to the GitHub path (`seed.fallback`); under `dispatcher` the launch throws `pool.seed_failed`.
+
+
 ## Entry 2026-10-19 — Dossier created (#4185)
 
 Initial dossier written with NORTHSTAR.md and the devdocs freshness gate.
@@ -3672,3 +3678,7 @@ Cite: #5908.
 ## A disk-paused sandbox is still running (#5957)
 
 A sandbox the pool pauses under disk pressure (agent state `paused`, #5891) is not finished. `httpTransport.status` (`sandbox-remote.mjs`) maps `paused` to `running` alongside `running|pending|starting`, and `containerProvider.status` (`execution.mjs`) maps docker `paused` to `running`, so the lane poll keeps waiting instead of fetching `/result` (404) and ending engine-error `lostWithoutResult`. Other unknown pool states still map to `exited` and a 404 to `gone`.
+
+## Hosted --clear-breaker is a durable, time-scoped request (#5964)
+
+The 7 s ack window of #5947 dropped the request before a slow runner pass reached it. Now `schedd.mjs` op `clear-breaker` for a hosted batch writes the request, polls the ack up to `min(waitMs, 60 s)` and, with no ack, replies `{acknowledged:false, pending:true, hosted:true}`; it never calls `readClearBreaker` or rewrites `state.json` (an unhosted batch keeps the direct rewrite). `batch.mjs` `peekClearBreaker` returns the request `at` without deleting; `readClearBreaker` consumes. The runner (`orchestrate.mjs`, `getClearBreaker` = peek, `consumeClearBreaker` = consume) asks `clear-breaker.mjs` `decideClear({tripped, requestAt})`: a numeric `requestAt` clears only a `tripped.at` at or before it (a stale request is acked uncleared and discarded); boolean `true` is the legacy unconditional clear. After a real clear the pass re-runs so admissions resume. The CLI sends `waitMs` (2 × `pollMs`, default 30 s) and prints `pending: the runner will clear it on its next pass`.

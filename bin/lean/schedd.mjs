@@ -11,7 +11,7 @@
  *   {op:"attach", id, resume?}    → (`resume` also clears a pending cancel, #4592) log.jsonl rows replayed, then live rows/lines and done; a finished batch replays report.json
  *                                   ({type:"done", replay:true}) unless it has unrun added issues; a batch nobody hosts is resumed here
  *   {op:"set-parallel", id, k}    → {type:"ok", parallel}
- *   {op:"clear-breaker", id}      → {type:"ok", cleared, acknowledged, hosted} (#5947): a hosted runner resets its in-memory breaker (request file + ack); otherwise state.json is rewritten
+ *   {op:"clear-breaker", id}      → {type:"ok", cleared, acknowledged, hosted} (#5947): a hosted runner resets its in-memory breaker (request file + ack, #5964: the request is never dropped; no ack within waitMs → pending:true); otherwise state.json is rewritten
  *   {op:"set-execution", id, maxRemote?, mode?} → {type:"ok", execution} (#5138): live max_remote / placement (remote|hybrid|local); remote/hybrid refused for a batch with no provider
  *   {op:"requeue", id, issues, reason, by} → {type:"ok", requeued, refused, hosted, reopened} (#4550): see batch.requeue; a finished batch is hosted again
  *   {op:"add", id, issues}        → {type:"ok", added, skipped, hosted} (#4408): merged into the batch's `add` file, which a
@@ -370,10 +370,13 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       let acknowledged = false, cleared = false;
       if (isHosted) {
         const at = b.requestClearBreaker();
-        for (let i = 0; i < 140 && !acknowledged; i++) {
+        // #5964: never drop the request: the runner consumes it on its next pass (time-scoped against the trip)
+        const budget = Math.min(Number.isFinite(req.waitMs) && req.waitMs > 0 ? req.waitMs : 7000, 60000);
+        for (let i = 0, n = Math.ceil(budget / 50); i < n && !acknowledged; i++) {
           const a = b.readClearBreakerAck();
           if (a && a.at >= at) { acknowledged = true; cleared = Boolean(a.cleared); } else await new Promise((r) => setTimeout(r, 50));
         }
+        if (!acknowledged) return send({ type: "ok", cleared: false, acknowledged: false, pending: true, hosted: true }, true);
       }
       if (!acknowledged) {
         b.readClearBreaker(); // drop an unconsumed request so it cannot clear a later trip

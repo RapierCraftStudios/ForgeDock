@@ -8,6 +8,8 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 export const CACHE_LABEL = "computeshare.cache=1";
+/** #5955: every package-manager store the lanes write (depcache.mjs env(), agent.mjs pnpm store), relative to the /cache volume root. One list for the sweep and pruneCaches. */
+export const PACKAGE_STORES = ["pnpm-store", ...["pnpm-store", "npm-cache", "uv-cache", "poetry-cache", "pip-cache"].map((n) => `forge-depcache/stores/${n}`)];
 /** #5881: owner label; the reaper and sweeps touch only containers and volumes carrying their own agent's label. */
 export const agentLabel = (id) => `computeshare.agent=${id}`;
 const DAY = 86400000;
@@ -47,7 +49,7 @@ export function sweepVolume({ root = "/cache", maxAgeDays = 14, maxGb = null, ke
   const errors = [], removed = [];
   const rm = (p) => { try { rmSync(p, { recursive: true, force: true }); removed.push(p); } catch (e) { errors.push(`${p}: ${e.message}`); } };
   const cutoff = now - maxAgeDays * DAY;
-  for (const d of ["uv", "npm", "pip", "poetry"]) { // package caches: old files out, then the empty dirs
+  for (const d of PACKAGE_STORES) { // package caches: old files out, then the empty dirs
     const dir = join(root, d);
     if (!existsSync(dir)) continue;
     sh("find", [dir, "-type", "f", "-mtime", `+${maxAgeDays}`, "-delete"]);
@@ -64,7 +66,7 @@ export function sweepVolume({ root = "/cache", maxAgeDays = 14, maxGb = null, ke
     const entries = [];
     const keepSet = new Set(keep);
     for (const k of kids(join(root, "work"))) entries.push({ ...k, bytes: sizeOf(k.path), live: keepSet.has(k.path) });
-    for (const d of ["uv", "npm", "pip", "poetry", "env", "forge-depcache", "forge-depcache/stores"]) for (const k of kids(join(root, d))) if (!k.path.endsWith("/stores")) entries.push({ ...k, bytes: sizeOf(k.path), live: false });
+    for (const d of [...PACKAGE_STORES, "env", "forge-depcache", "forge-depcache/stores"]) for (const k of kids(join(root, d))) if (!k.path.endsWith("/stores")) entries.push({ ...k, bytes: sizeOf(k.path), live: false });
     const plan = planCacheCap(entries, maxGb * 1024 ** 3);
     for (const p of plan.delete) rm(p);
   }

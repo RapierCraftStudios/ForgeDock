@@ -15,7 +15,7 @@ import { call as httpCall } from "./http.mjs";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const loadJson = (p) => JSON.parse(readFileSync(p, "utf8"));
 
-const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB --agent-url URL | --outbound | --one-liner] | status [--json] [--account A] | link <user_code> [--account A] | policy <agent> [--cpus N --mem GB --idle-only --pause --resume-policy] | limit <agent> --lanes N|none | pause | resume | uninstall --yes | upgrade [agent] | remove <agent>  [--config path]";
+const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB --agent-url URL | --outbound | --one-liner] | status [--json] [--account A] | link <user_code> [--account A] | policy <agent> [--cpus N --mem GB --idle-only --pause --resume-policy] | limit <agent> --lanes N|none | pause | resume | uninstall [--yes] | upgrade [agent] | remove <agent>  [--config path]";
 const HELP_FLAGS = ["--help", "-h"];
 // Flags each verb accepts: `value` flags consume the next token, `bool` flags stand alone. Anything else dash-prefixed is rejected (#5008).
 const VERB_FLAGS = {
@@ -26,7 +26,7 @@ const VERB_FLAGS = {
   policy: { value: ["--config", "--cpus", "--mem"], bool: ["--idle-only", "--no-idle-only", "--pause", "--resume-policy"] },
   pause: { value: ["--config"], bool: [] },
   resume: { value: ["--config"], bool: [] },
-  uninstall: { value: ["--config"], bool: ["--yes"] },
+  uninstall: { value: [], bool: ["--yes"] },
   upgrade: { value: ["--config"], bool: [] },
   remove: { value: ["--config"], bool: [] },
   limit: { value: ["--config", "--lanes"], bool: [] },
@@ -178,13 +178,18 @@ export async function runPoolCli(argv, deps = {}) {
     }
     case "uninstall": {
       // #5885: the owner removes this box's agent. Destructive, so it needs --yes; running lanes are not waited for.
-      const win = (deps.platform ?? process.platform) === "win32";
+      // The shipped per-OS scripts (#5883) own the teardown at fixed install paths; no path from the command line reaches a delete, and
+      // without --yes the script's own --dry-run is the preview, so what is shown is what --yes does.
+      const platform = deps.platform ?? process.platform;
       const run = deps.spawn ?? spawnSync;
-      if (!rest.includes("--yes")) { console.log(win ? "would run pool/install/uninstall-agent.ps1 (removes the keep-alive task, firewall rules and the computeshare WSL distro)" : "would stop and disable computeshare-agent, delete its systemd unit and /etc/computeshare"); console.log("re-run with --yes to proceed"); break; }
-      const steps = win
-        ? [["powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(repoRoot, "pool", "install", "uninstall-agent.ps1")]]]
-        : [["systemctl", ["disable", "--now", "computeshare-agent"]], ["rm", ["-f", "/etc/systemd/system/computeshare-agent.service"]], ["systemctl", ["daemon-reload"]], ["rm", ["-rf", flag("config") ? dirname(flag("config")) : "/etc/computeshare"]]];
+      const dir = join(repoRoot, "pool", "install");
+      const dry = !rest.includes("--yes");
+      const steps = platform === "win32"
+        ? (dry ? [] : [["powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(dir, "uninstall-agent.ps1")]]])
+        : [["bash", [join(dir, platform === "darwin" ? "uninstall-agent-macos.sh" : "uninstall-agent-linux.sh"), ...(dry ? ["--dry-run"] : [])]]];
+      if (dry && platform === "win32") console.log("would run pool/install/uninstall-agent.ps1 (removes the keep-alive task, firewall rules and the computeshare WSL distro)");
       for (const [bin, args] of steps) { const r = run(bin, args, { stdio: "inherit" }); if (r.status !== 0) throw new Error(`${bin} ${args[0]} exited ${r.status}`); }
+      if (dry) { console.log("re-run with --yes to proceed"); break; }
       console.log("agent uninstalled from this box. Remove it from the router with: forgedock pool remove <agent>");
       break;
     }
