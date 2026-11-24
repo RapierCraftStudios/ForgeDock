@@ -1673,6 +1673,7 @@ async function orchestrateClient(argv, deps = {}) {
     if (sock) execution = (await schedd.request(sock, { op: "set-execution", id, ...patch }, undefined, { timeoutMs: schedd.REQUEST_MS }))?.execution ?? null;
     else { const batchMod = await import("./lean/batch.mjs"); execution = liveExec.applySetExecution(batchMod.openBatch(batchMod.batchRoot(), id), patch); }
     console.log(`batch ${id}: ${liveExec.formatOverride(patch)}`);
+    if (patch.maxRemote !== undefined) { const note = await poolLaneNote(patch.maxRemote, liveExec); if (note) console.log(note); } // #5735
     return { ok: true, batch: id, execution };
   }
   // #4408: --add, and the extra issues of --resume <id> N..., go to the batch (through the daemon when one runs).
@@ -1789,6 +1790,20 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     // #4685: close a tripped breaker without editing state.json; the next --resume (or a running batch's next save) starts closed.
     const b = batchMod.openBatch(root, flag(argv, "--clear-breaker"));
     if (!b.exists()) throw new Error(`no batch ${flag(argv, "--clear-breaker")} in ${root}`);
+    // #5947: a schedd-hosted runner holds the breaker in memory; ask it through the sched socket and say whether it acknowledged.
+    if (!deps.noDaemon) {
+      const schedd = await import("./lean/schedd.mjs");
+      let sock = null;
+      try { sock = await schedd.connectDaemon({ dir: deps.scheddDir ?? (await import("./lean/sched.mjs")).schedDir(), spawnDaemon: null }); } catch { sock = null; }
+      if (sock) {
+        let r = null;
+        try { r = await schedd.request(sock, { op: "clear-breaker", id: b.id }, undefined, { timeoutMs: 15000 }); } catch { r = null; }
+        if (r?.hosted) {
+          sink.line(`batch ${b.id}: ${r.acknowledged ? (r.cleared ? "breaker cleared" : "no breaker was tripped") : "breaker cleared in state.json; the live runner did not acknowledge"}${r.acknowledged ? " (live runner acknowledged)" : ""}`);
+          return { ok: true, batch: b.id, cleared: Boolean(r.cleared), acknowledged: Boolean(r.acknowledged) };
+        }
+      }
+    }
     const st = b.store.load();
     if (st) b.store.save({ ...st, breaker: null, errorTimes: [] });
     sink.line(`batch ${b.id}: ${st?.breaker ? "breaker cleared" : "no breaker was tripped"}`);
@@ -1811,6 +1826,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     sink.line(`batch ${id}: ${liveExec.formatOverride(patch)}`);
     const drain = liveExec.drainNote(patch);
     if (drain) sink.line(drain);
+    if (patch.maxRemote !== undefined) { const note = await poolLaneNote(patch.maxRemote, liveExec); if (note) sink.line(note); } // #5735
     return { ok: true, batch: id, execution };
   }
   if (["--show-env", "--set-env", "--unset-env"].some((f) => argv.includes(f))) return envBatch({ argv, root, print: (l) => sink.line(l) });
@@ -2293,7 +2309,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       trusted: (n) => trustedOf.get(n) === true,
       autoChildren,
       ...(autoMod.addsEpicChildren(autoChildren.mode) ? { getChildren: async () => ({ list: await autoMod.readChildList({ gh: (a) => leanIo.gh(a), repo, fields: childFields ??= await autoMod.hostListFields((a) => leanIo.gh(a)) }), elsewhere: autoMod.liveElsewhere({ batchMod, root, self: batch.id, repo }) }) } : {}),
-      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, expireHolds: batch.expireHolds, getHoldInfo: batch.readHoldInfo, getGates: batch.readGates, baseWait: baseWaits.size ? baseWaitOf(baseWaits, { io, leanIo, cwd }) : null, ...lanes,
+      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getClearBreaker: batch.readClearBreaker, ackClearBreaker: batch.ackClearBreaker, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, expireHolds: batch.expireHolds, getHoldInfo: batch.readHoldInfo, getGates: batch.readGates, baseWait: baseWaits.size ? baseWaitOf(baseWaits, { io, leanIo, cwd }) : null, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(Number.isInteger(orch.transientRetries) ? { transientRetries: orch.transientRetries } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, rotator, batchId: batch.id, drift, lifecycle, integration,
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd), host: { cores: () => cpus().length, memAvailableMb, rampingMb: rampProbe.rampingMb } }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       // #5174: hold new local admissions while loadavg/cores is above engine.overload_load_per_core (host-wide batches only)
@@ -3201,4 +3217,20 @@ export async function probeFromCli(argv, deps = {}) {
   for (const r of rows) console.log(`#${r.issue} → ${r.outcome}${r.detail ? ` (${r.detail})` : ""}`);
   console.log(formatProbeSummary(rows) || "probes: nothing to run");
   return { rows };
+}
+
+/**
+ * #5735: the `--set-max-remote` lane note (live-execution.mjs remoteLaneNote) from the pool router's `GET /agents`.
+ * Best effort: no router, an error or no answer within ~5 s gives null, so the set itself never fails because of it.
+ */
+async function poolLaneNote(n, liveExec, { env = process.env, timeoutMs = 5000 } = {}) {
+  let timer = null;
+  try {
+    const { poolRouterConfig, remoteTransportFor } = await import("./lean/execution.mjs");
+    const endpoint = poolRouterConfig({ env })?.endpoint;
+    if (!endpoint) return null;
+    const t = remoteTransportFor({ provider: "pool", endpoint }, { env });
+    const lanes = await Promise.race([t.agentLanes(), new Promise((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); timer.unref?.(); })]);
+    return liveExec.remoteLaneNote(n, lanes);
+  } catch { return null; } finally { clearTimeout(timer); }
 }

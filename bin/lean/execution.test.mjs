@@ -441,6 +441,7 @@ describe("container provider (#4253)", () => {
     const p = containerProvider({ batch, image: "i", gitDir: "/g", docker });
     const h = { provider: "container", id: "fdsbx-bt-1", issue: 1 };
     assert.equal(await p.status(h), "running");
+    state = "paused"; assert.equal(await p.status(h), "running"); // #5957
     state = "exited"; assert.equal(await p.status(h), "exited");
     state = null; assert.equal(await p.status(h), "gone");
     assert.equal(await p.teardown(h), true);

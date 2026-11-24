@@ -22,6 +22,7 @@ import { experimentReport, renderExperiment } from "./experiment.mjs";
 import { readExperiment } from "../experiment.mjs";
 import { compoundingReport, gatherCompounding, renderCompounding, DEFAULT_BUCKETS, DEFAULT_WINDOW_MS } from "./compounding.mjs";
 import { poolUtilisation, formatPoolLines } from "./pool.mjs";
+import { chainsReport, formatChainLines } from "./chains.mjs";
 import { ciAwarenessReport, readCiLogs, renderCiAwareness } from "./ci-awareness.mjs";
 import { gatherIssues, selfFiledReport, renderSelfFiled } from "./selffiled.mjs";
 import { firstReviewReport, renderFirstReview } from "./first-review.mjs";
@@ -41,6 +42,7 @@ export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <ow
        forgedock stats --experiment <id> [--require-met] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --by version [--post-metrics <pr>] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --pool [--window 7d,30d] [--repo <owner/repo>] [--json]
+       forgedock stats --chains [--window 7d,30d] [--repo <owner/repo>] [--json]
        forgedock stats --ci-awareness [--repo <owner/repo>] [--since <date>] [--json]
        forgedock stats --first-review [--repo <owner/repo>] [--since <date>] [--min-n 20] [--json]
        forgedock stats --first-merge [--repo <owner/repo>[,<owner/repo>...]] [--json]
@@ -103,6 +105,7 @@ Pool (forge#4549; local batch reports, no gh):
   --ci-awareness        median/p90 CI awareness latency, CI rounds per PR and wall per round, per engine version, from local run logs (#5692);
                         --since <date> keeps only the lanes started on/after that date
   --pool                remote lane minutes, lanes and share per pool agent over --window (default 7d,30d)
+  --chains              stacked-lane chains from local batch reports: wall time p50 by depth, per-link overlap, cascade rework rate (#5834)
 
 Efficiency (forge#4402; local batch dirs and run logs, gh only for merged issues' bodies, labels and probes):
   --efficiency          $/merge, turns/merge, context/turn per size and model, retries/merge by cause, no-action
@@ -171,7 +174,7 @@ Lane profile baseline (forge#4436; local run logs only, every run of each issue,
 export function experimentExit(opts, report) { return opts.requireMet && report.targets_met !== true ? 1 : 0; }
 
 export function parseArgs(argv) {
-  const o = { card: false, week: false, month: false, includeRepoNames: false, publicRepo: false, out: null, depth: false, conformanceOutcomes: false, windowDays: null, since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, compounding: false, selfFiled: false, origin: false, firstMerge: false, bucket: null, laneProfile: false, issues: null, efficiency: false, pool: false, ciAwareness: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
+  const o = { card: false, week: false, month: false, includeRepoNames: false, publicRepo: false, out: null, depth: false, conformanceOutcomes: false, windowDays: null, since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, compounding: false, selfFiled: false, origin: false, firstMerge: false, bucket: null, laneProfile: false, issues: null, efficiency: false, pool: false, chains: false, ciAwareness: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
   const val = (i, name) => {
     const v = argv[i + 1];
     if (v == null || v.startsWith("--")) throw new Error(`${name} needs a value`);
@@ -206,6 +209,7 @@ export function parseArgs(argv) {
     else if (name === "--efficiency") o.efficiency = true;
     else if (name === "--depth") o.depth = true;
     else if (name === "--pool") o.pool = true;
+    else if (name === "--chains") o.chains = true;
     else if (name === "--release-ledger") o.releaseLedger = true;
     else if (name === "--baseline") { const v = take(); if (v !== "save" && v !== "compare") throw new Error("--baseline must be save or compare"); o.baseline = v; }
     else if (name === "--baseline-file") o.baselineFile = take();
@@ -242,10 +246,10 @@ export function parseArgs(argv) {
   }
   if ((o.week || o.month || o.includeRepoNames || o.publicRepo || o.out) && !o.card) throw new Error("--week, --month, --include-repo-names, --public-repo and --out need --card");
   if (o.week && o.month) throw new Error("--week and --month are mutually exclusive");
-  if (o.card && (o.depth || o.pool || o.ciAwareness || o.efficiency || o.compounding || o.selfFiled || o.conformanceOutcomes || o.contextAb || o.exploreAb || o.tiers || o.laneProfile || o.edge || o.milestone || o.experiment || o.by)) throw new Error("--card cannot be combined with another query mode");
+  if (o.card && (o.depth || o.pool || o.chains || o.ciAwareness || o.efficiency || o.compounding || o.selfFiled || o.conformanceOutcomes || o.contextAb || o.exploreAb || o.tiers || o.laneProfile || o.edge || o.milestone || o.experiment || o.by)) throw new Error("--card cannot be combined with another query mode");
   if (o.card && (o.week || o.month) && o.since) throw new Error("--week/--month and --since are mutually exclusive");
   if (o.batch && !o.efficiency) throw new Error("--batch and --window need --efficiency");
-  if (o.windows && !o.efficiency && !o.pool && !o.compounding) throw new Error("--batch and --window need --efficiency");
+  if (o.windows && !o.efficiency && !o.pool && !o.chains && !o.compounding) throw new Error("--batch and --window need --efficiency");
   if (o.bucket && !o.compounding) throw new Error("--bucket needs --compounding");
   if (o.compare && !o.efficiency) throw new Error("--compare and --offline need --efficiency");
   if (o.offline && !o.efficiency && !o.depth) throw new Error("--compare and --offline need --efficiency (--offline also works with --depth)");
@@ -425,6 +429,9 @@ export async function buildReport(opts, deps = {}) {
     const pool = poolUtilisation({ batchRoot: deps.batchRoot ?? batchRoot(env), repo, windows: opts.windows ?? parseWindows("7d,30d"), now: deps.now?.() ?? Date.now() });
     return { repo, query: { pool } };
   }
+  if (opts.chains) { // #5834: local batch reports only
+    return { repo, query: { chains: chainsReport({ batchRoot: deps.batchRoot ?? batchRoot(env), repo, windows: opts.windows ?? parseWindows("7d,30d"), now: deps.now?.() ?? Date.now() }) } };
+  }
   if (opts.depth) { // forge#5209: run logs; gh only for post-merge defect signals
     const st = sinceToTimestamp(opts.since, releaseTimes), nowMs = deps.now?.() ?? Date.now();
     let sinceMs = st.since ? Date.parse(st.since) : null;
@@ -576,6 +583,7 @@ export async function runStats(argv, deps = {}) {
     if (report.query?.self_filed && !opts.json) { process.stdout.write(`${renderSelfFiled(report.query.self_filed)}\n`); return 0; }
     if (report.query?.depth && !opts.json) { process.stdout.write(`${renderDepth(report.query.depth, { repo: report.repo, since: opts.since })}\n`); return 0; }
     if (report.query?.ci_awareness && !opts.json) { process.stdout.write(`${renderCiAwareness(report.query.ci_awareness)}\n`); return 0; }
+    if (report.query?.chains && !opts.json) { process.stdout.write(`${formatChainLines(report.query.chains).join("\n")}\n`); return 0; }
     if (report.query?.pool && !opts.json) { process.stdout.write(`${formatPoolLines(report.query.pool).join("\n")}\n`); return 0; }
     if (report.query?.efficiency && !opts.json) {
       const e = report.query.efficiency;

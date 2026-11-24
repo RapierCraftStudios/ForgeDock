@@ -327,6 +327,27 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     log.info?.(`owner ${on ? "paused" : "resumed"} this agent`);
     return { status: 200, body: { ok: true, owner_paused: on, active: capacity().active } };
   }
+  /** #5886: a router-pushed policy (allowlisted keys, persisted beside the agent config). Its `paused` is separate from the owner's pause: the router can set or clear only its own, never the owner's. */
+  let policyPaused = Boolean(cfg.policy_paused);
+  function applyPolicy(body) {
+    const p = body && typeof body === "object" ? body : {}, int = (v, lo, hi) => (Number.isInteger(v) && v >= lo && v <= hi);
+    if ((p.cpus !== undefined && !int(p.cpus, 1, 256)) || (p.mem_gb !== undefined && !int(p.mem_gb, 1, 1024)) || (p.idle_only !== undefined && typeof p.idle_only !== "boolean") || (p.paused !== undefined && typeof p.paused !== "boolean")
+      || (p.floors !== undefined && !(p.floors && typeof p.floors === "object" && Object.keys(p.floors).every((k) => k === "host_disk_gb" && Number.isFinite(p.floors[k]) && p.floors[k] >= 0)))) return { status: 400, body: { error: "invalid policy" } };
+    const set = {};
+    if (p.cpus !== undefined) set.allow_cpus = p.cpus;
+    if (p.mem_gb !== undefined) set.allow_mem_gb = p.mem_gb;
+    if (p.idle_only !== undefined) set.idle_only = p.idle_only;
+    if (p.floors?.host_disk_gb !== undefined) set.host_disk_floor_gb = p.floors.host_disk_gb;
+    if (p.paused !== undefined) set.policy_paused = p.paused;
+    if (cfg.config_path) {
+      try { const c = JSON.parse(readFileSync(cfg.config_path, "utf8")); writeFileSync(cfg.config_path, JSON.stringify({ ...c, ...set }, null, 2), { mode: 0o600 }); }
+      catch (e) { log.warn?.(`policy not persisted: ${e.message}`); }
+    }
+    Object.assign(cfg, set);
+    if (p.paused !== undefined) policyPaused = p.paused;
+    log.info?.(`policy applied: ${Object.keys(set).join(", ") || "none"}`);
+    return { status: 200, body: { ok: true, applied: Object.keys(p), paused: Boolean(cfg.paused || ownerPaused || policyPaused), owner_paused: ownerPaused } };
+  }
   /** #5856: reserved vs borrowable headroom for the router (only when reservations or idle_only are configured). */
   function priorityView() {
     if (!weighted()) return {};
@@ -339,7 +360,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const active = Object.values(sb()).filter((s) => s.state !== "exited").length;
     const e = effectiveCapacity();
     const h = live(cfg);
-    return { host: cfg.name ?? hostname(), ...running, vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.log && upgrade.state === "failed" ? { upgrade_log: upgrade.log } : {}), ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10 }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...throttleView(h), ...diskView(), ...laneDiskView(), ...hostDiskView(active), net: readNet(), paused: Boolean(cfg.paused || ownerPaused), owner_paused: ownerPaused, live: h, usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
+    return { host: cfg.name ?? hostname(), ...running, vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.log && upgrade.state === "failed" ? { upgrade_log: upgrade.log } : {}), ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10 }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...throttleView(h), ...diskView(), ...laneDiskView(), ...hostDiskView(active), net: readNet(), paused: Boolean(cfg.paused || ownerPaused || policyPaused), owner_paused: ownerPaused, live: h, usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
   }
 
   /** The image a spec's lanes run (the per-repo lane_tools tag when tools are listed), without building it. */
@@ -916,6 +937,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       return { status: 200, body: { rows: rows.slice(-500) } };
     }],
     [route("POST", "/admin/resize"), async (_p, body) => resize(body ?? {})],
+    [route("POST", "/admin/policy"), async (_p, body) => applyPolicy(body)], // #5886
     [route("POST", "/pause"), async () => setOwnerPause(true)], // #5885: box-local `forgedock pool pause`; running lanes finish
     [route("POST", "/resume"), async () => setOwnerPause(false)],
     [route("POST", "/admin/update"), async () => { selfUpdate(); return { status: 202, body: { ok: true, from: running } }; }],

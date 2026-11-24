@@ -45,6 +45,7 @@ checkout_repo() {
   if [ -n "${CS_REPO_URL:-}" ]; then
     # Shared bare mirror in the cache volume: later lanes fetch a delta instead of a full clone.
     mirror="/cache/git/$(echo "${CS_REPO_SLUG:-repo}" | tr '/' '_').git"
+<<<<<<< HEAD
     # #5949: a mirror seeded by the dispatcher (cs-seeded marker, written by the agent's atomic apply) is cloned from directly:
     # no GitHub transfer is needed to start. Its fetch is best effort with retries, and skipped when it already has the lane ref.
     if [ -f "$mirror/cs-seeded" ]; then
@@ -70,8 +71,16 @@ checkout_repo() {
       mkdir -p /cache/git
       git clone --mirror --quiet "$CS_REPO_URL" "$mirror"
     fi
+=======
+    # #5947: mirror.sh validates (refs, no empty objects), quarantines a bad one, builds under a lock; `direct` = no --reference.
+    use="$(/usr/local/bin/cs-mirror prepare "$CS_REPO_URL" "$mirror" 2>/dev/null || echo direct)"
+>>>>>>> origin/staging
     rm -rf /work/repo
-    git clone --quiet --reference "$mirror" ${CS_REPO_REF:+--branch "$CS_REPO_REF"} "$CS_REPO_URL" /work/repo
+    if [ "$use" = "ok" ]; then
+      git clone --quiet --reference "$mirror" ${CS_REPO_REF:+--branch "$CS_REPO_REF"} "$CS_REPO_URL" /work/repo
+    else
+      git clone --quiet ${CS_REPO_REF:+--branch "$CS_REPO_REF"} "$CS_REPO_URL" /work/repo
+    fi
     cd "$(readlink -f /work/repo)"
   fi
 }

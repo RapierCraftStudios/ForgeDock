@@ -554,7 +554,7 @@ export function containerProvider({ batch, repo, image, gitDir, cacheDir = `${ho
     async status(h) {
       let s;
       try { s = String(await docker(["inspect", "-f", "{{.State.Status}}", h.id])).trim(); } catch { return "gone"; }
-      return ["running", "created", "restarting"].includes(s) ? "running" : "exited";
+      return ["running", "created", "restarting", "paused"].includes(s) ? "running" : "exited";
     },
     async fetchResult(h) {
       const r = readJson(batch.resultFile(h?.issue));

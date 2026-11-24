@@ -95,7 +95,7 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
       if (r.status === 404) return "gone";
       if (!r.ok) throw Object.assign(fail("status", r), r.status === 401 ? { transient: true } : {}); // #5053: the sandbox launched, so a 401 is retried like an unreachable pool
       const s = String(r.data?.state ?? "");
-      return s === "running" || s === "pending" || s === "starting" ? "running" : s === "gone" ? "gone" : "exited";
+      return s === "running" || s === "pending" || s === "starting" || s === "paused" ? "running" : s === "gone" ? "gone" : "exited";
     },
     async logs(id, cursor = 0) { const r = await call("GET", `${p(id)}/logs?cursor=${encodeURIComponent(cursor)}`); return r.ok ? { text: String(r.data?.text ?? ""), cursor: r.data?.cursor ?? cursor } : { text: "", cursor }; },
     async result(id) { const r = await call("GET", `${p(id)}/result`); if (r.status === 401) throw Object.assign(fail("result", r), { transient: true }); if (r.ok && r.data?.disk_pressure === true) return { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_DISK_PRESSURE, retryInSeconds: 120, cost_usd: 0, detail: `sandbox ${id} was stopped to save the host drive (disk pressure); worktree and volume kept, requeued to resume` }; /* #5891 */ if (r.ok && r.data?.drained === true) return { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, retryInSeconds: 60, cost_usd: 0, detail: `sandbox ${id} was drained to free capacity for reserved work (${String(r.data.reason ?? "").slice(0, 120)}); rescheduled` }; /* #5856 */ return r.ok && r.data && typeof r.data === "object" ? r.data : null; },
@@ -117,6 +117,7 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
       if (!Array.isArray(r.data?.agents)) throw new Error("agent disk: malformed router answer");
       return r.data.agents.map((a) => ({ name: String(a?.name ?? "?"), disk_free_gb: Number.isFinite(a?.disk_free_gb) ? a.disk_free_gb : null }));
     },
+<<<<<<< HEAD
     /** #5949: the agent mirror's ref tips for a repo ({mirrors: {slug: {ref: sha} | "absent"}, upload_offset?}); 404/405 = an older router/agent (unsupported). */
     async mirrors(id, q) {
       const r = await call("GET", `${p(id)}/mirrors?${new URLSearchParams(Object.entries(q).filter(([, v]) => v !== null && v !== undefined).map(([k, v]) => [k, String(v)]))}`);
@@ -130,6 +131,17 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
       if (r.status === 404 || r.status === 405) throw Object.assign(fail("seed", r), { unsupported: true });
       if (!r.ok) throw Object.assign(fail("seed", r), Number.isInteger(r.data?.offset) ? { offset: r.data.offset } : {});
       return r.data ?? {};
+=======
+    /** #5735: lane sandboxes per pool agent (`GET /agents` -> `agents[].lanes {used, ceiling}`) and across all batches (`remote_lanes`; else the `fdrsbx-` keys of `sandboxes`). A bad answer throws. */
+    async agentLanes() {
+      const r = await call("GET", "/agents");
+      if (!r.ok) throw fail("agent lanes", r);
+      if (!Array.isArray(r.data?.agents)) throw new Error("agent lanes: malformed router answer");
+      const int = (v) => (Number.isInteger(v) && v >= 0 ? v : null);
+      const agents = r.data.agents.map((a) => ({ name: String(a?.name ?? "?"), used: int(a?.lanes?.used) ?? 0, ceiling: int(a?.lanes?.ceiling) }));
+      const sb = r.data.sandboxes && typeof r.data.sandboxes === "object" ? Object.keys(r.data.sandboxes) : [];
+      return { agents, total: int(r.data.remote_lanes) ?? sb.filter((id) => id.startsWith("fdrsbx-")).length };
+>>>>>>> origin/staging
     },
     async relayPending(id) { const r = await call("GET", `${p(id)}/relay`); return r.ok && Array.isArray(r.data?.requests) ? r.data.requests : []; },
     async relayAnswer(id, rid, out) { const r = await call("POST", `${p(id)}/relay/${encodeURIComponent(rid)}`, out); if (!r.ok) throw fail("relay answer", r); return true; },

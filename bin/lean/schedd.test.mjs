@@ -149,6 +149,25 @@ describe("schedd host scheduler (#4192)", () => {
     } finally { await h.cleanup(); }
   });
 
+  it("#5947 clear-breaker on a hosted batch reaches the live runner, which acknowledges it (no daemon restart)", async () => {
+    const h = host();
+    try {
+      const d = await h.daemon();
+      const all = capture(() => h.inWork(() => orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client)));
+      await until(() => h.launched().length === 1 && h.lanePids().length === 1);
+      const [id] = listBatches(h.root);
+      const r = await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "clear-breaker", id }, undefined, { timeoutMs: 20000 });
+      assert.equal(r.type, "ok");
+      assert.equal(r.hosted, true);
+      assert.equal(r.acknowledged, true, "the hosted runner consumed the request and acked");
+      assert.equal(openBatch(h.root, id).readClearBreakerAck().cleared, false, "no breaker was tripped");
+      assert.equal(existsSync(join(h.root, id, "clear-breaker")), false, "the request file is consumed");
+      assert.equal((await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "status" })).pid, d.pid, "same daemon");
+      writeFileSync(h.release, "");
+      await all;
+    } finally { await h.cleanup(); }
+  });
+
   it("a client that disconnects does not stop the batch; --resume reattaches, and replays the report once done", async () => {
     const h = host(); h.enter(); // admission off: this test needs >1 concurrent local lane on any host
     try {

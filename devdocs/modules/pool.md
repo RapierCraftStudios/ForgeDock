@@ -18,6 +18,15 @@ Rolling per-module knowledge log. Hard cap: 150 lines.
 - `pool/image/entrypoint.sh`: a seeded mirror is cloned `--shared` with no GitHub fetch when it already has the lane ref (else a best-effort fetch, 3 tries); origin is reset to GitHub, so pushes stay there. Unseeded mirrors keep the old clone/fetch path.
 - `execution.repo_source: dispatcher | github | auto` (default auto): github never seeds; dispatcher fails the launch when seeding fails; auto falls back to the GitHub path.
 
+## Entry 2026-11-21 — Per-host lane ceiling (#5735)
+
+- Decision: `devdocs/decisions/5735-host-lane-ceiling.md`.
+- `bin/pool/router.mjs`: a lane sandbox is one whose id starts with `fdrsbx-`. Ceiling = the agent state entry's `max_lanes`, else router.json `agents.<name>.max_lanes`; no valid value = no ceiling. Used = placed `fdrsbx-` sandboxes on the agent plus in-flight reservations, taken synchronously before the agent POST (launch and warm claim) and released in `finally`.
+- `launch()` skips agents at the ceiling for a new lane id. When none is left and one was skipped for the ceiling: 503 `{error, code: "pool.host_lane_ceiling", agents: [{name, used, ceiling}]}` with Retry-After (a capacity deferral in the dispatcher). Re-launch of a placed id is not re-checked. `claim()` skips capped agents (404, then a cold launch).
+- `GET /agents`: each agent gains `lanes {used, ceiling|null}`; the body gains `remote_lanes`. `POST /agents/:name/limit {max_lanes: N|null}` (fd token; 404 unknown agent, 400 bad value) sets or clears the ceiling; re-enrollment keeps it.
+- `bin/pool/cli.mjs`: `forgedock pool limit <agent> --lanes N|none`; `status` adds `<agent>: lanes used/ceiling` and `remote lanes across batches: N`. `bin/lean/sandbox-remote.mjs` `agentLanes()` feeds the `--set-max-remote` note.
+- Tests: `bin/tests/computeshare.test.mjs` (lane ceiling), `bin/tests/pool-cli.test.mjs`.
+
 ## Entry 2026-11-24 — pool status table, owner pause/resume (#5885, parent #5857)
 
 - `forgedock pool status` prints one row per host from router `GET /agents`: HOST, CPUS and MEM GB as used/borrowable/total (used = total - free; borrowable = `cpus_borrowable`/`mem_borrowable_gb` on weighted agents, else free), ACTIVE, THROTTLED, PAUSED (`no`, `owner`, `resize`, `yes`), REASON (owner pause, resize drain, idle gate, last drain). Unreachable agents show `unreachable: <error>`. The `<name>: transport <t>` lines follow. `--json` prints the raw `/agents` body as before.
@@ -92,3 +101,18 @@ The router ships agents only `AGENT_BUNDLE_PATHS` (`package.json`, `bin/pool`, `
 
 - `bin/pool/cache-sweep.mjs`: pure `planCacheCap` (oldest-first, live work dirs never chosen) and `planIdleEviction` (last use known, idle, unreferenced, not never-evict); `sweepVolume` runs in a lane-image container (`docker.sweepCache`, 10 min timeout, source passed via env) and ages out uv/npm/pip/poetry, forge-depcache, env entries, prunes pnpm, `git gc --auto`.
 - `agent.mjs` `cacheSweep` runs from `reap()` every `cache_sweep_interval_s`; failures land in `/capacity` `cache_sweep_error` (also work-dir sweep/destroy failures), sizes in `cache_volumes`. Volumes are created with label `computeshare.cache=1` (`docker.createVolume`); `gc.mjs` reports them, never reclaims (`forgedock.owner=1` stays the only reclaim label). Entrypoint writes `/cache/.last-used`.
+
+## Entry 2026-11-24 — mirror integrity, net.transient, live --clear-breaker (#5947)
+
+- `pool/image/mirror.sh` (installed as `cs-mirror`; `checkout_repo` calls `cs-mirror prepare <url> <mirror>`): a mirror is valid with refs and no zero-length file under `objects/` (`MIRROR_FSCK=1` adds `fsck --connectivity-only`). Valid: `ok`, the lane clones with `--reference`. Bad: quarantined as `<name>.git.corrupt-<ts>`, the lane clones directly (`direct`), and one background rebuild runs. A failed mirror step never fails a lane.
+- Builds hold a per-repo `flock` (`<name>.git.lock` under `/cache/git`), clone into `<name>.git.tmp-<pid>` with retries and rename only when refs exist, so a timed-out clone leaves no `<name>.git`. Ten concurrent lanes on a missing mirror build it once.
+- `forgedock env ensure` does the same validity check before `git clone --shared`; an unhealthy mirror is "not ready" (exit 0) unless `--url` gives a direct clone source.
+- `orchestrate.mjs`: git transport failures (`GIT_TRANSPORT_TEXT`: curl 56/28, early EOF, RPC failed, invalid index-pack output, unexpected disconnect, not a local repository) end a lane as a `net.transient` deferral with the #5161 backoff, capped by `max_deferrals`. They never reach `noteEngineError`, so the breaker does not count them.
+- `forgedock orchestrate --clear-breaker <id>` on a schedd-hosted batch sends `{op:"clear-breaker"}`; the runner consumes the batch's `clear-breaker` request file, resets its in-memory breaker, writes `clear-breaker.ack`, and the CLI prints whether the live runner acknowledged. Unhosted batches keep the state.json rewrite.
+
+## Entry 2026-11-24 — device login, accounts, per-box policy (#5886)
+
+- `router.mjs`: `POST /device/code` (auth none; rate limited by `device_codes_per_min`, TTL `device_ttl_s`), `POST /device/approve` (forgedock token; binds a user code to an `account` label), `POST /device/token` (poll: `authorization_pending`, `slow_down` when faster than `interval`, `expired_token`, then a single-use enroll code carrying the account). `enroll()` stamps `account` on the agent record; legacy tokens and `/codes` are unchanged. State lives in `store.data.devices`, read with `own()`.
+- `GET /agents?account=` filters agents (and their sandboxes); `account`/`policy` appear only on records that have them, so legacy output is byte-identical. `launch`/`claim` honour `spec.account` (only that account's agents); no account means any agent, as before.
+- `PUT /agents/:name/policy` validates an allowlist (`cpus`, `mem_gb`, `idle_only`, `paused`, `floors.host_disk_gb`), stores it on the record and pushes to the agent's `POST /admin/policy`; an unreachable box keeps `policy_pending` and `tick()` re-pushes. The agent persists the keys beside its config; the router's `paused` is `policyPaused`, separate from `owner_paused`, so the router can never clear the owner's pause.
+- CLI: `pool link <user_code> [--account A]`, `pool policy <agent> [--cpus --mem --idle-only --pause]`, `pool status --account A` (ACCOUNT column only when an agent has one). Installer: `install-agent-linux.sh --device`. Tests: `bin/tests/pool-device.test.mjs`.

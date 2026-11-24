@@ -15,18 +15,21 @@ import { call as httpCall } from "./http.mjs";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const loadJson = (p) => JSON.parse(readFileSync(p, "utf8"));
 
-const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB --agent-url URL | --outbound | --one-liner] | status [--json] | pause | resume | uninstall --yes | upgrade [agent] | remove <agent>  [--config path]";
+const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB --agent-url URL | --outbound | --one-liner] | status [--json] [--account A] | link <user_code> [--account A] | policy <agent> [--cpus N --mem GB --idle-only --pause --resume-policy] | limit <agent> --lanes N|none | pause | resume | uninstall --yes | upgrade [agent] | remove <agent>  [--config path]";
 const HELP_FLAGS = ["--help", "-h"];
 // Flags each verb accepts: `value` flags consume the next token, `bool` flags stand alone. Anything else dash-prefixed is rejected (#5008).
 const VERB_FLAGS = {
   router: { value: ["--config"], bool: [] },
   agent: { value: ["--config"], bool: [] },
-  status: { value: ["--config"], bool: ["--json"] },
+  status: { value: ["--config", "--account"], bool: ["--json"] },
+  link: { value: ["--config", "--account"], bool: [] },
+  policy: { value: ["--config", "--cpus", "--mem"], bool: ["--idle-only", "--no-idle-only", "--pause", "--resume-policy"] },
   pause: { value: ["--config"], bool: [] },
   resume: { value: ["--config"], bool: [] },
   uninstall: { value: ["--config"], bool: ["--yes"] },
   upgrade: { value: ["--config"], bool: [] },
   remove: { value: ["--config"], bool: [] },
+  limit: { value: ["--config", "--lanes"], bool: [] },
   enroll: { value: ["--config", "--cpus", "--mem", "--agent-url"], bool: ["--outbound", "--one-liner"] },
   "install-command": { value: ["--config", "--cpus", "--mem", "--agent-url"], bool: ["--outbound", "--one-liner"] },
   resize: { value: ["--config", "--cpus", "--mem", "--vm-cpus", "--vm-mem", "--vm-swap"], bool: ["--drain"] },
@@ -46,16 +49,18 @@ function rejectUnknownFlags(cmd, rest) {
 const num = (x) => (Number.isFinite(x) ? String(Math.round(x * 10) / 10) : "-");
 /** #5885: one row per host: used/borrowable/total cpus and memory, lane counts, pause state and why lanes are throttled or drained. */
 export function statusTable(agents) {
-  const head = ["HOST", "CPUS used/borrow/total", "MEM GB used/borrow/total", "ACTIVE", "THROTTLED", "PAUSED", "REASON"];
+  const withAccount = agents.some((a) => a.account); // #5886: the column appears only when an agent has an account
+  const head = ["HOST", ...(withAccount ? ["ACCOUNT"] : []), "CPUS used/borrow/total", "MEM GB used/borrow/total", "ACTIVE", "THROTTLED", "PAUSED", "REASON"];
   const rows = agents.map((a) => {
     const name = a.name ?? a.host ?? "?";
-    if (a.ok === false) return [name, "-", "-", "-", "-", "-", `unreachable${a.error ? `: ${a.error}` : ""}`];
+    const acct = withAccount ? [a.account ?? "-"] : [];
+    if (a.ok === false) return [name, ...acct, "-", "-", "-", "-", "-", `unreachable${a.error ? `: ${a.error}` : ""}`];
     const used = (tot, free) => (Number.isFinite(tot) && Number.isFinite(free) ? tot - Math.max(0, free) : null);
     const borrow = (b, free) => num(b ?? free);
     const paused = a.owner_paused ? "owner" : a.paused ? (a.pending_resize ? "resize" : "yes") : "no";
     const why = [a.owner_paused ? "paused by owner" : null, a.paused && !a.owner_paused && a.pending_resize ? "draining for resize" : null,
       a.idle_gate ? `owner busy: ${a.idle_gate}` : null, a.last_drain ? `last drain ${a.last_drain.sandbox} at ${a.last_drain.at}: ${a.last_drain.reason}` : null].filter(Boolean).join("; ");
-    return [name, `${num(used(a.cpus_total, a.cpus_free))}/${borrow(a.cpus_borrowable, a.cpus_free)}/${num(a.cpus_total)}`,
+    return [name, ...acct, `${num(used(a.cpus_total, a.cpus_free))}/${borrow(a.cpus_borrowable, a.cpus_free)}/${num(a.cpus_total)}`,
       `${num(used(a.mem_total_gb, a.mem_free_gb))}/${borrow(a.mem_borrowable_gb, a.mem_free_gb)}/${num(a.mem_total_gb)}`,
       String(a.active ?? "-"), String(a.throttled ?? 0), paused, why || "-"];
   });
@@ -108,10 +113,13 @@ export async function runPoolCli(argv, deps = {}) {
     }
     case "status": {
       const cfg = routerConfig();
-      const r = await call(`http://${cfg.listen.host}:${cfg.listen.port}`, "GET", "/agents", { token: cfg.forgedock_token });
+      const r = await call(`http://${cfg.listen.host}:${cfg.listen.port}`, "GET", `/agents${flag("account") ? `?account=${encodeURIComponent(flag("account"))}` : ""}`, { token: cfg.forgedock_token });
       if (rest.includes("--json")) console.log(JSON.stringify(r.data, null, 2));
       else if (!r.ok) throw new Error(`router refused: HTTP ${r.status} ${JSON.stringify(r.data)}`);
       else console.log(statusTable(r.data?.agents ?? []));
+      // #5735: lane sandboxes used/ceiling per agent, and the lane total across all batches
+      for (const a of Array.isArray(r.data?.agents) ? r.data.agents : []) if (a?.lanes) console.log(`${a.name}: lanes ${a.lanes.used}/${a.lanes.ceiling ?? "-"}`);
+      if (Number.isInteger(r.data?.remote_lanes)) console.log(`remote lanes across batches: ${r.data.remote_lanes}`);
       for (const a of r.data?.agents ?? []) {
         if (a.transport) console.log(`${a.name}: transport ${a.transport}`); // #5882
         const n = a.net; // #5923
@@ -119,6 +127,43 @@ export async function runPoolCli(argv, deps = {}) {
         if (!Number.isFinite(a.host_disk_free_gb)) continue;
         console.error(`${a.name}: host_disk_free_gb ${a.host_disk_free_gb}${Number.isFinite(a.host_disk_growth_gb_per_h) ? `, growth ${a.host_disk_growth_gb_per_h} GB/h` : ""}${a.disk_warning ? ` WARNING: ${a.disk_warning}` : ""}`);
       }
+      break;
+    }
+    case "link": {
+      // #5886: approve the user code a box printed (`install ... --device`), binding it to an account; the box then enrolls itself.
+      const code = rest.find((x) => !x.startsWith("--") && x !== flag("config") && x !== flag("account"));
+      if (!code) throw new Error("usage: forgedock pool link <user_code> [--account A]");
+      const cfg = routerConfig();
+      const r = await call(`http://${cfg.listen.host}:${cfg.listen.port}`, "POST", "/device/approve", { body: { user_code: code, ...(flag("account") ? { account: flag("account") } : {}) }, token: cfg.forgedock_token });
+      if (!r.ok) throw new Error(`router refused: HTTP ${r.status} ${JSON.stringify(r.data)}`);
+      console.log(`linked ${code} to account ${r.data.account}; the box enrolls on its next poll`);
+      break;
+    }
+    case "policy": {
+      // #5886: a per-box policy the router stores and pushes; the box owner's own pause is never cleared by it.
+      const name = rest.find((x) => !x.startsWith("--") && x !== flag("config") && x !== flag("cpus") && x !== flag("mem"));
+      if (!name) throw new Error("usage: forgedock pool policy <agent> [--cpus N --mem GB --idle-only --pause]");
+      const body = { ...(flag("cpus") ? { cpus: Number(flag("cpus")) } : {}), ...(flag("mem") ? { mem_gb: Number(flag("mem")) } : {}),
+        ...(rest.includes("--idle-only") ? { idle_only: true } : rest.includes("--no-idle-only") ? { idle_only: false } : {}),
+        ...(rest.includes("--pause") ? { paused: true } : rest.includes("--resume-policy") ? { paused: false } : {}) };
+      if (!Object.keys(body).length) throw new Error("usage: forgedock pool policy <agent> [--cpus N --mem GB --idle-only --pause]");
+      const cfg = routerConfig();
+      const r = await call(`http://${cfg.listen.host}:${cfg.listen.port}`, "PUT", `/agents/${encodeURIComponent(name)}/policy`, { body, token: cfg.forgedock_token, timeoutMs: 30000 });
+      if (!r.ok && r.status !== 202) throw new Error(`${name}: HTTP ${r.status} ${JSON.stringify(r.data)}`);
+      console.log(`${name}: policy ${JSON.stringify(r.data?.policy ?? body)}${r.data?.pushed === false ? " (stored; the box is unreachable, it is re-pushed when it returns)" : ""}`);
+      break;
+    }
+    case "limit": {
+      // #5735: forgedock pool limit <agent> --lanes N|none: the agent's lane sandbox ceiling across all batches.
+      const name = rest.find((x, i) => !x.startsWith("--") && !["--lanes", "--config"].includes(rest[i - 1]));
+      const v = flag("lanes");
+      if (!name || v === undefined) throw new Error("usage: forgedock pool limit <agent> --lanes N|none");
+      if (v !== "none" && !/^\d+$/.test(v)) throw new Error("usage: --lanes must be a non-negative integer or none");
+      const max_lanes = v === "none" ? null : parseInt(v, 10);
+      const cfg = routerConfig();
+      const r = await call(`http://${cfg.listen.host}:${cfg.listen.port}`, "POST", `/agents/${encodeURIComponent(name)}/limit`, { body: { max_lanes }, token: cfg.forgedock_token, timeoutMs: 30000 });
+      if (!r.ok) throw new Error(`${name}: HTTP ${r.status} ${JSON.stringify(r.data)}`);
+      console.log(`${name}: max_lanes ${max_lanes ?? "none"}`);
       break;
     }
     case "pause":

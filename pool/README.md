@@ -12,6 +12,10 @@ ForgeDock's built-in remote compute pool (imported from computeshare; AGPL-3.0-o
   Uninstall: `curl -fsSL '<router>/install' | sh -s -- --uninstall` (or `pool/install/uninstall-agent-linux.sh` / `uninstall-agent-macos.sh`,
   `--dry-run` to preview). It removes the service, this agent's labelled containers, volumes and lane images and its files; docker and node
   only when `/etc/computeshare/installed-by` records that the installer added them. Never a `docker system prune`.
+  Device login (#5886): `install-agent-linux.sh --router URL --device` prints a user code and polls; on your ForgeDock machine run
+  `forgedock pool link <user_code> [--account A]` and the box enrolls itself, stamped with that account. `forgedock pool status --account A`
+  shows one account's boxes; `forgedock pool policy <agent> [--cpus N --mem GB --idle-only --pause]` sets a per-box policy the router pushes
+  (the box owner's own `pool pause` always wins). A launch spec with `account` is placed only on that account's boxes.
 - `pool/services/` opt-in caching proxies (npm, PyPI, apt) and a read-only git mirror (`docker-compose.yml`); nothing starts them. See `docs/ENV-LIBRARY.md`.
 - Tests: `bin/tests/computeshare.test.mjs`.
 

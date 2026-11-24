@@ -223,6 +223,11 @@ export function openBatch(root, id) {
       if (!Number.isInteger(k) || k < 1) throw new Error("parallel must be a positive integer");
       put(f("parallel"), `${k}\n`);
     },
+    /** #5947: `--clear-breaker` for a hosted runner: the request file (a timestamp) is consumed by the runner, which answers in `clear-breaker.ack`. */
+    requestClearBreaker: () => { try { rmSync(f("clear-breaker.ack"), { force: true }); } catch { /* best effort */ } const at = Date.now(); put(f("clear-breaker"), `${at}\n`); return at; },
+    readClearBreaker: () => { try { readFileSync(f("clear-breaker"), "utf8"); rmSync(f("clear-breaker"), { force: true }); return true; } catch { return false; } },
+    ackClearBreaker: (info = {}) => put(f("clear-breaker.ack"), JSON.stringify({ at: Date.now(), ...info }) + "\n"),
+    readClearBreakerAck: () => readJson(f("clear-breaker.ack")),
     /** Live execution override (#5138): the `execution` file `{maxRemote?, mode?, provider?}`, read on every admission; null when missing or invalid. */
     readExecution: () => sanitizeOverride(readJson(f("execution"))),
     /** Merge a validated patch into the `execution` file. @returns the stored override. */
