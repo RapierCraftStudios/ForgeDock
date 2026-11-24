@@ -221,7 +221,8 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   lockCheckMs = LOCK_CHECK_MS, admitMs = Number(process.env.FORGEDOCK_SCHEDD_ADMIT_MS) || ADMIT_MS, lagMs = LAG_MS, stallCheckMs = Number(process.env.FORGEDOCK_SCHEDD_STALL_CHECK_MS) || 60_000, stallMin = Number(process.env.FORGEDOCK_SCHEDD_STALL_MIN) || DEFAULT_STALL_MIN, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS, preflight = null,
   abandonMs = (Number(process.env.FORGEDOCK_SCHEDD_ABANDON_DAYS) > 0 ? Number(process.env.FORGEDOCK_SCHEDD_ABANDON_DAYS) * 24 * 3600 * 1000 : ABANDON_AGE_MS), killChildren = killTrackedChildren,
   hostLoad = liveOverload(), installedVersion = readInstalledVersion, respawn = undefined, probeEnv = (env) => probeBatchEnv(env), restartForStall = undefined,
-  exit = null, hardExitMs = HARD_EXIT_MS, unit = unitState, probe = undefined, successorMs = SUCCESSOR_MS, successorPollMs = 200 } = {}) {
+  exit = null, hardExitMs = HARD_EXIT_MS, unit = unitState, probe = undefined, successorMs = SUCCESSOR_MS, successorPollMs = 200, rehost = undefined } = {}) {
+  const startOpts = arguments[0] ?? {};
   const p = scheddPaths(dir);
   // #5204: default handover target: a new daemon from the (new) install unless systemd restarts the unit itself
   const respawnFn = respawn !== undefined ? respawn : () => { if (!["active", "activating"].includes(unitState())) defaultSpawn({ dir }); };
@@ -240,7 +241,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   const conns = new Set();
   const runs = new Map(); // every runBatch in flight (hosted or not yet started) -> its AbortController (#4454)
   const starting = new Map(); // batch id -> host() promise of a start-up resume not yet hosted (#4503: an attach waits for it)
-  let closing = null, resolveClosed, keepSock = false, stopCode = null;
+  let closing = null, resolveClosed, keepSock = false, stopCode = null, rehosted = null;
   let idleTimer, lockTimer, lagTimer, stallTimer, dueTimer; // assigned below; close() clears them
   let lastActive = Date.now();
   const touch = () => { lastActive = Date.now(); };
@@ -548,7 +549,14 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       if (probeFn && !underUnit) {
         let ok = await waitListening();
         if (!ok) { log("schedd: successor not listening; retrying"); spawnOnce(); ok = await waitListening(); }
-        if (!ok) log(`schedd: no successor listening after ${successorMs} ms; exiting non-zero`);
+        if (!ok) {
+          // R1 (#5966): no successor came up: keep hosting by resuming the batches in this process (the lock is free again)
+          log(`schedd: no successor listening after ${successorMs} ms; hosting the batches again`);
+          try { rehosted = await (rehost !== undefined ? rehost() : startDaemon({ ...startOpts })); } catch (e) { log(`schedd: re-host failed: ${e?.message ?? e}`); }
+          if (rehosted?.running) { clearTimeout(hard); return; }
+          rehosted = null;
+          log("schedd: could not host again; exiting non-zero");
+        }
       }
     } catch (e) { log(`schedd: stop failed: ${e?.message ?? e}`); }
     clearTimeout(hard);
@@ -684,7 +692,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       started.catch((e) => log(`schedd: resume ${id} failed: ${e?.message ?? e}`)).finally(() => starting.delete(id));
     }
   }
-  return { running: true, pid, sock: p.sock, close, closed, stopCode: () => stopCode };
+  return { running: true, pid, sock: p.sock, close: () => (rehosted ? rehosted.close() : close()), closed, stopCode: () => stopCode, rehosted: () => rehosted };
 }
 
 /** #5204: `version` of the package.json of this install (../../package.json), null when it cannot be read. */

@@ -811,17 +811,29 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     }
   });
 
-  it("#5966: without a unit, a handover whose successor never listens retries once then exits non-zero (no silent zombie)", async () => {
+  it("#5966 R1: without a unit, a handover whose successor never listens keeps hosting (re-hosted here); if that fails it exits non-zero", async () => {
     const dir = tmpDir("schedd-nosucc-"), root = join(dir, "batches"), lines = [], exits = [];
     let version = "1.51.0", spawns = 0;
     const d = await startDaemon({ dir, root, log: (m) => lines.push(m), resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => null,
       exit: (c) => exits.push(c), respawn: () => { spawns++; }, probe: async () => false, successorMs: 50, successorPollMs: 10, runBatch: async () => ({}) });
     version = "1.52.0";
-    await until(() => exits.length > 0);
-    assert.deepEqual(exits, [1]);
-    assert.equal(spawns, 2, "the successor is started twice");
-    assert.ok(lines.some((l) => l.includes("no successor listening")));
-    await d.closed;
+    await until(() => d.rehosted());
+    const d2 = d.rehosted();
+    try {
+      assert.equal(d2.running, true, "a daemon hosts again and holds the lock");
+      assert.equal(readFileSync(scheddPaths(dir).lock, "utf8").trim(), String(process.pid));
+      assert.deepEqual(exits, [], "no exit while hosting continues");
+      assert.equal(spawns, 2, "the successor was started twice");
+      assert.ok(lines.some((l) => l.includes("hosting the batches again")));
+    } finally { await d2.close(); }
+    // re-host impossible -> exit non-zero
+    const dir2 = tmpDir("schedd-nosucc2-"), exits2 = [];
+    let v2 = "1.51.0";
+    await startDaemon({ dir: dir2, root: join(dir2, "batches"), log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => v2, unit: () => null,
+      exit: (c) => exits2.push(c), respawn: () => {}, probe: async () => false, successorMs: 30, successorPollMs: 10, rehost: async () => null, runBatch: async () => ({}) });
+    v2 = "1.52.0";
+    await until(() => exits2.length > 0);
+    assert.deepEqual(exits2, [1]);
   });
 
   it("#5966: a stall-recovery restart also exits (shared self-stop path)", async () => {
