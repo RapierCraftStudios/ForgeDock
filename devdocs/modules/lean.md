@@ -3635,3 +3635,8 @@ Cite: #5923.
 ## Dispatch-stall verdict is re-evaluated each tick (#5938)
 
 `batch-health.mjs` `evaluateDispatchStall` no longer counts an issue with a live `running` record (a recovery lane keeps it in `pending`) as ready, so a batch at running == K is healthy. The detail carries `runningSplit` (`running a/K (local x, remote y)`, remote = run record `remote`) and `lanes alive N min ago`. When every ready issue has a stored `capReasons[n]` (orchestrate persists the last `sandbox.capacity` / host-disk detail per issue, removed on dispatch; optional, state shape unchanged) the code is `pool-capacity` and names the pool's reason instead of `dispatch-stalled`. `schedd.mjs` evaluates every tick and `clearStaleStall` drops a stored stall that no longer holds (`STALL CLEARED <t>` in batch.log); `summaryLines` skips one that no longer holds. `schedd status` shows running/K with the split, last progress and lanes alive separately (`lastProgressMs` semantics unchanged: abandon decisions use it). `sched show` falls back to the run record placement for `agent`. `schedd watchdog` logs one `batchVerdict` line per batch (healthy, stalled -> action, stalled -> no action and why) via the `batchVerdicts` callback; heartbeat/kill/restart behaviour is unchanged.
+
+## Stacked dependency state: an open PR wins over a stale merged one (#5908)
+
+`depInfo` in `bin/lean/lean.mjs` lists every PR on the dependency branch name (`--state all`). It now returns `open` before `merged`, so a merged PR left from an earlier use of a reused branch name no longer satisfies the `merge.stacked_base` guard or ends the wait loop while the current dependency PR is still open. MERGED-only, CLOSED-only and empty/error lists map as before.
+Cite: #5908.
