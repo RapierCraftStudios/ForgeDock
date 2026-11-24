@@ -937,7 +937,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (train && row.outcome === "pr-ready" && Number.isInteger(r?.pr) && r?.head) { // #5836: the slot frees now; the train merges the PR
       const p = recovering.get(n);
       if (p) { recovering.delete(n); row.cost_usd = Math.round(((Number(row.cost_usd) || 0) + (Number(p.cost_usd) || 0)) * 1e6) / 1e6; row.minutes = Math.round(((Number(row.minutes) || 0) + (Number(p.minutes) || 0)) * 10) / 10; }
-      train.add({ issue: n, pr: r.pr, head: r.head, required: Array.isArray(r.required) ? r.required : [], policy: r.policy, lane: r.lane ?? rec?.lane ?? null, milestone: r.milestone });
+      train.add({ issue: n, pr: r.pr, head: r.head, required: Array.isArray(r.required) ? r.required : [], policy: r.policy, lane: r.lane ?? rec?.lane ?? null, milestone: r.milestone, postMerge: r.postMerge, laneSide: r.laneSide });
       results.set(n, row); done(); save(); update(row);
       return;
     }

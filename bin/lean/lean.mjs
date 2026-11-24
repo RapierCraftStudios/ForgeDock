@@ -4180,12 +4180,24 @@ export async function runCore(o) {
       return null;
     }
 
-    // #5836: only a plain merge is handed to the merge train: a split, an e2e gate, numbered sequence files or close-time records keep the lane waiting.
-    async function trainPlain() {
-      if (isSplit || seqLease || pendingRecord().length || closing.checklist || closing.liveBlocked || closing.transferred || closing.reason === "partial") return false;
-      if (e2eWanted({ cfg: vcfg.e2e, files: await changedFiles(), contract: effective }).run) return false;
-      if (io.sequenceCheck && io.sequenceLease && ((await io.sequenceSnapshot?.({ cwd: wt, base }).catch(() => null)) ?? []).length) return false;
-      return true;
+    // #5839: with the train on every lane kind but a split hands over at PR-ready (a split is never resolved by an LLM and is re-split on the new base, so it stays in-lane).
+    // The merge-time work of e2e, sequence-file and close-record lanes travels as a persisted post-merge record the train replays.
+    async function trainPlain() { return !isSplit; }
+    function postMergeRecord() {
+      const pend = pendingRecord(), notes = [];
+      const keepOpen = Boolean(closing.checklist || closing.liveBlocked || closing.transferred || pend.length);
+      if (pend.length) notes.push({ marker: "FORGE:FOLLOWUP_PENDING", body: renderPendingFollowups(pend, pr) });
+      if (closing.checklist) notes.push({ marker: "FORGE:TRACKED", body: `## Left open: partial\nMerged by PR #${pr}, but these acceptance criteria are not met by it:\n${(closing.unticked ?? []).map((u) => `- [ ] ${u}`).join("\n")}${closing.tracked?.length ? `\n\nTracked in ${closing.tracked.join(", ")}.` : ""}` });
+      if (closing.transferred) notes.push({ marker: "FORGE:TRACKED", body: `## Left open: transferred, not met\nMerged by PR #${pr}, but these end-to-end/manual requirements were not run in the lane:\n${(closing.transfer ?? closing.open ?? []).map((r) => `- ${r.id}`).join("\n")}` });
+      if (closing.liveBlocked) notes.push({ marker: "FORGE:TRACKED", body: `## Left open: live acceptance deferred on a default-on change\nMerged by PR #${pr}, but these requirements still need live verification:\n${(closing.blocks ?? []).map((b) => `- ${b.id} (flag ${b.flag})`).join("\n")}` });
+      if (!keepOpen && closing.tracked?.length) notes.push({ marker: "FORGE:TRACKED", body: `## Remaining work tracked\nClosed as completed by PR #${pr}. The contracted deferred and post-deploy requirements are tracked in ${closing.tracked.join(", ")}.` });
+      return { keepOpen, notes, ...(pend.length ? { pendingFollowups: pend } : {}), ...(seqLease ? { sequence: true } : {}) };
+    }
+    async function trainHandover(why, conflicting = false) {
+      if (!conflicting && e2eHead !== localHead) { const g = await e2eGate(); if (g?.done) return g.done; if (g?.again) return { again: true }; } // the e2e gate runs at the head in the lane; its merge-time record is replayed by the train
+      ev({ event: "PR_READY", pr, head: localHead, required, policy });
+      T.merge = [policyText, `pr-ready: ${why}, merge handed to the train at ${localHead.slice(0, 12)}`];
+      return await finish("pr-ready", `PR #${pr} reviewed at ${localHead.slice(0, 12)}; ${why}, merge handed to the merge train`, { pr, head: localHead, required, policy, lane: resumed?.base ?? lane, ...(milestone ? { milestone } : {}), postMerge: postMergeRecord(), laneSide: { syncs, baseConflicts: conflicting ? 1 : 0 } });
     }
 
     // ---- 7. (sync) wait per policy, (sync) merge at the reviewed head ----
@@ -4253,7 +4265,9 @@ export async function runCore(o) {
     // A rerun on an existing PR goes through the same conflict check, so a conflicting PR from an earlier run recovers.
     for (;;) {
       const c0 = await prConflicting();
+      if (c0 && mergeTrain === "on" && !isSplit && await trainPlain()) return await trainHandover(c0 === "conflict" ? "PR conflicts with the base, handed to the train as base.conflict" : "no lane base-sync", c0 === "conflict"); // #5839
       if (c0) { const r = await baseSync(c0 === "unknown" ? "PR mergeability unknown" : "PR is conflicting", c0 === "unknown"); if (r) return r; }
+      if (mergeTrain === "on" && await trainPlain() && (policy === "none" || (policy === "required" && !required.length))) { const h = await trainHandover("no required checks"); if (h?.again) continue; return h; } // #5839
       if (policy === "none" || (policy === "required" && !required.length)) {
         // merge right after review
         T.merge = [policyText, "merged right after review"];
@@ -4283,7 +4297,7 @@ export async function runCore(o) {
           if (policy === "all") {
             // #4270: the lane's own report-only check never gates its own merge
             const w = await io.waitCiGreen(pr, repo, 0, ...(vcfg.checkRun === true ? [{ ignore: [VERIFY_CHECK_NAME] }] : [])).catch(() => ({ rc: 2, text: "" }));
-            if (w.rc === 0) { gateHead = /CI_GATE_HEAD:\s*([0-9a-f]{7,40})/.exec(w.text ?? "")?.[1] ?? null; break; }
+            if (w.rc === 0) { gateHead = /CI_GATE_HEAD:\s*([0-9a-f]{7,40})/.exec(w.text ?? "")?.[1] ?? null; if (mergeTrain === "on" && await trainPlain()) { const h = await trainHandover("CI green"); if (h?.again) continue; return h; } break; }
             if (w.rc === 1) return await needsHuman(`Remote CI failed on PR #${pr}:\n${String(w.text).slice(-2000)}`, OUTCOME_CODES.CI_RED);
           } else {
             try { states = (await io.checkStates(pr)) ?? []; } catch { states = []; }
@@ -4297,13 +4311,11 @@ export async function runCore(o) {
               startedAt = now(); pollIndex = 0; // the fixed head gets the full wait budget
               continue;
             }
-            if (required.every((n) => st(n) === "success")) break;
-            // #5836: with the merge train on, a plain merge whose required checks are still pending leaves the slot; the train merges it
+            // #5836/#5839: with the merge train on, a green or pending PR leaves the slot; the train is the one merge queue per base
             if (mergeTrain === "on" && required.length && await trainPlain()) {
-              ev({ event: "PR_READY", pr, head: localHead, required, policy });
-              T.merge = [policyText, `pr-ready: required checks pending, merge handed to the train at ${localHead.slice(0, 12)}`];
-              return await finish("pr-ready", `PR #${pr} reviewed at ${localHead.slice(0, 12)}; required checks pending, merge handed to the merge train`, { pr, head: localHead, required, policy, lane: resumed?.base ?? lane, ...(milestone ? { milestone } : {}) });
+              const h = await trainHandover(required.every((n) => st(n) === "success") ? "required checks green" : "required checks pending"); if (h?.again) continue; return h;
             }
+            if (required.every((n) => st(n) === "success")) break;
           }
           // #4266: a PR that turns conflicting gets no merge ref, so its pull_request workflows never start: base-sync now.
           const ms = await waitMergeState();

@@ -1502,12 +1502,14 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     assert.doesNotMatch(traj(w).join("\n"), /left open as partial/);
   });
 
-  it("#5836 merge train on: close-time records (a still-pending follow-up) keep the lane waiting, never pr-ready", async () => {
+  it("#5839 merge train on: close-time records (a still-pending follow-up) hand over with a keepOpen post-merge record", async () => {
     const k = two("defer", { why: "w" });
     const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], issueStates: { 900: "CLOSED" } });
     w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => [{ name: "build", state: "pending" }];
     const r = await run(w, { mergeTrain: "on", ciMaxMinutes: 5 });
-    assert.equal(r.terminalReason, "ci-pending"); assert.equal(w.merges.length, 0);
+    assert.equal(r.terminalReason, "pr-ready"); assert.equal(w.merges.length, 0);
+    assert.equal(r.postMerge.keepOpen, true); assert.ok(r.postMerge.pendingFollowups.length >= 1);
+    assert.ok(r.postMerge.notes.some((n) => n.marker === "FORGE:FOLLOWUP_PENDING"));
   });
 
   it("a tracking issue that is not open is not a tracking issue: the item stays pending and is recorded", async () => {
@@ -3301,11 +3303,24 @@ describe("merge_wait policy", () => {
       const w2 = world(); w2.io.requiredChecks = async () => ["build"]; w2.io.checkStates = async () => states({ build: "pending" });
       assert.equal((await run(w2, { ciMaxMinutes: 5, mergeTrain: "off" })).terminalReason, "ci-pending");
     });
-    it("on, already-green checks merge in the lane", async () => {
+    it("on, already-green checks are handed to the train too (#5839): one queue per base, no lane merge", async () => {
       const w = world(); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "success" });
       const r = await run(w, { mergeTrain: "on" });
+      assert.equal(r.terminalReason, "pr-ready"); assert.equal(w.merges.length, 0);
+      assert.deepEqual(r.postMerge, { keepOpen: false, notes: [] }); assert.equal(r.laneSide.syncs, 0);
+    });
+    it("off, already-green checks merge in the lane (unchanged)", async () => {
+      const w = world(); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "success" });
+      const r = await run(w, { mergeTrain: "off" });
       assert.equal(r.terminalReason, "merged");
       assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
+    });
+    it("on, a conflicting PR is handed over with no base-sync (the train hands back base.conflict)", async () => {
+      const CONFLICTING = { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }; const w = world({ prView: [CONFLICTING, CONFLICTING] }); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "success" });
+      const r = await run(w, { mergeTrain: "on" });
+      assert.equal(r.terminalReason, "pr-ready"); assert.equal(w.merges.length, 0);
+      assert.equal(r.laneSide.baseConflicts, 1);
+      assert.ok(!w.calls.some((c) => Array.isArray(c) && c[0] === "merge" && /origin\//.test(c.join(" "))), "no lane base-sync merge");
     });
     it("on, a red check still gets the lane's own outcome (never pr-ready)", async () => {
       const w = world(); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "failure" });
@@ -3313,14 +3328,15 @@ describe("merge_wait policy", () => {
       assert.equal(w.merges.length, 0);
     });
   });
-  describe("#5836 merge train: plain-merge gate keeps the lane waiting", () => {
+  describe("#5839 merge train: every lane kind but a split hands over", () => {
     const pending = (w) => { w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "pending" }); return w; };
-    it("numbered sequence files keep the lane waiting", async () => {
+    it("numbered sequence files hand over with a post-merge record", async () => {
       const w = pending(world());
       w.io.sequenceCheck = async () => []; w.io.sequenceLease = { acquire: async () => ({ waitMs: 0, timedOut: false, release: () => {} }) };
       w.io.sequenceSnapshot = async () => [{ path: "db/0007_usage.sql", blob: "b1" }];
       const r = await run(w, { mergeTrain: "on", ciMaxMinutes: 5 });
-      assert.notEqual(r.terminalReason, "pr-ready"); assert.equal(w.merges.length, 0);
+      assert.equal(r.terminalReason, "pr-ready"); assert.equal(w.merges.length, 0);
+      assert.equal(typeof r.postMerge.keepOpen, "boolean");
     });
   });
   describe("#4624 merge-time rerun / wait / flaky branch of mergeFixRound", () => {

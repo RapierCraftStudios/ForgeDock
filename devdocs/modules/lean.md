@@ -558,11 +558,13 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
 8. **Push + PR → merge** — merge policy `required` (default) | `all` | `none`;
    base-sync merges the lane in on conflict (never rebase/force-push); merge
    at the reviewed head → `merged`, or `ci-pending` after the CI wait. With `mergeTrain: on`
-   (`orchestration.merge_train`, default off, #5836) a plain merge (no split, e2e gate,
-   numbered sequence files or close-time records) whose required checks are still pending
-   ends `pr-ready` with `{pr, head, required, policy, lane}`, freeing the slot for the
-   batch's merge train (`bin/lean/mergetrain.mjs`); red checks still get the lane's CI
-   fix round and green ones merge in the lane. Each CI
+   (`orchestration.merge_train`, default off, #5836/#5839) every lane but a split ends `pr-ready` with
+   `{pr, head, required, policy, lane, postMerge, laneSide}` once reviewed: green, pending or conflicting, with no
+   lane base-sync (the train syncs a BEHIND PR and hands a conflicting one back as `base.conflict`). e2e, numbered-sequence and
+   close-record lanes hand over too: their merge-time work is the persisted `postMerge` record (`keepOpen`, notes,
+   pending follow-ups) that the train replays after the merge. Red checks still get the lane's CI
+   fix round; the train is `bin/lean/mergetrain.mjs`, and the default is chosen in
+   `devdocs/decisions/5839-merge-train-default.md`. Each CI
    wait poll re-reads mergeability (#4266): a PR that turned conflicting (its
    `pull_request` workflows never start) base-syncs at once and waits again,
    within the same base-sync limit (→ `base.conflict`); required checks that
@@ -3630,3 +3632,7 @@ Cite: #5923.
 ## Dispatch-stall verdict is re-evaluated each tick (#5938)
 
 `batch-health.mjs` `evaluateDispatchStall` no longer counts an issue with a live `running` record (a recovery lane keeps it in `pending`) as ready, so a batch at running == K is healthy. The detail carries `runningSplit` (`running a/K (local x, remote y)`, remote = run record `remote`) and `lanes alive N min ago`. When every ready issue has a stored `capReasons[n]` (orchestrate persists the last `sandbox.capacity` / host-disk detail per issue, removed on dispatch; optional, state shape unchanged) the code is `pool-capacity` and names the pool's reason instead of `dispatch-stalled`. `schedd.mjs` evaluates every tick and `clearStaleStall` drops a stored stall that no longer holds (`STALL CLEARED <t>` in batch.log); `summaryLines` skips one that no longer holds. `schedd status` shows running/K with the split, last progress and lanes alive separately (`lastProgressMs` semantics unchanged: abandon decisions use it). `sched show` falls back to the run record placement for `agent`. `schedd watchdog` logs one `batchVerdict` line per batch (healthy, stalled -> action, stalled -> no action and why) via the `batchVerdicts` callback; heartbeat/kill/restart behaviour is unchanged.
+
+## Merge train phase 3: one queue, no lane base-sync (#5839)
+
+With `mergeTrain: on` the lane skips its PR-ready base-sync and hands over green, pending and conflicting PRs; e2e, sequence-file and close-record lanes hand over with a persisted post-merge record that `mergetrain.mjs` replays (notes, then close unless `keepOpen`). Splits stay in-lane. `stats()`/`snapshot()` carry per-batch `baseConflicts`, `laneSide` counts and wait p50/p90 (a phase-2 snapshot restores as zero); the batch report prints them and a throughput line (`mergeThroughput` in `engine-cli.mjs`). The default stays off until measured data meets the target.
