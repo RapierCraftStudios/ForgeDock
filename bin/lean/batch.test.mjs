@@ -10,6 +10,8 @@ import { resolveLane, makeLaneCache } from "./lane.mjs";
 import { orchestrate, deferPolicy, DEFER_BACKOFF_S, formatOutcomeLists, CAPACITY_FALLBACK_AFTER, isTransientEngineError, transientRetryDelayMs, DEFAULT_TRANSIENT_RETRIES } from "./orchestrate.mjs";
 import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane, detachedLanes, stackedOnOf } from "./batch.mjs";
 import { makeLedger } from "./ledger.mjs";
+import { placeLane } from "./execution.mjs";
+import { liveRemote } from "./live-execution.mjs";
 import { providerLanes } from "./execution.mjs";
 import { orchestrateFromCli, runFromCli, readOrchestration, makeRelabelNeedsHuman, makeMarkRecovering, makeDispatchCheck } from "../engine-cli.mjs";
 
@@ -1616,6 +1618,42 @@ describe("#5138: live max_remote and placement of a running batch", () => {
     const rows = await done;
     assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged", "merged"]);
     assert.deepEqual(seen.find(([n]) => n === 3)[1], [3]);
+  });
+  const liveDrain = (state) => liveRemote({ isRemote: () => true, capacity: () => null }, { exec: { mode: "remote", maxRemote: 2 }, readOverride: () => ({ maxRemote: state.m }), place: (e) => placeLane({ exec: e }) });
+  it("#5933 remote batch at max_remote 0 holds lanes pending", async () => {
+    const st = { m: 0 }, seen = [];
+    const done = orchestrate({ issues: [1], parallel: 2, pollMs: 1, readBody: async () => "", sleep: tick, remote: liveDrain(st),
+      runOne: async (n, _ln, ctx = {}) => { seen.push([n, ctx.placement?.where]); return { terminalReason: "merged", pr: 100 + n }; } });
+    for (let i = 0; i < 20; i++) await tick();
+    assert.deepEqual(seen, [], "nothing runs, locally or remotely, at max_remote 0");
+    st.m = 1;
+    await done;
+    assert.deepEqual(seen, [[1, "remote"]]);
+  });
+  it("#5933 lowering max_remote to 0 leaves a running lane running", async () => {
+    const st = { m: 2 }, seen = [];
+    let open, running = false;
+    const gate = new Promise((r) => { open = r; });
+    const done = orchestrate({ issues: [1, 2], parallel: 2, pollMs: 1, readBody: async () => "", sleep: tick, remote: liveDrain(st),
+      runOne: async (n, _ln, ctx = {}) => { seen.push([n, ctx.placement?.where]); if (n === 1) { running = true; await gate; } return { terminalReason: "merged", pr: 100 + n }; } });
+    await until(() => running);
+    st.m = 0;
+    for (let i = 0; i < 20; i++) await tick();
+    assert.ok(!seen.some(([n, w]) => w === "local"), "no lane lands on the host");
+    open();
+    await new Promise((r) => setTimeout(r, 5));
+    st.m = 2;
+    const rows = await done;
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+  });
+  it("#5933 --set-max-remote 0 prints drain semantics", async () => {
+    const root = tmpDir("batch-drain-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: ["1"] });
+    const lines = [], l = console.log;
+    console.log = (...x) => { lines.push(x.join(" ")); };
+    try { await orchestrateFromCli(["--set-max-remote", "b1", "0"], { batchRoot: root }); } finally { console.log = l; }
+    assert.match(lines.join("\n"), /remote starts paused; nothing runs locally/);
   });
   it("--set-max-remote / --set-placement write the batch's execution file; bad values and provider-less remote refused", async () => {
     const root = tmpDir("batch-live-exec-");
