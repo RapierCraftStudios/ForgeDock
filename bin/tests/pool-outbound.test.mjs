@@ -1,14 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { tmpDir } from "./_tmp.mjs";
 import { createRouter } from "../pool/router.mjs";
 import { startPoll } from "../pool/agent.mjs";
 
 const quiet = { info() {}, warn() {}, error() {} };
 function mkRouter(extra = {}) {
-  const cfg = { state_dir: mkdtempSync(join(tmpdir(), "pool-outbound-")), enroll_token: "enroll-secret", forgedock_token: "fd", repos: {}, ...extra };
+  const cfg = { state_dir: tmpDir("pool-outbound-"), enroll_token: "enroll-secret", forgedock_token: "fd", repos: {}, ...extra };
   return createRouter(cfg, { log: quiet });
 }
 const req = (token, method = "GET", path = "/") => ({ method, url: path, headers: { authorization: `Bearer ${token}` }, socket: {} });
@@ -74,7 +72,7 @@ describe("outbound-only agent connection (#5882)", () => {
 
   it("a stale agent goes offline after poll_offline_s", async () => {
     let t = 1000;
-    const cfg = { state_dir: mkdtempSync(join(tmpdir(), "pool-outbound-")), enroll_token: "e", forgedock_token: "fd", repos: {}, poll_offline_s: 10 };
+    const cfg = { state_dir: tmpDir("pool-outbound-"), enroll_token: "e", forgedock_token: "fd", repos: {}, poll_offline_s: 10 };
     const router = createRouter(cfg, { log: quiet, now: () => t });
     const token = router.enroll({ token: "e", name: "a" }).body.agent_token;
     assert.equal((await hit(router, token, "GET", "/agent/poll?wait=0")).status, 204);
@@ -102,7 +100,7 @@ describe("outbound-only agent connection (#5882)", () => {
   it("direct-url agents are still dialed over HTTP", async () => {
     const calls = [];
     const fetchFn = async (url, init) => { calls.push(`${init.method} ${url}`); return { status: 200, ok: true, text: async () => JSON.stringify({ cpus_free: 2 }), headers: { get: () => null } }; };
-    const router = createRouter({ state_dir: mkdtempSync(join(tmpdir(), "pool-outbound-")), enroll_token: "e", forgedock_token: "fd", repos: {} }, { log: quiet, fetchFn });
+    const router = createRouter({ state_dir: tmpDir("pool-outbound-"), enroll_token: "e", forgedock_token: "fd", repos: {} }, { log: quiet, fetchFn });
     assert.equal(router.enroll({ token: "e", name: "d", url: "http://10.0.0.5:7711" }).status, 200);
     const caps = await router.capacities();
     assert.equal(caps[0].ok, true);
