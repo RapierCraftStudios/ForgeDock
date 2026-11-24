@@ -3658,3 +3658,7 @@ With `mergeTrain: on` the lane skips its PR-ready base-sync and hands over green
 
 `depInfo` in `bin/lean/lean.mjs` lists every PR on the dependency branch name (`--state all`). It now returns `open` before `merged`, so a merged PR left from an earlier use of a reused branch name no longer satisfies the `merge.stacked_base` guard or ends the wait loop while the current dependency PR is still open. MERGED-only, CLOSED-only and empty/error lists map as before.
 Cite: #5908.
+
+## Git transport failures defer as net.transient; --clear-breaker reaches a hosted runner (#5947)
+
+`orchestrate.mjs` `GIT_TRANSPORT_TEXT` (curl 56/28, early EOF, RPC failed, invalid index-pack output, unexpected disconnect, "is not a local repository") is part of `TRANSPORT_TEXT`. A lane ending engine-error with such detail settles as a `net.transient` deferral (backoff from `transientRetryDelayMs`) and never reaches `noteEngineError`, so the breaker does not count it; other engine-errors still do. `getClearBreaker` is polled with `getParallel`: when set, the runner resets `tripped`, `errorTimes` and `transportErrors`, saves, and calls `ackClearBreaker`; a tripped runner keeps polling at `pollMs`. `batch.mjs` holds the `clear-breaker` request file and `clear-breaker.ack`; `schedd.mjs` op `clear-breaker` writes the request, waits briefly for the ack and replies `{cleared, acknowledged, hosted}`. Pool mirror details: `modules/pool.md`.
