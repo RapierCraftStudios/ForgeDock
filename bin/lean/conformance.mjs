@@ -16,7 +16,18 @@ import { activationFailures } from "./activation.mjs";
 import * as nodeFs from "node:fs";
 import { tmpdir } from "node:os";
 
-export const DISPOSITIONS = Object.freeze(["deliver", "defer", "not-applicable", "post-deploy"]);
+export const DISPOSITIONS = Object.freeze(["deliver", "defer", "not-applicable", "post-deploy", "guidance"]);
+/** #5750: a proposed change the issue prescribes: non-binding; the builder follows, adapts or rejects it with a reason. Conformance judges the outcome rows only. */
+export const GUIDANCE = Object.freeze(["guidance"]);
+/** #5750: the outcome rows a contract binds the lane to; a contract with guidance rows keeps at least one. */
+export const BINDING = Object.freeze(["deliver", "defer", "post-deploy"]);
+const STANCE_RE = /\b(follow|adapt|reject)(?:s|ed|ing)?\b/i;
+/** #5750: the planned stance (follow|adapt|reject) of a guidance row's why, or null when the why names none or gives no reason. */
+export const guidanceStance = (why) => {
+  const m = STANCE_RE.exec(String(why ?? ""));
+  return m && /\w{2,}/.test(String(why).replace(m[0], "")) ? m[1].toLowerCase() : null;
+};
+const isGuidance = (r) => GUIDANCE.includes(r?.disposition);
 /** Dispositions the engine files as a tracked follow-up issue before anything merges. */
 export const TRACKED = Object.freeze(["defer", "post-deploy"]);
 /** forge#4165: where a plan decision's justification comes from; audits filter on lint|precedent. */
@@ -585,6 +596,8 @@ export function validateContract(c, issueText, { repro = false, pages = null, te
     if (r?.disposition === "post-deploy" && blank(r?.local_infeasible_why)) problems.push(`${id}: post-deploy needs local_infeasible_why: why a fixture or recorded response cannot check this locally (#5448)`);
     if (r?.disposition === "post-deploy" && (inLaneDeferral(r) || (bucketKind(r?.bucket) !== "owner" && bucketKind(r?.bucket) !== "host" && DEV_WORK_RE.test(String(r?.quote ?? ""))))) problems.push(`${id}: development work (finding or fixing the signal) is delivered in-lane, never deferred as prod-only; deliver it and keep only the measurement post-deploy (#5448)`);
     if (r?.disposition === "not-applicable" && blank(r?.evidence)) problems.push(`${id}: not-applicable needs file:line evidence`);
+    if (isGuidance(r) && !guidanceStance(r?.why)) problems.push(`${id}: guidance needs a why stating the planned stance (follow|adapt|reject) and a reason, e.g. "adapt: the cache lives in the loader, not the route"`);
+    if (r?.derived_outcome != null && (r?.disposition !== "deliver" || blank(r.derived_outcome))) problems.push(`${id}: derived_outcome must be a non-empty observable success statement on a deliver row`);
     for (const m of bucketProblems(r)) problems.push(`${id}: ${m}`);
     if (r?.class != null && !FOLLOWUP_CLASSES.includes(r.class)) problems.push(`${id}: class must be one of ${FOLLOWUP_CLASSES.join("|")}`);
     if (r?.verify != null && !VERIFY_MODES.includes(r.verify)) problems.push(`${id}: verify must be one of ${VERIFY_MODES.join("|")}`);
@@ -592,6 +605,7 @@ export function validateContract(c, issueText, { repro = false, pages = null, te
     else if (isOutOfBand(r) && blank(r?.evidence)) problems.push(`${id}: verify out_of_band needs evidence naming the job or workflow that measures it (or set verify "in_lane" if this change can check it)`);
     if (r?.disposition === "deliver" && !isOutOfBand(r) && r?.verify !== "in_lane" && TIME_PROD_ONLY_RE.test(String(r?.quote ?? ""))) problems.push(`${id}: the quote needs time or production to observe (${String(r.quote).match(TIME_PROD_ONLY_RE)[0]}); classify it post-deploy (with a check id), defer with a bucket, or verify out_of_band with evidence, never narrow it into a deliver the lane can observe (#5653)`);
   }
+  if (reqs.some(isGuidance) && !reqs.some((r) => BINDING.includes(r?.disposition))) problems.push(`the contract has guidance rows but no binding outcome row (${BINDING.join("|")}); write the symptom or success statement as a deliver row (with derived_outcome when the issue states none), or end needs-human asking for one (#5750)`);
   if (c.regression != null && !Array.isArray(c.regression)) problems.push("regression must be an array of {id, command, covers}");
   for (const g of Array.isArray(c.regression) ? c.regression : []) {
     if (!g?.id || blank(g?.command)) { problems.push(`regression entry without id or command: ${JSON.stringify(g ?? null).slice(0, 80)}`); continue; }
@@ -797,7 +811,8 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       }
       const r = { disposition: "deliver", ...a.requirement, ...(snapTo ? { quote: snapTo, requoted: a.requirement.quote } : {}), amended: true };
       if (!DISPOSITIONS.includes(r.disposition)) { problems.push(`add-requirement ${r.id}: bad disposition ${r.disposition}`); continue; }
-      if (TRACKED.includes(r.disposition) && blank(r.why)) r.why = a.why;
+      if ((TRACKED.includes(r.disposition) || isGuidance(r)) && blank(r.why)) r.why = a.why;
+      if (isGuidance(r) && !guidanceStance(r.why)) { problems.push(`add-requirement ${r.id}: guidance needs a why stating follow|adapt|reject and a reason`); continue; }
       if (tagsOutOfBand(r)) r.verify = "out_of_band"; // #4404: same freeze-time tag as the planned requirements
       c.requirements.push(r);
       if (TRACKED.includes(r.disposition)) toTrack.push(r);
@@ -943,6 +958,16 @@ export function envProvisioningCommand(command) {
 }
 /** #5732: true when a failed run's output carries test-failure text (an assertion, a runner's failed-test mark), not only an environment error. */
 const ASSERTION_RE = /AssertionError|\bassert(?:ion)?\b[^\n]*(?:==|!=|failed|error)|^FAILED\s+\S+::|^\s*E\s+(?:assert|Expected)|\bExpected\b[^\n]*\b(?:Received|got|to (?:be|equal))|expect\(|^not ok \d+|^\s*[✗×✖]\s|^\s*● |\bTests?:\s+\d+ failed/m;
+// #5730: sandbox-only failures a validate rerun can show beyond ENV_SIGNATURES: a missing command, a refused connection, an unresolved host, an absent venv path, no display
+const VALIDATE_ENV_RE = /: command not found|: not found\b|ECONNREFUSED|connection refused|no such host|\.venv\/bin\/[\w.-]+: No such file or directory|cannot open display|Missing X server|\$DISPLAY/i;
+/** #5730: a validate output that is the executor's environment (not a red test, not a stale artifact): only these defer to a host replay. */
+export function isEnvValidateFailure(output) {
+  const out = String(output ?? "");
+  if (!out || isDriftFailure(out) || ASSERTION_RE.test(out)) return false;
+  return Boolean(envSignature(out)) || VALIDATE_ENV_RE.test(out);
+}
+/** #5730: the redacted last 4000 characters of a rerun's output, kept on a validate_failed failure so the lane can classify it. */
+const rawTail = (output) => String(output ?? "").replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").slice(-4000).replace(SECRET_PAIR_RE, "$1[redacted]").replace(SECRET_SHAPE_RE, "[redacted]");
 export function assertionFailure(output) {
   return ASSERTION_RE.test(String(output ?? ""));
 }
@@ -1052,6 +1077,9 @@ export function cliUsageError({ rc, output } = {}) {
 }
 const FORGEDOCK_ENTRY_RE = /^\/.*\/forgedock\/bin\/(?:lean\/checks|forgedock)\.mjs$/;
 const FORGEDOCK_TOKEN_RE = /(?<![\w./-])\/[^\s'"`;&|()]*\/forgedock\/bin\/(lean\/checks|forgedock)\.mjs/g;
+/** #5727: the portable placeholders a frozen command names forgedock's entry points by (the lane env exports both). */
+export const FORGEDOCK_CHECKS_VAR = "FORGEDOCK_CHECKS_CLI", FORGEDOCK_ENTRY_VAR = "FORGEDOCK_ENTRY_CLI";
+const FORGEDOCK_PLACEHOLDER_RE = /\$(?:\{FORGEDOCK_(CHECKS|ENTRY)_CLI\}|FORGEDOCK_(CHECKS|ENTRY)_CLI(?!\w))/g;
 /**
  * #5005: a frozen validate command names forgedock's own entry point by the absolute path of the install that wrote it; on
  * the host that runs it that path may not exist. Rewrites each such token whose file is missing to this install's path.
@@ -1060,9 +1088,33 @@ export function resolveForgedockPaths(command, { exists = () => true, checksCli,
   return String(command ?? "").replace(FORGEDOCK_TOKEN_RE, (tok, which) => {
     const here = which === "forgedock" ? forgedockCli : checksCli;
     return here && !exists(tok) ? here : tok;
+  }).replace(FORGEDOCK_PLACEHOLDER_RE, (tok, a, b) => { // #5727: the portable frozen form always names this install
+    const here = (a ?? b) === "ENTRY" ? forgedockCli : checksCli;
+    return here || tok;
   });
 }
-const KIND_NAME = { command: "command", "python-module": "Python module", "node-module": "Node package", environment: "environment service" };
+/** #5727: every absolute forgedock entry-point token becomes its portable placeholder, so a frozen contract names no install path. Pure. */
+export function portableForgedockPaths(command) {
+  return String(command ?? "").replace(FORGEDOCK_TOKEN_RE, (tok, which) => `$${which === "forgedock" ? FORGEDOCK_ENTRY_VAR : FORGEDOCK_CHECKS_VAR}`);
+}
+const RESOLVED_RUNNERS = ["runCommand", "probeCommand", "preflightRun", "redGreen"];
+/**
+ * #5727: `io` with its command runners (runCommand, probeCommand, preflightRun, redGreen) resolving `command` through
+ * resolveForgedockPaths before the call, so no execution site runs a frozen forgedock path of another install. Other members untouched.
+ */
+export function resolvingIo(io, opts = {}) {
+  if (!io || typeof io !== "object") return io;
+  const wrapped = new Map(); // live view: a member set on io later is seen; a runner is wrapped per function
+  return new Proxy(io, {
+    get(t, k, r) {
+      const fn = Reflect.get(t, k, r);
+      if (!RESOLVED_RUNNERS.includes(k) || typeof fn !== "function") return fn;
+      if (!wrapped.has(fn)) wrapped.set(fn, (a, ...rest) => fn.call(t, a && typeof a === "object" && typeof a.command === "string" ? { ...a, command: resolveForgedockPaths(a.command, opts) } : a, ...rest));
+      return wrapped.get(fn);
+    },
+  });
+}
+const KIND_NAME = { "forgedock-path": "forgedock install path", command: "command", "python-module": "Python module", "node-module": "Node package", environment: "environment service" };
 /**
  * forge#4323: the host tool or module a failed command could not find, from its {rc, output}: bash/sh "X: command not found"
  * (or rc 127), python "No module named x" (top-level package), node "Cannot find module|package 'x'" (bare specifiers only).
@@ -1075,7 +1127,7 @@ export function missingTool({ rc, output } = {}, { repoHas = () => false, comman
   const py = PY_MISSING_RE.exec(out);
   if (py) { const tool = String(py[1] ?? py[2]).split(".")[0]; return local(tool) ? null : { tool, kind: "python-module" }; }
   const js = NODE_MISSING_RE.exec(out);
-  if (js && FORGEDOCK_ENTRY_RE.test(js[1])) return { tool: "forgedock", kind: "command" }; // #5005: the host's forgedock install is not at the frozen path
+  if (js && FORGEDOCK_ENTRY_RE.test(js[1])) return { tool: "forgedock", kind: "forgedock-path" }; // #5005, #5727: an install-path mismatch, never a lane_tools candidate (not a TOOL_KIND)
   if (js) {
     const spec = js[1], scoped = spec.startsWith("@");
     if (!scoped && spec.includes("/")) return null;
@@ -1113,6 +1165,8 @@ export function interfaceDecisionFailures(contract, result, changedFiles) {
   return out;
 }
 
+const tagText = (q) => String(q ?? "").replace(/`[^`\n]*`/g, (span, at, all) => (/[^\s.,;:)]/.test(all.slice(at + span.length).replace(/`[^`\n]*\[type:[^`\n]*`/g, "")) ? "" : span));
+const wantsE2e = (r) => /\[type:(?:e2e|manual)\]/i.test(tagText(r?.quote));
 /**
  * Deterministic checks before any reviewer tokens are spent: unauthorized files, failed or missing validation,
  * requirements not implemented, deferrals without a tracking issue, and unexempted hotspot growth. Returns {ok, failures[], superseded[]}; each failure carries a
@@ -1133,6 +1187,10 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
     if (r.disposition === "post-deploy" && !(r.check && checkIds.has(r.check))) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "check_unknown", detail: `${r.id} post-deploy check ${r.check ? `'${r.check}'` : "id"} is neither on the default branch nor added by this PR (.forge/post-deploy-checks.json)` });
+  }
+  // #5754: a deliver [type:e2e]/[type:manual] row whose observable exists only in production (live stack, deploy, prod window) cannot be produced by the placement: fail fast with a typed code instead of spending builder resumes
+  for (const r of contract.requirements ?? []) {
+    if (r.disposition === "deliver" && wantsE2e(r) && !isOutOfBand(r) && r.verify !== "in_lane" && prodOnlyE2e(r.quote)) failures.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_placement", detail: `${r.id} is a [type:e2e]/[type:manual] criterion observable only in production or on the live stack, which this lane cannot produce; mark ${r.id} post-deploy so it is transferred to the epic's acceptance instead of spending builder resumes (#5754)` });
   }
   // #4769: a default-off rollout entry added by the diff needs an activation row
   if (newOffKeys?.length) for (const f of activationFailures(contract, newOffKeys)) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, ...f });
@@ -1156,7 +1214,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       if (verdict === "unverified") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "substitute_unverified", detail: `${from}, but the engine has no rerun of the frozen command to show it cannot run` }); continue; }
       // #5653: the frozen command runs, and the substitute ran the same test ids with the same exit: recorded, not failed
       if (verdict === "runs" && equivalentRuns(substitutedRuns[v.id], substitutedRuns[v.id].sub)) equivalent.push({ id: v.id, from: v.substituted.from, to: v.command });
-      else if (verdict === "runs") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `${from}, but the frozen command runs and fails (exit ${substitutedRuns[v.id].rc}): a substitute-validate replaces only a command that cannot run, never a failing check${outputTail(substitutedRuns[v.id].output)}` }); continue; }
+      else if (verdict === "runs") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", output: rawTail(substitutedRuns[v.id].output), detail: `${from}, but the frozen command runs and fails (exit ${substitutedRuns[v.id].rc}): a substitute-validate replaces only a command that cannot run, never a failing check${outputTail(substitutedRuns[v.id].output)}` }); continue; }
       if (verdict === "timeout" && !ciVerified) { failures.push({ code: ENV_VALIDATE_TIMEOUT, kind: "validate_timeout", detail: `${from}, and the frozen command timed out (exit 124) on the engine's rerun, so its substitution cannot be judged: infrastructure (host load)` }); continue; }
     }
     const r = runs.find((x) => x?.id === v.id);
@@ -1182,13 +1240,13 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)${outputTail(rerun.output)}` });
       else if (amendedOnly && isScopeCheck(v.command)) superseded.push({ id: v.id, files: amendedOnly });
       else if (rerun && isDriftFailure(rerun.output)) failures.push({ code: C.BASE_CONFLICT, kind: "validate_drift", detail: `validate ${v.id} (\`${v.command}\`) failed on a stale generated artifact (base drift, not the change): base-sync, regenerate the artifact (forge.yaml validate.regenerate) and rerun${outputTail(rerun.output)}` }); // #5653: a mechanical base-sync recovery, not unimplemented work
-      else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${engineRun ? rerun.rc : r.exit}${engineRun ? ", run by the engine: no recorded result" : ""})${outputTail(rerun?.output)}` });
+      else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", output: rawTail(rerun?.output), detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${engineRun ? rerun.rc : r.exit}${engineRun ? ", run by the engine: no recorded result" : ""})${outputTail(rerun?.output)}` });
     }
   }
   const st = Array.isArray(result?.requirements) ? result.requirements : [];
   for (const r of contract.requirements ?? []) {
     const s = st.find((x) => x?.id === r.id)?.status;
-    if (TRACKED.includes(r.disposition)) continue; // typed deferrals are judged by the reviewer, then filed before the PR
+    if (TRACKED.includes(r.disposition) || isGuidance(r)) continue; // typed deferrals are judged by the reviewer, then filed before the PR; #5750: guidance is non-binding
     if (r.disposition === "deliver" && isOutOfBand(r)) {
       // #4404: measured outside the lane; the builder delivers its instrumentation (budget test or bench committed, job configured)
       const row = st.find((x) => x?.id === r.id);
@@ -1430,7 +1488,10 @@ export function fillEngineRows(rv, { contract, changedFiles = [], repoFiles = []
     });
   }
   if (Array.isArray(rv.requirements)) {
-    out.requirements = rv.requirements.map((r) => {
+    // #5750: a guidance row is non-binding; the engine fills it when the reviewer leaves it out
+    const given = [...rv.requirements];
+    for (const g of (contract.requirements ?? []).filter(isGuidance)) if (!given.some((x) => x?.id === g.id)) given.push({ id: g.id, status: "not-applicable", evidence: "", note: "guidance row filled by the engine", filled: true });
+    out.requirements = given.map((r) => {
       if (r?.status !== "implemented" && r?.instrumented !== true) return r;
       const e = evidenceOf(r.evidence, { changedFiles, repoFiles });
       return e ? { ...r, evidence: `${e.path}:${e.line}` } : r;
@@ -1460,6 +1521,7 @@ export function checkCompleteness(rv, { contract, changedFiles, issueText, pathE
     const rows = (reqs ?? []).filter((x) => x?.id === r.id);
     if (rows.length !== 1) { miss(r.id, `requirement ${r.id} needs exactly one row (has ${rows.length})`); continue; }
     const row = rows[0];
+    if (isGuidance(r)) continue; // #5750: non-binding; any status is accepted
     if (!REQ_STATUS.includes(row.status)) { miss(r.id, `${r.id}: status invalid: ${row.status}`); continue; }
     if (TRACKED.includes(r.disposition) && typeof row.deferral_ok !== "boolean") miss(r.id, `${r.id}: a ${r.disposition} requirement needs deferral_ok true|false (is deferring it justified?)`);
     if (isOutOfBand(r) && typeof row.instrumented !== "boolean") miss(r.id, `${r.id}: a requirement verified out of band needs instrumented true|false (is its budget test or bench committed and its job configured?)`);
@@ -1488,8 +1550,6 @@ export function checkCompleteness(rv, { contract, changedFiles, issueText, pathE
 
 /** #4726, #5339: a requirement quote that carries a `[type:e2e]` or `[type:manual]` criterion. */
 /** #5547: a tag inside a mid-sentence code span (`` `[type:e2e]` row whose ... ``) is a mention of the tag, not the tag; a trailing backticked tag still counts. */
-const tagText = (q) => String(q ?? "").replace(/`[^`\n]*`/g, (span, at, all) => (/[^\s.,;:)]/.test(all.slice(at + span.length).replace(/`[^`\n]*\[type:[^`\n]*`/g, "")) ? "" : span));
-const wantsE2e = (r) => /\[type:(?:e2e|manual)\]/i.test(tagText(r?.quote));
 /** #5339: failure kinds enforced without an `engine.conformance_kinds` entry (the entry still overrides). */
 // #5449: test_missing/test_weak are only generated for bug lanes (testadequacy.mjs), so enforcing the kinds is bug-only.
 const DEFAULT_ENFORCED_KINDS = ["e2e_row", "test_missing", "test_weak"];
@@ -1505,12 +1565,14 @@ export function isE2eCommand(command, e2e = null) {
   if (typeof e2e?.isSpec === "function" && cmd.split(/\s+/).some((t) => t && e2e.isSpec(t.replace(/^["']+|["']+$/g, "")))) return true;
   return E2E_CMD_RE.test(cmd);
 }
+/** #5754: a criterion verified against the running live stack/service/environment/cluster: observable only in production, so post-deploy at freeze instead of builder resumes. Checked after the local-runnable exclusion. */
+const LIVE_STACK_RE = /\b(?:against|on|in)\s+(?:the\s+)?live\s+(?:stack|service|environment|cluster)\b|\breal traffic\s+(?:against|on)\s+(?:the\s+)?live\b/i;
 /** #5468: a `[type:e2e]`/`[type:manual]` quote whose observable only exists in production (live URL, deploy, prod probe); local stack, browser and sandbox wording is runnable pre-merge. */
 export function prodOnlyE2e(quote) {
   const q = String(quote ?? "");
   if (LIVE_INFRA_RE.test(q)) return true; // #5547
   if (/\b(?:localhost|127\.0\.0\.1|local stack|playwright|browser|sandbox|staging)\b/i.test(q)) return false;
-  return /https?:\/\//i.test(q) || /\b(?:after (?:the )?deploy|production|prod probe|live (?:domain|site)|prod)\b/i.test(q) || PROD_WINDOW_RE.test(q);
+  return /https?:\/\//i.test(q) || /\b(?:after (?:the )?deploy|production|prod probe|live (?:domain|site)|prod)\b/i.test(q) || PROD_WINDOW_RE.test(q) || LIVE_STACK_RE.test(q);
 }
 /** #5547: criteria whose run needs a live benchmark, a paid run, remote infra or host-level load: observable only outside the lane, by shape not by repo name. */
 const LIVE_INFRA_RE = /\b(?:live|paid|remote)\s+(?:benchmarks?|runs?|infra(?:structure)?|hosts?)\b|\bbench(?:mark)?[\w.-]*\.(?:mjs|js|py|sh)\b|\bre-?run\b[^.]{0,60}\bbench(?:mark)?\b|\b(?:sandbox pool|(?:remote|rented|cloud|gpu) (?:infra|hosts?|runners?|clusters?|boxe?s?|machines?|gpus?|pool)|on (?:a|the) (?:remote|rented|cloud|gpu) \w+)\b|\bsynthetic load\b|\b\d+\s*[×x]\s*(?:nproc|cores?|cpus?)\b|\bCPU hogs?\b|\bhost[- ]level (?:load|run)\b|\b[≤<]=?\s*[\d.]+\s*[×x]\s*(?:the\s+)?(?:control\s+)?cost\b/i;
@@ -1615,6 +1677,13 @@ export function e2eVerified(row, contract, e2e = null) {
  * | review.inconsistent. failures[] are {code, detail}; `inconsistent` marks a CONFORMS verdict whose rows fail;
  * `missing` lists the ids (or sections) a targeted re-ask must fill; `review` is the reply with the engine-filled rows.
  */
+/** #5750: an issue_coverage row for a guidance quote only (by contract_ids, else by quote); judged only when flagged misclassified. */
+function guidanceCoverage(c, contract) {
+  const reqs = contract?.requirements ?? [];
+  const ids = Array.isArray(c?.contract_ids) ? c.contract_ids : [];
+  const named = ids.length ? reqs.filter((r) => ids.includes(r.id)) : reqs.filter((r) => r.quote === c?.quote);
+  return named.length > 0 && named.every(isGuidance);
+}
 export function decide(raw, ctx) {
   if (!raw) return { state: "review.unparseable", failures: [{ code: C.REVIEW_NO_VERDICT, detail: "no JSON object in the reviewer reply" }] };
   const rv = fillEngineRows(raw, ctx);
@@ -1623,14 +1692,16 @@ export function decide(raw, ctx) {
   const f = [], converted = [];
   const amendedOf = (ids) => (ctx.contract.requirements ?? []).find((r) => r.amendment?.text && (ids ?? []).includes(r.id));
   const notAccepted = (r) => (r ? `amendment not accepted (${r.id} amended to "${String(r.amendment.text).slice(0, 200)}"): ` : "");
-  for (const c of rv.issue_coverage) if (c.status !== "covered") f.push({ code: C.CONFORMANCE_OMISSION, detail: `${notAccepted(amendedOf(c.contract_ids))}issue requirement ${c.status}: "${c.quote}"${c.note ? ` (${c.note})` : ""}` });
+  for (const c of rv.issue_coverage) if (c.misclassified === true) f.push({ code: C.CONFORMANCE_OMISSION, detail: `guidance row misclassified: "${c.quote}" is a symptom or success criterion, judge it as binding${c.note ? ` (${c.note})` : ""}` });
+  else if (c.status !== "covered" && !guidanceCoverage(c, ctx.contract)) f.push({ code: C.CONFORMANCE_OMISSION, detail: `${notAccepted(amendedOf(c.contract_ids))}issue requirement ${c.status}: "${c.quote}"${c.note ? ` (${c.note})` : ""}` });
   for (const r of ctx.contract.requirements) {
+    if (isGuidance(r)) continue; // #5750: the outcome rows are judged, never whether the proposal was followed
     const row = rv.requirements.find((x) => x.id === r.id);
     if (r.disposition === "deliver" && isOutOfBand(r)) {
       // #4404: the measured result lives in the named job; only the instrumentation is judged here
       if (row.instrumented !== true) f.push({ code: C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.id} verified out of band${r.evidence ? ` by ${r.evidence}` : ""}: instrumentation missing${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
     } else if (r.disposition === "deliver" && row.status !== "implemented") {
-      f.push({ code: ["deferred", "post-deploy"].includes(row.status) ? C.CONFORMANCE_UNTRACKED_DEFERRAL : C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.amendment?.text ? `${r.id} amendment not accepted (amended to "${String(r.amendment.text).slice(0, 200)}"): ` : `${r.id} `}${row.status}${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
+      f.push({ code: ["deferred", "post-deploy"].includes(row.status) ? C.CONFORMANCE_UNTRACKED_DEFERRAL : C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.amendment?.text ? `${r.id} amendment not accepted (amended to "${String(r.amendment.text).slice(0, 200)}"): ` : r.derived_outcome ? `${r.id} derived outcome not met ("${String(r.derived_outcome).slice(0, 200)}"): ` : `${r.id} `}${row.status}${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
     } else if (r.disposition === "deliver" && wantsE2e(r) && !e2eVerified(row, ctx.contract, ctx.e2e)) {
       const faked = (ctx.e2e?.faked ?? []).length ? `; faked or mocked components in ${ctx.e2e.faked.slice(0, 3).join(", ")}` : "";
       f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_row", detail: `${r.id} is a [type:e2e]/[type:manual] criterion but ${row.validated_by || "its validated_by"} is not a real end-to-end check (the repo's e2e set, Playwright/browser/live stack${faked}); run one, or mark ${r.id} post-deploy so it is transferred to the epic's acceptance${ctx.e2e?.sandboxes?.length ? `; it can run pre-merge: declare env: [${ctx.e2e.sandboxes.slice(0, 3).join(", ")}] on its validate to use the test sandbox (#5450), do not defer it` : ""}` });
@@ -1693,8 +1764,8 @@ export function reviewSkeleton(contract, changedFiles = [], ignore = []) {
   if (contract && !Array.isArray(contract.requirements) && "contract" in contract) ({ contract, changedFiles = [], ignore = [] } = contract);
   const reqs = contract?.requirements ?? [];
   return {
-    issue_coverage: reqs.map((r) => ({ quote: r.quote, contract_ids: [r.id], status: "" })),
-    requirements: reqs.map((r) => ({ id: r.id, status: "", evidence: "", validated_by: "", ...(TRACKED.includes(r.disposition) ? { deferral_ok: null } : {}), ...(isOutOfBand(r) ? { verify: "out_of_band", job: r.evidence ?? "", instrumented: null } : {}), note: "" })),
+    issue_coverage: reqs.map((r) => (isGuidance(r) ? { quote: r.quote, contract_ids: [r.id], status: "covered", guidance: true, misclassified: false } : { quote: r.quote, contract_ids: [r.id], status: "" })),
+    requirements: reqs.map((r) => isGuidance(r) ? { id: r.id, status: "not-applicable", guidance: true, stance: guidanceStance(r.why), note: "" } : ({ id: r.id, status: "", evidence: "", validated_by: "", ...(TRACKED.includes(r.disposition) ? { deferral_ok: null } : {}), ...(isOutOfBand(r) ? { verify: "out_of_band", job: r.evidence ?? "", instrumented: null } : {}), ...(r.derived_outcome ? { derived_outcome: r.derived_outcome } : {}), note: "" })),
     scope: reviewedFiles(changedFiles, ignore).map((f) => ({ file: f, authorized_by: authorizationOf(contract ?? {}, f) ?? "none", note: "" })),
     preserve: (contract?.preserve ?? []).map((x) => ({ id: x.id, status: "unverified", evidence: "" })),
     regressions: [], verdict: "", summary: "",

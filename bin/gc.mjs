@@ -333,6 +333,7 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
       try {
         const vols = jsonLines(await P.docker(["volume", "ls", "--format", "{{json .}}"]));
         const created = new Map();
+        const poolCache = (v) => parseLabels(v.Labels)["computeshare.cache"] === "1"; // #5757: pool cache volumes, the agent evicts them
         const labelled = vols.filter((v) => { const l = parseLabels(v.Labels); return l["forgedock.owner"] === "1" || LANE_COMPOSE_RE.test(String(l["com.docker.compose.project"] ?? "")); }).map((v) => v.Name);
         if (labelled.length) {
           try { for (const l of String(await P.docker(["volume", "inspect", "--format", "{{.Name}}\t{{.CreatedAt}}", ...labelled])).split("\n")) { const [n, t] = l.split("\t"); if (n) created.set(n, Date.parse(t)); } }
@@ -340,6 +341,7 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
         }
         for (const v of vols) {
           if (!v.Name || seen.has(`volume:${v.Name}`) || liveIds.has(`volume:${v.Name}`)) continue;
+          if (poolCache(v)) { add({ type: "volume", id: v.Name, sizeBytes: null, ageMs: null, owned: false, action: "report", reason: "pool cache volume (computeshare.cache=1); the pool agent evicts it" }); continue; }
           add({ type: "volume", id: v.Name, sizeBytes: null, ageMs: age(created.get(v.Name)), ...ownedBy(parseLabels(v.Labels), created.get(v.Name), "volume") });
         }
       } catch (e) { notes.push(`docker volumes unavailable: ${errText(e)}`); }

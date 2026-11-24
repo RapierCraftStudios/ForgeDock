@@ -64,6 +64,7 @@ import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { validateLaneTools } from "../pool/lane-tools.mjs";
 import { resolveCredential, memoKeychain, defaultKeychain } from "./credentials.mjs";
 import { httpTransport, isActionsEndpoint, remoteProvider } from "./sandbox-remote.mjs";
+import { actionsProvider, laneCap } from "./sandbox-actions.mjs";
 import { ADMISSION_DEFAULTS } from "./admission.mjs";
 import { classifyStep, heavyConfig, memAvailableMb } from "./heavy.mjs";
 import { detectPins } from "./toolchain.mjs";
@@ -72,7 +73,7 @@ import { parseRelayCommands } from "./relay.mjs";
 import { detectUsageLimit, parseSessionLimitResetEpochMs } from "../runner.mjs";
 
 export const EXECUTION_MODES = Object.freeze(["local", "remote", "hybrid"]);
-export const SANDBOX_PROVIDERS = Object.freeze(["local", "container", "remote", "pool"]);
+export const SANDBOX_PROVIDERS = Object.freeze(["local", "container", "remote", "pool", "actions"]);
 const NAME_RE = /^[a-z][a-z0-9-]*$/;
 const CAPABILITY_RE = /^[a-z][a-z0-9_-]*$/;
 const safeRegExp = (src) => { try { return new RegExp(src, "i"); } catch { return null; } };
@@ -97,6 +98,12 @@ const CLONE_RETRY_S = 120;
 export const SANDBOX_CLONE_CODE = "sandbox.clone";
 /** #4866: a sandbox clone failure is a retryable `deferred` `sandbox.clone`, never an engine-error (so the breaker never sees it). */
 const cloneDeferred = (id, detail) => ({ terminalReason: "deferred", code: SANDBOX_CLONE_CODE, retryInSeconds: CLONE_RETRY_S, detail: `sandbox ${id} could not clone the repo: ${detail}; retry in ${CLONE_RETRY_S}s` });
+// #5923: a hung github.com connection (ls-remote/fetch, or a connect timeout inside a clone) is egress, not a plain clone failure.
+const EGRESS_RE = /Connection timed out|Failed to connect to|\b(ls-remote|fetch)\b[^\n]*\b(time[ds]?\s?out|timeout|hung|hang)|\b(time[ds]?\s?out|timeout)\b[^\n]*\b(ls-remote|fetch)\b/i;
+export const isEgressTimeout = (text) => EGRESS_RE.test(String(text ?? ""));
+/** Outcome code of a sandbox whose git egress hung to a timeout; local like sandbox.clone. */
+export const SANDBOX_EGRESS_TIMEOUT_CODE = "sandbox.egress_timeout";
+const egressDeferred = (id, detail) => ({ terminalReason: "deferred", code: SANDBOX_EGRESS_TIMEOUT_CODE, retryInSeconds: CLONE_RETRY_S, detail: `sandbox ${id} git egress timed out: ${detail}; retry in ${CLONE_RETRY_S}s` });
 const errLine = (t) => String(t ?? "").split("\n")[0].slice(0, 300);
 const errText = (e) => String(e?.stderr || e?.message || e).split("\n")[0].slice(0, 300);
 
@@ -146,7 +153,14 @@ export function parseExecution(sec = {}) {
   // #5094: rotator.mjs reads its per-account quota state; #5205: off/none/false disables auto-detection, anything else is unset (auto)
   const rot = str(s.account_rotator).toLowerCase(), accountRotator = rot === "tokenbaton" ? "tokenbaton" : ["off", "none", "false"].includes(rot) ? "off" : null;
   const unreachableWindowMin = str(s.unreachable_window_min) !== "" && Number.isFinite(uw) && uw >= 0 ? uw : null; // unset: providerLanes defaults to 5
-  return { mode, maxRemote, provider, image, secrets, budget, ...(hostFallback !== null ? { hostFallback } : {}), ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(accountRotator ? { accountRotator } : {}), ...(lt.tools.length ? { laneTools: lt.tools } : {}), ...(lt.errors.length ? { laneToolsErrors: lt.errors } : {}) };
+  // #5748: the `actions` provider's plan (concurrent-job limit), explicit job_limit, CI reserve and dispatcher identity
+  const jl = Number(str(s.job_limit)), cr = Number(str(s.ci_reserve));
+  const jobLimit = str(s.job_limit) !== "" && Number.isInteger(jl) && jl > 0 ? jl : null;
+  const ciReserve = str(s.ci_reserve) !== "" && Number.isInteger(cr) && cr >= 0 ? cr : null;
+  const plan = ["free", "pro", "team", "enterprise"].includes(str(s.plan).toLowerCase()) ? str(s.plan).toLowerCase() : null;
+  const publicDefault = str(s.public_default).toLowerCase() === "actions" ? "actions" : null; // #5900: opt-in only
+  const dispatcher = /^[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?$/.test(str(s.dispatcher)) ? str(s.dispatcher) : null;
+  return { mode, maxRemote, provider, image, secrets, budget, ...(jobLimit ? { jobLimit } : {}), ...(ciReserve !== null ? { ciReserve } : {}), ...(plan ? { plan } : {}), ...(publicDefault ? { publicDefault } : {}), ...(dispatcher ? { dispatcher } : {}), ...(hostFallback !== null ? { hostFallback } : {}), ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(accountRotator ? { accountRotator } : {}), ...(lt.tools.length ? { laneTools: lt.tools } : {}), ...(lt.errors.length ? { laneToolsErrors: lt.errors } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -213,6 +227,27 @@ export function openExecutionBudget({ budget = {}, file = executionBudgetFile(),
       return { ok: true };
     },
   };
+}
+
+/**
+ * #5748/#5900: opt-in public-repo placement. Only when forge.yaml sets `execution.public_default: actions` and no
+ * `execution.mode` (`exec.modeExplicit` unset) does a public repo place lanes on GitHub-hosted runners (`provider: actions`,
+ * free minutes), capped at the plan's job limit minus a CI reserve. Without the opt-in nothing changes (lanes stay local, as
+ * before 1.62.0): the actions provider needs owner setup (workflow file, `forgedock-lane` environment and secret, branch
+ * protection) that an upgrade cannot do. A private repo, an unknown visibility (`isPublic` not true: fails closed) and any
+ * explicit mode, `local` included, keep `exec` as is.
+ */
+export function resolveDefaultExecution(exec, { isPublic = false } = {}) {
+  if (exec?.publicDefault !== "actions" || exec?.modeExplicit || isPublic !== true) return exec;
+  const base = exec ?? parseExecution({});
+  const cap = laneCap({ jobLimit: base.jobLimit ?? null, plan: base.plan ?? null, ciReserve: base.ciReserve });
+  return { ...base, mode: "remote", provider: "actions", maxRemote: cap, defaultedActions: true };
+}
+
+/** #5748: whether `repo` is public, from `gh api repos/<repo>`; any failure is false (private: today's default). */
+export async function repoIsPublic({ repo, gh }) {
+  if (!repo || typeof gh !== "function") return false;
+  try { return JSON.parse(await gh(["api", `repos/${repo}`]))?.private === false; } catch { return false; }
 }
 
 /** Where a `mode: remote` lane runs: remote only with `max_remote >= 1`. Hybrid is placed per lane by `placeLane` (#4256). */
@@ -439,7 +474,8 @@ export function hostHeadroom({ cfg = {}, heavyCfg = {}, host = { memAvailableMb,
   if (c.enabled === false) return { ok: true, detail: "" };
   const reasons = [];
   const need = c.min_free_mem_mb + h.step_mem_mb, mem = probe(host?.memAvailableMb);
-  if (mem !== null && mem < need) reasons.push(`mem ${mem} MB < ${need} MB`);
+  const ramping = mem === null ? 0 : Math.max(0, probe(() => host?.rampingMb?.(c.ramp_s)) ?? 0); // #5845: lanes admitted within the ramp window have not grown yet
+  if (mem !== null && mem - ramping < need) reasons.push(ramping > 0 ? `mem ${mem} MB − ramping ${ramping} MB < ${need} MB` : `mem ${mem} MB < ${need} MB`);
   const maxLoad = typeof c.max_load_per_core === "number" && Number.isFinite(c.max_load_per_core) ? c.max_load_per_core : null;
   if (maxLoad !== null) {
     const load = probe(host?.loadAvg1), cores = probe(host?.cores);
@@ -602,6 +638,7 @@ export function poolRouterConfig({ env = process.env, path = env.COMPUTESHARE_CO
 export function providerByName(name, opts) {
   if (name === "local") return localProvider(opts);
   if (name === "container") return containerProvider(opts);
+  if (name === "actions") return actionsProvider({ batch: opts.batch, repo: opts.repo, settings: opts.exec ?? {}, env: opts?.env ?? process.env, ...(opts?.transport ? { transport: opts.transport } : {}), ...(opts?.actionsApi ? { api: opts.actionsApi } : {}), ...(opts?.now ? { now: opts.now } : {}) });
   if (name === "remote" || name === "pool") {
     const env = opts?.env ?? process.env;
     const exec = opts?.exec ?? {};
@@ -682,6 +719,13 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
     if (ok) { try { led?.release("sandbox", h.id); led?.remove(); } catch { /* the reaper retries */ } }
     return ok;
   };
+  // #5808: the result is handed back at once; the teardown starts now and the dispatcher's postRun hook waits for it (the batch
+  // never ends before it, the ledger still holds the sandbox until it is released), so it is off the slot's path.
+  const tearAfter = (led, h, r) => {
+    const torn = tear(led, h), prev = r && typeof r === "object" && typeof r.postRun === "function" ? r.postRun : null;
+    const postRun = async () => { await torn; if (prev) await prev(); };
+    return (r && typeof r === "object") ? { ...r, postRun } : r;
+  };
   // #4672: a transport failure (router restart, refused/reset connection, 502/503/504) is retried with backoff until the lane has
   // waited `unreachableWindowMs` in a row without one successful poll; then it ends sandbox.unreachable with the sandbox kept.
   const guard = (st) => async (fn) => {
@@ -701,7 +745,8 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
     : { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_UNREACHABLE, retryInSeconds: 60,
       detail: `sandbox ${h.id} ${errText(e)}; kept for adopt on resume` });
   const tailOf = async (h) => { try { return typeof logTail === "function" ? String(await logTail(h) ?? "") : ""; } catch { return ""; } };
-  const settleClone = (r, id) => (r?.terminalReason === "engine-error" && r.code === undefined && isCloneFailure(r.detail) ? cloneDeferred(id, errLine(r.detail)) : r);
+  const settleClone = (r, id) => (r?.terminalReason === "engine-error" && r.code === undefined && isEgressTimeout(r.detail) ? egressDeferred(id, errLine(r.detail))
+    : r?.terminalReason === "engine-error" && r.code === undefined && isCloneFailure(r.detail) ? cloneDeferred(id, errLine(r.detail)) : r);
   // #5669: a halted batch (schedd handover) stops polling; the sandbox is neither torn down nor released, so the next daemon adopts it.
   const wait = async (h, g = guard({ waited: 0, tries: 0 }), sig = null) => {
     for (;;) {
@@ -721,7 +766,9 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
           return { terminalReason: "deferred", code: OUTCOME_CODES.RATE_LIMITED, resetAt: lim.resetAt ?? "unknown", resetAtEpochMs: Number.isFinite(at) ? at : null,
             detail: `${why}: usage limit hit; resets at ${lim.resetAt ?? "unknown"}` };
         }
-        return isCloneFailure(tail) ? cloneDeferred(h.id, why) : { terminalReason: "engine-error", detail: why };
+        // #5859: tagged with its pool agent so the runner can tell an agent/VM restart (many lost on one agent) from one dead sandbox
+        if (isEgressTimeout(tail)) return egressDeferred(h.id, why);
+        return isCloneFailure(tail) ? cloneDeferred(h.id, why) : { terminalReason: "engine-error", detail: why, lostWithoutResult: true, ...(typeof h?.agent === "string" && h.agent ? { agent: h.agent } : {}) };
       }
       await sleep(pollMs);
     }
@@ -774,8 +821,8 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
         if (started && e?.unreachable) return withUsage(unreachable(h, e), h); // #4672: no tear, the ledger keeps it
         r = started ? settleClone({ terminalReason: "engine-error", detail: `sandbox ${base.id}: ${errText(e)}` }, base.id) : startFailed(base.id, e);
       }
-      await tear(led, h); // every path, after the result is in (tear never throws)
-      return started ? withUsage(r, h) : r; // a sandbox that never started used nothing
+      const torn = tearAfter(led, h, r); // every path, after the result is in (tear never throws); #5808: not awaited here
+      return started ? withUsage(torn, h) : torn; // a sandbox that never started used nothing
     },
     adopt: (n, rec, ctx = {}) => adoptSaved(n, rec, ctx),
   };
@@ -803,8 +850,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
         if (e?.unreachable) return withUsage(unreachable(h, e), h); // #4672: same tolerance; no tear, left for the next adopt
         r = { terminalReason: "engine-error", detail: `sandbox ${h.id}: ${errText(e)}` };
       }
-      await tear(led, h);
-      return withUsage(r, h);
+      return withUsage(tearAfter(led, h, r), h); // #5808: teardown runs after the result is handed back
   }
   // A leftover ledger entry of this lane's sandbox: its result if it can still be had, else null (torn down by the caller).
   async function adoptLeft(n, left, ctx) {

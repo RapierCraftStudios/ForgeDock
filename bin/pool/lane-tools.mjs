@@ -101,6 +101,11 @@ export function laneToolsTag(baseImage, tools) {
   return `${baseImage}-t${h}`;
 }
 
+/** True when `tag` is the base image itself or a per-repo tools variant (`<base>-t<12 hex>`) of it. */
+export function isLaneToolsTagOf(tag, base) {
+  return typeof tag === "string" && (tag === base || (tag.startsWith(`${base}-t`) && /^[0-9a-f]{12}$/.test(tag.slice(base.length + 2))));
+}
+
 /** The generated Dockerfile: FROM the base lane image, then each recipe's steps in sorted order. */
 export function laneToolsDockerfile(baseImage, tools) {
   const steps = [...tools].sort().flatMap((e) => { const { name, version } = parseLaneTool(e); return RECIPES[name].steps(version); });

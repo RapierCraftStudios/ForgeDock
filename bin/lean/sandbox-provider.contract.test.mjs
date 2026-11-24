@@ -14,6 +14,7 @@ import { makeLedger } from "./ledger.mjs";
 import { openBatch } from "./batch.mjs";
 import { orchestrate } from "./orchestrate.mjs";
 import { planGc, applyGc } from "../gc.mjs";
+import { actionsProvider, LANE_RESULT_MARKER } from "./sandbox-actions.mjs";
 
 const HOST = "testhost";
 const SECRET = "s3cret-value-123";
@@ -62,7 +63,26 @@ function remoteFixture(batch, { launchError = null } = {}) {
   };
 }
 
-const FIXTURES = { container: containerFixture, remote: remoteFixture };
+/** #5748: the Actions provider over a fake GitHub (runs by run-name, result comments by the Actions bot). */
+function actionsFixture(batch, { launchError = null } = {}) {
+  const runs = new Map(), comments = [];
+  const api = async (method, path, body) => {
+    if (method === "POST" && /\/dispatches$/.test(path)) { if (launchError) throw launchError; runs.set(`forgedock-lane ${body.inputs.lane_id}`, { id: runs.size + 1, display_title: `forgedock-lane ${body.inputs.lane_id}`, status: "in_progress" }); return null; }
+    if (method === "GET" && path === "repos/o/r") return { default_branch: "main" };
+    if (method === "GET" && /\/runs\?/.test(path)) return { workflow_runs: [...runs.values()] };
+    if (method === "GET" && /\/comments\?/.test(path)) return [comments];
+    if (method === "POST" && /\/cancel$/.test(path)) { for (const [k, r] of runs) if (path.includes(`/runs/${r.id}/`)) runs.delete(k); return null; }
+    throw new Error(`unexpected ${method} ${path}`);
+  };
+  const provider = actionsProvider({ batch, repo: "o/r", settings: {}, api, env: {}, credentials: () => null, gitIdentity: () => ({}) });
+  return {
+    provider,
+    finish: (h, result) => { runs.get(`forgedock-lane ${h.id}`).status = "completed"; comments.push({ user: { login: "github-actions[bot]" }, body: `${LANE_RESULT_MARKER(h.id)}\n\`\`\`json\n${JSON.stringify(result)}\n\`\`\`` }); },
+    exists: (id) => runs.has(`forgedock-lane ${id}`),
+  };
+}
+
+const FIXTURES = { container: containerFixture, remote: remoteFixture, actions: actionsFixture };
 
 for (const [name, make] of Object.entries(FIXTURES)) {
   describe(`sandbox provider contract: ${name} (#4254)`, () => {
@@ -100,6 +120,7 @@ for (const [name, make] of Object.entries(FIXTURES)) {
       const started = [];
       const r = await providerLanes({ provider: wrapped, laneArgs: () => ["--repo", "o/r"], ledgerFor, env: { GH_TOKEN: SECRET }, secrets: ["GH_TOKEN"], pollMs: 2 }).runOne(9, "staging", { onStart: (x) => started.push(x) });
       assert.equal(r.terminalReason, "merged");
+      await r.postRun?.(); // #5808: teardown runs after the result is handed back
       assert.deepEqual(atStart, [provider.idFor(9)]);
       assert.equal(ledgerFor(9).read(), null);
       const files = [JSON.stringify(started), JSON.stringify(r)];

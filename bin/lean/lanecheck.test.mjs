@@ -10,7 +10,7 @@ import { checkPoolAuth, checkPoolVersion, checkPathLoop, checkGhFields, availabl
 import { which } from "./toolchain.mjs";
 import { findShimLoops, heavyShimScript } from "./heavy.mjs";
 import { orchestrate, deferPolicy } from "./orchestrate.mjs";
-import { providerLanes, isCloneFailure } from "./execution.mjs";
+import { providerLanes, isCloneFailure, isEgressTimeout } from "./execution.mjs";
 
 const pool = { mode: "remote", provider: "pool", tokenEnv: null, endpoint: null };
 const until = async (f, ms = 3000) => { const t = Date.now(); while (!f()) { if (Date.now() - t > ms) throw new Error("timeout"); await new Promise((r) => setTimeout(r, 5)); } };
@@ -56,11 +56,24 @@ describe("pool_auth shared resolver (#5131)", () => {
 });
 
 describe("pool_version", () => {
-  it("reports the agent, image version, CLI version and upgrade command", () => {
-    const c = checkPoolVersion({ exec: pool, cliVersion: "1.39.0", agents: [{ name: "a1", ok: true, version: "1.37.0" }, { name: "a2", ok: true, version: "1.39.0" }] });
+  const ver = (agentVersion, cli = "1.39.0") => checkPoolVersion({ exec: pool, cliVersion: cli, agents: [{ name: "a1", ok: true, version: agentVersion }, { name: "a2", ok: true, version: cli }] });
+  it("a different major fails, naming the agent, image version, CLI version and upgrade command", () => {
+    const c = ver("0.37.0", "1.39.0");
     assert.equal(c.ok, false); assert.equal(c.code, "preflight.pool_version");
-    assert.match(c.detail, /a1/); assert.match(c.detail, /1\.37\.0/); assert.match(c.detail, /1\.39\.0/); assert.ok(c.detail.includes(UPGRADE_COMMAND)); assert.ok(!/a2/.test(c.detail));
-    assert.equal(checkPoolVersion({ exec: pool, cliVersion: "1.39.0", agents: [{ name: "a", ok: true, version: "1.39.0" }] }).ok, true);
+    assert.match(c.detail, /a1/); assert.match(c.detail, /0\.37\.0/); assert.match(c.detail, /1\.39\.0/); assert.ok(c.detail.includes(UPGRADE_COMMAND)); assert.ok(!/a2/.test(c.detail));
+  });
+  it("#5745: minor and patch skew within the same major passes and notes the skew", () => {
+    for (const [agent, cli] of [["1.60.1", "1.61.1"], ["1.61.0", "1.61.1"], ["v1.61.1-rc.1", "1.61.1"]]) {
+      const c = ver(agent, cli);
+      assert.equal(c.ok, true, `${agent} vs ${cli}`); assert.equal(c.code, "preflight.pool_version"); assert.equal(c.scope, "remote");
+      assert.match(c.detail, /compatible, same major/); assert.ok(c.detail.includes(UPGRADE_COMMAND));
+    }
+  });
+  it("#5745: an unparseable differing version fails; an exact match is unchanged", () => {
+    assert.equal(ver("latest", "1.61.1").ok, false);
+    assert.equal(ver("1.61.1", "dev").ok, false);
+    const c = checkPoolVersion({ exec: pool, cliVersion: "1.39.0", agents: [{ name: "a", ok: true, version: "1.39.0" }] });
+    assert.equal(c.ok, true); assert.equal(c.detail, "1 agent(s) at 1.39.0");
   });
 });
 
@@ -173,6 +186,18 @@ describe("sandbox.clone", () => {
     const o = await lanes(prov()).runOne(7, {}, {});
     assert.equal(o.terminalReason, "engine-error");
     assert.equal(isCloneFailure("clone of repo ok"), false);
+  });
+  it("#5923: an ls-remote/fetch timeout ends deferred sandbox.egress_timeout with retry-in; other failures stay engine-error", async () => {
+    for (const t of ["fatal: unable to access 'https://github.com/o/r/': Failed to connect to github.com port 443: Connection timed out", "git ls-remote timed out after 60s", "git fetch hung: timeout"]) {
+      const r = await lanes(prov(), { logTail: () => t }).runOne(7, {}, {});
+      assert.equal(r.terminalReason, "deferred", t); assert.equal(r.code, "sandbox.egress_timeout", t); assert.ok(r.retryInSeconds > 0);
+    }
+    const e = await lanes(prov({ fetchResult: async () => ({ terminalReason: "engine-error", detail: "git fetch failed: Connection timed out" }) })).runOne(7, {}, {});
+    assert.equal(e.code, "sandbox.egress_timeout");
+    const o = await lanes(prov(), { logTail: () => "npm ERR! build failed" }).runOne(7, {}, {});
+    assert.equal(o.terminalReason, "engine-error");
+    assert.equal(isEgressTimeout("fetch of cache ok"), false);
+    assert.equal(isEgressTimeout("git clone timed out after 300s"), false);
   });
   it("is requeued with its retry-in and is not an engine-error (breaker input)", () => {
     const p = deferPolicy({ terminalReason: "deferred", code: "sandbox.clone", retryInSeconds: 120 }, { now: 0 });

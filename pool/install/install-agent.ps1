@@ -131,6 +131,14 @@ foreach ($l in $lines) {
 }
 if ($inWsl2) { foreach ($k in $want.Keys) { if (-not $seen[$k]) { $out.Add("$k=$($want[$k])"); $seen[$k] = $true } } }
 if (-not ($out | Where-Object { $_ -match '^\s*\[wsl2\]\s*$' })) { $out.Add('[wsl2]'); foreach ($k in $want.Keys) { $out.Add("$k=$($want[$k])") } }
+# #5884: sparse VHD (freed blocks shrink the vhdx, so a lane burst cannot pin the Windows drive full). [experimental] is its own section.
+$expIdx = -1; for ($i = 0; $i -lt $out.Count; $i++) { if ($out[$i] -match '^\s*\[experimental\]\s*$') { $expIdx = $i; break } }
+if ($expIdx -lt 0) { $out.Add('[experimental]'); $out.Add('sparseVhd=true') }
+else {
+  $j = $expIdx + 1; $found = $false
+  while ($j -lt $out.Count -and $out[$j] -notmatch '^\s*\[') { if ($out[$j] -match '^\s*sparseVhd\s*=') { $out[$j] = 'sparseVhd=true'; $found = $true }; $j++ }
+  if (-not $found) { $out.Insert($expIdx + 1, 'sparseVhd=true') }
+}
 $changed = (($lines -join "`n") -ne ($out -join "`n"))
 if ($changed) {
   if (Test-Path $wslConfig) { Copy-Item $wslConfig "$wslConfig.computeshare-backup" -Force }
@@ -164,6 +172,9 @@ if ($distros -notcontains $Distro) {
   }
   Remove-Item $tar -Force
 }
+
+# #5884: convert the already imported vhdx to sparse (best effort: older WSL builds lack --manage --set-sparse).
+[void](Invoke-Wsl @('--manage', $Distro, '--set-sparse', 'true') 300 -Optional)
 
 # systemd for docker + the agent; no Windows PATH or Windows binaries inside the lane distro.
 $wslConf = "[boot]\nsystemd=true\n\n[network]\nhostname=$AgentName-cs\n\n[interop]\nappendWindowsPath=false\n"

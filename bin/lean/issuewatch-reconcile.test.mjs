@@ -79,3 +79,28 @@ test("remediateStep: a remediation exit 0 posts one FORGE:TRACKED hand-off while
   await run({ outcomes: { 7: { kind: "parked", code: "x" } } });
   assert.equal(comments.length, 0);
 });
+
+test("remediateStep: a failed remediation on a merged issue adds no needs-human; one reopened after the merge does (#5759)", async () => {
+  const { remediateStep } = await import("./issuewatch-reconcile.mjs");
+  const run = async (events) => {
+    const edits = [];
+    const io = {
+      remediate: () => ({ poll: () => ({ code: 1 }) }),
+      gh: async (a) => {
+        if (a[0] === "issue" && a[1] === "view") return JSON.stringify({ state: "OPEN", labels: [{ name: "workflow:merged" }] });
+        if (a[0] === "api") return events;
+        if (a[1] === "edit") edits.push(a.join(" "));
+        return "";
+      },
+    };
+    const state = { outcomes: { 7: { kind: "parked", code: "ci.red" } } }, failed = [], handles = new Map();
+    const step = () => remediateStep({ watch: { name: "w" }, repo: "o/r", io, state, handles, now: 1, settle: () => {}, fail: (n) => failed.push(n) });
+    await step(); await step();
+    return { edits, failed };
+  };
+  const merged = await run("labeled\t2026-11-17T00:00:00.000Z\tworkflow:merged");
+  assert.deepEqual(merged.edits, []);
+  assert.deepEqual(merged.failed, [7]);
+  const reopened = await run("labeled\t2026-11-17T00:00:00.000Z\tworkflow:merged\nreopened\t2026-11-18T00:00:00.000Z\t");
+  assert.ok(reopened.edits.some((e) => e.includes("--add-label needs-human")));
+});

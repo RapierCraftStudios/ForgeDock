@@ -23,6 +23,7 @@ import { triageTick } from "./issuewatch-triage.mjs";
 import { releaseRoot } from "./release.mjs";
 import { loadPolicy } from "./decision-engine.mjs";
 import { decisionContext, decisionsActive, decisionStep, decisionCounts, formatDecisionDryRun, claimsUsed } from "./issuewatch-decisions.mjs";
+import { repairMergedParked } from "./merged-park.mjs";
 import { reconcileClaims, remediateStep, reclaimStep, redriveStep, claimCounts, stuckClaims, formatStuck } from "./issuewatch-reconcile.mjs";
 import { APP_SLUG } from "../init-repo.mjs";
 import { noComments } from "./render.mjs";
@@ -366,6 +367,8 @@ export async function tick({ watch, repo, io, state, dir, branches = {}, default
     else if (r.code === 75 && (state.retries[n] = (state.retries[n] ?? 0) + 1) <= RETRIES) handles.set(n, io.launch(n, state.lanes[n]));
     else fail(n);
   }
+  // #5759: an open issue with workflow:merged still carrying park labels is inconsistent; clear them
+  try { for (const r of await repairMergedParked({ gh: io.gh, repo })) (state.repaired ??= []).push({ issue: r.issue, labels: r.flagged, at: now }); } catch { /* best effort */ }
   if (watch.mode === "batch") {
     await remediateStep({ watch, repo, io, state, handles, now, settle, fail });
     await reclaimStep({ repo, io, state, trusted: (c) => TRUSTED.has(c?.authorAssociation), release: (n) => { releaseClaims(repoDir(repo, io.env), [n], watch.name); state.claimed = state.claimed.filter((x) => x !== n); delete state.lanes[n]; unsettle(state, n); } });

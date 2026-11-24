@@ -64,3 +64,14 @@ describe("base red (#5239)", () => {
     assert.equal(await reportBaseRed({ ghc: async () => { throw new Error("x"); }, repo: "o/r", base: "s", att: null, laneIssue: 5, commands: ["c"] }), null);
   });
 });
+
+describe("reportTrainBaseRed (#5838)", () => {
+  it("files a base-red issue naming the checks, the base tip and the batch, without a lane", async () => {
+    const calls = []; const ghc = async (a) => { calls.push(a); return "https://github.com/o/r/issues/77\n"; };
+    const { reportTrainBaseRed } = await import("./basered.mjs");
+    assert.equal(await reportTrainBaseRed({ ghc, repo: "o/r", base: "staging", baseSha: "c".repeat(40), checks: [{ name: "build", url: "https://ci/1" }], batch: "b1" }), 77);
+    const body = calls[0][calls[0].indexOf("--body") + 1];
+    assert.match(body, /FORGE:BASE_RED/); assert.match(body, /`build` https:\/\/ci\/1/); assert.match(body, /batch b1/); assert.doesNotMatch(body, /Lane #/);
+    assert.match(calls[0][calls[0].indexOf("--title") + 1], /staging is red on required check build/);
+  });
+});

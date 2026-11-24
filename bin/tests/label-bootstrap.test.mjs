@@ -143,3 +143,16 @@ describe("forge#3567 spec call sites never combine a possibly-missing label in o
     }
   });
 });
+
+describe("forge#5759 transition-label.sh merged clears park labels", () => {
+  it("transition-label merged clears pipeline labels", () => {
+    const park = ["needs-human", "needs-human:external", "parked:env.tool_missing", "remediation-queue"];
+    const { r, issue } = runTransition("merged", { repo: ["workflow:merged", "workflow:in-review", ...park, "bug"], issue: ["workflow:in-review", "bug", ...park] });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(issue.sort(), ["bug", "workflow:merged"]);
+  });
+  it("one failing park-label removal leaves the others removed", () => {
+    const { issue } = runTransition("merged", { repo: ["workflow:merged", "needs-human", "parked:x"], issue: ["needs-human", "remediation-queue", "parked:x"] });
+    assert.deepEqual(issue.sort(), ["remediation-queue", "workflow:merged"]);
+  });
+});
