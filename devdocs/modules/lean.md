@@ -548,7 +548,12 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `not_members` with a why) resumes the builder once; still missing is an anomaly.
 8. **Push + PR → merge** — merge policy `required` (default) | `all` | `none`;
    base-sync merges the lane in on conflict (never rebase/force-push); merge
-   at the reviewed head → `merged`, or `ci-pending` after the CI wait. Each CI
+   at the reviewed head → `merged`, or `ci-pending` after the CI wait. With `mergeTrain: on`
+   (`orchestration.merge_train`, default off, #5836) a plain merge (no split, e2e gate,
+   numbered sequence files or close-time records) whose required checks are still pending
+   ends `pr-ready` with `{pr, head, required, policy, lane}`, freeing the slot for the
+   batch's merge train (`bin/lean/mergetrain.mjs`); red checks still get the lane's CI
+   fix round and green ones merge in the lane. Each CI
    wait poll re-reads mergeability (#4266): a PR that turned conflicting (its
    `pull_request` workflows never start) base-syncs at once and waits again,
    within the same base-sync limit (→ `base.conflict`); required checks that
@@ -713,7 +718,7 @@ defer it as `lease.held` for the TTL. Genuinely foreign leases still defer. The 
 
 ## Outcomes
 
-Terminal reasons: `merged`, `ci-pending`, `deferred`, `decomposed`, `invalid`,
+Terminal reasons: `merged`, `pr-ready` (#5836, `awaiting_merge`), `ci-pending`, `deferred`, `decomposed`, `invalid`,
 `needs-human`, `dependency-open`, `dependency-unreadable`,
 `dependency-blocked`, `lane-refused`, `engine-error`. Typed codes come from
 `bin/engine/outcome-codes.mjs` `OUTCOME_CODES` (e.g. `host.busy`,

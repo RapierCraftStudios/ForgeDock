@@ -43,6 +43,7 @@ export const TYPES = {
   "verification.ci_local.extra_commands": "list",
   "verification.ci_local.budget_minutes": "number",
   "verification.ci_local.max_parallel": "number",
+  "orchestration.merge_train": { enum: ["off", "on"] }, // #5836: lanes end pr-ready and the batch merge train merges (default off)
   "env.snapshots.enabled": "bool",
   "env.snapshots.store": { enum: ["local", "oci"] },
   "env.snapshots.keep": "number",

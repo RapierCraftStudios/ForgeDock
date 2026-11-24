@@ -191,6 +191,7 @@ export function codeForTerminalReason(reason) {
     case "investigation":
       return OUTCOME_CODES.COMPLETED;
     case "awaiting-merge":
+    case "pr-ready": // #5836: handed to the merge train
     case "ci-pending":
       return OUTCOME_CODES.AWAITING_MERGE;
     case "invalid": return OUTCOME_CODES.INVALID;

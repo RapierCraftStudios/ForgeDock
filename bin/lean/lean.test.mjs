@@ -1502,6 +1502,14 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     assert.doesNotMatch(traj(w).join("\n"), /left open as partial/);
   });
 
+  it("#5836 merge train on: close-time records (a still-pending follow-up) keep the lane waiting, never pr-ready", async () => {
+    const k = two("defer", { why: "w" });
+    const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], issueStates: { 900: "CLOSED" } });
+    w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => [{ name: "build", state: "pending" }];
+    const r = await run(w, { mergeTrain: "on", ciMaxMinutes: 5 });
+    assert.equal(r.terminalReason, "ci-pending"); assert.equal(w.merges.length, 0);
+  });
+
   it("a tracking issue that is not open is not a tracking issue: the item stays pending and is recorded", async () => {
     const k = two("defer", { why: "w" });
     const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)], issueStates: { 900: "CLOSED" } });
@@ -3165,6 +3173,42 @@ describe("merge_wait policy", () => {
     assert.equal((await run(w)).terminalReason, "needs-human"); assert.equal(w.merges.length, 0);
     const w2 = world(); w2.io.requiredChecks = async () => ["build"]; w2.io.checkStates = async () => states({ build: "pending" });
     assert.equal((await run(w2, { ciMaxMinutes: 5 })).terminalReason, "ci-pending");
+  });
+  describe("#5836 merge train: pr-ready exit", () => {
+    it("on, pending required checks end pr-ready with the hand-over payload and no merge", async () => {
+      const w = world(); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "pending" });
+      const r = await run(w, { mergeTrain: "on" });
+      assert.equal(r.terminalReason, "pr-ready");
+      assert.deepEqual({ pr: r.pr, head: r.head, required: r.required, policy: r.policy, lane: r.lane }, { pr: 77, head: w.head, required: ["build"], policy: "required", lane: "staging" });
+      assert.equal(w.merges.length, 0);
+    });
+    it("off (default) keeps waiting: pending checks end ci-pending at the budget, never pr-ready", async () => {
+      const w = world(); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "pending" });
+      assert.equal((await run(w, { ciMaxMinutes: 5 })).terminalReason, "ci-pending");
+      const w2 = world(); w2.io.requiredChecks = async () => ["build"]; w2.io.checkStates = async () => states({ build: "pending" });
+      assert.equal((await run(w2, { ciMaxMinutes: 5, mergeTrain: "off" })).terminalReason, "ci-pending");
+    });
+    it("on, already-green checks merge in the lane", async () => {
+      const w = world(); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "success" });
+      const r = await run(w, { mergeTrain: "on" });
+      assert.equal(r.terminalReason, "merged");
+      assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
+    });
+    it("on, a red check still gets the lane's own outcome (never pr-ready)", async () => {
+      const w = world(); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "failure" });
+      assert.notEqual((await run(w, { mergeTrain: "on" })).terminalReason, "pr-ready");
+      assert.equal(w.merges.length, 0);
+    });
+  });
+  describe("#5836 merge train: plain-merge gate keeps the lane waiting", () => {
+    const pending = (w) => { w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "pending" }); return w; };
+    it("numbered sequence files keep the lane waiting", async () => {
+      const w = pending(world());
+      w.io.sequenceCheck = async () => []; w.io.sequenceLease = { acquire: async () => ({ waitMs: 0, timedOut: false, release: () => {} }) };
+      w.io.sequenceSnapshot = async () => [{ path: "db/0007_usage.sql", blob: "b1" }];
+      const r = await run(w, { mergeTrain: "on", ciMaxMinutes: 5 });
+      assert.notEqual(r.terminalReason, "pr-ready"); assert.equal(w.merges.length, 0);
+    });
   });
   describe("#4624 merge-time rerun / wait / flaky branch of mergeFixRound", () => {
     const RUN = (n, attempt) => `https://github.com/o/r/actions/runs/${n}/job/${attempt}`;
@@ -7129,6 +7173,12 @@ describe("refactor:split lane routing (forge#4211)", () => {
   const splitOk = (extra = {}) => ({ ok: true, target: "pkg/big.py", testCmd: "pytest", package: "pkg.big_parts", packageName: "big_parts", modules: { consts: ["A"], helpers: ["f", "g"] }, rest: null, verify: { ok: true, failures: [] }, grouped: true, lines: 120, ...extra });
   const mod = (w, result) => ({ ...refactorMod, runSplitStep: async (ctx) => { w.splitCtx.push(ctx); if (result.ok) await ctx.callGrouper("INDEX-ONLY PROMPT", { cwd: "/tmp/empty" }); return result; } });
 
+  it("#5836 merge train on: a split lane is never handed to the train (pending checks keep it waiting)", async () => {
+    const w = splitWorld(); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => [{ name: "build", state: "pending" }];
+    const r = await run(w, { mergeTrain: "on", ciMaxMinutes: 5, refactorModule: mod(w, splitOk()), precheck: { commands: ["pytest -q"] } });
+    assert.equal(r.terminalReason, "ci-pending"); assert.equal(w.merges.length, 0);
+  });
+
   it("a refactor:split issue never runs the builder or the reviewer: one tool-less grouping call, PR, merge", async () => {
     const w = splitWorld();
     const r = await run(w, { refactorModule: mod(w, splitOk()), precheck: { commands: ["pytest -q"] } });
@@ -8393,6 +8443,13 @@ describe("e2e merge gate (#4403)", () => {
     const ev = e2eEvents(dir);
     assert.deepEqual(ev.map((e) => [e.result, e.specs]), [["pass", ["e2e/foo.spec.ts"]]]);
     assert.ok(w.seq.indexOf("merge") > -1);
+  });
+
+  it("#5836 merge train on: an e2e gate keeps the lane waiting (never pr-ready)", async () => {
+    const w = withE2e(world({ changed: SPECS, reviews: [conf({}, CONTRACT, SPECS)] }), ["pending"]);
+    w.io.requiredChecks = async () => ["e2e"];
+    const r = await go(w, { mergeTrain: "on", ciMaxMinutes: 5 });
+    assert.notEqual(r.terminalReason, "pr-ready"); assert.equal(w.merges.length, 0);
   });
 
   it("the lane's own spec failing in e2e: builder fix round, re-review, then merged once e2e is green; no rounds left -> ci.red, nothing merged", async () => {

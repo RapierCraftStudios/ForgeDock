@@ -338,11 +338,21 @@ const defaultCredExec = (args) => {
  *                                   posts FORGE:DECISION and resumes the open PR on the rerun path with a recovery note. `final`
  *                                   (default true) is false when the runner may launch another attempt: the lane then never relabels (#4302)
  */
+/** #5836: the post-merge steps shared by the lane and the merge train: close the issue as completed, then (label) `workflow:merged` and (branch) delete the lane branch on origin. All best effort. */
+export async function closeMergedIssue({ gh, repo, issue, label = true, branch = null }) {
+  try { await gh(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]); } catch { /* the issue stays open for the sweep */ }
+  if (label) {
+    await clearPipelineLabels({ gh, repo, issue });
+    try { await gh(["issue", "edit", String(issue), "-R", repo, "--add-label", "workflow:merged"]); } catch { /* best effort */ }
+  }
+  if (branch) { try { await gh(["api", "-X", "DELETE", `repos/${repo}/git/refs/heads/${branch}`]); } catch { /* already gone */ } }
+}
+
 export async function runCore(o) {
   const armed = applyArmOverrides(o, o.issue); o = armed.options; // #5206: the arm's overrides shape the lane before any config is parsed
   o = { ...o, io: resolvingIo(o.io, { exists: existsSync, checksCli: CHECKS_CLI, forgedockCli: FORGEDOCK_CLI }) }; // #5727: every executed command names this install's forgedock entry points
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
-    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, validateRegenerate = null, validateCatalogSources = null, routeReachability = null, docsConfig = null, outcomeEvidenceConfig = null, ciBudget = null, pagesConfig = null, designConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, holdMergesDuringReleaseCi = true, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", reproQuality = "shadow", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, routeHandoffTokens = 40000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, contractMaxCorrections = 3, reviewMaxResumes = 3, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, contextWaitSeconds = 5, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, validateRegenerate = null, validateCatalogSources = null, routeReachability = null, docsConfig = null, outcomeEvidenceConfig = null, ciBudget = null, pagesConfig = null, designConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, mergeTrain = "off", holdMergesDuringReleaseCi = true, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", reproQuality = "shadow", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, contextCeilingBySize = null, routeHandoffTokens = 40000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, contractMaxCorrections = 3, reviewMaxResumes = 3, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, contextWaitSeconds = 5, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const rotator = io.rotator !== undefined ? io.rotator : openRotator({ kind: o.accountRotator }); // #5094
   // #5205: a rotator with pick() relaunches a limited phase pinned to another account; lane-level rotations and limited accounts
@@ -4138,6 +4148,14 @@ export async function runCore(o) {
       return null;
     }
 
+    // #5836: only a plain merge is handed to the merge train: a split, an e2e gate, numbered sequence files or close-time records keep the lane waiting.
+    async function trainPlain() {
+      if (isSplit || seqLease || pendingRecord().length || closing.checklist || closing.liveBlocked || closing.transferred || closing.reason === "partial") return false;
+      if (e2eWanted({ cfg: vcfg.e2e, files: await changedFiles(), contract: effective }).run) return false;
+      if (io.sequenceCheck && io.sequenceLease && ((await io.sequenceSnapshot?.({ cwd: wt, base }).catch(() => null)) ?? []).length) return false;
+      return true;
+    }
+
     // ---- 7. (sync) wait per policy, (sync) merge at the reviewed head ----
     let lastStates = null; // the last required-check poll, reused by the DCO gate (#4651)
     // #5832: review passed and precheck green: this head is PR-ready (FORGE:STATE `prReady`, read by the orchestrator's stacked admission).
@@ -4248,6 +4266,12 @@ export async function runCore(o) {
               continue;
             }
             if (required.every((n) => st(n) === "success")) break;
+            // #5836: with the merge train on, a plain merge whose required checks are still pending leaves the slot; the train merges it
+            if (mergeTrain === "on" && required.length && await trainPlain()) {
+              ev({ event: "PR_READY", pr, head: localHead, required, policy });
+              T.merge = [policyText, `pr-ready: required checks pending, merge handed to the train at ${localHead.slice(0, 12)}`];
+              return await finish("pr-ready", `PR #${pr} reviewed at ${localHead.slice(0, 12)}; required checks pending, merge handed to the merge train`, { pr, head: localHead, required, policy, lane: resumed?.base ?? lane, ...(milestone ? { milestone } : {}) });
+            }
           }
           // #4266: a PR that turns conflicting gets no merge ref, so its pull_request workflows never start: base-sync now.
           const ms = await waitMergeState();
@@ -4394,7 +4418,7 @@ export async function runCore(o) {
       try { await post("FORGE:TRACKED", `## Left open: live acceptance deferred on a default-on change\nMerged by PR #${pr}, but the rollout is live and these requirements still need live verification:\n${closing.blocks.map((b) => `- ${b.id} (flag ${b.flag})`).join("\n")}\n\nKeep the flag default-off until they are verified, or verify them and close.${closing.tracked.length ? ` Tracked in ${closing.tracked.join(", ")}.` : ""}`); } catch { /* the trajectory decision records it too */ }
     }
     // #5152: a merged change is `completed` even when partial: the remainder is tracked (FORGE:TRACKED), not dropped
-    if (!keepOpen && !(await closeBlockers("completed", pr)).length) await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {}); // #5505: not while another own PR is open
+    if (!keepOpen && !(await closeBlockers("completed", pr)).length) await closeMergedIssue({ gh: ghw, repo, issue, label: false }); // #5505: not while another own PR is open
     if (closing.transferred) { // #5339: record what is transferred, not met
       try { await post("FORGE:TRACKED", `## Left open: transferred, not met\nMerged by PR #${pr}, but these end-to-end/manual requirements were not run in the lane:\n${(closing.transfer ?? closing.open).map((r) => `- ${r.id}: ${r.transferred ? `transferred to epic #${r.transferred} (post-deploy journey)` : "no epic to take it"}`).join("\n")}${closing.tracked.length ? `\n\nTracked in ${closing.tracked.join(", ")}.` : ""}`); } catch { /* the PR body carries them too */ }
     } else if (closing.liveBlocked) { /* #5285: posted above */ } else if (closing.checklist) { // #5240: partial: left open; the unticked criteria, tracked follow-ups and any inert rollout are the record
