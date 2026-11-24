@@ -2277,6 +2277,12 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   try { healthTimers = batchHealth.scheduleChecks({ batch, created: healthCreated, config: healthConf, now: healthNow, ...(deps.healthTimer ? { setTimer: deps.healthTimer.set, clearTimer: deps.healthTimer.clear } : {}), check: healthCheck }); } catch { /* health is advisory */ }
   let rampProbe = {};
   try { rampProbe = (deps.host ?? (await import("./lean/effects.mjs")).makeHostProbe()); } catch { rampProbe = {}; } // #5845: the live cap subtracts lanes still ramping
+  try { // #5847: report the effective concurrency, its source and a missing forge.yaml; never blocks a batch
+    const host = { cores: () => cpus().length, memAvailableMb, rampingMb: rampProbe.rampingMb };
+    const d = schedMod.describeConcurrency({ parallel, parallelFrom: flag(argv, "--parallel") != null ? "--parallel" : "default", cwd, yamlFound: existsSync(join(cwd, "forge.yaml")),
+      ...(registry ? { registryCap: registry.cap(), globalParallel: orch.globalParallel ?? null, derivedCap: liveLaneCap(null, { cfg: readAdmission(cwd), host })() } : {}) });
+    for (const l of [d.line, ...d.warnings]) sink.line(l);
+  } catch { /* advisory */ }
   try {
     rows = await orchestrate({
       ...(train ? { train } : {}),
