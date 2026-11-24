@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { renderContract } from "./render.mjs";
-import { parseExecution, hostFallbackAllowed, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, containerProvider, providerByName, openExecutionBudget, poolCredential, remoteTransportFor, resolveDefaultExecution, repoIsPublic } from "./execution.mjs";
+import { parseExecution, hostFallbackAllowed, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, isEgressTimeout, SANDBOX_EGRESS_TIMEOUT_CODE, containerProvider, providerByName, openExecutionBudget, poolCredential, remoteTransportFor, resolveDefaultExecution, repoIsPublic } from "./execution.mjs";
 import * as executionModule from "./execution.mjs";
 import { remoteProvider } from "./sandbox-remote.mjs";
 import { makeLedger, countLiveLanes } from "./ledger.mjs";
@@ -62,9 +62,17 @@ describe("execution config (#4253)", () => {
     assert.equal(parseExecution({ mode: "remote", provider: "My Provider" }).provider, "container");
   });
 
+  it("remote mode with max_remote 0 pauses starts (#5933)", () => {
+    assert.notEqual(placement({ mode: "remote", maxRemote: 0 }), "local");
+    assert.equal(placeLane({ exec: { mode: "remote", maxRemote: 0 } }).where, "remote");
+  });
+  it("#5933 hybrid max_remote 0 stays local", () => {
+    assert.deepEqual(placeLane({ exec: { mode: "hybrid", maxRemote: 0 } }), { where: "local", reason: "max_remote 0" });
+  });
+
   it("placement: remote only for mode remote with max_remote >= 1; hybrid is placed per lane by placeLane (#4256)", () => {
     assert.equal(placement(parseExecution({})), "local");
-    assert.equal(placement(parseExecution({ mode: "remote", max_remote: "0" })), "local");
+    assert.equal(placement(parseExecution({ mode: "remote", max_remote: "0" })), "remote");
     assert.equal(placement(parseExecution({ mode: "hybrid", max_remote: "3" })), "local");
     assert.equal(placement(parseExecution({ mode: "remote", max_remote: "3" })), "remote");
     assert.equal(placement(undefined), "local");
@@ -705,7 +713,7 @@ describe("hybrid placement (#4256)", () => {
     const cases = [
       [{ exec: parseExecution({}) }, "local", "mode local"],
       [{ exec: parseExecution({ mode: "remote", max_remote: "3" }), weight: LIGHT }, "remote", "mode remote"],
-      [{ exec: parseExecution({ mode: "remote", max_remote: "0" }) }, "local", "mode remote"],
+      [{ exec: parseExecution({ mode: "remote", max_remote: "0" }) }, "remote", "mode remote"],
       [{ exec: hy("0"), weight: HEAVY }, "local", "max_remote 0"],
       [{ exec: hy(), verifyMode: "ci", weight: HEAVY, headroom: BUSY }, "local", "verify.mode ci: validation runs on CI, not billed twice"],
       [{ exec: hy(), labels: ["Documentation"], weight: HEAVY, headroom: BUSY }, "local", "docs-only lane"],
@@ -837,6 +845,15 @@ describe("hybrid placement (#4256)", () => {
     assert.deepEqual(prov.calls.filter((c) => c[0] === "start").map((c) => c[1]), [1]);
     assert.equal(res.rows[1].detail, "--placement|local|--placement-reason|docs-only lane");
     assert.deepEqual(res.rows[0].placement, { where: "remote", reason: "heavy validation: tsc" });
+  });
+});
+
+describe("#5923: egress timeout classification", () => {
+  it("isEgressTimeout matches network hangs only", () => {
+    assert.equal(SANDBOX_EGRESS_TIMEOUT_CODE, "sandbox.egress_timeout");
+    assert.equal(isEgressTimeout("ssh: connect: Connection timed out"), true);
+    assert.equal(isEgressTimeout("fatal: unable to access: Failed to connect to github.com"), true);
+    assert.equal(isEgressTimeout("fatal: repository not found"), false);
   });
 });
 

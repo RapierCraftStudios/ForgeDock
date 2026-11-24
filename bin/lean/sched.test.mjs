@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { grantOrder, openSched, priorityFromLabels, remoteLines } from "./sched.mjs";
+import { describeConcurrency, grantOrder, openSched, priorityFromLabels, remoteLines } from "./sched.mjs";
 import { orchestrate, estimateLaneMinutes, laneHistory, formatEstimateSummary, EST_DEFAULT_MIN, POST_DEPLOY_EST_MIN } from "./orchestrate.mjs";
 import { schedFromCli } from "../engine-cli.mjs";
 
@@ -555,6 +555,13 @@ describe("sched show lists remote (pool) lanes (#4964)", () => {
     assert.deepEqual(remoteLines({}), []);
   });
 
+  it("#5938: a placed remote lane shows its agent name, from the registry or the batch run record; `-` only when neither knows it", () => {
+    const e = { issue: 7, repo: "o/r", batch: "B", sandbox: "sb1", pid: 9 };
+    assert.match(remoteLines({ remote: [{ ...e, agent: "legion" }] })[0], /agent legion /);
+    assert.match(remoteLines({ remote: [e] }, { agentOf: () => "atlas" })[0], /agent atlas /);
+    assert.match(remoteLines({ remote: [e] }, { agentOf: () => { throw new Error("no batch"); } })[0], /agent - /);
+  });
+
   it("orchestrate publishes a remote lane while it runs, drops it after, and never acquires a slot", async () => {
     const { handle } = world();
     const reg = handle(531);
@@ -567,5 +574,30 @@ describe("sched show lists remote (pool) lanes (#4964)", () => {
     assert.deepEqual(seen.remote.map((r) => [r.issue, r.sandbox, r.agent]), [[7, "fdrsbx-B-7", "legion"]]);
     assert.equal(seen.slots.length, 0);
     assert.equal(reg.list().remote.length, 0);
+  });
+});
+
+describe("describeConcurrency", () => {
+  it("describeConcurrency line format", () => {
+    const r = describeConcurrency({ parallel: 6, parallelFrom: "--parallel", registryCap: 2 });
+    assert.equal(r.line, "concurrency: K=6 (host cap 2 from forgedock sched cap) [K from --parallel]");
+  });
+  it("describeConcurrency reports K, cap and source", () => {
+    assert.match(describeConcurrency({ parallel: 2, globalParallel: 3 }).line, /host cap 3 from forge\.yaml orchestration\.global_parallel/);
+    assert.match(describeConcurrency({ parallel: 2, globalParallel: 5, derivedCap: 4 }).line, /host cap 4 from host-derived limit/);
+    const none = describeConcurrency({ parallel: 2 });
+    assert.match(none.line, /host cap none from none/);
+    assert.deepEqual(none.warnings, []);
+  });
+  it("describeConcurrency warns when K exceeds cap", () => {
+    const r = describeConcurrency({ parallel: 6, registryCap: 2 });
+    assert.equal(r.warnings.length, 1);
+    assert.match(r.warnings[0], /forgedock sched cap 6/);
+    assert.deepEqual(describeConcurrency({ parallel: 2, registryCap: 2 }).warnings, []);
+  });
+  it("describeConcurrency warns when forge.yaml is missing", () => {
+    const r = describeConcurrency({ parallel: 1, yamlFound: false, cwd: "/x" });
+    assert.match(r.warnings[0], /no forge\.yaml in \/x; defaults apply/);
+    assert.deepEqual(describeConcurrency({ parallel: 1 }).warnings, []);
   });
 });

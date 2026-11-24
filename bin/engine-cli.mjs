@@ -116,6 +116,24 @@ export function makeIo() {
 }
 
 /** forge.yaml `engine.ci_pending_max_minutes` from the cwd checkout; undefined when absent or invalid. */
+/**
+ * #5839: the merge-train A/B reader. Per batch: merged issues per wall-clock hour, slot-hours per merge (summed lane minutes / merged)
+ * and post-merge fix sessions (rows that are fix lanes for a merged PR). Compare a batch with orchestration.merge_train on against off at equal parallelism.
+ */
+export function mergeThroughput(rows, wallMs) {
+  const list = Array.isArray(rows) ? rows : [];
+  const merged = list.filter((r) => r?.outcome === "merged").length;
+  const slotHours = list.reduce((n, r) => n + (Number(r?.minutes) || 0), 0) / 60;
+  const fixes = list.filter((r) => r?.postMergeFix === true || /post-merge fix|broke the merged tree/i.test(String(r?.detail ?? ""))).length;
+  const hours = Number(wallMs) > 0 ? wallMs / 3600000 : null;
+  return { merged, perHour: hours && merged ? Math.round((merged / hours) * 100) / 100 : null, slotHoursPerMerge: merged ? Math.round((slotHours / merged) * 100) / 100 : null, postMergeFixSessions: fixes };
+}
+export function formatMergeThroughput(rows, wallMs) {
+  const t = mergeThroughput(rows, wallMs);
+  if (!t.merged) return null;
+  return `throughput: merged ${t.merged}, ${t.perHour ?? "n/a"}/hour, slot-hours per merge ${t.slotHoursPerMerge ?? "n/a"}, post-merge fix sessions ${t.postMergeFixSessions}`;
+}
+
 export function readCiPendingMaxMinutes(cwd = process.cwd()) {
   try {
     const n = Number(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.ci_pending_max_minutes);
@@ -429,6 +447,7 @@ export function readHeavy(cwd = process.cwd()) {
  * `lane_limits_memory_max`/`lane_limits_cpu_quota`), plus `tasks_max` (#4690, default 1024). `engine.cli_idle_minutes` (default 15) and `engine.cli_max_minutes` (default 180).
  * `engine.cli_busy_minutes` (default 45, #4405): extra silence allowed while the builder has a live heavy step or heavy-queue entry.
  * #4390: `engine.context_ceiling_tokens` (default 120000 in runCore; 0 = off).
+ * #5829: unset context_ceiling_tokens = `engine.context_window_share` (default 0.5) of the routed model's window; `engine.context_restart_cost_usd` is the cost gate's restart estimate.
  * #5346: `engine.context_ceiling_by_size` ("S=..,M=..,L=.."; a size without an entry uses context_ceiling_tokens).
  * #5812: `engine.route_handoff_tokens` (default 40000 in runCore; 0 = always resume): a planning session above it is not resumed by the build, which starts from a digest.
  * #4392: `engine.turn_budget_s|m|l` (implement turn budget per lane size; defaults 25/60/100, always returned; 0 = off).
@@ -446,6 +465,8 @@ export function readCoreLimits(cwd = process.cwd()) {
       ...(posNum(y.engine?.cli_max_minutes) ? { cliMaxMinutes: posNum(y.engine.cli_max_minutes) } : {}),
       ...(posNum(y.engine?.cli_busy_minutes) ? { cliBusyMinutes: posNum(y.engine.cli_busy_minutes) } : {}),
       ...(/^\d+$/.test(String(y.engine?.context_ceiling_tokens ?? "").trim()) ? { contextCeilingTokens: Number(y.engine.context_ceiling_tokens) } : {}),
+      ...(Number(y.engine?.context_window_share) > 0 && Number(y.engine.context_window_share) <= 1 ? { contextWindowShare: Number(y.engine.context_window_share) } : {}), // #5829: default ceiling = this share of the routed model's window
+      ...(String(y.engine?.context_restart_cost_usd ?? "").trim() !== "" && Number(y.engine.context_restart_cost_usd) >= 0 ? { contextRestartCostUsd: Number(y.engine.context_restart_cost_usd) } : {}),
       ...(parseCeilingBySize(y.engine) ? { contextCeilingBySize: parseCeilingBySize(y.engine) } : {}), // #5346
       ...(/^\d+$/.test(String(y.engine?.route_handoff_tokens ?? "").trim()) ? { routeHandoffTokens: Number(y.engine.route_handoff_tokens) } : {}), // #5812
       turnBudgets: parseTurnBudgets(y.engine) ?? { ...TURN_BUDGET_DEFAULTS }, // #4392: lanes are budgeted by default
@@ -1116,7 +1137,7 @@ export async function runFromCli(argv, deps = {}) {
       ...(rotatorKind({ execution: readExecution(process.cwd()), env }) ? { accountRotator: rotatorKind({ execution: readExecution(process.cwd()), env }) } : {}), // #5094, #5205: detected
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}), ...(plan ? { plan: true } : {}), ...(planned ? { planned } : {}), ...(stackedOn ? { stackedOn } : {}), ...(stackedOn ? { stackedOn } : {}),
       emitTelemetry: deps.emitTelemetry ?? composeEmit(makeEmitTelemetry({ repo: leanRepo }), makeEventEmitter({ repo: leanRepo, config: readEvents() }).emit),
-      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readConformanceKinds() ? { conformanceKinds: readConformanceKinds() } : {}), ...(readConformanceMutation() ? { conformanceMutation: "report" } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readSequenceVersioned() ? { sequenceVersioned: readSequenceVersioned() } : {}), ...(readSharedSurfaces() ? { sharedSurfaces: readSharedSurfaces() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readReproQuality() ? { reproQuality: readReproQuality() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readExperiment() ? { experiment: readExperiment() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}), hostFallback: readHostFallback(), ...readRelayCaps(), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}), ...(readBaseMerge() ? { baseMerge: readBaseMerge() } : {}), ...(readFollowupsDefaultMilestone() ? { followupsDefaultMilestone: readFollowupsDefaultMilestone() } : {}), ...(readFollowupsRollupLabel() ? { followupsRollupLabel: readFollowupsRollupLabel() } : {}), ...(readCiFailFast() ? { ci: { fail_fast: readCiFailFast() } } : {}), ...(Number.isInteger(Number(readLeanSetting("contract_max_corrections"))) && Number(readLeanSetting("contract_max_corrections")) >= 1 ? { contractMaxCorrections: Number(readLeanSetting("contract_max_corrections")) } : {}), ...(Number.isInteger(Number(readLeanSetting("review_max_resumes"))) && Number(readLeanSetting("review_max_resumes")) >= 1 ? { reviewMaxResumes: Number(readLeanSetting("review_max_resumes")) } : {}) });
+      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readConformanceKinds() ? { conformanceKinds: readConformanceKinds() } : {}), ...(readConformanceMutation() ? { conformanceMutation: "report" } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readSequenceVersioned() ? { sequenceVersioned: readSequenceVersioned() } : {}), ...(readSharedSurfaces() ? { sharedSurfaces: readSharedSurfaces() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readReproQuality() ? { reproQuality: readReproQuality() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readExperiment() ? { experiment: readExperiment() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readOrchestration().mergeTrain === "on" ? { mergeTrain: "on" } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}), hostFallback: readHostFallback(), ...readRelayCaps(), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}), ...(readBaseMerge() ? { baseMerge: readBaseMerge() } : {}), ...(readFollowupsDefaultMilestone() ? { followupsDefaultMilestone: readFollowupsDefaultMilestone() } : {}), ...(readFollowupsRollupLabel() ? { followupsRollupLabel: readFollowupsRollupLabel() } : {}), ...(readCiFailFast() ? { ci: { fail_fast: readCiFailFast() } } : {}), ...(Number.isInteger(Number(readLeanSetting("contract_max_corrections"))) && Number(readLeanSetting("contract_max_corrections")) >= 1 ? { contractMaxCorrections: Number(readLeanSetting("contract_max_corrections")) } : {}), ...(Number.isInteger(Number(readLeanSetting("review_max_resumes"))) && Number(readLeanSetting("review_max_resumes")) >= 1 ? { reviewMaxResumes: Number(readLeanSetting("review_max_resumes")) } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
     if (interrupted) return lres; // the signal handler reported and exits
@@ -1652,6 +1673,7 @@ async function orchestrateClient(argv, deps = {}) {
     if (sock) execution = (await schedd.request(sock, { op: "set-execution", id, ...patch }, undefined, { timeoutMs: schedd.REQUEST_MS }))?.execution ?? null;
     else { const batchMod = await import("./lean/batch.mjs"); execution = liveExec.applySetExecution(batchMod.openBatch(batchMod.batchRoot(), id), patch); }
     console.log(`batch ${id}: ${liveExec.formatOverride(patch)}`);
+    if (patch.maxRemote !== undefined) { const note = await poolLaneNote(patch.maxRemote, liveExec); if (note) console.log(note); } // #5735
     return { ok: true, batch: id, execution };
   }
   // #4408: --add, and the extra issues of --resume <id> N..., go to the batch (through the daemon when one runs).
@@ -1788,6 +1810,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { id, patch } = liveExec.parseSetExecution(argv);
     const execution = liveExec.applySetExecution(batchMod.openBatch(root, id), patch);
     sink.line(`batch ${id}: ${liveExec.formatOverride(patch)}`);
+    const drain = liveExec.drainNote(patch);
+    if (drain) sink.line(drain);
+    if (patch.maxRemote !== undefined) { const note = await poolLaneNote(patch.maxRemote, liveExec); if (note) sink.line(note); } // #5735
     return { ok: true, batch: id, execution };
   }
   if (["--show-env", "--set-env", "--unset-env"].some((f) => argv.includes(f))) return envBatch({ argv, root, print: (l) => sink.line(l) });
@@ -1976,7 +2001,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, deferPostRun: true, // #5437: orchestrate runs result.postRun once the slot is free
       laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), ...(ctx.plan ? { plan: true } : {}), ...(ctx.planned ? { planned: ctx.planned } : {}), ...(ctx.stackedOn ? { stackedOn: ctx.stackedOn } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
       ...(rotatorKind({ execution: readExecution(cwd), env }) ? { accountRotator: rotatorKind({ execution: readExecution(cwd), env }) } : {}), // #5094, #5205: detected
-      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readConformanceKinds(cwd) ? { conformanceKinds: readConformanceKinds(cwd) } : {}), ...(readConformanceMutation(cwd) ? { conformanceMutation: "report" } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readSequenceVersioned(cwd) ? { sequenceVersioned: readSequenceVersioned(cwd) } : {}), ...(readSharedSurfaces(cwd) ? { sharedSurfaces: readSharedSurfaces(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readReproQuality(cwd) ? { reproQuality: readReproQuality(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readExperiment(cwd) ? { experiment: readExperiment(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), hostFallback: readHostFallback(cwd), ...readRelayCaps(), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}), ...(readBaseMerge(cwd) ? { baseMerge: readBaseMerge(cwd) } : {}), ...(readFollowupsDefaultMilestone(cwd) ? { followupsDefaultMilestone: readFollowupsDefaultMilestone(cwd) } : {}), ...(readFollowupsRollupLabel(cwd) ? { followupsRollupLabel: readFollowupsRollupLabel(cwd) } : {}), ...(readCiFailFast(cwd) ? { ci: { fail_fast: readCiFailFast(cwd) } } : {}), ...(Number.isInteger(Number(readLeanSetting("contract_max_corrections", cwd))) && Number(readLeanSetting("contract_max_corrections", cwd)) >= 1 ? { contractMaxCorrections: Number(readLeanSetting("contract_max_corrections", cwd)) } : {}), ...(Number.isInteger(Number(readLeanSetting("review_max_resumes", cwd))) && Number(readLeanSetting("review_max_resumes", cwd)) >= 1 ? { reviewMaxResumes: Number(readLeanSetting("review_max_resumes", cwd)) } : {}) }) };
+      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readConformanceKinds(cwd) ? { conformanceKinds: readConformanceKinds(cwd) } : {}), ...(readConformanceMutation(cwd) ? { conformanceMutation: "report" } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readSequenceVersioned(cwd) ? { sequenceVersioned: readSequenceVersioned(cwd) } : {}), ...(readSharedSurfaces(cwd) ? { sharedSurfaces: readSharedSurfaces(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readReproQuality(cwd) ? { reproQuality: readReproQuality(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readExperiment(cwd) ? { experiment: readExperiment(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readOrchestration(cwd).mergeTrain === "on" ? { mergeTrain: "on" } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), hostFallback: readHostFallback(cwd), ...readRelayCaps(), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}), ...(readBaseMerge(cwd) ? { baseMerge: readBaseMerge(cwd) } : {}), ...(readFollowupsDefaultMilestone(cwd) ? { followupsDefaultMilestone: readFollowupsDefaultMilestone(cwd) } : {}), ...(readFollowupsRollupLabel(cwd) ? { followupsRollupLabel: readFollowupsRollupLabel(cwd) } : {}), ...(readCiFailFast(cwd) ? { ci: { fail_fast: readCiFailFast(cwd) } } : {}), ...(Number.isInteger(Number(readLeanSetting("contract_max_corrections", cwd))) && Number(readLeanSetting("contract_max_corrections", cwd)) >= 1 ? { contractMaxCorrections: Number(readLeanSetting("contract_max_corrections", cwd)) } : {}), ...(Number.isInteger(Number(readLeanSetting("review_max_resumes", cwd))) && Number(readLeanSetting("review_max_resumes", cwd)) >= 1 ? { reviewMaxResumes: Number(readLeanSetting("review_max_resumes", cwd)) } : {}) }) };
   } else {
     const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
     // #4690: lanes learn K (the default MemoryMax is derived from it); one line says so when no scope caps them.
@@ -2009,7 +2034,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     execForNeeds = exec ?? null;
     hybrid = exec?.mode === "hybrid" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1;
     let remoteStop = null; // #4612: the sandbox provider's checkpoint stop, used only when the cancel asks for it
-    if (exec && (execMod.placement(exec) === "remote" || hybrid)) {
+    if (exec && ((execMod.placement(exec) === "remote" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1) || hybrid)) {
       // #4253: lanes run in sandboxes, ledger-tracked per lane, admitted against max_remote instead of the host cap.
       let gitDir = null;
       try { gitDir = resolvePath(cwd, String(await leanIo.git(["rev-parse", "--git-common-dir"], { cwd })).trim()); } catch { gitDir = null; }
@@ -2081,6 +2106,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     lanes = { ...lanes, stopLane, releaseLease };
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
+  const train = orch.mergeTrain === "on" ? (deps.train ?? (await import("./lean/mergetrain.mjs")).createMergeTrain({ gh: (a) => leanIo.gh(a), repo, batchSize: orch.mergeTrainBatch ?? 4,
+    flaky: readYamlList(cwd, "verify", "flaky") ?? [], onBaseRed: async (r) => (await import("./lean/basered.mjs")).reportTrainBaseRed({ ghc: (a) => leanIo.gh(a), repo, ...r }) })) : null; // #5836: off (default) builds nothing; #5838: bisection seams
   // #4965: --auto-children overrides forge.yaml; it is part of plan.argv, so --resume keeps it
   const autoMod = _autoChildren, yamlAuto = readAutoChildren(cwd);
   const autoChildren = { mode: argv.includes("--auto-children") ? autoMod.parseAutoModeFlag(flag(argv, "--auto-children")) : yamlAuto.mode, pollS: yamlAuto.pollS,
@@ -2252,8 +2279,15 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   try { healthTimers = batchHealth.scheduleChecks({ batch, created: healthCreated, config: healthConf, now: healthNow, ...(deps.healthTimer ? { setTimer: deps.healthTimer.set, clearTimer: deps.healthTimer.clear } : {}), check: healthCheck }); } catch { /* health is advisory */ }
   let rampProbe = {};
   try { rampProbe = (deps.host ?? (await import("./lean/effects.mjs")).makeHostProbe()); } catch { rampProbe = {}; } // #5845: the live cap subtracts lanes still ramping
+  try { // #5847: report the effective concurrency, its source and a missing forge.yaml; never blocks a batch
+    const host = { cores: () => cpus().length, memAvailableMb, rampingMb: rampProbe.rampingMb };
+    const d = schedMod.describeConcurrency({ parallel, parallelFrom: flag(argv, "--parallel") != null ? "--parallel" : "default", cwd, yamlFound: existsSync(join(cwd, "forge.yaml")),
+      ...(registry ? { registryCap: registry.cap(), globalParallel: orch.globalParallel ?? null, derivedCap: liveLaneCap(null, { cfg: readAdmission(cwd), host })() } : {}) });
+    for (const l of [d.line, ...d.warnings]) sink.line(l);
+  } catch { /* advisory */ }
   try {
     rows = await orchestrate({
+      ...(train ? { train } : {}),
       ...(estimate ? { estimate } : {}),
       beforeAdmit,
       ...(preflight ? { preflight } : {}),
@@ -2331,6 +2365,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   if (pfLine) report.push(pfLine);
   let heavyStats = null; // #4169: live heavy-semaphore queue next to the per-phase waits the lanes reported
   try { heavyStats = deps.heavyStats !== undefined ? deps.heavyStats : (await import("./lean/heavy.mjs")).openHeavy(schedMod.schedDir()).stats(); } catch { heavyStats = null; }
+  const trainLine = train ? (await import("./lean/mergetrain.mjs")).formatTrainSummary(train.stats()) : null; // #5836
+  if (trainLine) report.push(trainLine);
+  { const tl = formatMergeThroughput(rows, Date.now() - (Date.parse(batch.startedAt ?? batch.started_at ?? "") || NaN)); if (tl) report.push(tl); } // #5839
   const waitLine = formatWaitSummary(rows, heavyStats);
   if (waitLine) report.push(waitLine);
   report.push(formatLedgerSummary(rows)); // #4908: per-phase wall time, n/a without ledger rows
@@ -2629,7 +2666,9 @@ export async function scheddFromCli(argv, deps = {}) {
     for (const b of st.batches) {
       const age = b.lastProgressAgeSec == null ? "no progress yet" : `last progress ${b.lastProgressAgeSec}s ago`;
       const pend = b.pendingAdds?.length ? `, pending adds: ${b.pendingAdds.map((n) => `#${n}`).join(" ")}` : "";
-      console.log(`  ${b.id}${b.running ? "" : " (not hosted)"}: ${age}${pend}`);
+      const ln = b.lanes ? `, running ${b.lanes.running}/${b.lanes.k} (local ${b.lanes.local}, remote ${b.lanes.remote})` : "";
+      const alive = b.lanesAliveAgeSec == null ? "" : `, lanes alive ${b.lanesAliveAgeSec}s ago`;
+      console.log(`  ${b.id}${b.running ? "" : " (not hosted)"}: ${age}${ln}${alive}${pend}`);
     }
     for (const l of schedd.sharedPendingLines(st.batches)) console.log(l); // #5471
     if (st.host) { const h = formatOverload(st.host) ?? formatHostLoad(st.host); if (h) console.log(`schedd: ${st.host.overloaded ? h : `host ${h}`}`); } // #5174
@@ -2647,7 +2686,8 @@ export async function scheddFromCli(argv, deps = {}) {
     const bm = await import("./lean/batch.mjs");
     const unfinished = () => { const root = bm.batchRoot(); return bm.listBatches(root).filter((id) => { try { const b = bm.openBatch(root, id); const br = b.store.peek()?.breaker; return !!b.readPlan()?.daemon && !b.isTerminal() && b.pendingIssues().length > 0 && !(br && !br.transport); } catch { return false; } }); };
     const start = () => { if (schedd.unitState() === null) schedd.defaultSpawn({ dir }); else schedd.startUnit(); };
-    return (deps.watchdog ?? health.watchdog)({ dir, ...(sec > 0 ? { stallMs: sec * 1000 } : {}), unfinished, start });
+    const batchVerdicts = () => schedd.batchVerdicts(bm.batchRoot());
+    return (deps.watchdog ?? health.watchdog)({ dir, ...(sec > 0 ? { stallMs: sec * 1000 } : {}), unfinished, start, batchVerdicts });
   }
   if (argv.length) throw new Error("usage: forgedock schedd [status | watchdog [--stall-sec N]]");
   (deps.renice ?? (await import("./lean/schedd-health.mjs")).bestEffortRenice)(); // #4780: lanes must not starve the scheduler
@@ -2836,7 +2876,9 @@ export async function schedFromCli(argv, deps = {}) {
     console.log(`repo weights: ${ws.length ? ws.map(([r, n]) => `${r}=${n}`).join(", ") : "equal (none set)"}`);
     for (const e of st.slots) console.log(`  running ${who(e)}  dispatcher ${e.pid}${e.lanePid ? ` lane ${e.lanePid}` : ""}`);
     for (const e of st.queue) console.log(`  queued  ${who(e)}  dispatcher ${e.pid}`);
-    for (const l of schedMod.remoteLines(st)) console.log(l); // #4964
+    const batchMod = await import("./lean/batch.mjs");
+    const agentOf = (e) => { const bm = batchMod; const r = bm.openBatch(bm.batchRoot(), e.batch).store.peek()?.running?.[e.issue]; return r?.placement?.agent ?? r?.agent ?? null; };
+    for (const l of schedMod.remoteLines(st, { agentOf })) console.log(l); // #4964
     try { for (const l of (await import("./lean/batch-health.mjs")).summaryLines((await import("./lean/batch.mjs")).batchRoot())) console.log(l); } catch { /* advisory */ } // #5314
     return st;
   }
@@ -2889,7 +2931,7 @@ export function readOrchestration(cwd = process.cwd()) {
   const errors = int(o.breaker_errors ?? o.errors, 3), windowMin = int(o.breaker_window_min ?? o.window_min, 30);
   const gp = int(o.global_parallel, null);
   const recoveryMax = int(o.recovery_max_attempts ?? o.max_attempts, 1);
-  return { breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), transientRetries: int(o.transient_retries, 4), blockedLabel: String(o.blocked_label ?? "blocked").trim(), globalParallel: gp >= 1 ? gp : null,
+  return { mergeTrain: String(o.merge_train ?? "off").trim().toLowerCase() === "on" ? "on" : "off", /* #5836 */ mergeTrainBatch: int(o.merge_train_batch, 4) >= 1 ? int(o.merge_train_batch, 4) : 4, /* #5837 */ breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), transientRetries: int(o.transient_retries, 4), blockedLabel: String(o.blocked_label ?? "blocked").trim(), globalParallel: gp >= 1 ? gp : null,
     stacking: normalizeStacking(o.stacking), // #5831
     recovery: { maxAttempts: recoveryMax, mechanicalMaxAttempts: Math.max(int(o.recovery_mechanical_max_attempts ?? o.mechanical_max_attempts, 2), recoveryMax) }, // #4725: env/base/sequence codes have their own budget
     // #4525: parked-PR base sync. The parser flattens one level, so `base_sync.enabled|union_globs` arrive as `enabled|union_globs` (or flat `base_sync_*`).
@@ -3161,4 +3203,20 @@ export async function probeFromCli(argv, deps = {}) {
   for (const r of rows) console.log(`#${r.issue} → ${r.outcome}${r.detail ? ` (${r.detail})` : ""}`);
   console.log(formatProbeSummary(rows) || "probes: nothing to run");
   return { rows };
+}
+
+/**
+ * #5735: the `--set-max-remote` lane note (live-execution.mjs remoteLaneNote) from the pool router's `GET /agents`.
+ * Best effort: no router, an error or no answer within ~5 s gives null, so the set itself never fails because of it.
+ */
+async function poolLaneNote(n, liveExec, { env = process.env, timeoutMs = 5000 } = {}) {
+  let timer = null;
+  try {
+    const { poolRouterConfig, remoteTransportFor } = await import("./lean/execution.mjs");
+    const endpoint = poolRouterConfig({ env })?.endpoint;
+    if (!endpoint) return null;
+    const t = remoteTransportFor({ provider: "pool", endpoint }, { env });
+    const lanes = await Promise.race([t.agentLanes(), new Promise((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); timer.unref?.(); })]);
+    return liveExec.remoteLaneNote(n, lanes);
+  } catch { return null; } finally { clearTimeout(timer); }
 }

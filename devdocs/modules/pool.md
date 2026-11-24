@@ -10,6 +10,37 @@ last_compacted: "2026-11-15"
 
 Rolling per-module knowledge log. Hard cap: 150 lines.
 
+## Entry 2026-11-21 — Per-host lane ceiling (#5735)
+
+- Decision: `devdocs/decisions/5735-host-lane-ceiling.md`.
+- `bin/pool/router.mjs`: a lane sandbox is one whose id starts with `fdrsbx-`. Ceiling = the agent state entry's `max_lanes`, else router.json `agents.<name>.max_lanes`; no valid value = no ceiling. Used = placed `fdrsbx-` sandboxes on the agent plus in-flight reservations, taken synchronously before the agent POST (launch and warm claim) and released in `finally`.
+- `launch()` skips agents at the ceiling for a new lane id. When none is left and one was skipped for the ceiling: 503 `{error, code: "pool.host_lane_ceiling", agents: [{name, used, ceiling}]}` with Retry-After (a capacity deferral in the dispatcher). Re-launch of a placed id is not re-checked. `claim()` skips capped agents (404, then a cold launch).
+- `GET /agents`: each agent gains `lanes {used, ceiling|null}`; the body gains `remote_lanes`. `POST /agents/:name/limit {max_lanes: N|null}` (fd token; 404 unknown agent, 400 bad value) sets or clears the ceiling; re-enrollment keeps it.
+- `bin/pool/cli.mjs`: `forgedock pool limit <agent> --lanes N|none`; `status` adds `<agent>: lanes used/ceiling` and `remote lanes across batches: N`. `bin/lean/sandbox-remote.mjs` `agentLanes()` feeds the `--set-max-remote` note.
+- Tests: `bin/tests/computeshare.test.mjs` (lane ceiling), `bin/tests/pool-cli.test.mjs`.
+
+## Entry 2026-11-24 — pool status table, owner pause/resume (#5885, parent #5857)
+
+- `forgedock pool status` prints one row per host from router `GET /agents`: HOST, CPUS and MEM GB as used/borrowable/total (used = total - free; borrowable = `cpus_borrowable`/`mem_borrowable_gb` on weighted agents, else free), ACTIVE, THROTTLED, PAUSED (`no`, `owner`, `resize`, `yes`), REASON (owner pause, resize drain, idle gate, last drain). Unreachable agents show `unreachable: <error>`. The `<name>: transport <t>` lines follow. `--json` prints the raw `/agents` body as before.
+- New `capacity()` fields (also on `/health`): `owner_paused` always; `idle_gate` (the `notIdle` reason or null), `throttled` (count of throttled active lanes) and `last_drain` `{reason, at, sandbox}` only on weighted agents (reservations or `idle_only`), so flat agents gain no priority fields. `paused` is now `cfg.paused || owner_paused`, so the router stops placing on an owner-paused host.
+- `forgedock pool pause` / `resume` run on the host itself: they read agent.json (`--config`, default `/etc/computeshare/agent.json`) and call `POST /pause` / `POST /resume` on the agent's own listen address (127.0.0.1 when it binds 0.0.0.0) with the agent token, never through the router; works for outbound agents too. Pause refuses new launches with 503; running lanes finish. The flag is the file `owner-paused` beside agent.json (state dir when no config path), so it survives restarts; it is separate from the resize drain's `cfg.paused`, which a resize clears.
+- `forgedock pool uninstall [--yes]` removes the agent from this box (Linux: `systemctl disable --now computeshare-agent`, delete the unit and `/etc/computeshare`; Windows: `pool/install/uninstall-agent.ps1`); without `--yes` it only prints what it would do. Tests: `bin/tests/pool-cli.test.mjs`, `bin/tests/computeshare.test.mjs` (#5885).
+
+## Entry 2026-11-24 — One-command installers: /install, Linux/macOS uninstall (#5883, parent #5857)
+
+- `GET /install` (router, `auth: none`) serves `installScript()`: a POSIX sh script with only `cfg.public_url` baked in, never a token. `curl -fsSL <router>/install | sh -s -- --code CODE [--name N --cpus N --mem GB]`; the code goes to `/bootstrap/bundle.tar.gz?token=` (checked, not consumed) and `/enroll` (consumed). Detects `uname` Linux|Darwin and runs `install-agent-linux.sh` or `install-agent-macos.sh` with `--outbound` (always). `--uninstall` runs the shipped `uninstall-agent-{linux,macos}.sh` from the installed code root (bundle fallback when `--code` is given). `--dry-run` prints the plan (code redacted).
+- Idempotent: with an agent token present (`/etc/computeshare/agent.token`, macOS `/usr/local/etc/computeshare/agent.token`) the bootstrap and the installers reuse the installed code (no bundle download, so a used code works) and never re-enroll.
+- Install marker `/etc/computeshare/installed-by` (macOS `/usr/local/etc/computeshare/installed-by`): one line per component the installer added (`docker`, `node`, `sysctl`, `fstrim.timer` only if this install enabled it). `uninstall-agent-linux.sh` stops and removes `computeshare-agent.service`, removes this agent's containers and volumes by `computeshare.agent=<id>` label (id from agent.json `agent_id`/`name`), `forgedock-lane` images, `/opt/computeshare`, `/etc/computeshare`, `/var/lib/computeshare`, the sysctl drop-in; `/opt/node`, fstrim.timer and docker only when marked. Never `docker system prune`. No user is created, so none is removed. `--dry-run` prints `would run:`/`would remove:` lines; a clean host is a no-op.
+- macOS: needs a running Docker Desktop / colima (never installed); node and code under `/usr/local/computeshare`, state `/usr/local/var/computeshare`, LaunchDaemon `io.forgedock.computeshare-agent` with the console user's `DOCKER_HOST`; agent listens on 127.0.0.1 (lanes use host.docker.internal). `uninstall-agent-macos.sh` boots it out and removes plist, dirs and labelled docker objects.
+- `forgedock pool enroll --outbound` prints the curl|sh line first, then the unchanged `OUTBOUND=1 ...` line; `--one-liner` prints only the curl|sh line. Scripts honour `CS_PREFIX` (tests only). Tests: `bin/tests/pool-install.test.mjs`.
+
+## Entry 2026-11-23 — Outbound-only agent transport (#5882, parent #5857)
+
+- An agent enrolled without `url` (`POST /enroll` {token,name}) is stored `{name, transport:"poll", token}`; the router never dials it. `agentCall` (`bin/pool/router.mjs`) enqueues the request and awaits the reply (rejects at once when the agent has not polled for `poll_offline_s`, default 60, so callers answer 502 / `ok:false` in `capacities()`).
+- Agent side (`startPoll`, `bin/pool/agent.mjs`, on when `outbound: true` in agent.json): `GET /agent/poll?wait=25` (router clamps to 55s; 204 on timeout; the poll is the heartbeat), runs the request on its own bearer-checked API via loopback, `POST /agent/reply/:rid`. Reconnect backoff 1s..30s. Queue is in memory (a router restart drops it).
+- The local listener stays for the lanes' credential calls; `install-agent.sh` binds it to the docker bridge (`AGENT_LISTEN_HOST`, default 172.17.0.1) in outbound mode. `forgedock pool enroll --outbound` prints `OUTBOUND=1 install-agent-linux.sh ...`.
+- Long-poll chosen over WebSocket: no stdlib WS server, no new dependency. Tests: `bin/tests/pool-outbound.test.mjs`.
+
 ## Entry 2026-11-22 — Priority classes, reservations, borrowing (#5856)
 
 - `spec.priority` is `reserved | normal | borrow` (default `normal`; anything else is 400). Lanes send `borrow` (`bin/lean/sandbox-remote.mjs`). Agent config: `reservations: [{name, cpus, mem_gb}]`, `idle_only`, optional `idle_max_owner_load_per_core` (0.5), `idle_min_free_mem_gb` (4), `cpu_shares` ({reserved 4096, normal 1024, borrow 128, throttled 2}), `drain_grace_s` (20), `cores`.
@@ -20,6 +51,12 @@ Rolling per-module knowledge log. Hard cap: 150 lines.
 - One agent per docker daemon: `reap()` removes any labelled container not in its own store, so reservations live inside the single agent.
 - `forgedock pool enroll --agent-url http://127.0.0.1:<port>` prints a Linux install command with `AGENT_URL` set (SSH-tunnel hosts).
 - Tests: `bin/tests/computeshare.test.mjs` (`#5856`).
+
+## Entry 2026-11-23 — lane disk cap, prune, fstrim, sparse VHD (#5884)
+
+- `bin/pool/disk.mjs` (pure, dependency-free): `laneDiskUsedGb`, `planDiskCap` (ok|prune|full), `fstrimDue`, `runFstrim` (never throws). Keys: `lane_disk_cap_gb` (unset = off, `/capacity` byte-identical), `disk_prune_at_pct` (80), `fstrim_interval_s` (6 h), `fstrim`, `docker_root`.
+- `launch` answers 503 `pool.disk_cap` at the cap; the router skips `disk_capped` agents and defers with the same code. From the threshold `reap()` runs label-scoped `containerPrune`/`imagePrune` (`docker.mjs`, #5881 scoping), builder prune and `cacheSweep`, then fstrim.
+- Installer: `.wslconfig` `[experimental] sparseVhd=true` plus `wsl --manage --set-sparse` (reverted with the backup on uninstall); Linux enables `fstrim.timer` best effort. Tests: `bin/tests/pool-disk-cap.test.mjs`.
 
 ## Entry 2026-11-15 — Environment snapshots (#5714)
 

@@ -155,15 +155,68 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     log.info?.(`claude login limited: account=${n} agent=${agent} until=${new Date(until).toISOString()}`);
     return { status: 200, body: { account: n, until: new Date(until).toISOString() } };
   }
-  const agentCall = (a, method, path, body, timeoutMs) => call(a.url, method, path, { body, token: a.token, timeoutMs, fetchFn });
+  // #5882: outbound-only agents (no url) dial the router: GET /agent/poll long-polls for the next queued request (the poll is also
+  // the heartbeat) and POST /agent/reply/:rid answers it. In memory only: a router restart drops queued requests, like relayQ.
+  const pollSt = new Map(), pollReplies = new Map(); // agent -> {q, waiter, seen}; rid -> {agent, done}
+  const POLL_MAX_WAIT_S = 55, pollOfflineMs = (cfg.poll_offline_s ?? 60) * 1000;
+  const pollState = (name) => { let st = pollSt.get(name); if (!st) pollSt.set(name, st = { q: [], waiter: null, seen: 0 }); return st; };
+  const pollOnline = (name) => { const st = pollSt.get(name); return Boolean(st && (st.waiter || now() - st.seen <= pollOfflineMs)); };
+  function pollCall(a, method, path, body, timeoutMs = 15000) {
+    if (!pollOnline(a.name)) return Promise.reject(new Error("agent offline (no recent poll)"));
+    return new Promise((resolve, reject) => {
+      const st = pollState(a.name), rid = randomBytes(12).toString("hex");
+      const timer = setTimeout(() => { pollReplies.delete(rid); st.q = st.q.filter((x) => x.rid !== rid); reject(new Error("agent did not answer in time")); }, timeoutMs);
+      pollReplies.set(rid, { agent: a.name, done: (r) => { clearTimeout(timer); resolve(r); } });
+      st.q.push({ rid, method, path, ...(body !== undefined ? { body } : {}) });
+      st.waiter?.();
+    });
+  }
+  async function agentPoll(req, url) {
+    const name = agentFor(req), st = pollState(name);
+    const w = Number(url.searchParams.get("wait") ?? 25), waitS = Number.isFinite(w) ? Math.min(Math.max(w, 0), POLL_MAX_WAIT_S) : 25;
+    st.waiter?.(); // a newer poll from the same agent supersedes the older one
+    st.seen = now();
+    if (!st.q.length && waitS > 0) await new Promise((res) => {
+      let t = null;
+      const done = () => { clearTimeout(t); if (st.waiter === done) st.waiter = null; res(); };
+      t = setTimeout(done, waitS * 1000);
+      st.waiter = done;
+    });
+    st.seen = now();
+    const item = st.q.shift();
+    return item ? { status: 200, body: item } : { status: 204 };
+  }
+  function agentReply(req, { rid }, body) {
+    const r = pollReplies.get(rid);
+    if (!r || r.agent !== agentFor(req)) return { status: 404, body: { error: "unknown request" } };
+    pollReplies.delete(rid);
+    const status = Number.isInteger(body?.status) ? body.status : 502;
+    r.done({ status, ok: status >= 200 && status < 300, data: body?.data ?? null, retryAfter: body?.retry_after ?? null });
+    return { status: 200, body: { ok: true } };
+  }
+  const agentCall = (a, method, path, body, timeoutMs) => a.transport === "poll"
+    ? pollCall(a, method, path, body, timeoutMs)
+    : call(a.url, method, path, { body, token: a.token, timeoutMs, fetchFn });
 
+  /** #5891: host drive figures per agent, plus a warning when the projected time until the drive is full is under disk_warn_hours (2). */
+  const diskWarned = new Map();
+  function diskReport(c) {
+    if (!Number.isFinite(c.host_disk_free_gb)) return {};
+    const out = { host_disk_free_gb: c.host_disk_free_gb, ...(Number.isFinite(c.host_disk_growth_gb_per_h) ? { host_disk_growth_gb_per_h: c.host_disk_growth_gb_per_h } : {}) };
+    const limit = cfg.disk_warn_hours ?? 2;
+    if (Number.isFinite(c.host_disk_full_in_h) && c.host_disk_full_in_h < limit) {
+      out.disk_warning = `host drive full in ~${c.host_disk_full_in_h} h at ${c.host_disk_growth_gb_per_h} GB/h (${c.host_disk_free_gb} GB free)`;
+      if (now() - (diskWarned.get(c.name) ?? -Infinity) > 600000) { diskWarned.set(c.name, now()); log.warn?.(`${c.name}: ${out.disk_warning}`); }
+    }
+    return out;
+  }
   async function capacities() {
     const out = [];
     for (const [name, a] of Object.entries(agents())) {
       try {
         const r = await agentCall(a, "GET", "/capacity", undefined, 5000);
-        out.push(r.ok ? { name, ok: true, ...r.data } : { name, ok: false, error: `HTTP ${r.status}` });
-      } catch (e) { out.push({ name, ok: false, error: String(e.message ?? e) }); }
+        out.push(r.ok ? { name, ok: true, ...(a.transport ? { transport: a.transport } : {}), ...r.data } : { name, ok: false, error: `HTTP ${r.status}` });
+      } catch (e) { out.push({ name, ok: false, ...(a.transport ? { transport: a.transport } : {}), error: String(e.message ?? e) }); }
     }
     return out;
   }
@@ -171,7 +224,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   /** Agent liveness for the scheduler (#4547): an agent is online when it answers and is not paused. */
   async function status() {
     const caps = await capacities();
-    const agentsView = caps.map((c) => ({ name: c.name, ok: c.ok, paused: Boolean(c.paused) }));
+    const agentsView = caps.map((c) => ({ name: c.name, ok: c.ok, paused: Boolean(c.paused), transport: c.transport ?? "direct", ...diskReport(c) }));
     return { online: agentsView.filter((a) => a.ok && !a.paused).length, total: agentsView.length, agents: agentsView };
   }
 
@@ -193,6 +246,39 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     if (!path) return spec;
     try { return { ...spec, env: { ...(spec.env ?? {}), CS_FORGE_YAML_B64: readFileSync(path).toString("base64") } }; }
     catch (e) { log.warn?.(`forge.yaml for ${spec.repo.slug} unreadable: ${e.message}`); return spec; }
+  }
+
+  // #5735: per-agent lane ceiling across all batches. A lane sandbox is one whose id starts with `fdrsbx-`; other tenants'
+  // sandboxes are never counted or refused. Ceiling: the agent state entry's `max_lanes` (`pool limit`), else router.json
+  // `agents.<name>.max_lanes`; no valid value = no ceiling. In-flight launches reserve their slot synchronously before the
+  // awaited agent call, so concurrent launches cannot overshoot.
+  const isLane = (id) => typeof id === "string" && id.startsWith("fdrsbx-");
+  const validCeiling = (v) => Number.isInteger(v) && v >= 0;
+  function ceilingOf(name) {
+    const st = own(agents(), name)?.max_lanes;
+    if (validCeiling(st)) return st;
+    const c = cfg.agents && Object.hasOwn(cfg.agents, name) ? cfg.agents[name]?.max_lanes : undefined;
+    return validCeiling(c) ? c : null;
+  }
+  const pending = new Map(); // agent -> Set of lane ids reserved by an in-flight launch or claim
+  const lanesOn = (name) => {
+    const ids = new Set(pending.get(name) ?? []);
+    for (const [id, s] of Object.entries(sbx())) if (s?.agent === name && isLane(id)) ids.add(id);
+    return ids.size;
+  };
+  const atCeiling = (name) => { const c = ceilingOf(name); return c !== null && lanesOn(name) >= c; };
+  const reserve = (name, id) => { if (!pending.has(name)) pending.set(name, new Set()); pending.get(name).add(id); };
+  const release = (name, id) => { const s = pending.get(name); s?.delete(id); if (s && !s.size) pending.delete(name); };
+  const laneView = (name) => ({ used: lanesOn(name), ceiling: ceilingOf(name) });
+  function setLimit(name, body) {
+    const a = own(agents(), name);
+    if (!a) return { status: 404, body: { error: "unknown agent" } };
+    const v = body?.max_lanes;
+    if (v !== null && !validCeiling(v)) return { status: 400, body: { error: "max_lanes must be a non-negative integer or null" } };
+    if (v === null) delete a.max_lanes; else a.max_lanes = v;
+    store.save();
+    log.info?.(`agent ${name} max_lanes ${v === null ? "none" : v}`);
+    return { status: 200, body: { name, max_lanes: v, lanes: laneView(name) } };
   }
 
   /** #5053: an agent's 401 reaches the dispatcher through this router; tag it so it is not mistaken for a router auth failure. */
@@ -224,16 +310,24 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     const size = sizeFor(spec);
     const sized = (await capacities()).filter((c) => c.ok && !c.paused && fitsPriority(c, spec, size));
     const diskLow = sized.filter((c) => c.host_disk_low === true).map((c) => c.name); // #5733: never POST to a host whose drive is short
-    const fits = sized.filter((c) => c.host_disk_low !== true).sort((a, b) => headroom(b, spec) - headroom(a, spec) || b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
+    const capped = sized.filter((c) => c.disk_capped === true && c.host_disk_low !== true).map((c) => c.name); // #5884: lane disk at its hard cap
+    const fits = sized.filter((c) => c.host_disk_low !== true && c.disk_capped !== true).sort((a, b) => headroom(b, spec) - headroom(a, spec) || b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
+    const laneId = isLane(spec.id), laneCapped = []; // #5735: agents skipped because their lane ceiling is reached
     let busy = null; // the last agent 503 (e.g. lane_tools image building): its body and Retry-After are passed back
     for (const c of fits) {
-      const r = await agentCall(own(agents(), c.name), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...size }, 120000);
-      if (r.status === 503) { busy = { r, name: c.name }; continue; } // raced with another launch, or still building; try the next host
-      if (r.ok) { sbx()[spec.id] = { agent: c.name, issue: spec.issue ?? null, batch: spec.batch ?? null, createdAt: now(), touched: now() }; store.save(); }
-      return { status: r.status, body: { ...agentBody(r, c.name), agent: c.name } };
+      if (laneId && atCeiling(c.name)) { laneCapped.push({ name: c.name, ...laneView(c.name) }); continue; }
+      if (laneId) reserve(c.name, spec.id);
+      try {
+        const r = await agentCall(own(agents(), c.name), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...size }, 120000);
+        if (r.status === 503) { busy = { r, name: c.name }; continue; } // raced with another launch, or still building; try the next host
+        if (r.ok) { sbx()[spec.id] = { agent: c.name, issue: spec.issue ?? null, batch: spec.batch ?? null, createdAt: now(), touched: now() }; store.save(); }
+        return { status: r.status, body: { ...agentBody(r, c.name), agent: c.name } };
+      } finally { if (laneId) release(c.name, spec.id); }
     }
+    if (laneCapped.length && !busy) return { status: 503, body: { error: "pool.host_lane_ceiling", code: "pool.host_lane_ceiling", agents: laneCapped }, retryAfter: cfg.retry_after_s ?? 60 };
     if (busy) return { status: 503, body: { ...agentBody(busy.r, busy.name), agent: busy.name }, retryAfter: busy.r.retryAfter ?? cfg.retry_after_s ?? 60 };
     if (diskLow.length) return { status: 503, body: { error: "no host has free disk", code: "pool.disk_low", agents: diskLow }, retryAfter: cfg.disk_low_retry_after_s ?? 300 }; // a capacity deferral, not a failure
+    if (capped.length) return { status: 503, body: { error: "no host has lane disk below its cap", code: "pool.disk_cap", agents: capped }, retryAfter: cfg.disk_low_retry_after_s ?? 300 };
     return { status: 503, body: { error: "no host has a free reservation", lane: size }, retryAfter: cfg.retry_after_s ?? 60 };
   }
 
@@ -242,12 +336,17 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id)) return { status: 400, body: { error: "spec.id required ([A-Za-z0-9._-], max 128)" } };
     if (own(sbx(), spec.id)) return launch(spec); // already placed: the same idempotent path
     const size = sizeFor(spec);
+    const laneId = isLane(spec.id);
     for (const c of (await capacities()).filter((x) => x.ok && !x.paused)) {
-      const r = await agentCall(own(agents(), c.name), "POST", "/warm/claim", { spec: withForgeYaml(spec), ...size }, 30000);
-      if (!r.ok) continue;
-      sbx()[spec.id] = { agent: c.name, issue: spec.issue ?? null, batch: spec.batch ?? null, createdAt: now(), touched: now() };
-      store.save();
-      return { status: 200, body: { ...(r.data ?? {}), agent: c.name } };
+      if (laneId && atCeiling(c.name)) continue; // #5735: the 404 makes the caller cold-launch, which gets the ceiling 503
+      if (laneId) reserve(c.name, spec.id);
+      try {
+        const r = await agentCall(own(agents(), c.name), "POST", "/warm/claim", { spec: withForgeYaml(spec), ...size }, 30000);
+        if (!r.ok) continue;
+        sbx()[spec.id] = { agent: c.name, issue: spec.issue ?? null, batch: spec.batch ?? null, createdAt: now(), touched: now() };
+        store.save();
+        return { status: 200, body: { ...(r.data ?? {}), agent: c.name } };
+      } finally { if (laneId) release(c.name, spec.id); }
     }
     return { status: 404, body: { error: "no warm sandbox ready" } };
   }
@@ -286,14 +385,17 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   function enroll(body) {
     if (!enrollOk(body?.token)) return { status: 401, body: { error: "bad enrollment token", hop: "router", reason: "router auth: bad enrollment token" } };
     const name = String(body.name ?? "").toLowerCase().replace(/[^a-z0-9-]/g, "");
-    let url;
-    try { url = new URL(String(body.url)); } catch { return { status: 400, body: { error: "url required" } }; }
+    // #5882: no url means an outbound-only agent that polls this router (no inbound port on its host).
+    let url = null;
+    if (body.url) { try { url = new URL(String(body.url)); } catch { return { status: 400, body: { error: "url must be a valid URL (or omitted for an outbound agent)" } }; } }
     if (!name) return { status: 400, body: { error: "name required" } };
     enrollOk(body.token, true);
     const token = randomBytes(32).toString("hex");
-    agents()[name] = { url: url.origin, token, enrolledAt: new Date(now()).toISOString() };
+    const keep = own(agents(), name)?.max_lanes; // #5735: re-enrollment keeps a `pool limit` ceiling
+    const keepCfg = validCeiling(keep) ? { max_lanes: keep } : {};
+    agents()[name] = url ? { url: url.origin, token, enrolledAt: new Date(now()).toISOString(), ...keepCfg } : { name, transport: "poll", token, enrolledAt: new Date(now()).toISOString(), ...keepCfg };
     store.save();
-    log.info?.(`enrolled agent ${name} at ${url.origin}`);
+    log.info?.(`enrolled agent ${name} ${url ? `at ${url.origin}` : "(outbound poll)"}`);
     return { status: 200, body: { name, agent_token: token } };
   }
 
@@ -314,6 +416,73 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       `& (Join-Path $tmp 'pool\\install\\install-agent.ps1') -RouterUrl $RouterUrl -EnrollToken $EnrollToken -BundlePath (Join-Path $tmp 'bundle.tar.gz')${sizing}${net}`,
       "",
     ].join("\r\n");
+  }
+
+  /**
+   * #5883: the POSIX sh one-command installer served at GET /install (no auth: it holds no secret, only this router's URL).
+   * The one-time code arrives as `--code` and is checked only by /bootstrap/bundle.tar.gz and consumed by /enroll.
+   */
+  function installScript() {
+    const q = (s) => `'${String(s ?? "").replace(/'/g, "'\\''")}'`;
+    return `#!/bin/sh
+# computeshare agent one-command installer for Linux (systemd) and macOS (launchd), served by the router (#5883).
+# Install:   curl -fsSL ${q(`${cfg.public_url}/install`)} | sudo sh -s -- --code CODE [--name N] [--cpus N] [--mem GB]
+# Uninstall: curl -fsSL ${q(`${cfg.public_url}/install`)} | sudo sh -s -- --uninstall
+# Rerunning is safe: an enrolled host reuses its installed code and agent token (no download, no re-enrollment).
+set -eu
+ROUTER=${q(cfg.public_url)}
+CODE=""; NAME=""; CPUS=""; MEM=""; UNINSTALL=0; DRY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --code) CODE="\${2:?--code needs a value}"; shift 2 ;;
+    --name) NAME="\${2:?--name needs a value}"; shift 2 ;;
+    --cpus) CPUS="\${2:?--cpus needs a value}"; shift 2 ;;
+    --mem) MEM="\${2:?--mem needs a value}"; shift 2 ;;
+    --uninstall) UNINSTALL=1; shift ;;
+    --dry-run) DRY=1; shift ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+case "$(uname -s)" in
+  Linux) OS=linux; ROOT=/opt/computeshare; TOKEN_FILE=/etc/computeshare/agent.token ;;
+  Darwin) OS=macos; ROOT=/usr/local/computeshare; TOKEN_FILE=/usr/local/etc/computeshare/agent.token ;;
+  *) echo "unsupported OS $(uname -s): Linux or macOS only (Windows: forgedock pool enroll prints a PowerShell command)" >&2; exit 1 ;;
+esac
+if [ "$UNINSTALL" = 1 ]; then ACTION=uninstall; elif [ -s "$TOKEN_FILE" ] && [ -f "$ROOT/pool/install/install-agent-$OS.sh" ]; then ACTION=reinstall; else ACTION=install; fi
+if [ "$DRY" = 1 ]; then
+  echo "os=$OS action=$ACTION router=$ROUTER root=$ROOT name=\${NAME:-<hostname>} cpus=\${CPUS:-<auto>} mem_gb=\${MEM:-<auto>} code=\${CODE:+<redacted>}"
+  exit 0
+fi
+[ "$(id -u)" = 0 ] || { echo "run as root: curl -fsSL '$ROUTER/install' | sudo sh -s -- ..." >&2; exit 1; }
+command -v bash >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1 || { echo "needs bash, curl and tar" >&2; exit 1; }
+TMP=""
+cleanup() { [ -z "$TMP" ] || rm -rf "$TMP"; }
+trap cleanup EXIT
+fetch_bundle() {
+  TMP="$(mktemp -d "\${TMPDIR:-/tmp}/computeshare-install.XXXXXX")"
+  curl -fsS "$ROUTER/bootstrap/bundle.tar.gz?token=$CODE" -o "$TMP/bundle.tar.gz" || { echo "bundle download refused: the code is wrong, used or expired (forgedock pool enroll --outbound prints a new one)" >&2; exit 1; }
+  tar -xzf "$TMP/bundle.tar.gz" -C "$TMP"
+}
+if [ "$ACTION" = uninstall ]; then
+  if [ -f "$ROOT/pool/install/uninstall-agent-$OS.sh" ]; then bash "$ROOT/pool/install/uninstall-agent-$OS.sh"; exit $?; fi
+  if [ -z "$CODE" ]; then echo "[computeshare] $ROOT is not installed here; nothing to uninstall (pass --code to run the full cleanup from a fresh bundle)"; exit 0; fi
+  fetch_bundle
+  bash "$TMP/pool/install/uninstall-agent-$OS.sh"
+  exit $?
+fi
+set -- --router "$ROUTER" --outbound
+if [ -n "$NAME" ]; then set -- "$@" --name "$NAME"; fi
+if [ -n "$CPUS" ]; then set -- "$@" --cpus "$CPUS"; fi
+if [ -n "$MEM" ]; then set -- "$@" --mem "$MEM"; fi
+if [ "$ACTION" = reinstall ]; then
+  echo "[computeshare] already enrolled: reusing $ROOT and its agent token (no bundle download, no re-enrollment)"
+  bash "$ROOT/pool/install/install-agent-$OS.sh" "$@" --token "\${CODE:-enrolled}"
+  exit $?
+fi
+[ -n "$CODE" ] || { echo "--code CODE required (forgedock pool enroll --outbound prints the command)" >&2; exit 2; }
+fetch_bundle
+bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TMP/bundle.tar.gz"
+`;
   }
 
   /** Stream an allow-listed image (docker save) to an agent whose daemon cannot reach the registry itself. */
@@ -355,7 +524,9 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     [route("GET", "/agents"), fd(async () => { // #5535: each sandbox carries disk_used_mb from its agent's sandbox_disk_mb when the agent reports it
       const caps = await capacities(), byName = new Map(caps.map((c) => [c.name, c])), out = {};
       for (const [id, s] of Object.entries(sbx())) { const mb = byName.get(s?.agent)?.sandbox_disk_mb?.[id]; out[id] = Number.isFinite(mb) ? { ...s, disk_used_mb: mb } : s; }
-      return { status: 200, body: { agents: caps, sandboxes: out } };
+      // #5735: each agent's lane sandboxes used/ceiling, and the lane sandboxes across all batches and agents
+      const remote_lanes = Object.keys(sbx()).filter(isLane).length;
+      return { status: 200, body: { agents: caps.map((c) => ({ ...c, lanes: laneView(c.name), ...diskReport(c) })), sandboxes: out, remote_lanes } };
     })],
     [route("POST", "/codes"), fd(async () => ({ status: 200, body: issueCode() }))],
     [route("GET", "/agent/creds/github"), { fn: async () => ({ status: 200, body: { token: await githubToken() } }), auth: "agent" }],
@@ -363,6 +534,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     [route("POST", "/agent/creds/claude/limited"), { fn: async (_p, body, _u, req) => claudeLimited(req, body), auth: "agent" }], // #5205
     [route("POST", "/agent/relay/:id"), { fn: async (p, body, _u, req) => relayPost(req, p, body), auth: "agent" }], // #4778
     [route("GET", "/agent/relay/:id/:rid"), { fn: async (p, _b, _u, req) => relayPoll(req, p), auth: "agent" }],
+    [route("GET", "/agent/poll"), { fn: async (_p, _b, url, req) => agentPoll(req, url), auth: "agent" }], // #5882
+    [route("POST", "/agent/reply/:rid"), { fn: async (p, body, _u, req) => agentReply(req, p, body), auth: "agent" }],
     [route("GET", "/agent/bundle"), { fn: async () => ({ bundle: true }), auth: "agent" }],
     [route("GET", "/agent/images/:ref"), { fn: async ({ ref }) => ({ image: ref }), auth: "agent" }],
     [route("POST", "/agents/:name/upgrade"), fd(async ({ name }) => {
@@ -383,6 +556,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       const r = await agentCall(a, "POST", "/admin/resize", body ?? {});
       return { status: r.status, body: r.data };
     })],
+    [route("POST", "/agents/:name/limit"), fd(async ({ name }, body) => setLimit(name, body))], // #5735
     [route("GET", "/agents/:name/usage"), fd(async ({ name }) => {
       const a = own(agents(), name);
       if (!a) return { status: 404, body: { error: "unknown agent" } };
@@ -396,6 +570,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       return c.q ? { status: 200, body: await ciEvents.wait(c.q, c.since, c.waitS) } : c;
     })],
     [route("POST", "/enroll"), { fn: async (_p, body) => enroll(body), auth: "none" }],
+    [route("GET", "/install"), { fn: async () => ({ status: 200, body: installScript() }), auth: "none" }], // #5883: script text only, the code comes as --code
     [route("GET", "/bootstrap/install.ps1"), { fn: async (_p, _b, url) => ({ status: 200, body: bootstrapScript(url.searchParams.get("token"), url) }), auth: "enroll" }],
     [route("GET", "/bootstrap/bundle.tar.gz"), { fn: async () => ({ bundle: true }), auth: "enroll" }],
   ];

@@ -98,6 +98,12 @@ const CLONE_RETRY_S = 120;
 export const SANDBOX_CLONE_CODE = "sandbox.clone";
 /** #4866: a sandbox clone failure is a retryable `deferred` `sandbox.clone`, never an engine-error (so the breaker never sees it). */
 const cloneDeferred = (id, detail) => ({ terminalReason: "deferred", code: SANDBOX_CLONE_CODE, retryInSeconds: CLONE_RETRY_S, detail: `sandbox ${id} could not clone the repo: ${detail}; retry in ${CLONE_RETRY_S}s` });
+// #5923: a hung github.com connection (ls-remote/fetch, or a connect timeout inside a clone) is egress, not a plain clone failure.
+const EGRESS_RE = /Connection timed out|Failed to connect to|\b(ls-remote|fetch)\b[^\n]*\b(time[ds]?\s?out|timeout|hung|hang)|\b(time[ds]?\s?out|timeout)\b[^\n]*\b(ls-remote|fetch)\b/i;
+export const isEgressTimeout = (text) => EGRESS_RE.test(String(text ?? ""));
+/** Outcome code of a sandbox whose git egress hung to a timeout; local like sandbox.clone. */
+export const SANDBOX_EGRESS_TIMEOUT_CODE = "sandbox.egress_timeout";
+const egressDeferred = (id, detail) => ({ terminalReason: "deferred", code: SANDBOX_EGRESS_TIMEOUT_CODE, retryInSeconds: CLONE_RETRY_S, detail: `sandbox ${id} git egress timed out: ${detail}; retry in ${CLONE_RETRY_S}s` });
 const errLine = (t) => String(t ?? "").split("\n")[0].slice(0, 300);
 const errText = (e) => String(e?.stderr || e?.message || e).split("\n")[0].slice(0, 300);
 
@@ -244,9 +250,9 @@ export async function repoIsPublic({ repo, gh }) {
   try { return JSON.parse(await gh(["api", `repos/${repo}`]))?.private === false; } catch { return false; }
 }
 
-/** Where a `mode: remote` lane runs: remote only with `max_remote >= 1`. Hybrid is placed per lane by `placeLane` (#4256). */
+/** Where a `mode: remote` lane runs: always remote (#5933: `max_remote 0` pauses starts, it never falls back to the host). Hybrid is placed per lane by `placeLane` (#4256). */
 export function placement(exec) {
-  return exec?.mode === "remote" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1 ? "remote" : "local";
+  return exec?.mode === "remote" ? "remote" : "local";
 }
 
 /** An explicit need written in prose (#5725): `needs: sops`, `needs sops`, `host capability: sops`. */
@@ -381,7 +387,7 @@ const DOCS_LABELS = new Set(["docs", "documentation", "type:docs"]);
 /**
  * Hybrid placement (#4256), pure: facts in, `{where: "local"|"remote", reason}` out. `exec` is parseExecution output,
  * `verifyMode` forge.yaml `verify.mode`, `labels` the issue's label names (the lane kind), `weight` from
- * `validationWeight`, `headroom` from `hostHeadroom`. In order: a non-hybrid mode keeps `placement()`; `max_remote` 0 is
+ * `validationWeight`, `headroom` from `hostHeadroom`. In order: a non-hybrid mode keeps `placement()` (remote mode stays remote at `max_remote` 0: orchestrate holds it pending); `max_remote` 0 is
  * local; `verify.mode: ci` is local (heavy validation already runs, and is billed, on CI); a docs-only lane is local; a
  * heavy-validation lane is remote; a host without headroom sends the lane remote; anything else stays on the host.
  * A `needs` entry (host-only capability, #4542) the provider does not `relays` is local first, in `remote` mode too.
@@ -739,7 +745,8 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
     : { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_UNREACHABLE, retryInSeconds: 60,
       detail: `sandbox ${h.id} ${errText(e)}; kept for adopt on resume` });
   const tailOf = async (h) => { try { return typeof logTail === "function" ? String(await logTail(h) ?? "") : ""; } catch { return ""; } };
-  const settleClone = (r, id) => (r?.terminalReason === "engine-error" && r.code === undefined && isCloneFailure(r.detail) ? cloneDeferred(id, errLine(r.detail)) : r);
+  const settleClone = (r, id) => (r?.terminalReason === "engine-error" && r.code === undefined && isEgressTimeout(r.detail) ? egressDeferred(id, errLine(r.detail))
+    : r?.terminalReason === "engine-error" && r.code === undefined && isCloneFailure(r.detail) ? cloneDeferred(id, errLine(r.detail)) : r);
   // #5669: a halted batch (schedd handover) stops polling; the sandbox is neither torn down nor released, so the next daemon adopts it.
   const wait = async (h, g = guard({ waited: 0, tries: 0 }), sig = null) => {
     for (;;) {
@@ -760,6 +767,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
             detail: `${why}: usage limit hit; resets at ${lim.resetAt ?? "unknown"}` };
         }
         // #5859: tagged with its pool agent so the runner can tell an agent/VM restart (many lost on one agent) from one dead sandbox
+        if (isEgressTimeout(tail)) return egressDeferred(h.id, why);
         return isCloneFailure(tail) ? cloneDeferred(h.id, why) : { terminalReason: "engine-error", detail: why, lostWithoutResult: true, ...(typeof h?.agent === "string" && h.agent ? { agent: h.agent } : {}) };
       }
       await sleep(pollMs);
