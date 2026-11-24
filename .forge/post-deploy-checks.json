@@ -184,5 +184,11 @@
     "pass": "exit 0",
     "timeout": 60,
     "for": "30d"
+  },
+  "base-red-no-issues-1d": {
+    "run": "test \"$(gh issue list --state all --search \"FORGE:BASE_RED in:body created:>$(date -u -d '1 day ago' +%Y-%m-%d)\" --json number --jq length)\" -eq 0",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "7d"
   }
 }

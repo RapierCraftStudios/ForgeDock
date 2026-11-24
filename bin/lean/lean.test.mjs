@@ -7031,6 +7031,18 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     assert.equal(builders(w).length, 2, "no builder fix round spent on a base failure");
   });
 
+  it("#5945 an env-signature base failure is not base.red and files nothing; a host verify pass skips filing", async () => {
+    for (const hook of [false, true]) {
+      const w = world(); const filed = [], gh = w.io.gh;
+      w.io.runCommand = async ({ cwd }) => ({ rc: 1, output: hook ? "bare 429 at app/routers/listing_feeds.py" : "ModuleNotFoundError: No module named yaml" });
+      if (hook) w.io.verifyBaseOnHost = async () => ({ rc: 0 });
+      w.io.gh = async (a, o) => { if (a[0] === "issue" && ["create", "comment", "reopen"].includes(a[1]) && a.some((x) => /FORGE:BASE_RED/.test(x))) filed.push(a); return gh(a, o); };
+      const r = await run(w, { verify: { invariants: ["bash scripts/guard.sh"] } });
+      assert.notEqual(r.code, "base.red"); assert.equal(w.merges.length, 0);
+      assert.equal(filed.length, 0, "no BASE_RED issue filed");
+    }
+  });
+
   it("#5239 verify.guard_block false keeps a failing invariant advisory", async () => {
     const w = world(); w.io.runCommand = async () => ({ rc: 1, output: "x" });
     const r = await run(w, { verify: { invariants: ["bash scripts/guard.sh"], guardBlock: false } });

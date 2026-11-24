@@ -3117,12 +3117,27 @@ export async function runCore(o) {
       const g = failed.filter((f) => guardFailing([f]));
       if (!g.length || isSplit || !io.runCommand) return null;
       const baseRuns = await heavyStep("precheck", () => runOnBase({ commands: g.map((f) => f.command), git, runCommand: io.runCommand, mergeBase: base, cwd: wt, env: laneEnv(), timeoutMs: vcfg.precheckTimeoutSeconds * 1000 }));
-      const { baseRed } = classifyBaseRed({ failed: g, baseRuns });
+      const { baseRed: red, env: envRed } = classifyBaseRed({ failed: g, baseRuns });
+      const tailOf = (c) => String(baseRuns.find((b) => b.command === c)?.output ?? "").slice(-4096);
+      if (envRed.length) {
+        T.decisions.push(`env.base_probe: guard command(s) ${envRed.map((f) => `\`${f.command}\``).join(", ")} failed on ${base} with an environment signature, not a red base; the failure stays the lane's. Base output tail: ${envRed.map((f) => tailOf(f.command).slice(-500)).join(" | ")}`);
+        ev({ event: "BASE_PROBE_ENV", code: "env.base_probe", commands: envRed.map((f) => f.command), output: envRed.map((f) => tailOf(f.command).slice(-500)) });
+      }
+      let baseRed = red;
+      if (baseRed.length && typeof io.verifyBaseOnHost === "function") { // R6: a pass on the bare base tip at the host makes the sandbox result environment
+        const ok = [];
+        for (const f of baseRed) { let r = null; try { r = await io.verifyBaseOnHost({ command: f.command, base }); } catch { /* no verdict */ } if (Number(r?.rc) === 0) ok.push(f); }
+        if (ok.length) { T.decisions.push(`env.base_probe: guard command(s) ${ok.map((f) => `\`${f.command}\``).join(", ")} pass on the bare ${base} tip at the host; the sandbox base failure is environment, no issue filed`); baseRed = baseRed.filter((f) => !ok.includes(f)); }
+      }
       if (!baseRed.length) return null;
       const att = await attributeBaseRed({ failed: baseRed, git, base });
-      const cmds = baseRed.map((f) => f.command), n = await reportBaseRed({ ghc: ghw, repo, base, att, laneIssue: issue, commands: cmds });
+      let baseSha = "", commitDate = "";
+      try { baseSha = String(await git(["rev-parse", base])).trim(); } catch { /* key falls back to the attributed sha */ }
+      try { if (att?.sha) commitDate = String(await git(["show", "-s", "--format=%cI", att.sha])).trim(); } catch { /* no reopen */ }
+      const cmds = baseRed.map((f) => f.command), outputs = Object.fromEntries(cmds.map((c) => [c, tailOf(c)]));
+      const n = await reportBaseRed({ ghc: ghw, repo, base, att, laneIssue: issue, commands: cmds, outputs, baseSha, commitDate });
       T.decisions.push(`Guard command(s) ${cmds.map((c) => `\`${c}\``).join(", ")} also fail on ${base}${att ? ` (last change ${att.sha.slice(0, 12)}${att.issue ? `, #${att.issue}` : ""})` : ""}; lane deferred behind ${n ? `#${n}` : "the base fix"}`);
-      ev({ event: "BASE_RED", commands: cmds, sha: att?.sha ?? null, issue: att?.issue ?? null, tracked: n });
+      ev({ event: "BASE_RED", commands: cmds, output: cmds.map((c) => tailOf(c).slice(-500)), sha: att?.sha ?? null, issue: att?.issue ?? null, tracked: n });
       return await finish("deferred", `base ${base} is red on guard command(s) ${cmds.join(", ")}; deferred behind ${n ? `#${n}` : "the base fix"}`, { code: OUTCOME_CODES.BASE_RED, retryInSeconds: 900 }, OUTCOME_CODES.BASE_RED);
     }
     const structureLine = structureNote(structure);
