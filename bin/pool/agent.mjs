@@ -86,6 +86,23 @@ const envLine = (k, v) => `${k}=${String(v).replace(/\r?\n/g, " ")}`;
  * Host agent: runs each sandbox as one docker container inside a fixed reservation (allow_cpus / allow_mem_gb).
  * A sandbox lives only while its lease is renewed; the reaper removes expired, over-age and orphaned containers.
  */
+/** #5919: a build/upgrade failure as text, keeping its END (the failing step's own output), not the Dockerfile echo at its head. */
+export function upgradeErrorText(e, max = 2000) {
+  const t = String(e?.stderr || e?.stdout || e?.message || e || "").trim();
+  return t.length <= max ? t : `…${t.slice(t.length - max + 1)}`;
+}
+/** #5919: a build failure that a retry can fix (network, registry or DNS), as opposed to a bad Dockerfile or version pin. */
+export const NETWORK_BUILD_RE = /ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|socket hang up|network timeout|timed out|Could not resolve host|Connection reset|TLS handshake|i\/o timeout|unexpected EOF|curl: \((?:6|7|18|28|35|52|56)\)|npm (?:ERR!|error) (?:code|network) (?:ETIMEDOUT|ECONNRESET|EAI_AGAIN|ENOTFOUND)|503 Service Unavailable|502 Bad Gateway/i;
+/** #5919: run `build`; one retry after `delayMs` when the first failure looks like a network error. */
+export async function buildWithRetry(build, { sleep = (ms) => new Promise((r) => setTimeout(r, ms)), delayMs = 30000, log = null } = {}) {
+  try { return await build(); } catch (e) {
+    if (!NETWORK_BUILD_RE.test(upgradeErrorText(e, 20000))) throw e;
+    log?.warn?.(`lane image build failed on a network error; retrying once: ${upgradeErrorText(e, 300)}`);
+    await sleep(delayMs);
+    return build();
+  }
+}
+
 export function createAgent(cfg, { docker, now = () => Date.now(), log = console, live = liveHeadroom, hostDisk = null, vm = vmSize, trim = runFstrim } = {}) {
   const stateDir = cfg.state_dir;
   const store = jsonStore(join(stateDir, "state.json"), { sandboxes: {} });
@@ -272,7 +289,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const u = used();
     const active = Object.values(sb()).filter((s) => s.state !== "exited").length;
     const e = effectiveCapacity();
-    return { host: cfg.name ?? hostname(), ...running, vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10 }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...diskView(), ...laneDiskView(), ...hostDiskView(active), paused: Boolean(cfg.paused), live: live(cfg), usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
+    return { host: cfg.name ?? hostname(), ...running, vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.log && upgrade.state === "failed" ? { upgrade_log: upgrade.log } : {}), ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10 }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...diskView(), ...laneDiskView(), ...hostDiskView(active), paused: Boolean(cfg.paused), live: live(cfg), usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
   }
 
   /** The image a spec's lanes run (the per-repo lane_tools tag when tools are listed), without building it. */
@@ -650,7 +667,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       if (want.image !== running.image || want.version !== running.version) {
         const nextImage = cfg.image && cfg.image !== "computeshare-lane:1" ? cfg.image : laneImageTag(want.version);
         log.info?.(`rebuilding ${nextImage} (${running.version}/${running.image} -> ${want.version}/${want.image})`);
-        await docker.build(join(next, "pool", "image"), nextImage, laneBuildArgs(want.version));
+        await buildWithRetry(() => docker.build(join(next, "pool", "image"), nextImage, laneBuildArgs(want.version)), { log }); // #5919
       }
       await pruneLaneImages([laneImageTag(want.version)]);
       await prepullImages();
@@ -661,7 +678,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       upgrade.state = "restarting";
       setTimeout(() => process.exit(0), 500);
     } catch (e) {
-      upgrade.state = "failed"; upgrade.error = String(e.stderr || e.message).slice(0, 500);
+      upgrade.state = "failed"; upgrade.error = upgradeErrorText(e); // #5919: the tail, where the failing command's output is
+      try { writeFileSync(join(stateDir, "upgrade.log"), `${new Date(now()).toISOString()}\n${upgradeErrorText(e, 200000)}\n`); upgrade.log = join(stateDir, "upgrade.log"); } catch { /* best effort */ }
       log.error?.(`self-update failed: ${upgrade.error}`);
     }
   }
