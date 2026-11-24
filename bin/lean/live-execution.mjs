@@ -94,6 +94,25 @@ export function drainNote(patch) {
 }
 
 /**
+ * #5735: the `--set-max-remote` note from the pool router's lane view (`httpTransport.agentLanes()`: {agents: [{name, used,
+ * ceiling|null}], total}): the remote lane total across batches, per-agent used/ceiling, and a leading warning when every
+ * listed agent has a ceiling and `n` exceeds their sum. null lanes -> null. Never throws.
+ */
+export function remoteLaneNote(n, lanes) {
+  try {
+    if (!lanes || typeof lanes !== "object") return null;
+    const list = Array.isArray(lanes.agents) ? lanes.agents.filter((a) => a && typeof a === "object") : [];
+    const ceil = (a) => (Number.isInteger(a.ceiling) && a.ceiling >= 0 ? a.ceiling : null);
+    const total = Number.isInteger(lanes.total) ? lanes.total : list.reduce((s, a) => s + (Number.isInteger(a.used) ? a.used : 0), 0);
+    const per = list.map((a) => `${a.name}: lanes ${Number.isInteger(a.used) ? a.used : 0}/${ceil(a) ?? "-"}`);
+    const lines = [`remote lanes across batches: ${total}${per.length ? ` (${per.join(", ")})` : ""}`];
+    const sum = list.length && list.every((a) => ceil(a) !== null) ? list.reduce((s, a) => s + ceil(a), 0) : null;
+    if (sum !== null && Number.isInteger(n) && n > sum) lines.unshift(`warning: max_remote ${n} exceeds the pool host lane ceiling ${sum}; lanes beyond it are deferred`);
+    return lines.join(String.fromCharCode(10));
+  } catch { return null; }
+}
+
+/**
  * Hybrid validation weight (#4256) that is computed only when first needed: `initial` (already computed) or `compute()`
  * started on the first `get()`; until it resolves (or when it fails) a light weight is used.
  */

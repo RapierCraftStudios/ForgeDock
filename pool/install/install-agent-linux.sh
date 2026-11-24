@@ -4,12 +4,15 @@
 # Native Linux (systemd) agent install: the Windows installer without the VM layer. Resolves host settings, then runs install-agent.sh,
 # which installs docker, node, enrolls the agent, builds the lane image and installs the computeshare-agent systemd unit.
 # Usage: install-agent-linux.sh --router URL --token CODE [--name N] [--port P] [--cpus N] [--mem GB] [--bundle FILE] [--outbound] [--dry-run]
+#        install-agent-linux.sh --router URL --device [same options]   (device login, #5886: no --token)
 # Env equivalents: ROUTER_URL ENROLL_TOKEN AGENT_NAME AGENT_PORT ALLOW_CPUS ALLOW_MEM_GB BUNDLE AGENT_URL OUTBOUND
 # Rerun (#5883): with /etc/computeshare/agent.token present and no --bundle, the installed /opt/computeshare is reused (no download, so a used
 # code works) and nothing is re-enrolled. Uninstall: uninstall-agent-linux.sh (removes only what /etc/computeshare/installed-by records).
+# --device (#5886): prints a user code, waits while `forgedock pool link CODE [--account A]` approves it on the operator's machine, then enrolls with the one-time code the router returns (always outbound); the agent record carries the account.
 # --outbound (OUTBOUND=1): the agent dials the router (no Tailscale, no inbound port); it enrolls without a URL and listens only on the docker bridge.
 set -euo pipefail
 DRY=0
+DEVICE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --router) ROUTER_URL="${2:?}"; shift 2 ;;
@@ -20,10 +23,36 @@ while [ $# -gt 0 ]; do
     --mem) ALLOW_MEM_GB="${2:?}"; shift 2 ;;
     --bundle) BUNDLE="${2:?}"; shift 2 ;;
     --outbound) OUTBOUND=1; shift ;;
+    --device) DEVICE=1; shift ;;
     --dry-run) DRY=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+if [ "$DEVICE" = 1 ]; then
+  : "${ROUTER_URL:?--router or ROUTER_URL required}"
+  OUTBOUND=1
+  if [ "$DRY" = 1 ]; then ENROLL_TOKEN="<device-code>"; else
+    json_field() { sed -n "s/.*\"$1\":\"\{0,1\}\([^\",}]*\).*/\1/p" | head -1; }
+    DEV="$(curl -fsS -X POST "${ROUTER_URL}/device/code")" || { echo "could not reach ${ROUTER_URL}/device/code" >&2; exit 1; }
+    DEVICE_CODE="$(printf %s "$DEV" | json_field device_code)"; USER_CODE="$(printf %s "$DEV" | json_field user_code)"
+    INTERVAL="$(printf %s "$DEV" | json_field interval)"; INTERVAL="${INTERVAL:-5}"
+    [ -n "$DEVICE_CODE" ] && [ -n "$USER_CODE" ] || { echo "router returned no device code" >&2; exit 1; }
+    echo "[computeshare] to link this box, run on your ForgeDock machine:  forgedock pool link $USER_CODE [--account NAME]"
+    ENROLL_TOKEN=""
+    while [ -z "$ENROLL_TOKEN" ]; do
+      sleep "$INTERVAL"
+      RES="$(curl -sS -X POST -H 'content-type: application/json' -d "{\"device_code\":\"$DEVICE_CODE\"}" "${ROUTER_URL}/device/token" || true)"
+      ENROLL_TOKEN="$(printf %s "$RES" | json_field enroll_code)"
+      [ -n "$ENROLL_TOKEN" ] && break
+      case "$RES" in
+        *authorization_pending*) ;;
+        *slow_down*) INTERVAL=$((INTERVAL + 5)) ;;
+        *) echo "device login failed or expired: $RES" >&2; exit 1 ;;
+      esac
+    done
+    echo "[computeshare] linked; enrolling"
+  fi
+fi
 : "${ROUTER_URL:?--router or ROUTER_URL required}" "${ENROLL_TOKEN:?--token or ENROLL_TOKEN required}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT="${AGENT_PORT:-7711}"

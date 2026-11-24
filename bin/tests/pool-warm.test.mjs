@@ -11,6 +11,8 @@ import { fileURLToPath } from "node:url";
 import { createAgent } from "../pool/agent.mjs";
 import { createRouter } from "../pool/router.mjs";
 import { tmpDir } from "./_tmp.mjs";
+// Windows hosts: these tests exercise POSIX-only behaviour (file modes, tmpfs, systemd units, sh/bash scripts, file-URL paths); Linux CI runs them.
+const POSIX_ONLY = process.platform === "win32" && "POSIX-only behaviour";
 
 const IMG = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "pool", "image");
 const quiet = { info() {}, warn() {}, error() {} };
@@ -49,7 +51,7 @@ test("warm 0 or absent: a launch starts no warm sandbox and mounts no claim dir"
   assert.ok(docker.runs.every((a) => !a.some((x) => String(x).endsWith(":/claim"))));
 });
 
-test("spec.warm N: the agent keeps N warm sandboxes; a ready one is claimed, its lane written 0600, and the pool refills", async () => {
+test("spec.warm N: the agent keeps N warm sandboxes; a ready one is claimed, its lane written 0600, and the pool refills", { skip: POSIX_ONLY }, async () => {
   const { agent, docker, markReady } = fixture();
   await agent.launch({ spec: spec("lane-1", { warm: 2 }), ...SIZE });
   await agent.warm.replenish();

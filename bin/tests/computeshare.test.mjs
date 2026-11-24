@@ -10,6 +10,8 @@ import { createAgent, safeName } from "../pool/agent.mjs";
 import { createRouter } from "../pool/router.mjs";
 import { httpTransport } from "../lean/sandbox-remote.mjs";
 import { tmpDir } from "./_tmp.mjs";
+// Windows hosts: these tests exercise POSIX-only behaviour (file modes, tmpfs, systemd units, sh/bash scripts, file-URL paths); Linux CI runs them.
+const POSIX_ONLY = process.platform === "win32" && "POSIX-only behaviour";
 
 function fakeDocker() {
   const containers = new Map();
@@ -404,7 +406,7 @@ test("credential relay hands out access tokens only; no refresh token leaves the
 const installDir = fileURLToPath(new URL("../../pool/install/", import.meta.url)).replace(/\\/g, "/"); // C:/... on win32, which bash accepts
 const linuxInstaller = `${installDir}install-agent-linux.sh`;
 
-test("linux installer scripts parse and install the systemd unit without WSL", () => {
+test("linux installer scripts parse and install the systemd unit without WSL", { skip: POSIX_ONLY }, () => {
   // #5883: the Linux uninstaller and the macOS install/uninstall pair ship beside the Linux installer and must parse too.
   for (const f of ["install-agent-linux.sh", "install-agent.sh", "uninstall-agent-linux.sh", "install-agent-macos.sh", "uninstall-agent-macos.sh"]) assert.equal(spawnSync("bash", ["-n", `${installDir}${f}`]).status, 0, f);
   assert.ok(!/wsl/i.test(readFileSync(linuxInstaller, "utf8")));
@@ -412,7 +414,7 @@ test("linux installer scripts parse and install the systemd unit without WSL", (
   assert.match(readFileSync(`${installDir}uninstall-agent-linux.sh`, "utf8"), /computeshare-agent\.service/);
 });
 
-test("linux installer --dry-run resolves settings and redacts the token", () => {
+test("linux installer --dry-run resolves settings and redacts the token", { skip: POSIX_ONLY }, () => {
   const r = spawnSync("bash", [linuxInstaller, "--dry-run", "--router", "http://100.1.1.1:7710", "--token", "sekret", "--name", "box", "--cpus", "6", "--mem", "9", "--port", "7712"],
     { encoding: "utf8", env: { ...process.env, AGENT_URL: "http://100.2.2.2:7712" } });
   assert.equal(r.status, 0, r.stderr);
@@ -803,6 +805,117 @@ test("router /ci/events: ci token posts, only the fd token reads, long-poll answ
   assert.equal((await call("GET", "/health")).status, 200);
 });
 
+// #5735: per-agent lane ceiling across all batches.
+const laneSpec = (batch, issue) => spec(`fdrsbx-${batch}-${issue}`, { issue, batch });
+const bodyCall = (target, method, url, body) => new Promise((resolve) => {
+  const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body))];
+  const req = { method, url, headers: { authorization: "Bearer fd", "content-type": "application/json" }, socket: {}, async *[Symbol.asyncIterator]() { yield* chunks; } };
+  let out = "";
+  target.handle(req, { writeHead(st) { this.s = st; }, setHeader() {}, write(x) { out += x; }, end(b) { out += b ?? ""; resolve({ status: this.s, body: out ? JSON.parse(out) : null }); } });
+});
+
+test("lane ceiling: two batches x 6 concurrent fdrsbx launches with max_lanes 2 place exactly 2; the rest are deferred 503 (#5735)", async () => {
+  const { router } = routerFixture({ legion: { cpus_free: 64, mem_free_gb: 128 } });
+  router.store.data.agents.legion.max_lanes = 2;
+  const specs = [];
+  for (let i = 1; i <= 6; i++) specs.push(laneSpec("b1", i), laneSpec("b2", 100 + i));
+  const res = await Promise.all(specs.map((s) => router.launch(s)));
+  assert.equal(res.filter((r) => r.status === 201).length, 2);
+  const refused = res.filter((r) => r.status === 503);
+  assert.equal(refused.length, 10);
+  for (const r of refused) {
+    assert.equal(r.body.code, "pool.host_lane_ceiling");
+    assert.equal(r.body.error, "pool.host_lane_ceiling");
+    assert.ok(r.retryAfter > 0);
+    assert.equal(r.body.agents[0].name, "legion");
+    assert.equal(r.body.agents[0].ceiling, 2);
+  }
+  assert.equal(Object.keys(router.store.data.sandboxes).length, 2);
+  // An already-placed id re-launches idempotently (not re-checked).
+  const placed = Object.keys(router.store.data.sandboxes)[0];
+  assert.equal((await router.launch(spec(placed, { issue: 1 }))).status, 201);
+  // A DELETE frees a slot; the next lane launch is placed.
+  assert.equal((await bodyCall(router, "DELETE", `/sandboxes/${placed}`)).status, 200);
+  assert.equal((await router.launch(laneSpec("b2", 999))).status, 201);
+  assert.equal((await router.launch(laneSpec("b1", 998))).status, 503);
+});
+
+test("lane ceiling: other tenants' sandboxes place on a capped agent and are not counted (#5735)", async () => {
+  const { router } = routerFixture({ legion: { cpus_free: 64, mem_free_gb: 128 } });
+  router.store.data.agents.legion.max_lanes = 1;
+  assert.equal((await router.launch(spec("tenant-a", { batch: null }))).status, 201);
+  assert.equal((await router.launch(laneSpec("b1", 1))).status, 201);
+  assert.equal((await router.launch(spec("tenant-b", { batch: null }))).status, 201);
+  assert.equal((await router.launch(laneSpec("b2", 2))).status, 503);
+  const j = (await bodyCall(router, "GET", "/agents")).body;
+  assert.deepEqual(j.agents[0].lanes, { used: 1, ceiling: 1 });
+  assert.equal(j.remote_lanes, 1);
+  assert.ok(j.sandboxes["tenant-a"], "sandboxes map kept (#5535)");
+});
+
+test("lane ceiling: an uncapped agent has no ceiling; a capped one sends lanes to the next host (#5735)", async () => {
+  const { router } = routerFixture({ big: { cpus_free: 32, mem_free_gb: 64 }, small: { cpus_free: 8, mem_free_gb: 16 } });
+  router.store.data.agents.big.max_lanes = 1;
+  const res = await Promise.all([1, 2, 3, 4].map((i) => router.launch(laneSpec("b1", i))));
+  assert.deepEqual(res.map((r) => r.status), [201, 201, 201, 201]);
+  assert.deepEqual(res.map((r) => r.body.agent).sort(), ["big", "small", "small", "small"]);
+  const j = (await bodyCall(router, "GET", "/agents")).body;
+  assert.deepEqual(Object.fromEntries(j.agents.map((a) => [a.name, a.lanes])), { big: { used: 1, ceiling: 1 }, small: { used: 3, ceiling: null } });
+  assert.equal(j.remote_lanes, 4);
+});
+
+test("lane ceiling: claim() skips an agent at its ceiling (#5735)", async () => {
+  const { router, calls } = routerFixture({ legion: { cpus_free: 64, mem_free_gb: 128 } });
+  router.store.data.agents.legion.max_lanes = 1;
+  router.store.data.sandboxes["fdrsbx-b1-1"] = { agent: "legion", issue: 1, batch: "b1" };
+  const r = await router.claim(laneSpec("b2", 2));
+  assert.equal(r.status, 404);
+  assert.ok(!calls.some((c) => c.endsWith("/warm/claim")), "no warm claim sent to a capped agent");
+});
+
+test("lane ceiling: POST /agents/:name/limit sets and clears; router.json agents.<name>.max_lanes is the fallback; enroll keeps it (#5735)", async () => {
+  const { router } = routerFixture({ legion: { cpus_free: 64, mem_free_gb: 128 } });
+  assert.equal((await bodyCall(router, "POST", "/agents/legion/limit", { max_lanes: 0 })).status, 200);
+  assert.equal(router.store.data.agents.legion.max_lanes, 0);
+  assert.equal((await router.launch(laneSpec("b1", 1))).status, 503);
+  assert.equal((await bodyCall(router, "POST", "/agents/nope/limit", { max_lanes: 1 })).status, 404);
+  for (const bad of [-1, 1.5, "2"]) assert.equal((await bodyCall(router, "POST", "/agents/legion/limit", { max_lanes: bad })).status, 400);
+  const cleared = await bodyCall(router, "POST", "/agents/legion/limit", { max_lanes: null });
+  assert.equal(cleared.status, 200);
+  assert.equal("max_lanes" in router.store.data.agents.legion, false);
+  assert.equal((await router.launch(laneSpec("b1", 1))).status, 201);
+  // Static fallback from router.json, overridden by the state entry.
+  const fetchFn = async (url, init) => new Response(JSON.stringify(new URL(url).pathname === "/capacity" ? { cpus_free: 64, mem_free_gb: 128 } : { id: JSON.parse(init.body ?? "{}").spec?.id }), { status: new URL(url).pathname === "/sandboxes" ? 201 : 200, headers: { "content-type": "application/json" } });
+  const r2 = createRouter({ state_dir: tmpDir("cs-router-cap-"), lane: { cpus: 2, mem_gb: 3 }, enroll_token: "e", forgedock_token: "fd", agents: { legion: { max_lanes: 1 } } }, { fetchFn, log: quiet });
+  r2.store.data.agents.legion = { url: "http://legion:7711", token: "t" };
+  assert.equal((await r2.launch(laneSpec("b1", 1))).status, 201);
+  assert.equal((await r2.launch(laneSpec("b2", 2))).status, 503);
+  r2.store.data.agents.legion.max_lanes = 2;
+  assert.equal((await r2.launch(laneSpec("b2", 2))).status, 201);
+  const en = r2.enroll({ token: "e", name: "legion", url: "http://legion:7711" });
+  assert.equal(en.status, 200);
+  assert.equal(r2.store.data.agents.legion.max_lanes, 2);
+});
+
+test("lane ceiling 503 through httpTransport is a retryable capacity error (deferred, not failed) (#5735)", async () => {
+  const { router } = routerFixture({ legion: { cpus_free: 64, mem_free_gb: 128 } });
+  router.store.data.agents.legion.max_lanes = 1;
+  const serve = (target) => (url, init) => new Promise((resolve) => {
+    const u = new URL(url), chunks = init.body ? [Buffer.from(init.body)] : [];
+    const req = { method: init.method, url: u.pathname + u.search, headers: Object.fromEntries(Object.entries(init.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v])), socket: {}, async *[Symbol.asyncIterator]() { yield* chunks; } };
+    const hdr = {};
+    target.handle(req, { writeHead(st, h) { this.s = st; Object.assign(hdr, h ?? {}); }, setHeader(k, v) { hdr[k.toLowerCase()] = String(v); }, end(b) { resolve(new Response(b || "{}", { status: this.s, headers: { "content-type": "application/json", ...hdr } })); } });
+  });
+  const transport = httpTransport({ endpoint: "http://pool", token: "fd", fetchFn: serve(router) });
+  await transport.launch(laneSpec("b1", 1));
+  const e = await transport.launch(laneSpec("b2", 2)).then(() => null, (x) => x);
+  assert.ok(e, "the second lane launch must be refused");
+  assert.equal(e.status, 503);
+  assert.equal(e.retryable, true);
+  assert.ok(e.retryInSeconds > 0, `retryInSeconds: ${e.retryInSeconds}`);
+  assert.deepEqual(await transport.agentLanes(), { agents: [{ name: "legion", used: 1, ceiling: 1 }], total: 1 });
+});
+
 // #5856: priority classes, reservations, borrowing, idle_only.
 const prio = (id, priority, extra = {}) => spec(id, { priority, ...extra });
 const RES = [{ name: "marcode", cpus: 10, mem_gb: 20 }];
@@ -914,6 +1027,62 @@ test("#5856 capacity reports reserved vs borrowable headroom; flat agents add no
   const flat = agentFixture().agent.capacity();
   assert.equal(flat.reservations, undefined);
   assert.equal(flat.cpus_borrowable, undefined);
+});
+
+test("#5885 capacity says why borrowed lanes are throttled and drained under idle_only; flat agents add no such fields", async () => {
+  let h = { ok: true, load_per_core: 0.1, mem_available_gb: 20 };
+  const { agent } = agentFixture({ idle_only: true, cores: 8, drain_grace_s: 0, live: () => h });
+  await agent.launch({ spec: prio("b1", "borrow"), cpus: 1, mem_gb: 1 });
+  assert.deepEqual([agent.capacity().idle_gate, agent.capacity().throttled, agent.capacity().last_drain], [null, 0, null]);
+  h = { ok: true, load_per_core: 0.9, mem_available_gb: 20 };
+  await agent.reap();
+  let c = agent.capacity();
+  assert.match(c.idle_gate, /^owner load 0\.90\/core/);
+  assert.equal(c.throttled, 1);
+  await agent.reap();
+  c = agent.capacity();
+  assert.equal(c.throttled, 0);
+  assert.equal(c.last_drain.sandbox, "b1");
+  assert.match(c.last_drain.reason, /^owner busy: owner load 0\.90\/core/);
+  assert.ok(!Number.isNaN(Date.parse(c.last_drain.at)));
+  const flat = agentFixture().agent.capacity();
+  for (const k of ["idle_gate", "throttled", "last_drain"]) assert.equal(k in flat, false, k);
+  assert.equal(flat.owner_paused, false);
+});
+
+test("#5885 owner pause refuses launches with 503 until resume, survives a restart and a resize drain", async () => {
+  const { agent, dir } = agentFixture();
+  const req = (method, url, token = "agent-token", body = {}) => new Promise((resolve) => {
+    agent.handle({ method, url, headers: { authorization: `Bearer ${token}` }, socket: {}, async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body)); } }, { writeHead(st) { this.s = st; }, setHeader() {}, end(b) { resolve({ status: this.s, body: b ? JSON.parse(b) : null }); } });
+  });
+  assert.equal((await req("POST", "/pause", "wrong")).status, 401);
+  assert.equal(agent.capacity().owner_paused, false);
+  const p = await req("POST", "/pause");
+  assert.deepEqual([p.status, p.body.owner_paused], [200, true]);
+  assert.deepEqual([agent.capacity().paused, agent.capacity().owner_paused], [true, true]);
+  const refused = await agent.launch({ spec: spec("p1"), cpus: 1, mem_gb: 1 });
+  assert.equal(refused.status, 503);
+  // a restarted agent on the same state dir stays paused
+  const again = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, state_dir: dir, allow_cpus: 4, allow_mem_gb: 8, token: "agent-token" }, { docker: fakeDocker(), log: quiet, live: () => ({ ok: true }), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
+  assert.equal(again.capacity().owner_paused, true);
+  // an idle resize clears the resize pause (cfg.paused) but never the owner's
+  if (!onWsl) { // an idle resize on WSL would rewrite the real .wslconfig
+    assert.equal((await req("POST", "/admin/resize", "agent-token", { cpus: 2, mem_gb: 4 })).status, 202);
+    assert.equal(agent.capacity().paused, true);
+  }
+  const r = await req("POST", "/resume");
+  assert.deepEqual([r.status, r.body.owner_paused], [200, false]);
+  assert.deepEqual([agent.capacity().paused, agent.capacity().owner_paused], [false, false]);
+  assert.equal((await agent.launch({ spec: spec("p2"), cpus: 1, mem_gb: 1 })).status, 201);
+});
+
+test("#5885 resize drain pause is independent of the owner pause", async () => {
+  const { agent } = agentFixture();
+  await agent.launch({ spec: spec("d1"), cpus: 1, mem_gb: 1 });
+  const body = { cpus: 2, mem_gb: 4, drain: true };
+  const res = await new Promise((resolve) => agent.handle({ method: "POST", url: "/admin/resize", headers: { authorization: "Bearer agent-token" }, socket: {}, async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body)); } }, { writeHead(st) { this.s = st; }, setHeader() {}, end(b) { resolve({ status: this.s, body: JSON.parse(b) }); } }));
+  assert.equal(res.status, 202);
+  assert.deepEqual([agent.capacity().paused, agent.capacity().owner_paused], [true, false]);
 });
 
 test("#5856 flat agent ignores priority for admission and adds no cpu weight", async () => {

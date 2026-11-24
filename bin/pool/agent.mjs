@@ -7,7 +7,7 @@ import { randomBytes } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, statfsSync, lstatSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { cpus, hostname } from "node:os";
 import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
 import { repoRoot, versionOf, laneImageTag, laneBuildArgs } from "./version.mjs";
@@ -278,6 +278,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   }
   // Throttle = low cpu weight + a halved soft memory limit (`--memory-reservation`: under host memory pressure the kernel reclaims from containers over it first; the docker CLI has no memory.high).
   const throttle = async (r, shares) => { const memMb = Math.round(r.mem_gb * (shares === SHARES().throttled ? 512 : 1024)); for (const n of r.docker ? [r.name, dindName(r.name)] : [r.name]) { try { await docker.update?.(n, { cpuShares: shares, memoryReservationMb: memMb }); } catch (e) { log.warn?.(`throttle ${n}: ${String(e.stderr || e.message).slice(0, 160)}`); } } r.throttled = shares === SHARES().throttled; };
+  let lastDrain = null; // #5885: the most recent drain, for capacity().last_drain
   /** SIGTERM (the lane checkpoints and reports run.interrupted), wait out the grace, then SIGKILL; the router/dispatcher reschedules the lane. */
   async function drainOne(r, why) {
     for (const n of r.docker ? [r.name, dindName(r.name)] : [r.name]) { try { await docker.kill(n, "TERM"); } catch { /* gone */ } }
@@ -285,6 +286,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     try { await docker.kill(r.name, "KILL"); } catch { /* already exited */ }
     if (r.docker) { try { await docker.remove(dindName(r.name)); } catch { /* destroy retries */ } }
     r.state = "exited"; r.finishedAt = now(); r.drained = why;
+    lastDrain = { reason: why, at: new Date(now()).toISOString(), sandbox: r.id }; // #5885: shown by `pool status`
     log.info?.(`drained borrowed sandbox ${r.id} (${why})`);
   }
   /** Admission by class: `{ victims }` (borrow sandboxes to reclaim, reserved only) or `{ refuse }` (a 503/400 body). */
@@ -309,6 +311,42 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     }
     return needC > 0 || needM > 0 ? { refuse: { status: 503 } } : { victims };
   }
+  /** #5885: why borrowed lanes are throttled or drained (weighted agents only, like priorityView). */
+  function throttleView(h) {
+    if (!weighted()) return {};
+    return { idle_gate: notIdle(h), throttled: activeRecs().filter((r) => r.throttled).length, last_drain: lastDrain };
+  }
+  /** #5885: the owner's own pause, distinct from the resize drain's cfg.paused; a file beside the agent config keeps it across restarts. */
+  const ownerPauseFile = join(cfg.config_path ? dirname(cfg.config_path) : stateDir, "owner-paused");
+  let ownerPaused = existsSync(ownerPauseFile);
+  function setOwnerPause(on) {
+    if (on) writeFileSync(ownerPauseFile, `${new Date(now()).toISOString()}\n`, { mode: 0o600 });
+    else rmSync(ownerPauseFile, { force: true });
+    ownerPaused = on;
+    log.info?.(`owner ${on ? "paused" : "resumed"} this agent`);
+    return { status: 200, body: { ok: true, owner_paused: on, active: capacity().active } };
+  }
+  /** #5886: a router-pushed policy (allowlisted keys, persisted beside the agent config). Its `paused` is separate from the owner's pause: the router can set or clear only its own, never the owner's. */
+  let policyPaused = Boolean(cfg.policy_paused);
+  function applyPolicy(body) {
+    const p = body && typeof body === "object" ? body : {}, int = (v, lo, hi) => (Number.isInteger(v) && v >= lo && v <= hi);
+    if ((p.cpus !== undefined && !int(p.cpus, 1, 256)) || (p.mem_gb !== undefined && !int(p.mem_gb, 1, 1024)) || (p.idle_only !== undefined && typeof p.idle_only !== "boolean") || (p.paused !== undefined && typeof p.paused !== "boolean")
+      || (p.floors !== undefined && !(p.floors && typeof p.floors === "object" && Object.keys(p.floors).every((k) => k === "host_disk_gb" && Number.isFinite(p.floors[k]) && p.floors[k] >= 0)))) return { status: 400, body: { error: "invalid policy" } };
+    const set = {};
+    if (p.cpus !== undefined) set.allow_cpus = p.cpus;
+    if (p.mem_gb !== undefined) set.allow_mem_gb = p.mem_gb;
+    if (p.idle_only !== undefined) set.idle_only = p.idle_only;
+    if (p.floors?.host_disk_gb !== undefined) set.host_disk_floor_gb = p.floors.host_disk_gb;
+    if (p.paused !== undefined) set.policy_paused = p.paused;
+    if (cfg.config_path) {
+      try { const c = JSON.parse(readFileSync(cfg.config_path, "utf8")); writeFileSync(cfg.config_path, JSON.stringify({ ...c, ...set }, null, 2), { mode: 0o600 }); }
+      catch (e) { log.warn?.(`policy not persisted: ${e.message}`); }
+    }
+    Object.assign(cfg, set);
+    if (p.paused !== undefined) policyPaused = p.paused;
+    log.info?.(`policy applied: ${Object.keys(set).join(", ") || "none"}`);
+    return { status: 200, body: { ok: true, applied: Object.keys(p), paused: Boolean(cfg.paused || ownerPaused || policyPaused), owner_paused: ownerPaused } };
+  }
   /** #5856: reserved vs borrowable headroom for the router (only when reservations or idle_only are configured). */
   function priorityView() {
     if (!weighted()) return {};
@@ -320,7 +358,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const u = used();
     const active = Object.values(sb()).filter((s) => s.state !== "exited").length;
     const e = effectiveCapacity();
-    return { host: cfg.name ?? hostname(), ...running, vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.log && upgrade.state === "failed" ? { upgrade_log: upgrade.log } : {}), ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10 }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...diskView(), ...laneDiskView(), ...hostDiskView(active), net: readNet(), paused: Boolean(cfg.paused), live: live(cfg), usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
+    const h = live(cfg);
+    return { host: cfg.name ?? hostname(), ...running, vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.log && upgrade.state === "failed" ? { upgrade_log: upgrade.log } : {}), ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10 }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...throttleView(h), ...diskView(), ...laneDiskView(), ...hostDiskView(active), net: readNet(), paused: Boolean(cfg.paused || ownerPaused || policyPaused), owner_paused: ownerPaused, live: h, usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
   }
 
   /** The image a spec's lanes run (the per-repo lane_tools tag when tools are listed), without building it. */
@@ -887,6 +926,9 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       return { status: 200, body: { rows: rows.slice(-500) } };
     }],
     [route("POST", "/admin/resize"), async (_p, body) => resize(body ?? {})],
+    [route("POST", "/admin/policy"), async (_p, body) => applyPolicy(body)], // #5886
+    [route("POST", "/pause"), async () => setOwnerPause(true)], // #5885: box-local `forgedock pool pause`; running lanes finish
+    [route("POST", "/resume"), async () => setOwnerPause(false)],
     [route("POST", "/admin/update"), async () => { selfUpdate(); return { status: 202, body: { ok: true, from: running } }; }],
     [route("DELETE", "/sandboxes/:id"), async ({ id }) => ((await destroy(id, "requested")) ? { status: 200, body: { ok: true } } : { status: 404, body: { state: "gone" } })],
   ];
