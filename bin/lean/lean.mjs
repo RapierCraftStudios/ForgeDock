@@ -434,7 +434,7 @@ export async function runCore(o) {
   };
   let pageVisual = null; // #5770: the engine's visual capture {sha, screenshots, errors, rows}, kept for the page gate and the PR body
 
-  const ctxStats = { restarts: 0, continues: 0, turns: 0 }; // #5829: reported on the lane result
+  const ctxStats = { restarts: 0, continues: 0, compactions: 0, turns: 0 }; // #5829: reported on the lane result
   const builderTriggers = []; // #4362: implement-attempt triggers in order, for the lane's first-pass flag
   let usageUnknown = false, inflight = null; // #5334: a killed session streamed nothing; the builder call in flight (flushed when a signal ends the run)
   const impl = { cost: 0, models: new Set() }; // #4397: implement spend and reported models, for the verifier
@@ -1166,7 +1166,7 @@ export async function runCore(o) {
   let laneCeiling = contextCeilingTokens ?? DEFAULT_CEILING; // #5346: set to the lane size's ceiling once the contract is frozen; #5829: model-aware when no explicit one
   let ceilingExplicit = contextCeilingTokens != null || contextCeilingBySize != null; // #5829
   let laneModelInfo = null; // #5829: the routed model's static window and cache-read price (null = unknown: kill-and-restart at the ceiling)
-  const UNCEILED = ["plan", "contract_correction", "block_correction"], CONTEXT_RESTARTS_MAX = 3;
+  const UNCEILED = ["plan", "contract_correction", "block_correction"], CONTEXT_RESTARTS_MAX = 3, CONTEXT_COMPACT_MAX = 2;
   /** #5812: the planning session's last-turn context, the files it read and its final reply, for the route hand-off. */
   let planSession = null;
   const notePlanSession = (r, trigger) => { planSession = { endTokens: num(r.endTokens), read: [...new Set([...(planSession?.read ?? []), ...handoffFacts(r.toolUses).read])], text: trigger === "plan" ? String(r.text ?? "") : planSession?.text ?? "" }; };
@@ -1196,6 +1196,20 @@ export async function runCore(o) {
           ev({ event: "CONTEXT_CEILING", context_tokens: e.context ?? null, ceiling: e.contextMax ?? laneCeiling, real_limit: Boolean(continued), turns: e.turns ?? null, trigger: opts.trigger ?? null, restart: contextRestarts, last_tool: e.lastTool?.name ?? null });
           await attempt("implement", n, { usage: e.usage ?? null, turns: e.turns ?? null, tools: toolStats(e.toolUses), costUsd: null, model: opts.model ?? laneModel() ?? null }, opts.mode, opts.trigger, opts.restartOf);
           await checkpoint("context ceiling");
+          // #5829: compact the stopped session in place (the CLI's /compact on a resume) and continue it; any failure falls through to the digest restart
+          if (e.sessionId && ctxStats.compactions < CONTEXT_COMPACT_MAX) {
+            ctxStats.compactions++;
+            let c = null; try { c = await builderOnce(n, "/compact", e.sessionId, live, { model: opts.model ?? null, mode: opts.mode ?? null, keepSession: true, trigger: "context_compact", restartOf: opts.restartOf ?? opts.trigger ?? null }); } catch { c = null; }
+            const after = num(c?.endTokens);
+            if (after != null && num(e.context) != null && after < e.context * 0.8) {
+              ev({ event: "CONTEXT_COMPACTED", tokens_before: e.context, tokens_after: after, session_id: e.sessionId });
+              T.decisions.push(`Builder session reached ${e.context} context tokens: compacted in place to ${after} and continued the same session`);
+              p = "The session context was compacted. Continue the task from where you left off; .forge-lean/contract.json stays the authority and the work so far is checkpointed on the branch."; resume = e.sessionId; opts.restartOf ??= opts.trigger ?? null; opts.trigger = "context_compact_continue";
+              contextRestarts--; ctxStats.restarts--; // a compaction is not a restart
+              continue;
+            }
+            ev({ event: "CONTEXT_COMPACT_FAILED", tokens_before: e.context ?? null, tokens_after: after, session_id: e.sessionId });
+          }
           T.decisions.push(`Builder session reached ${e.context ?? "?"} context tokens (ceiling ${laneCeiling}): checkpointed, restarted fresh from the contract, diff and last validate result`);
           p = restart() + await contextRestartNote(handoffFacts(e.toolUses, e.lastTool)); resume = null; opts.restartOf ??= opts.trigger ?? null; opts.trigger = "context_restart";
           continue;

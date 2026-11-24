@@ -251,7 +251,8 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    price vs `engine.context_restart_cost_usd`, default 0.5): `continue` raises that call's `contextMax` to 90% of the window
    (`CONTEXT_CONTINUE`; `CONTEXT_CONTINUED` records `tokens_before`/`tokens_after`), else the session stops at the ceiling. A stop at the
    real limit, an unknown window, or a costlier continue restarts via the digest (max 3, `CONTEXT_CEILING` has `real_limit`). The lane
-   result carries `context: {restarts, continues, turns, cost_usd}` for before/after comparison. No CLI compaction path is used.
+   #5829 compaction: a context stop that names its session (`CLI_CONTEXT.sessionId`, the stream's `session_id`) is first compacted in place: `builder()` resumes it with `/compact` (trigger `context_compact`, max 2 per call), logs `CONTEXT_COMPACTED` with `tokens_before`/`tokens_after` and, when the context fell below 80%, continues the same session (not a restart). A throw, no session id or too small a drop logs `CONTEXT_COMPACT_FAILED` and falls back to the digest restart.
+   result carries `context: {restarts, continues, compactions, turns, cost_usd}` for before/after comparison. No CLI compaction path is used.
    #5346 (`ceiling.mjs`, pure): `engine.context_ceiling_by_size` ("S=..,M=..,L=..", `readCoreLimits` → `contextCeilingBySize`) sets
    the ceiling per lane size at contract freeze (no entry: the global one; defaults unchanged until an A/B sets them). Before
    the build, `predictRestart` estimates the start (prompt bytes + the contract's existing deliverable files, 4 bytes/token):

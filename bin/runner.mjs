@@ -2150,6 +2150,7 @@ export async function runCliBackendAsync(opts) {
   let limitInfo = null;
   const ceiling = maxMs > 0 ? maxMs : o.timeout;
   let collected, idleInfo = null, ctxInfo = null, turnInfo = null;
+  let streamSessionId = null;
   const msgUsage = new Map(); // #4390: assistant message id -> its usage (a message spans several stream lines)
   const toolUses = new Map(); // #4410: tool_use id -> {msg, name, path, cmd}
   const sum = (k) => [...msgUsage.values()].reduce((a, u) => a + toFiniteUsageNumber(u[k]), 0);
@@ -2214,6 +2215,7 @@ export async function runCliBackendAsync(opts) {
       const noteLine = (line) => {
         if (!line.startsWith("{") || line.length > 4_000_000) return;
         let j; try { j = JSON.parse(line); } catch { return; }
+        if (typeof j?.session_id === "string" && j.session_id) streamSessionId = j.session_id; // #5829: a context stop names the session so it can be compacted
         if (j?.type === "result") resultLine = line;
         else if (j?.type === "user" && Array.isArray(j.message?.content)) {
           // #5346: a tool_result closes its edit; a ceiling crossed mid-edit stops the session at this safe point
@@ -2271,7 +2273,7 @@ export async function runCliBackendAsync(opts) {
   }
   if (ctxInfo) {
     const err = new Error(`claude CLI session reached ${ctxInfo.context} context tokens (ceiling ${contextMax}) after ${msgUsage.size} turn(s) and was stopped`);
-    err.code = "CLI_CONTEXT"; err.context = ctxInfo.context; err.contextMax = contextMax; err.turns = msgUsage.size; err.lastTool = ctxInfo.lastTool;
+    err.code = "CLI_CONTEXT"; err.sessionId = streamSessionId; err.context = ctxInfo.context; err.contextMax = contextMax; err.turns = msgUsage.size; err.lastTool = ctxInfo.lastTool;
     err.usage = streamUsage(); err.toolUses = [...toolUses.values()];
     throw err;
   }
