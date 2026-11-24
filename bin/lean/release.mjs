@@ -675,7 +675,7 @@ export async function releaseFromCli(argv, deps = {}) {
     try { io.print(await budgetReportLine({ cwd, repo, gh: (a) => io.gh(a), now: io.now(), release: since ? await releaseRuns({ gh: (a) => io.gh(a), repo, sinceMs: since }) : null })); } catch { /* best effort */ }
   };
   await budget(null);
-  const r = await runRelease({ io, repo, opts: { merge: argv.includes("--merge"), lane: flag(argv, "--lane") }, config, branches: readBranches(cwd), root, id, mounts: deps.mounts });
+  const r = await runRelease({ io, repo, opts: { merge: argv.includes("--merge"), lane: flag(argv, "--lane") }, config, branches: readBranches(cwd), root, id, mounts: deps.mounts, steps: deps.steps });
   const line = r.status === "done" ? `release ${id}: done` : `release ${id}: ${r.status} at ${r.step}: ${r.reason} (resume: forgedock release --resume ${id})`;
   io.print(line);
   try { await budget(Date.parse(openRelease(root, id).load()?.startedAt) || null); } catch { /* best effort */ }
