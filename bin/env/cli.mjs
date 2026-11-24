@@ -36,6 +36,17 @@ function parseArgs(argv) {
   }
   return o;
 }
+/** #5947: a bare mirror is usable when it has refs (packed-refs entries or refs/ files) and no zero-length object or pack file. */
+export function mirrorHealthy(fs, dir) {
+  try {
+    const walk = (d, f) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = join(d, e.name); if (e.isDirectory()) { if (!walk(p, f)) return false; } else if (!f(p)) return false; } return true; };
+    let refs = false;
+    try { refs = fs.readFileSync(join(dir, "packed-refs"), "utf8").split("\n").some((l) => /^[0-9a-f]{40,64} /.test(l)); } catch { /* no packed-refs */ }
+    if (!refs && fs.existsSync(join(dir, "refs"))) refs = !walk(join(dir, "refs"), () => false);
+    if (!refs) return false;
+    return !fs.existsSync(join(dir, "objects")) || walk(join(dir, "objects"), (p) => fs.statSync(p).size > 0);
+  } catch { return false; }
+}
 const num = (v, def) => (v !== undefined && /^\d+$/.test(String(v)) ? Number(v) : def);
 const gb = (n) => (Number.isFinite(n) ? `${(n / 2 ** 30).toFixed(2)} GB` : "?");
 
@@ -117,8 +128,14 @@ export async function envFromCli(argv, { fs = nodeFs, exec = defaultExec, out = 
       // Pool-host helper (bin/pool/agent.mjs envEnsureArgs). A missing mirror or a failed install leaves lanes on today's path.
       const prefix = o.prefix ?? ENV_PREFIX;
       if (!o.mirror || !fs.existsSync(o.mirror)) { out(`env ensure: mirror ${o.mirror ?? "(none)"} not ready`); return 0; }
+      // #5947: a mirror with no refs or a zero-length object (a timed-out build) is not trusted: clone direct from the repo URL, else report not ready.
+      let src = o.mirror;
+      if (!mirrorHealthy(fs, o.mirror)) {
+        if (!o.url) { out(`env ensure: mirror ${o.mirror} is not healthy (no refs or an empty object); not ready`); return 0; }
+        src = o.url;
+      }
       if (fs.existsSync(prefix)) { process.stderr.write(`env ensure: ${prefix} already exists (run in a fresh build container)\n`); return 1; }
-      try { await exec("git", ["clone", "--quiet", "--shared", ...(o.ref ? ["--branch", o.ref] : []), o.mirror, prefix], { timeoutMs: 10 * 60000 }); }
+      try { await exec("git", ["clone", "--quiet", ...(src === o.mirror ? ["--shared"] : []), ...(o.ref ? ["--branch", o.ref] : []), src, prefix], { timeoutMs: 10 * 60000 }); }
       catch (e) { process.stderr.write(`env ensure: clone failed: ${String(e.stderr || e.message).slice(0, 300)}\n`); return 1; }
       const d = await describe(prefix);
       const r = await buildLocal({ wt: prefix, deps, store, desc: d, fs, exec, repo: o.repo ?? null, ref: o.ref ?? null, commit: await git(prefix, ["rev-parse", "HEAD"]) });

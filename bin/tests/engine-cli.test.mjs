@@ -1235,6 +1235,13 @@ describe("forgedock check (#4364)", () => {
     writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_tokens: lots\n"); assert.equal(readCoreLimits(d).contextCeilingTokens, undefined);
   });
 
+  it("#5829 ceiling knobs parse; an unset ceiling stays unset so the model default applies, an explicit one still wins", async () => {
+    const d = tmpDir("fd-ctx-"); const { readCoreLimits } = await import("../engine-cli.mjs");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_window_share: 0.6\n  context_restart_cost_usd: 1.5\n");
+    const a = readCoreLimits(d); assert.equal(a.contextWindowShare, 0.6); assert.equal(a.contextRestartCostUsd, 1.5); assert.equal(a.contextCeilingTokens, undefined);
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_window_share: 3\n  context_restart_cost_usd: lots\n  context_ceiling_tokens: 90000\n");
+    const b = readCoreLimits(d); assert.equal(b.contextWindowShare, undefined); assert.equal(b.contextRestartCostUsd, undefined); assert.equal(b.contextCeilingTokens, 90000);
+  });
   it("#5346: readCoreLimits reads engine.context_ceiling_by_size (junk ignored, absent: no key)", async () => {
     const { readCoreLimits } = await import("../engine-cli.mjs");
     const d = tmpDir("fd-ctxsz-");

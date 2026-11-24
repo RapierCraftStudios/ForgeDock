@@ -10,7 +10,7 @@ import { checkPoolAuth, checkPoolVersion, checkPathLoop, checkGhFields, availabl
 import { which } from "./toolchain.mjs";
 import { findShimLoops, heavyShimScript } from "./heavy.mjs";
 import { orchestrate, deferPolicy } from "./orchestrate.mjs";
-import { providerLanes, isCloneFailure } from "./execution.mjs";
+import { providerLanes, isCloneFailure, isEgressTimeout } from "./execution.mjs";
 
 const pool = { mode: "remote", provider: "pool", tokenEnv: null, endpoint: null };
 const until = async (f, ms = 3000) => { const t = Date.now(); while (!f()) { if (Date.now() - t > ms) throw new Error("timeout"); await new Promise((r) => setTimeout(r, 5)); } };
@@ -192,6 +192,18 @@ describe("sandbox.clone", () => {
     const o = await lanes(prov()).runOne(7, {}, {});
     assert.equal(o.terminalReason, "engine-error");
     assert.equal(isCloneFailure("clone of repo ok"), false);
+  });
+  it("#5923: an ls-remote/fetch timeout ends deferred sandbox.egress_timeout with retry-in; other failures stay engine-error", async () => {
+    for (const t of ["fatal: unable to access 'https://github.com/o/r/': Failed to connect to github.com port 443: Connection timed out", "git ls-remote timed out after 60s", "git fetch hung: timeout"]) {
+      const r = await lanes(prov(), { logTail: () => t }).runOne(7, {}, {});
+      assert.equal(r.terminalReason, "deferred", t); assert.equal(r.code, "sandbox.egress_timeout", t); assert.ok(r.retryInSeconds > 0);
+    }
+    const e = await lanes(prov({ fetchResult: async () => ({ terminalReason: "engine-error", detail: "git fetch failed: Connection timed out" }) })).runOne(7, {}, {});
+    assert.equal(e.code, "sandbox.egress_timeout");
+    const o = await lanes(prov(), { logTail: () => "npm ERR! build failed" }).runOne(7, {}, {});
+    assert.equal(o.terminalReason, "engine-error");
+    assert.equal(isEgressTimeout("fetch of cache ok"), false);
+    assert.equal(isEgressTimeout("git clone timed out after 300s"), false);
   });
   it("is requeued with its retry-in and is not an engine-error (breaker input)", () => {
     const p = deferPolicy({ terminalReason: "deferred", code: "sandbox.clone", retryInSeconds: 120 }, { now: 0 });

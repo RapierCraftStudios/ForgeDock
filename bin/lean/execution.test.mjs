@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { renderContract } from "./render.mjs";
-import { parseExecution, hostFallbackAllowed, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, containerProvider, providerByName, openExecutionBudget, poolCredential, remoteTransportFor, resolveDefaultExecution, repoIsPublic } from "./execution.mjs";
+import { parseExecution, hostFallbackAllowed, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, isEgressTimeout, SANDBOX_EGRESS_TIMEOUT_CODE, containerProvider, providerByName, openExecutionBudget, poolCredential, remoteTransportFor, resolveDefaultExecution, repoIsPublic } from "./execution.mjs";
 import * as executionModule from "./execution.mjs";
 import { remoteProvider } from "./sandbox-remote.mjs";
 import { makeLedger, countLiveLanes } from "./ledger.mjs";
@@ -62,9 +62,17 @@ describe("execution config (#4253)", () => {
     assert.equal(parseExecution({ mode: "remote", provider: "My Provider" }).provider, "container");
   });
 
+  it("remote mode with max_remote 0 pauses starts (#5933)", () => {
+    assert.notEqual(placement({ mode: "remote", maxRemote: 0 }), "local");
+    assert.equal(placeLane({ exec: { mode: "remote", maxRemote: 0 } }).where, "remote");
+  });
+  it("#5933 hybrid max_remote 0 stays local", () => {
+    assert.deepEqual(placeLane({ exec: { mode: "hybrid", maxRemote: 0 } }), { where: "local", reason: "max_remote 0" });
+  });
+
   it("placement: remote only for mode remote with max_remote >= 1; hybrid is placed per lane by placeLane (#4256)", () => {
     assert.equal(placement(parseExecution({})), "local");
-    assert.equal(placement(parseExecution({ mode: "remote", max_remote: "0" })), "local");
+    assert.equal(placement(parseExecution({ mode: "remote", max_remote: "0" })), "remote");
     assert.equal(placement(parseExecution({ mode: "hybrid", max_remote: "3" })), "local");
     assert.equal(placement(parseExecution({ mode: "remote", max_remote: "3" })), "remote");
     assert.equal(placement(undefined), "local");
@@ -242,6 +250,29 @@ describe("providerLanes: sandbox ledger and teardown on every exit path (#4253)"
     assert.equal(led.read(), null);
   });
 
+  it("#5859 lost without a result: the engine-error carries the pool agent; usage-limit and clone-failure mappings stay", async () => {
+    const lost = async (tail, agent = "legion") => {
+      const prov = fakeProvider({ finish: () => null });
+      const start = prov.start; prov.start = async (o) => ({ ...(await start(o)), agent });
+      const lanes = providerLanes({ provider: prov, laneArgs: () => [], ledgerFor: ledgerIn(tmpDir("exec-lost-")), pollMs: 1, now: () => 1000, sleep: async () => {}, logTail: async () => tail });
+      const r = await lanes.runOne(7, "staging", {});
+      await r.postRun?.();
+      return r;
+    };
+    const r = await lost("");
+    assert.equal(r.terminalReason, "engine-error");
+    assert.equal(r.agent, "legion");
+    assert.equal(r.lostWithoutResult, true);
+    assert.match(r.detail, /^sandbox fake-7 exited without a result$/, "detail text unchanged");
+    const lim = await lost("x\n[lane] deferred: usage limit hit; resets at 3:20pm (UTC)\n");
+    assert.equal(lim.terminalReason, "deferred");
+    assert.equal(lim.code, "rate_limited");
+    assert.equal(lim.lostWithoutResult, undefined);
+    const clone = await lost("git clone failed: early EOF");
+    assert.equal(clone.terminalReason, "deferred");
+    assert.equal(clone.lostWithoutResult, undefined);
+  });
+
   it("#4685 start refused with HTTP 401: deferred sandbox.auth with a long retry, never needs-human", async () => {
     const { r } = await run({ startThrows: 401 });
     assert.equal(r.terminalReason, "deferred");
@@ -410,6 +441,7 @@ describe("container provider (#4253)", () => {
     const p = containerProvider({ batch, image: "i", gitDir: "/g", docker });
     const h = { provider: "container", id: "fdsbx-bt-1", issue: 1 };
     assert.equal(await p.status(h), "running");
+    state = "paused"; assert.equal(await p.status(h), "running"); // #5957
     state = "exited"; assert.equal(await p.status(h), "exited");
     state = null; assert.equal(await p.status(h), "gone");
     assert.equal(await p.teardown(h), true);
@@ -682,7 +714,7 @@ describe("hybrid placement (#4256)", () => {
     const cases = [
       [{ exec: parseExecution({}) }, "local", "mode local"],
       [{ exec: parseExecution({ mode: "remote", max_remote: "3" }), weight: LIGHT }, "remote", "mode remote"],
-      [{ exec: parseExecution({ mode: "remote", max_remote: "0" }) }, "local", "mode remote"],
+      [{ exec: parseExecution({ mode: "remote", max_remote: "0" }) }, "remote", "mode remote"],
       [{ exec: hy("0"), weight: HEAVY }, "local", "max_remote 0"],
       [{ exec: hy(), verifyMode: "ci", weight: HEAVY, headroom: BUSY }, "local", "verify.mode ci: validation runs on CI, not billed twice"],
       [{ exec: hy(), labels: ["Documentation"], weight: HEAVY, headroom: BUSY }, "local", "docs-only lane"],
@@ -814,6 +846,15 @@ describe("hybrid placement (#4256)", () => {
     assert.deepEqual(prov.calls.filter((c) => c[0] === "start").map((c) => c[1]), [1]);
     assert.equal(res.rows[1].detail, "--placement|local|--placement-reason|docs-only lane");
     assert.deepEqual(res.rows[0].placement, { where: "remote", reason: "heavy validation: tsc" });
+  });
+});
+
+describe("#5923: egress timeout classification", () => {
+  it("isEgressTimeout matches network hangs only", () => {
+    assert.equal(SANDBOX_EGRESS_TIMEOUT_CODE, "sandbox.egress_timeout");
+    assert.equal(isEgressTimeout("ssh: connect: Connection timed out"), true);
+    assert.equal(isEgressTimeout("fatal: unable to access: Failed to connect to github.com"), true);
+    assert.equal(isEgressTimeout("fatal: repository not found"), false);
   });
 });
 

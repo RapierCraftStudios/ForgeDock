@@ -3,10 +3,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Native Linux (systemd) agent install: the Windows installer without the VM layer. Resolves host settings, then runs install-agent.sh,
 # which installs docker, node, enrolls the agent, builds the lane image and installs the computeshare-agent systemd unit.
-# Usage: install-agent-linux.sh --router URL --token CODE [--name N] [--port P] [--cpus N] [--mem GB] [--bundle FILE] [--dry-run]
-# Env equivalents: ROUTER_URL ENROLL_TOKEN AGENT_NAME AGENT_PORT ALLOW_CPUS ALLOW_MEM_GB BUNDLE AGENT_URL
+# Usage: install-agent-linux.sh --router URL --token CODE [--name N] [--port P] [--cpus N] [--mem GB] [--bundle FILE] [--outbound] [--dry-run]
+#        install-agent-linux.sh --router URL --device [same options]   (device login, #5886: no --token)
+# Env equivalents: ROUTER_URL ENROLL_TOKEN AGENT_NAME AGENT_PORT ALLOW_CPUS ALLOW_MEM_GB BUNDLE AGENT_URL OUTBOUND
+# Rerun (#5883): with /etc/computeshare/agent.token present and no --bundle, the installed /opt/computeshare is reused (no download, so a used
+# code works) and nothing is re-enrolled. Uninstall: uninstall-agent-linux.sh (removes only what /etc/computeshare/installed-by records).
+# --device (#5886): prints a user code, waits while `forgedock pool link CODE [--account A]` approves it on the operator's machine, then enrolls with the one-time code the router returns (always outbound); the agent record carries the account.
+# --outbound (OUTBOUND=1): the agent dials the router (no Tailscale, no inbound port); it enrolls without a URL and listens only on the docker bridge.
 set -euo pipefail
 DRY=0
+DEVICE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --router) ROUTER_URL="${2:?}"; shift 2 ;;
@@ -16,10 +22,37 @@ while [ $# -gt 0 ]; do
     --cpus) ALLOW_CPUS="${2:?}"; shift 2 ;;
     --mem) ALLOW_MEM_GB="${2:?}"; shift 2 ;;
     --bundle) BUNDLE="${2:?}"; shift 2 ;;
+    --outbound) OUTBOUND=1; shift ;;
+    --device) DEVICE=1; shift ;;
     --dry-run) DRY=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+if [ "$DEVICE" = 1 ]; then
+  : "${ROUTER_URL:?--router or ROUTER_URL required}"
+  OUTBOUND=1
+  if [ "$DRY" = 1 ]; then ENROLL_TOKEN="<device-code>"; else
+    json_field() { sed -n "s/.*\"$1\":\"\{0,1\}\([^\",}]*\).*/\1/p" | head -1; }
+    DEV="$(curl -fsS -X POST "${ROUTER_URL}/device/code")" || { echo "could not reach ${ROUTER_URL}/device/code" >&2; exit 1; }
+    DEVICE_CODE="$(printf %s "$DEV" | json_field device_code)"; USER_CODE="$(printf %s "$DEV" | json_field user_code)"
+    INTERVAL="$(printf %s "$DEV" | json_field interval)"; INTERVAL="${INTERVAL:-5}"
+    [ -n "$DEVICE_CODE" ] && [ -n "$USER_CODE" ] || { echo "router returned no device code" >&2; exit 1; }
+    echo "[computeshare] to link this box, run on your ForgeDock machine:  forgedock pool link $USER_CODE [--account NAME]"
+    ENROLL_TOKEN=""
+    while [ -z "$ENROLL_TOKEN" ]; do
+      sleep "$INTERVAL"
+      RES="$(curl -sS -X POST -H 'content-type: application/json' -d "{\"device_code\":\"$DEVICE_CODE\"}" "${ROUTER_URL}/device/token" || true)"
+      ENROLL_TOKEN="$(printf %s "$RES" | json_field enroll_code)"
+      [ -n "$ENROLL_TOKEN" ] && break
+      case "$RES" in
+        *authorization_pending*) ;;
+        *slow_down*) INTERVAL=$((INTERVAL + 5)) ;;
+        *) echo "device login failed or expired: $RES" >&2; exit 1 ;;
+      esac
+    done
+    echo "[computeshare] linked; enrolling"
+  fi
+fi
 : "${ROUTER_URL:?--router or ROUTER_URL required}" "${ENROLL_TOKEN:?--token or ENROLL_TOKEN required}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT="${AGENT_PORT:-7711}"
@@ -29,7 +62,10 @@ CPUS="${ALLOW_CPUS:-0}"
 if [ "$CPUS" -le 0 ]; then CPUS=$(( $(nproc) - 4 )); [ "$CPUS" -ge 2 ] || CPUS=2; fi
 MEM="${ALLOW_MEM_GB:-0}"
 if [ "$MEM" -le 0 ]; then MEM=$(( $(awk '/MemTotal/ {print int($2/1024/1024)}' /proc/meminfo) / 2 )); [ "$MEM" -ge 4 ] || MEM=4; fi
-if [ -z "${AGENT_URL:-}" ]; then
+OUTBOUND="${OUTBOUND:-0}"
+if [ "$OUTBOUND" = 1 ]; then
+  AGENT_URL=""
+elif [ -z "${AGENT_URL:-}" ]; then
   if [ "$DRY" = 1 ] && ! command -v tailscale >/dev/null; then TS_IP="<tailscale-ip>"; else
     TS_IP="$(tailscale ip -4 | head -1)"
     [[ "$TS_IP" == 100.* ]] || { echo "no Tailscale IPv4 found (got '$TS_IP')" >&2; exit 1; }
@@ -46,8 +82,24 @@ fi
 if [ -z "${BUNDLE:-}" ]; then
   BUNDLE="$(mktemp /tmp/computeshare-bundle.XXXXXX.tar.gz)"
   trap 'rm -f "$BUNDLE"' EXIT
-  curl -fsS "${ROUTER_URL}/bootstrap/bundle.tar.gz?token=${ENROLL_TOKEN}" -o "$BUNDLE"
+  if [ -s /etc/computeshare/agent.token ] && [ -f /opt/computeshare/package.json ]; then
+    echo "[computeshare] already enrolled: reinstalling from /opt/computeshare (no bundle download)"
+    tar -czf "$BUNDLE" -C /opt/computeshare .
+  else
+    curl -fsS "${ROUTER_URL}/bootstrap/bundle.tar.gz?token=${ENROLL_TOKEN}" -o "$BUNDLE"
+  fi
 fi
-export ROUTER_URL ENROLL_TOKEN AGENT_NAME AGENT_URL BUNDLE
+export ROUTER_URL ENROLL_TOKEN AGENT_NAME AGENT_URL BUNDLE OUTBOUND
 export AGENT_PORT="$PORT" ALLOW_CPUS="$CPUS" ALLOW_MEM_GB="$MEM"
 bash "$HERE/install-agent.sh"
+
+# #5884: periodic discard so freed lane blocks return to the thin disk / VHDX (best effort: absent timer, no systemd or an unsupported fs is not an install failure).
+if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files fstrim.timer >/dev/null 2>&1; then
+  if ! systemctl is-enabled fstrim.timer >/dev/null 2>&1; then # #5883: recorded only when this install enabled it, so uninstall leaves an owner's timer alone
+    if systemctl enable --now fstrim.timer >/dev/null 2>&1; then
+      grep -qx fstrim.timer /etc/computeshare/installed-by 2>/dev/null || echo fstrim.timer >> /etc/computeshare/installed-by
+    else
+      echo "note: could not enable fstrim.timer (the agent also runs fstrim itself)" >&2
+    fi
+  fi
+fi

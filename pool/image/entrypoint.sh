@@ -45,14 +45,33 @@ checkout_repo() {
   if [ -n "${CS_REPO_URL:-}" ]; then
     # Shared bare mirror in the cache volume: later lanes fetch a delta instead of a full clone.
     mirror="/cache/git/$(echo "${CS_REPO_SLUG:-repo}" | tr '/' '_').git"
-    if [ -d "$mirror" ]; then
-      git -C "$mirror" fetch --prune --quiet origin '+refs/heads/*:refs/heads/*' || true
-    else
-      mkdir -p /cache/git
-      git clone --mirror --quiet "$CS_REPO_URL" "$mirror"
+    # #5949: a mirror seeded by the dispatcher (cs-seeded marker, written by the agent's atomic apply) is cloned from directly:
+    # no GitHub transfer is needed to start. Its fetch is best effort with retries, and skipped when it already has the lane ref.
+    if [ -f "$mirror/cs-seeded" ]; then
+      if [ -n "${CS_REPO_REF:-}" ] && git -C "$mirror" rev-parse --verify --quiet "refs/heads/$CS_REPO_REF" >/dev/null; then
+        echo "[computeshare] mirror seeded by the dispatcher; skipping the GitHub fetch"
+      else
+        for attempt in 1 2 3; do
+          timeout 90 git -C "$mirror" fetch --prune --quiet origin '+refs/heads/*:refs/heads/*' && break || { echo "[computeshare] GitHub fetch attempt $attempt failed (best effort)"; sleep $((attempt * 5)); }
+        done
+      fi
+      rm -rf /work/repo
+      if git clone --quiet --shared ${CS_REPO_REF:+--branch "$CS_REPO_REF"} "$mirror" /work/repo; then
+        git -C /work/repo remote set-url origin "$CS_REPO_URL" # pushes stay on GitHub
+        cd "$(readlink -f /work/repo)"
+        return 0
+      fi
+      echo "[computeshare] clone from the seeded mirror failed; falling back to GitHub"
+      rm -rf /work/repo
     fi
+    # #5947: mirror.sh validates (refs, no empty objects), quarantines a bad one, builds under a lock; `direct` = no --reference.
+    use="$(/usr/local/bin/cs-mirror prepare "$CS_REPO_URL" "$mirror" 2>/dev/null || echo direct)"
     rm -rf /work/repo
-    git clone --quiet --reference "$mirror" ${CS_REPO_REF:+--branch "$CS_REPO_REF"} "$CS_REPO_URL" /work/repo
+    if [ "$use" = "ok" ]; then
+      git clone --quiet --reference "$mirror" ${CS_REPO_REF:+--branch "$CS_REPO_REF"} "$CS_REPO_URL" /work/repo
+    else
+      git clone --quiet ${CS_REPO_REF:+--branch "$CS_REPO_REF"} "$CS_REPO_URL" /work/repo
+    fi
     cd "$(readlink -f /work/repo)"
   fi
 }
