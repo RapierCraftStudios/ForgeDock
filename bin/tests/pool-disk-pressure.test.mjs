@@ -186,5 +186,6 @@ test("real pruneCaches targets every package store under /cache and nothing unde
   assert.ok(script, "an rm -rf script is exec'd");
   for (const d of PACKAGE_STORES) assert.ok(script.includes(`/cache/${d}`), d);
   assert.ok(script.includes("/cache/forge-depcache/stores/npm-cache") && script.includes("/cache/pnpm-store"));
+  for (const d of ["uv", "npm", "pip", "poetry"]) assert.ok(script.includes(`/cache/${d}`), d); // #5969 legacy dirs
   assert.ok(!/HOME|\/root|\.npm|\.cache/.test(script));
 });

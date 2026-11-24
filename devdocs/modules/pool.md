@@ -116,3 +116,7 @@ The router ships agents only `AGENT_BUNDLE_PATHS` (`package.json`, `bin/pool`, `
 - `GET /agents?account=` filters agents (and their sandboxes); `account`/`policy` appear only on records that have them, so legacy output is byte-identical. `launch`/`claim` honour `spec.account` (only that account's agents); no account means any agent, as before.
 - `PUT /agents/:name/policy` validates an allowlist (`cpus`, `mem_gb`, `idle_only`, `paused`, `floors.host_disk_gb`), stores it on the record and pushes to the agent's `POST /admin/policy`; an unreachable box keeps `policy_pending` and `tick()` re-pushes. The agent persists the keys beside its config; the router's `paused` is `policyPaused`, separate from `owner_paused`, so the router can never clear the owner's pause.
 - CLI: `pool link <user_code> [--account A]`, `pool policy <agent> [--cpus --mem --idle-only --pause]`, `pool status --account A` (ACCOUNT column only when an agent has one). Installer: `install-agent-linux.sh --device`. Tests: `bin/tests/pool-device.test.mjs`.
+
+## Entry 2026-11-24 — package cache layout pinned to entrypoint (#5969)
+
+- `pool/image/entrypoint.sh` points `UV_CACHE_DIR`, `npm_config_cache`, `POETRY_CACHE_DIR` and `PIP_CACHE_DIR` at `/cache/forge-depcache/stores/*`, the same layout as `depcache.mjs` `env()`. `cache-sweep.mjs` `PACKAGE_STORES` still includes `LEGACY_STORES` (`uv`, `npm`, `pip`, `poetry`) so old volumes and old images stay swept, capped and pruned. `pool-cache.test.mjs` pins every `/cache/...` path exported by the entrypoint to a `PACKAGE_STORES` entry.
