@@ -101,6 +101,24 @@ describe("forgedock pool (#4544)", () => {
     await assert.rejects(run(["pause"], as, { ok: false, status: 401, data: { error: "unauthorized" } }), /agent refused pause: HTTP 401/);
     await assert.rejects(run(["pause", "--force"], as, {}), /usage: unknown flag/);
   });
+  it("uninstall needs --yes, then stops the unit and removes its files (#5885)", async () => {
+    const s = setup();
+    const seen = [];
+    const spawn = (bin, args) => { seen.push([bin, ...args].join(" ")); return { status: 0 }; };
+    const run2 = async (argv, deps) => { const out = []; const log = console.log; console.log = (...a) => out.push(a.join(" ")); try { await poolFromCli([...argv, "--config", s.config], { poolDeps: deps }); } finally { console.log = log; } return out.join("\n"); };
+    const dry = await run2(["uninstall"], { spawn, platform: "linux" });
+    assert.deepEqual(seen, []);
+    assert.match(dry, /would stop and disable computeshare-agent[\s\S]*--yes/);
+    const out = await run2(["uninstall", "--yes"], { spawn, platform: "linux" });
+    assert.match(seen[0], /^systemctl disable --now computeshare-agent$/);
+    assert.equal(seen.length, 4);
+    assert.match(out, /agent uninstalled/);
+    seen.length = 0;
+    await run2(["uninstall", "--yes"], { spawn, platform: "win32" });
+    assert.match(seen[0], /^powershell .*uninstall-agent\.ps1$/);
+    await assert.rejects(run2(["uninstall", "--yes"], { spawn: () => ({ status: 1 }), platform: "linux" }), /exited 1/);
+    await assert.rejects(run2(["uninstall", "--force"], {}), /usage: unknown flag/);
+  });
   it("an unknown verb is a usage error", async () => {
     await assert.rejects(poolFromCli(["bogus"], { poolDeps: {} }), /usage: forgedock pool/);
   });

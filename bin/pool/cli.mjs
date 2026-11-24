@@ -15,7 +15,7 @@ import { call as httpCall } from "./http.mjs";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const loadJson = (p) => JSON.parse(readFileSync(p, "utf8"));
 
-const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB --agent-url URL | --outbound] | status [--json] | pause | resume | upgrade [agent] | remove <agent>  [--config path]";
+const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB --agent-url URL | --outbound] | status [--json] | pause | resume | uninstall --yes | upgrade [agent] | remove <agent>  [--config path]";
 const HELP_FLAGS = ["--help", "-h"];
 // Flags each verb accepts: `value` flags consume the next token, `bool` flags stand alone. Anything else dash-prefixed is rejected (#5008).
 const VERB_FLAGS = {
@@ -24,6 +24,7 @@ const VERB_FLAGS = {
   status: { value: ["--config"], bool: ["--json"] },
   pause: { value: ["--config"], bool: [] },
   resume: { value: ["--config"], bool: [] },
+  uninstall: { value: ["--config"], bool: ["--yes"] },
   upgrade: { value: ["--config"], bool: [] },
   remove: { value: ["--config"], bool: [] },
   enroll: { value: ["--config", "--cpus", "--mem", "--agent-url"], bool: ["--outbound"] },
@@ -122,6 +123,18 @@ export async function runPoolCli(argv, deps = {}) {
       const r = await call(`http://${host}:${cfg.listen.port}`, "POST", `/${cmd}`, { token: cfg.token, timeoutMs: 10000 });
       if (!r.ok) throw new Error(`agent refused ${cmd}: HTTP ${r.status} ${JSON.stringify(r.data)}`);
       console.log(cmd === "pause" ? `${cfg.name ?? "agent"}: paused; no new lanes start here (${r.data?.active ?? 0} running lane(s) finish). Undo with \`forgedock pool resume\`.` : `${cfg.name ?? "agent"}: resumed; lanes may start here again.`);
+      break;
+    }
+    case "uninstall": {
+      // #5885: the owner removes this box's agent. Destructive, so it needs --yes; running lanes are not waited for.
+      const win = (deps.platform ?? process.platform) === "win32";
+      const run = deps.spawn ?? spawnSync;
+      if (!rest.includes("--yes")) { console.log(win ? "would run pool/install/uninstall-agent.ps1 (removes the keep-alive task, firewall rules and the computeshare WSL distro)" : "would stop and disable computeshare-agent, delete its systemd unit and /etc/computeshare"); console.log("re-run with --yes to proceed"); break; }
+      const steps = win
+        ? [["powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(repoRoot, "pool", "install", "uninstall-agent.ps1")]]]
+        : [["systemctl", ["disable", "--now", "computeshare-agent"]], ["rm", ["-f", "/etc/systemd/system/computeshare-agent.service"]], ["systemctl", ["daemon-reload"]], ["rm", ["-rf", flag("config") ? dirname(flag("config")) : "/etc/computeshare"]]];
+      for (const [bin, args] of steps) { const r = run(bin, args, { stdio: "inherit" }); if (r.status !== 0) throw new Error(`${bin} ${args[0]} exited ${r.status}`); }
+      console.log("agent uninstalled from this box. Remove it from the router with: forgedock pool remove <agent>");
       break;
     }
     case "enroll":
