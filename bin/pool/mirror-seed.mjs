@@ -9,11 +9,15 @@
  */
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 /** Per-chunk cap on the decoded payload; base64 of it stays under the 1 MB JSON body limit of the router and agent. */
 export const SEED_CHUNK_MAX = 512 * 1024;
+/** Abandoned uploads: a `.part` untouched this long is swept; one upload and all uploads together are capped (#5970). */
+export const SEED_PART_TTL_MS = 60 * 60000;
+export const SEED_UPLOAD_MAX = 2 * 1024 ** 3;
+export const SEED_TOTAL_MAX = 4 * 1024 ** 3;
 export const mirrorName = (slug) => String(slug).replace(/\//g, "_");
 const SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9._-]+)?$/;
 const SHA_RE = /^[a-f0-9]{64}$/;
@@ -60,10 +64,23 @@ export function localRunner({ root, seedDir }) {
 }
 
 /** `runnerFor({slug, cache_key})` -> runner. Returns the agent's mirror seed handlers. */
-export function makeMirrorSeed({ seedDir, runnerFor }) {
+export function makeMirrorSeed({ seedDir, runnerFor, partTtlMs = SEED_PART_TTL_MS, uploadMax = SEED_UPLOAD_MAX, totalMax = SEED_TOTAL_MAX }) {
   mkdirSync(seedDir, { recursive: true });
   const part = (up) => join(seedDir, `${up}.part`);
   const size = (up) => { try { return statSync(part(up)).size; } catch { return 0; } };
+  /** Removes `.part` files idle past the TTL; returns the bytes the remaining ones hold. */
+  const sweep = () => {
+    let total = 0;
+    for (const n of readdirSync(seedDir)) {
+      if (!n.endsWith(".part")) continue;
+      try {
+        const st = statSync(join(seedDir, n));
+        if (Date.now() - st.mtimeMs > partTtlMs) rmSync(join(seedDir, n), { force: true }); else total += st.size;
+      } catch { /* removed concurrently */ }
+    }
+    return total;
+  };
+  sweep();
   const check = (b) => {
     if (typeof b?.slug !== "string" || !SLUG_RE.test(b.slug)) throw fail(400, "slug required");
     if (typeof b.upload !== "string" || !SHA_RE.test(b.upload)) throw fail(400, "upload must be the bundle sha256");
@@ -84,6 +101,8 @@ export function makeMirrorSeed({ seedDir, runnerFor }) {
       if (sha256(buf) !== b.sha256) throw fail(422, "chunk checksum mismatch");
       const have = size(b.upload);
       if (b.offset !== have) throw fail(409, "offset mismatch", { offset: have });
+      if (have + buf.length > uploadMax) throw fail(413, `upload exceeds ${uploadMax} bytes`);
+      if (sweep() + buf.length > totalMax) throw fail(413, `seed dir exceeds ${totalMax} bytes`);
       appendFileSync(part(b.upload), buf);
       return { offset: have + buf.length };
     },
