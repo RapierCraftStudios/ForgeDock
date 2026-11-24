@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
 import { chainMetrics, cascadeMetrics, chainsReport, formatChainLines } from "./chains.mjs";
 
@@ -37,7 +37,7 @@ describe("chain metrics (#5834)", () => {
     assert.deepEqual(c, { stacked: 2, cascaded: 1, cascades: 2, rework_rate: 0.5, per_stacked: 1, cost_usd: 0.5, minutes: 4 });
   });
   it("chainsReport reads a batch's report.json and formats p50 by depth and the rework rate", () => {
-    const root = mkdtempSync(join(tmpdir(), "chains-")), dir = join(root, "b1");
+    const root = tmpDir("chains-"), dir = join(root, "b1");
     mkdirSync(dir);
     const now = Date.parse("2026-11-23T00:00:00Z");
     writeFileSync(join(dir, "plan.json"), JSON.stringify({ created: "2026-11-22T00:00:00Z", repo: "o/r" }));
