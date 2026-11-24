@@ -483,6 +483,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const stackedTried = new Set(saved?.stackedTried ?? []);
   const planned = toMap(saved?.planned);
   const planTried = new Set(saved?.planTried ?? []);
+  const firstAdmit = new Map(), planMs = new Map(); // #5834: issue -> first admission ms; issue -> plan lane run ms (chain metrics)
   const recovering = toMap(saved?.recovering); // issue -> {code, attempt, detail, outcome, ...} of the recovery lane queued or running
   const freeRecovered = new Set(); // #5727: issues whose one free (no-attempt) recovery for a recipe-less remote tool miss was spent
   const requeueApplied = new Set(saved?.requeueApplied ?? []); // #4550: `--requeue` entries already applied (batch `requeue` file)
@@ -917,6 +918,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       ...(phasesOf(r, rec) ? { phases: phasesOf(r, rec) } : {}), // #4908
       ...(Array.isArray(r?.followups) && r.followups.length ? { followups: r.followups } : {}), // #5078
       ...(r?.cascade ? { cascade: r.cascade, cascades: Array.isArray(r.cascades) ? r.cascades : [r.cascade], ...(Number.isFinite(r.cascade_cost_usd) ? { cascade_cost_usd: r.cascade_cost_usd } : {}), ...(Number.isFinite(r.cascade_minutes) ? { cascade_minutes: r.cascade_minutes } : {}) } : {}), // #5833
+      ...(edges(n).length ? { deps: edges(n) } : {}), ...(firstAdmit.has(n) ? { admitted_at: firstAdmit.get(n), ended_at: now() } : {}), ...(planMs.has(n) ? { plan_minutes: Math.round(planMs.get(n) / 6000) / 10 } : {}), // #5834
       ...(Number.isFinite(r?.precheckMs) ? { precheck_ms: r.precheckMs } : {}), ...(Number.isInteger(r?.precheckDeferred) && r.precheckDeferred > 0 ? { precheck_deferred: r.precheckDeferred } : {}), // #4331
       ...(typeof r?.firstPass === "boolean" ? { first_pass: r.firstPass } : {}), // #4362
       ...(r?.turns && typeof r.turns === "object" ? { turns: r.turns } : {}), // #4392
@@ -954,6 +956,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       // #5831: a plan lane ends `planned` or `plan-failed` and goes back to pending for its build lane. It is never a final row and
       // never counts toward the breaker, the engine-error relaunch, the deferral or the requeue budgets (it returns before them).
       done();
+      planMs.set(n, (planMs.get(n) ?? 0) + Math.max(0, now() - rec.startedAt)); // #5834
       const ok = r?.terminalReason === "planned" && r?.planned?.contractHash && r?.planned?.baseSha;
       if (ok) planned.set(n, { contractHash: r.planned.contractHash, baseSha: r.planned.baseSha });
       store?.log?.({ event: ok ? "STACK_PLANNED" : "STACK_PLAN_FAILED", issue: n, ...(ok ? { contractHash: r.planned.contractHash, baseSha: r.planned.baseSha } : { reason: row.outcome }) });
@@ -1294,6 +1297,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const queueMs = Number.isFinite(enqueued.get(n)) ? Math.max(0, now() - enqueued.get(n)) : null; // #4908: queue_wait in the phase ledger
     heads.delete(n); enqueued.delete(n); busyNoted.delete(n);
     const rec = { startedAt: now(), ...(plan ? { plan: true } : {}), ...(stackedOn ? { stackedOn } : {}), ...(queueMs != null ? { queueMs } : {}), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}), ...(pl ? { placement: pl } : {}) };
+    if (!firstAdmit.has(n)) firstAdmit.set(n, rec.startedAt); // #5834: chain wall time starts at the first admission, plan lane included
     runRecs.set(n, rec); notBefore.delete(n); capReasons.delete(n); save();
     track(n, (async () => {
       // Pre-filter once per issue (a requeued issue is not re-checked); fail-open: an error means a normal lane.
