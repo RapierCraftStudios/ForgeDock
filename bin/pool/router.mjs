@@ -264,6 +264,29 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     return cpusFree >= size.cpus && memFree >= size.mem_gb;
   };
   const headroom = (c, spec) => (spec?.priority === "borrow" && Number.isFinite(c.cpus_free_unreserved) ? c.cpus_free_unreserved : 0);
+  // #5949: the dispatcher seeds a repo mirror before launch. The agent that will own the sandbox is picked here (the placing agent
+  // when it is known, else the best-fitting one) and remembered, so launch() prefers it and the seeded mirror is the one the lane uses.
+  const seedPick = new Map(); // sandbox id -> {agent, at}
+  const SEED_CHUNK_B64_MAX = 768 * 1024;
+  async function seedAgent(id) {
+    const known = own(sbx(), id);
+    if (known && own(agents(), known.agent)) return known.agent;
+    const hit = seedPick.get(id);
+    if (hit && own(agents(), hit.agent) && now() - hit.at < 30 * 60000) return hit.agent;
+    for (const [k, v] of seedPick) if (now() - v.at >= 30 * 60000) seedPick.delete(k);
+    const fits = (await capacities()).filter((c) => c.ok && !c.paused && c.host_disk_low !== true && c.disk_capped !== true).sort((a, b) => b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
+    if (!fits.length) return null;
+    seedPick.set(id, { agent: fits[0].name, at: now() });
+    return fits[0].name;
+  }
+  async function seedForward(id, method, path, body) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)) return { status: 400, body: { error: "bad sandbox id" } };
+    if (typeof body?.data_b64 === "string" && body.data_b64.length > SEED_CHUNK_B64_MAX) return { status: 413, body: { error: "chunk too large" } };
+    const name = await seedAgent(id), a = name && own(agents(), name);
+    if (!a) return { status: 503, body: { error: "no agent available to seed" }, retryAfter: cfg.retry_after_s ?? 60 };
+    try { const r = await agentCall(a, method, path, body, 120000); return { status: r.status, body: agentBody(r, name) }; }
+    catch (e) { return { status: 502, body: { error: `agent ${name} unreachable: ${e.message}` } }; }
+  }
   async function launch(spec) {
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id)) return { status: 400, body: { error: "spec.id required ([A-Za-z0-9._-], max 128)" } };
     const known = own(sbx(), spec.id);
@@ -280,6 +303,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     const capped = sized.filter((c) => c.disk_capped === true && c.host_disk_low !== true).map((c) => c.name); // #5884: lane disk at its hard cap
     const fits = sized.filter((c) => c.host_disk_low !== true && c.disk_capped !== true).sort((a, b) => headroom(b, spec) - headroom(a, spec) || b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
     let busy = null; // the last agent 503 (e.g. lane_tools image building): its body and Retry-After are passed back
+    const seeded = seedPick.get(spec.id)?.agent; // #5949: the agent holding this lane's seeded mirror goes first
+    if (seeded) fits.sort((a, b) => (b.name === seeded) - (a.name === seeded));
     for (const c of fits) {
       const r = await agentCall(own(agents(), c.name), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...size }, 120000);
       if (r.status === 503) { busy = { r, name: c.name }; continue; } // raced with another launch, or still building; try the next host
@@ -463,6 +488,8 @@ bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TM
     [route("GET", "/health"), { fn: async () => ({ status: 200, body: { ok: true, agents: Object.keys(agents()).length, sandboxes: Object.keys(sbx()).length } }), auth: "none" }],
     [route("POST", "/sandboxes"), fd(async (_p, body) => launch(body))],
     [route("POST", "/sandboxes/claim"), fd(async (_p, body) => claim(body))],
+    [route("GET", "/sandboxes/:id/mirrors"), fd(async ({ id }, _b, url) => seedForward(id, "GET", `/mirrors?${new URLSearchParams([...url.searchParams].filter(([k]) => ["slug", "cache_key", "upload"].includes(k)))}`))], // #5949
+    [route("POST", "/sandboxes/:id/seed"), fd(async ({ id }, body) => seedForward(id, "POST", "/mirrors/seed", body))],
     [route("GET", "/sandboxes/:id"), fd(async ({ id }) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}`))],
     [route("GET", "/sandboxes/:id/logs"), fd(async ({ id }, _b, url) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/logs?cursor=${encodeURIComponent(url.searchParams.get("cursor") ?? "0")}`))],
     [route("GET", "/sandboxes/:id/result"), fd(async ({ id }) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/result`))],

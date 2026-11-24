@@ -144,6 +144,7 @@ export function parseExecution(sec = {}) {
   const patRaw = Array.isArray(s.host_capability_patterns) ? s.host_capability_patterns : str(s.host_capability_patterns) ? str(s.host_capability_patterns).split(",") : [];
   const hostCapabilityPatterns = patRaw.map((x) => { const t = str(x), i = t.indexOf(":"); return { name: t.slice(0, i).trim().toLowerCase(), pattern: t.slice(i + 1).trim() }; })
     .filter((x) => CAPABILITY_RE.test(x.name) && x.pattern && safeRegExp(x.pattern));
+  const repoSource = ["dispatcher", "github", "auto"].includes(str(s.repo_source).toLowerCase()) ? str(s.repo_source).toLowerCase() : null; // #5949: where a pool sandbox's repo mirror comes from; unset = auto
   const wsN = Number(str(s.warm_sandboxes));
   const warmSandboxes = str(s.warm_sandboxes) !== "" && Number.isInteger(wsN) && wsN > 0 ? wsN : 0; // #4912: warm sandboxes the pool agent keeps ready; 0 = off
   const lt = validateLaneTools(s.lane_tools); // #5650: invalid entries are dropped here and reported in laneToolsErrors; the remote provider refuses to start with them
@@ -160,7 +161,7 @@ export function parseExecution(sec = {}) {
   const plan = ["free", "pro", "team", "enterprise"].includes(str(s.plan).toLowerCase()) ? str(s.plan).toLowerCase() : null;
   const publicDefault = str(s.public_default).toLowerCase() === "actions" ? "actions" : null; // #5900: opt-in only
   const dispatcher = /^[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?$/.test(str(s.dispatcher)) ? str(s.dispatcher) : null;
-  return { mode, maxRemote, provider, image, secrets, budget, ...(jobLimit ? { jobLimit } : {}), ...(ciReserve !== null ? { ciReserve } : {}), ...(plan ? { plan } : {}), ...(publicDefault ? { publicDefault } : {}), ...(dispatcher ? { dispatcher } : {}), ...(hostFallback !== null ? { hostFallback } : {}), ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(accountRotator ? { accountRotator } : {}), ...(lt.tools.length ? { laneTools: lt.tools } : {}), ...(lt.errors.length ? { laneToolsErrors: lt.errors } : {}) };
+  return { mode, maxRemote, provider, image, secrets, budget, ...(jobLimit ? { jobLimit } : {}), ...(ciReserve !== null ? { ciReserve } : {}), ...(plan ? { plan } : {}), ...(publicDefault ? { publicDefault } : {}), ...(dispatcher ? { dispatcher } : {}), ...(hostFallback !== null ? { hostFallback } : {}), ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(repoSource ? { repoSource } : {}), ...(accountRotator ? { accountRotator } : {}), ...(lt.tools.length ? { laneTools: lt.tools } : {}), ...(lt.errors.length ? { laneToolsErrors: lt.errors } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -667,7 +668,7 @@ export function providerByName(name, opts) {
     // #4685/#5131: an empty env/keychain lookup of `token_env` falls back to `token_file`, then the (matching) router's token file.
     const credentials = (n) => (n === tokenEnv ? resolve().token : resolveCredential(n, { env, keychain })); // per call, keychain memoised (#5159)
     const settings = { ...exec, ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(forgeYaml ? { forgeYaml } : {}),
-      ...(typeof opts?.prefetch === "function" ? { prefetch: opts.prefetch } : {}) }; // #4778: dispatch-time relay pre-fetch
+      ...(typeof opts?.prefetch === "function" ? { prefetch: opts.prefetch } : {}), ...(pool && opts?.cwd ? { repoDir: opts.cwd } : {}) }; // #4778; #5949: the dispatcher's clone seeds the pool mirror: dispatch-time relay pre-fetch
     return remoteProvider({ batch: opts.batch, repo: opts.repo, settings, ...(pool ? { name: "pool" } : {}), env, credentials,
       transport: remoteTransportFor(settings, { transport: opts?.transport, env, credentials, ...(opts?.fetchFn ? { fetchFn: opts.fetchFn } : {}) }), ...(opts?.now ? { now: opts.now } : {}) });
   }
