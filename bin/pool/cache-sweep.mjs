@@ -8,8 +8,10 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 export const CACHE_LABEL = "computeshare.cache=1";
+/** #5969: dirs older entrypoints (and volumes/images already out there) export as lane cache dirs; still swept, capped and pruned. */
+export const LEGACY_STORES = ["uv", "npm", "pip", "poetry"];
 /** #5955: every package-manager store the lanes write (depcache.mjs env(), agent.mjs pnpm store), relative to the /cache volume root. One list for the sweep and pruneCaches. */
-export const PACKAGE_STORES = ["pnpm-store", ...["pnpm-store", "npm-cache", "uv-cache", "poetry-cache", "pip-cache"].map((n) => `forge-depcache/stores/${n}`)];
+export const PACKAGE_STORES = ["pnpm-store", ...["pnpm-store", "npm-cache", "uv-cache", "poetry-cache", "pip-cache"].map((n) => `forge-depcache/stores/${n}`), ...LEGACY_STORES];
 /** #5881: owner label; the reaper and sweeps touch only containers and volumes carrying their own agent's label. */
 export const agentLabel = (id) => `computeshare.agent=${id}`;
 const DAY = 86400000;
