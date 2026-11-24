@@ -1551,7 +1551,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     try { Promise.resolve(stopLane(n, rec)).then((ok) => { if (ok !== false) s.accepted = true; }, () => {}); } catch { /* best effort */ }
   }
   // #5975: the batch pause. `paused (reason, until …)`, the one text every surface shows.
-  const pauseText = (p = opPause) => `paused (${p?.reason ?? "no reason given"}, until ${p?.expiresAt ?? "unpause"})`;
+  function pauseText(p = opPause) { return `paused (${p?.reason ?? "no reason given"}, until ${p?.expiresAt ?? "unpause"})`; }
   function refreshPause() {
     if (!getPause) return;
     if (expirePause) { // like #5469 holds: a pause past its expiry is lifted here, with a row and a decision
