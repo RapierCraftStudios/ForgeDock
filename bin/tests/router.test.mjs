@@ -2304,7 +2304,7 @@ describe("pool router upgrade guard (#5726)", () => {
       router.store.data.agents.a1 = { url: "http://a1:7711", token: "t" };
       const server = createServer(router.handle); await new Promise((r) => server.listen(0, "127.0.0.1", r));
       const post = async (body) => { const r = await fetch(`http://127.0.0.1:${server.address().port}/agents/a1/upgrade`, { method: "POST", headers: { authorization: "Bearer fd", "content-type": "application/json" }, body: JSON.stringify(body) }); return { status: r.status, data: await r.json() }; };
-      return { post, close: () => server.close() };
+      return { post, close: () => { server.closeAllConnections(); server.close(); } };
     };
     const busy = await mk(2);
     try {
