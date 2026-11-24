@@ -3586,3 +3586,8 @@ Security: the workflow is `workflow_dispatch` only (never `pull_request*`), `per
 
 A stacked lane (`stackedOn`) no longer only polls for the dependency's merge. Each poll reads the dependency's PRs (`depInfo`: merged | open+head | closed) and `cascadeDecision` (`bin/lean/stacking.mjs`) picks the reaction, emitted as `STACK_CASCADE`: head moved and `git merge --no-commit` of `origin/<dependency branch>` clean -> `baseSync`, a review delta, `stackedOn.sha`/`prReady` updated in FORGE:STATE (`reverify`); conflict -> PR closed, branch deleted, result `deferred` code `stack.restart` (`restart`); closed without a merge -> same drop, code `stack.replan` (`replan`). After the dependency merged: retarget, `base` becomes `origin/<lane>`, and `postMergeGate` runs only `invalidatedChecks` for the diff `<stacked sha>..origin/<lane>` (`rebase`). The result carries `cascade`, `cascades`, `cascade_cost_usd`, `cascade_minutes`. `merge.stacked_base` is unchanged and still the last gate.
 Cite: #5833.
+
+## Entry 2026-11-24 — Release resume after a CI-only GATE_FAILURE (#5912)
+
+`fixStep` (`bin/lean/release-review.mjs`) no longer trusts a result saved while CI was still running. On resume, a non-pass result with no blocking findings or guards, and either pending-only or no red CI, at an unmoved head is re-summarised once (`resummarise`), so CI that finished green posts `GATE_PASS`. A moved head or a CONFIRMED blocking finding is not re-summarised and blocks/fixes as before. `forge/deploy-gate` and the gate-marker check stay out of the required-check counters (`CI_EXCLUDED_CHECKS`): they are outputs of the review. When nothing is pending or failing, the block names the verdict, marker, PR and head instead of "still pending".
+Cite: #5912.
