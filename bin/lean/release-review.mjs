@@ -264,7 +264,7 @@ export async function fixStep(ctx) {
     const rec = collectFindings({ head: r.head, jobs, findings: r.items ?? [], guards: r.guards ?? [] });
     const b = blockingOf(rec);
     if (!b.ci.length && !b.review.length && !b.guards.length && !r.blocking?.length && jobs.pending?.length) return blocked(`required checks of #${r.pr} still running (${jobs.pending.join(", ")}), with no failure to fix yet; re-run the release once CI finishes`);
-    if (!b.ci.length && !b.review.length && !b.guards.length && !r.blocking?.length && !(r.ciFailing > 0)) return blocked(`${r.verdict} with neither a blocking finding nor red CI to fix`);
+    if (!b.ci.length && !b.review.length && !b.guards.length && !r.blocking?.length && !(r.ciFailing > 0)) return blocked(`${r.verdict} (${r.marker}) on #${r.pr} at ${String(r.head).slice(0, 7)} with neither a blocking finding nor red CI to fix: nothing is pending or failing, so the gate summary names the actual blocker; read it and re-run the release`);
     const hashesNow = Object.fromEntries(rec.ci.map((j) => [j.name, j.inputHash ?? inputHash(j.name, r.head)]));
     const brief = compileBrief(rec, { commands: ctx.config?.preflight ? [ctx.config.preflight.command] : [], rerunChecks: jobsToRerun(hashesNow, ctx.state.fixloop?.hashes ?? {}) });
     // Non-blocking and out-of-wave findings become next-plan issues, once per head; they are never part of the fix and never merged after READY (I16).
