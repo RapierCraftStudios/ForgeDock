@@ -198,6 +198,18 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     ? pollCall(a, method, path, body, timeoutMs)
     : call(a.url, method, path, { body, token: a.token, timeoutMs, fetchFn });
 
+  /** #5891: host drive figures per agent, plus a warning when the projected time until the drive is full is under disk_warn_hours (2). */
+  const diskWarned = new Map();
+  function diskReport(c) {
+    if (!Number.isFinite(c.host_disk_free_gb)) return {};
+    const out = { host_disk_free_gb: c.host_disk_free_gb, ...(Number.isFinite(c.host_disk_growth_gb_per_h) ? { host_disk_growth_gb_per_h: c.host_disk_growth_gb_per_h } : {}) };
+    const limit = cfg.disk_warn_hours ?? 2;
+    if (Number.isFinite(c.host_disk_full_in_h) && c.host_disk_full_in_h < limit) {
+      out.disk_warning = `host drive full in ~${c.host_disk_full_in_h} h at ${c.host_disk_growth_gb_per_h} GB/h (${c.host_disk_free_gb} GB free)`;
+      if (now() - (diskWarned.get(c.name) ?? -Infinity) > 600000) { diskWarned.set(c.name, now()); log.warn?.(`${c.name}: ${out.disk_warning}`); }
+    }
+    return out;
+  }
   async function capacities() {
     const out = [];
     for (const [name, a] of Object.entries(agents())) {
@@ -212,7 +224,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   /** Agent liveness for the scheduler (#4547): an agent is online when it answers and is not paused. */
   async function status() {
     const caps = await capacities();
-    const agentsView = caps.map((c) => ({ name: c.name, ok: c.ok, paused: Boolean(c.paused), transport: c.transport ?? "direct" }));
+    const agentsView = caps.map((c) => ({ name: c.name, ok: c.ok, paused: Boolean(c.paused), transport: c.transport ?? "direct", ...diskReport(c) }));
     return { online: agentsView.filter((a) => a.ok && !a.paused).length, total: agentsView.length, agents: agentsView };
   }
 
@@ -466,7 +478,7 @@ bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TM
     [route("GET", "/agents"), fd(async () => { // #5535: each sandbox carries disk_used_mb from its agent's sandbox_disk_mb when the agent reports it
       const caps = await capacities(), byName = new Map(caps.map((c) => [c.name, c])), out = {};
       for (const [id, s] of Object.entries(sbx())) { const mb = byName.get(s?.agent)?.sandbox_disk_mb?.[id]; out[id] = Number.isFinite(mb) ? { ...s, disk_used_mb: mb } : s; }
-      return { status: 200, body: { agents: caps, sandboxes: out } };
+      return { status: 200, body: { agents: caps.map((c) => ({ ...c, ...diskReport(c) })), sandboxes: out } };
     })],
     [route("POST", "/codes"), fd(async () => ({ status: 200, body: issueCode() }))],
     [route("GET", "/agent/creds/github"), { fn: async () => ({ status: 200, body: { token: await githubToken() } }), auth: "agent" }],

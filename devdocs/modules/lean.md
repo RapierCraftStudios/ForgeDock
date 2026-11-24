@@ -3601,6 +3601,11 @@ Security: the workflow is `workflow_dispatch` only (never `pull_request*`), `per
 - `bin/lean/sandbox-remote.mjs` `remoteProvider` now sends `spec.priority: "borrow"` on every lane sandbox spec. A pool agent without `reservations`/`idle_only` ignores it (flat admission as before); with them, lanes run on leftover capacity at a low `cpu.shares` weight and are throttled, then drained, when a reserved workload arrives.
 - A drained lane reports `run.interrupted` and is rescheduled, not lost. Reclaim order and config: `devdocs/modules/pool.md` (#5856).
 
+## Entry 2026-11-23 — Remote result maps a disk-pressure stop to `sandbox.disk_pressure` (#5891)
+
+- `bin/lean/sandbox-remote.mjs` `httpTransport.result` returns a deferred `sandbox.disk_pressure` outcome (retry in 120 s) when the agent's result carries `disk_pressure: true`. The pool agent stopped that lane to save its host drive; worktree and volume are kept, so the requeued lane resumes through the existing adopt path instead of failing.
+- Pause, prune and reap behaviour on the agent side: `devdocs/modules/pool.md`.
+
 `runCore({stackedOn})` (`run-issue --stacked-on <dep>:<sha>:<branch>`, #5832): the build base is `origin/<dependency branch>` (fetched; unreachable falls back to a normal lane), the **Depends on** refusal ignores that one open dependency, `gh pr create --base <dependency branch>`, and `stackedOn` goes into the lane's FORGE:STATE. At the start of the merge step the lane writes `prReady {pr, branch, sha}` to FORGE:STATE (`PR_READY` event; the orchestrator's stacked admission reads it). A stacked PR then waits (up to `ci.max_minutes`) until a PR from the dependency branch is MERGED, retargets the PR to the lane (`STACK_RETARGET`) and base-syncs. Engine guard `merge.stacked_base` (`stacking.mjs` `stackedBaseBlock`) runs right before `gh pr merge`: the PR's live base must be the lane and the dependency merged, else the lane ends `deferred` with code `merge.stacked_base` (`MERGE_STACKED_BASE_REFUSED`) and nothing merges. Non-stacked lanes are unchanged.
 
 ## Entry 2026-11-23 — Stacked lane watcher and cascades (#5833, epic #5822)

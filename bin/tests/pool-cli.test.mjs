@@ -32,6 +32,14 @@ describe("forgedock pool (#4544)", () => {
     assert.match(out, /install\.ps1\?token=ONECODE&cpus=4/);
     assert.doesNotMatch(out + err, /ENROLL-SECRET|FD-SECRET/);
   });
+  it("status prints host_disk_free_gb, growth GB/h and the warning per agent on stderr, JSON stays on stdout (#5891 R11/R12)", async () => {
+    const s = setup();
+    const agents = [{ name: "a1", host_disk_free_gb: 42.5, host_disk_growth_gb_per_h: 30, disk_warning: "host drive full in ~1.4 h" }, { name: "a2" }];
+    const { out, err } = await run(["status"], s, { ok: true, status: 200, data: { agents } });
+    assert.equal(JSON.parse(out).agents.length, 2);
+    assert.match(err, /a1: host_disk_free_gb 42\.5, growth 30 GB\/h WARNING: host drive full in ~1\.4 h/);
+    assert.doesNotMatch(err, /a2/);
+  });
   it("status lists agents; upgrade targets one agent", async () => {
     const s = setup();
     const { out } = await run(["status"], s, { ok: true, status: 200, data: { agents: [{ name: "a1" }] } });
