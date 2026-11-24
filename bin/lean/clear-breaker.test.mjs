@@ -39,7 +39,7 @@ describe("#5964 decideClear", () => {
 });
 
 describe("#5964 runner pass", () => {
-  it("a request 1 s into a 12 s pass survives, is cleared and acked on the next pass, and admissions resume", async () => {
+  it("slow pass: request survives and next pass clears (a request 1 s into a 12 s pass is cleared and acked on the next pass, and admissions resume)", async () => {
     const r = await slowRun({ reqAfterMs: 1000 });
     assert.ok(r.acks.some((a) => a.cleared === true), "acked a real clear");
     assert.equal(r.consumed, 1);
@@ -51,6 +51,30 @@ describe("#5964 runner pass", () => {
     assert.equal(r.acks.some((a) => a.cleared === true), false);
     assert.equal(r.consumed, 1);
     assert.equal(r.calls.includes(3), false, "the later trip stays closed");
+  });
+});
+
+describe("#5964 slow pass over the real batch request file", () => {
+  it("slow pass: a request made 1 s into a 12 s pass stays on disk, the next pass clears tripped, acks, consumes it, and admissions resume", async () => {
+    const root = tmpDir("clrbrk-"); const b = openBatch(root, "b3"); b.store.save({ id: "b3" });
+    let t = 1_000_000, tripped = false, requested = false, release = null, onDiskAtNextPass = null; const calls = [], acks = [];
+    const gate = new Promise((r) => { release = r; });
+    const script = { 1: EE("boom A"), 2: EE("boom B"), 3: null, 4: MERGED };
+    const rows = await orchestrate({ issues: [1, 2, 3, 4], parallel: 3, readBody: async () => "", now: () => t, store: memStore(), pollMs: 12000, breaker: { errors: 2, window_min: 10 },
+      sleep: async () => {
+        if (tripped && !requested) { requested = true; b.requestClearBreaker(); t += 12000; release(); } // the request lands during a 12 s pass
+        else t += 12000;
+      },
+      runOne: async (n) => { calls.push(n); if (n === 3) { await gate; return MERGED; } return script[n]; },
+      onUpdate: (u) => { if (u.outcome === "breaker") tripped = true; },
+      getClearBreaker: () => { if (requested && onDiskAtNextPass === null) onDiskAtNextPass = existsSync(join(root, "b3", "clear-breaker")); return b.peekClearBreaker(); },
+      consumeClearBreaker: b.readClearBreaker, ackClearBreaker: (i) => { acks.push(i); b.ackClearBreaker(i); } });
+    assert.equal(onDiskAtNextPass, true, "the request survived until the runner's next pass");
+    assert.equal(acks.some((a) => a.cleared === true), true, "tripped was cleared and acked");
+    assert.equal(b.readClearBreakerAck().cleared, true);
+    assert.equal(existsSync(join(root, "b3", "clear-breaker")), false, "consumed after the decision");
+    assert.ok(calls.includes(4), "admissions resumed (issue 4 ran) with no restart");
+    assert.equal(rows.find((r) => r.issue === 4)?.outcome, "merged");
   });
 });
 
