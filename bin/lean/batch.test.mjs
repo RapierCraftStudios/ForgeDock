@@ -2122,6 +2122,21 @@ describe("#5975: batch pause", () => {
     assert.ok(!summaryLines(root).some((l) => /paused/.test(l)));
   });
 
+  it("--hold <id> --all is sugar for --pause; --hold <id> N still holds one issue (#5975)", async () => {
+    const root = tmpDir("batch-pause5975-all-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: [], repo: "o/r" });
+    b.store.save({ order: [1, 2], pending: [1, 2] });
+    const io = { gh: async () => JSON.stringify({ state: "OPEN" }) };
+    await quiet(() => orchestrateFromCli(["--hold", "b1", "1"], { batchRoot: root, io }));
+    assert.equal(b.readPause(), null, "a per-issue hold does not pause the batch");
+    await quiet(() => orchestrateFromCli(["--hold", "b1", "--all", "--for", "2h"], { batchRoot: root, io }));
+    assert.equal(b.readPause().reason, "--hold --all");
+    assert.ok(Date.parse(b.readPause().expiresAt) > Date.parse(b.readPause().since));
+    await quiet(() => orchestrateFromCli(["--unpause", "b1"], { batchRoot: root, io }));
+    assert.equal(b.readPause(), null);
+  });
+
   it("a paused batch is not a dispatch stall", async () => {
     const { evaluateDispatchStall } = await import("./batch-health.mjs");
     const state = { order: [1], pending: [1], results: {}, running: {}, parallel: 1 };

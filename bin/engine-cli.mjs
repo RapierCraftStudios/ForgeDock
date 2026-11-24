@@ -1396,7 +1396,7 @@ async function envBatch({ argv, root, print = (l) => console.log(l) }) {
   return { ok: true, batch: id };
 }
 
-const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] [--auto-children off|decomposed|epic|all] [--epic N] | --resume <id> [issue...] | --set-parallel <id> <K> | --set-max-remote <id> <N> | --set-placement <id> remote|hybrid|local | --clear-breaker <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> <issue...> [--for <4h|30m|1d>] [--reason <text>] | --pause <id> [--for <4h|30m|1d>] --reason <text> | --unpause <id> | --gc-orphans | --adopt <issue> [--repo owner/repo] [--lane L] | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
+const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] [--auto-children off|decomposed|epic|all] [--epic N] | --resume <id> [issue...] | --set-parallel <id> <K> | --set-max-remote <id> <N> | --set-placement <id> remote|hybrid|local | --clear-breaker <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> --all [--for 2h] [--reason T] (sugar for --pause) | --hold <id> <issue...> [--for <4h|30m|1d>] [--reason <text>] | --pause <id> [--for <4h|30m|1d>] --reason <text> | --unpause <id> | --gc-orphans | --adopt <issue> [--repo owner/repo] [--lane L] | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
 const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force", "--auto-children", "--epic", "--for"];
 const issuesOf = (argv) => {
   const issues = [];
@@ -1532,6 +1532,12 @@ function parseHoldFor(v) {
 function holdMeta(argv) {
   const forLabel = flag(argv, "--for"), reason = flag(argv, "--reason");
   return { owner: process.env.FORGE_HOLD_OWNER || `${process.env.USER || process.env.USERNAME || "operator"}@${hostname()}`, ownerPid: process.ppid, ownerHost: hostname(), forMs: parseHoldFor(forLabel), forLabel, reason: reason && !reason.startsWith("--") ? reason : null };
+}
+
+/** #5975: `--hold --all` pauses the batch without a `--reason`: the reason defaults to the flag that asked. */
+function holdMetaAll(argv) {
+  const m = holdMeta(argv);
+  return argv.includes("--hold") && !m.reason ? { ...m, reason: "--hold --all" } : m;
 }
 
 /** #5469: `--gc-orphans`: cancel every orphaned batch (unhosted, pending issues, idle for a week) through the daemon or the batch files. */
@@ -1736,9 +1742,9 @@ async function orchestrateClient(argv, deps = {}) {
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
     return sock ? schedd.request(sock, { op: "gc-orphans" }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
   } });
-  for (const [flagName, op] of [["--pause", "pause"], ["--unpause", "unpause"]]) if (argv.includes(flagName)) {
+  for (const [flagName, op] of [["--pause", "pause"], ["--unpause", "unpause"], ["--hold", "pause"]]) if (argv.includes(flagName) && (flagName !== "--hold" || argv.includes("--all"))) { // #5975: `--hold <id> --all` is sugar for `--pause`
     const id = flag(argv, flagName), pv = (_o, meta) => viaPause(id, op, meta);
-    return pauseBatch({ op, id, root: await batchRootOf(), viaDaemon: pv, meta: op === "pause" ? holdMeta(argv) : null });
+    return pauseBatch({ op, id, root: await batchRootOf(), viaDaemon: pv, meta: op === "pause" ? holdMetaAll(argv) : null });
   }
   for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
     const id = flag(argv, `--${op}`);
@@ -1864,8 +1870,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     return requeueBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root, io: deps.io ?? makeIo(), requireHost: true, force: forceOf(argv), print: (l) => sink.line(l) });
   }
   if (argv.includes("--gc-orphans")) return gcOrphans({ root, print: (l) => sink.line(l) });
-  for (const op of ["pause", "unpause"]) if (argv.includes(`--${op}`)) {
-    return pauseBatch({ op, id: flag(argv, `--${op}`), root, meta: op === "pause" ? holdMeta(argv) : null, print: (l) => sink.line(l) });
+  for (const [flagName, op] of [["--pause", "pause"], ["--unpause", "unpause"], ["--hold", "pause"]]) if (argv.includes(flagName) && (flagName !== "--hold" || argv.includes("--all"))) { // #5975: `--hold <id> --all` is sugar for `--pause`
+    return pauseBatch({ op, id: flag(argv, flagName), root, meta: op === "pause" ? holdMetaAll(argv) : null, print: (l) => sink.line(l) });
   }
   for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
     const hid = flag(argv, `--${op}`);

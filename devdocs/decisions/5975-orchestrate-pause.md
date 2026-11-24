@@ -21,3 +21,5 @@ created: 2026-11-24
 
 - Extending the `hold` file: it is a set of issue numbers and cannot cover issues that appear later.
 - `--hold --all` (pause every non-terminal issue, now and later): optional sugar in the issue, deferred; `--pause` covers the drain.
+
+`--hold <id> --all` is sugar for `--pause <id>` (reason defaults to `--hold --all`; `--for` and `--reason` apply). `--hold <id> N...` still holds single issues.
