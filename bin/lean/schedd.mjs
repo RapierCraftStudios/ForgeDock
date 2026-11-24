@@ -11,6 +11,7 @@
  *   {op:"attach", id, resume?}    → (`resume` also clears a pending cancel, #4592) log.jsonl rows replayed, then live rows/lines and done; a finished batch replays report.json
  *                                   ({type:"done", replay:true}) unless it has unrun added issues; a batch nobody hosts is resumed here
  *   {op:"set-parallel", id, k}    → {type:"ok", parallel}
+ *   {op:"clear-breaker", id}      → {type:"ok", cleared, acknowledged, hosted} (#5947): a hosted runner resets its in-memory breaker (request file + ack); otherwise state.json is rewritten
  *   {op:"set-execution", id, maxRemote?, mode?} → {type:"ok", execution} (#5138): live max_remote / placement (remote|hybrid|local); remote/hybrid refused for a batch with no provider
  *   {op:"requeue", id, issues, reason, by} → {type:"ok", requeued, refused, hosted, reopened} (#4550): see batch.requeue; a finished batch is hosted again
  *   {op:"add", id, issues}        → {type:"ok", added, skipped, hosted} (#4408): merged into the batch's `add` file, which a
@@ -360,6 +361,27 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
       b.setParallel(Number(req.k));
       return send({ type: "ok", parallel: Number(req.k) }, true);
+    }
+    if (req.op === "clear-breaker") {
+      // #5947: a hosted runner holds the breaker in memory; it consumes the request file and acks. An unhosted (or silent) batch gets the state.json rewrite.
+      const b = openBatch(root, req.id);
+      if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
+      const isHosted = hosted.has(req.id);
+      let acknowledged = false, cleared = false;
+      if (isHosted) {
+        const at = b.requestClearBreaker();
+        for (let i = 0; i < 140 && !acknowledged; i++) {
+          const a = b.readClearBreakerAck();
+          if (a && a.at >= at) { acknowledged = true; cleared = Boolean(a.cleared); } else await new Promise((r) => setTimeout(r, 50));
+        }
+      }
+      if (!acknowledged) {
+        b.readClearBreaker(); // drop an unconsumed request so it cannot clear a later trip
+        const st = b.store.load();
+        cleared = Boolean(st?.breaker);
+        if (st) b.store.save({ ...st, breaker: null, errorTimes: [] });
+      }
+      return send({ type: "ok", cleared, acknowledged, hosted: isHosted }, true);
     }
     if (req.op === "set-execution") {
       // #5138: live max_remote / placement mode; the hosted runner re-reads the batch's `execution` file on every admission.
