@@ -2023,7 +2023,7 @@ describe("conformance shadow mode (the default)", () => {
   });
   it("#5371 a remote lane whose frozen validate fails ends env.validate_placement (output tail kept); the local recovery lane keeps the real failure terminal", async () => {
     const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
-    const rerun = async () => ({ rc: 1, output: "1 failed\nTOKEN=abcd1234secretvalue\nassertion x" });
+    const rerun = async () => ({ rc: 1, output: "connect ECONNREFUSED 127.0.0.1:5432\nTOKEN=abcd1234secretvalue\nassertion x" });
     const w = world({ validation: v }); w.io.runCommand = rerun;
     const r = await run(w, { conformance: "enforce", placement: { where: "remote", reason: "mode remote" } });
     assert.equal(r.code, ENV_VALIDATE_PLACEMENT); assert.equal(classifyNeedsHuman(r), "recoverable"); assert.equal(w.merges.length, 0);
@@ -2036,6 +2036,29 @@ describe("conformance shadow mode (the default)", () => {
     assert.notEqual((await run(rec, { conformance: "enforce", placement: { where: "local", reason: "x" }, recover: { code: ENV_VALIDATE_PLACEMENT, attempt: 1, final: true } })).code, ENV_VALIDATE_PLACEMENT);
     const ok = world({ validation: v }); ok.io.runCommand = async () => ({ rc: 0, output: "" });
     assert.equal((await run(ok, { conformance: "enforce", placement: { where: "local", reason: "x" }, recover: { code: ENV_VALIDATE_PLACEMENT, attempt: 1, final: true } })).terminalReason, "merged");
+  });
+  const remoteV = { conformance: "enforce", placement: { where: "remote", reason: "mode remote" } };
+  const v5730 = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
+  it("5730: remote validate_failed with stale-artifact output resumes the builder", async () => {
+    const stale = "listings/official/maps/maps-places/agent.md: missing or out of date (run --render-agent-md --render-page)";
+    for (const output of [stale, "not ok 1 - foo\n  AssertionError: expected 3, got 4"]) {
+      const w = world({ validation: v5730 }); w.io.runCommand = async () => ({ rc: 1, output });
+      const r = await run(w, remoteV);
+      assert.notEqual(r.code, ENV_VALIDATE_PLACEMENT, output); assert.ok(builders(w).length >= 3, "the builder resumes");
+    }
+  });
+  it("5730: env-signature validate_failed hand-off includes the sandbox output tail", async () => {
+    for (const output of ["sh: 1: foo-tool: command not found\nsandbox-only-line", "connect ECONNREFUSED 127.0.0.1:5432\nsandbox-only-line"]) {
+      const w = world({ validation: v5730 }); w.io.runCommand = async () => ({ rc: 1, output });
+      const r = await run(w, remoteV);
+      assert.ok([ENV_VALIDATE_PLACEMENT, "env.tool_missing"].includes(r.code), r.code);
+      if (r.code === ENV_VALIDATE_PLACEMENT) { assert.equal(builders(w).length, 2); assert.match(nhBody(w), /Sandbox output tail/); assert.match(nhBody(w), /sandbox-only-line/); }
+    }
+  });
+  it("5730: a recovery lane whose host replay fails the same way ends conformance.unimplemented, not another placement hop", async () => {
+    const w = world({ validation: v5730 }); w.io.runCommand = async () => ({ rc: 1, output: "connect ECONNREFUSED 127.0.0.1:5432" });
+    const r = await run(w, { ...remoteV, recover: { code: ENV_VALIDATE_PLACEMENT, attempt: 1, final: true } });
+    assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0); assert.equal(builders(w).length, 3);
   });
   it("#4906 a validate rerun that times out (rc 124) ends env.validate_timeout: recoverable, no builder resume, never conformance.unimplemented", async () => {
     const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 124 }];

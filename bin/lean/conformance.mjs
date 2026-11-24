@@ -958,6 +958,16 @@ export function envProvisioningCommand(command) {
 }
 /** #5732: true when a failed run's output carries test-failure text (an assertion, a runner's failed-test mark), not only an environment error. */
 const ASSERTION_RE = /AssertionError|\bassert(?:ion)?\b[^\n]*(?:==|!=|failed|error)|^FAILED\s+\S+::|^\s*E\s+(?:assert|Expected)|\bExpected\b[^\n]*\b(?:Received|got|to (?:be|equal))|expect\(|^not ok \d+|^\s*[✗×✖]\s|^\s*● |\bTests?:\s+\d+ failed/m;
+// #5730: sandbox-only failures a validate rerun can show beyond ENV_SIGNATURES: a missing command, a refused connection, an unresolved host, an absent venv path, no display
+const VALIDATE_ENV_RE = /: command not found|: not found\b|ECONNREFUSED|connection refused|no such host|\.venv\/bin\/[\w.-]+: No such file or directory|cannot open display|Missing X server|\$DISPLAY/i;
+/** #5730: a validate output that is the executor's environment (not a red test, not a stale artifact): only these defer to a host replay. */
+export function isEnvValidateFailure(output) {
+  const out = String(output ?? "");
+  if (!out || isDriftFailure(out) || ASSERTION_RE.test(out)) return false;
+  return Boolean(envSignature(out)) || VALIDATE_ENV_RE.test(out);
+}
+/** #5730: the redacted last 4000 characters of a rerun's output, kept on a validate_failed failure so the lane can classify it. */
+const rawTail = (output) => String(output ?? "").replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").slice(-4000).replace(SECRET_PAIR_RE, "$1[redacted]").replace(SECRET_SHAPE_RE, "[redacted]");
 export function assertionFailure(output) {
   return ASSERTION_RE.test(String(output ?? ""));
 }
@@ -1198,7 +1208,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       if (verdict === "unverified") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "substitute_unverified", detail: `${from}, but the engine has no rerun of the frozen command to show it cannot run` }); continue; }
       // #5653: the frozen command runs, and the substitute ran the same test ids with the same exit: recorded, not failed
       if (verdict === "runs" && equivalentRuns(substitutedRuns[v.id], substitutedRuns[v.id].sub)) equivalent.push({ id: v.id, from: v.substituted.from, to: v.command });
-      else if (verdict === "runs") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `${from}, but the frozen command runs and fails (exit ${substitutedRuns[v.id].rc}): a substitute-validate replaces only a command that cannot run, never a failing check${outputTail(substitutedRuns[v.id].output)}` }); continue; }
+      else if (verdict === "runs") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", output: rawTail(substitutedRuns[v.id].output), detail: `${from}, but the frozen command runs and fails (exit ${substitutedRuns[v.id].rc}): a substitute-validate replaces only a command that cannot run, never a failing check${outputTail(substitutedRuns[v.id].output)}` }); continue; }
       if (verdict === "timeout" && !ciVerified) { failures.push({ code: ENV_VALIDATE_TIMEOUT, kind: "validate_timeout", detail: `${from}, and the frozen command timed out (exit 124) on the engine's rerun, so its substitution cannot be judged: infrastructure (host load)` }); continue; }
     }
     const r = runs.find((x) => x?.id === v.id);
@@ -1224,7 +1234,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)${outputTail(rerun.output)}` });
       else if (amendedOnly && isScopeCheck(v.command)) superseded.push({ id: v.id, files: amendedOnly });
       else if (rerun && isDriftFailure(rerun.output)) failures.push({ code: C.BASE_CONFLICT, kind: "validate_drift", detail: `validate ${v.id} (\`${v.command}\`) failed on a stale generated artifact (base drift, not the change): base-sync, regenerate the artifact (forge.yaml validate.regenerate) and rerun${outputTail(rerun.output)}` }); // #5653: a mechanical base-sync recovery, not unimplemented work
-      else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${engineRun ? rerun.rc : r.exit}${engineRun ? ", run by the engine: no recorded result" : ""})${outputTail(rerun?.output)}` });
+      else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", output: rawTail(rerun?.output), detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${engineRun ? rerun.rc : r.exit}${engineRun ? ", run by the engine: no recorded result" : ""})${outputTail(rerun?.output)}` });
     }
   }
   const st = Array.isArray(result?.requirements) ? result.requirements : [];
