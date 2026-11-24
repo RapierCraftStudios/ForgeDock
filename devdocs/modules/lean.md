@@ -905,8 +905,11 @@ arguments, resolves the repo, auto-spawns the daemon (output to
   `liveRemote`): `max`, `fallbackLocal` (true in hybrid) and `place` re-read the file
   on every admission, and orchestrate reads `remoteMax()` per grant. Running lanes are
   never stopped: a lower `max_remote` only holds new remote admissions (polled, so a
-  raise admits them, even with nothing running); hybrid runs them on the host instead,
-  and placement `local` runs every new lane on the host. A batch that built a
+  raise admits them, even with nothing running); hybrid runs them on the host instead.
+  #5933: on a `mode: remote` batch `max_remote 0` is a drain: `placement()` stays
+  `remote`, so ready issues wait pending with no local fallback, and
+  `--set-max-remote <id> 0` prints `drainNote` ("remote starts paused; nothing runs
+  locally"). Placement `local` runs every new lane on the host. A batch that built a
   remote provider records `provider: true` at start (`false` when a resume builds
   none); `remote`/`hybrid` are refused without it, because the provider, ledger and
   execution budget are built once at start. Switching a remote batch to hybrid
@@ -1063,7 +1066,7 @@ ADR `decisions/4169-heavy-step-semaphore.md`.
 forge.yaml `execution:` (`execution.mjs` `parseExecution`, read by `engine-cli.mjs`
 `readExecution`): `mode` local (default) | remote | hybrid, `max_remote` (default 0),
 `provider` (default `container` off local), `image`, `secrets` (comma-separated env
-names). `placement` is `remote` only for `mode: remote` with `max_remote >= 1`;
+names). `placement` is `remote` for `mode: remote` whatever `max_remote` is (#5933: 0 pauses starts, never host fallback; startup still takes the local path unless `max_remote >= 1`);
 `hybrid` is placed per lane by `placeLane` (#4256). Absent or local config builds lanes with
 `batch.mjs` `detachedLanes` exactly as before.
 

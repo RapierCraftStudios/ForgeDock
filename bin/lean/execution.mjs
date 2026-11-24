@@ -250,9 +250,9 @@ export async function repoIsPublic({ repo, gh }) {
   try { return JSON.parse(await gh(["api", `repos/${repo}`]))?.private === false; } catch { return false; }
 }
 
-/** Where a `mode: remote` lane runs: remote only with `max_remote >= 1`. Hybrid is placed per lane by `placeLane` (#4256). */
+/** Where a `mode: remote` lane runs: always remote (#5933: `max_remote 0` pauses starts, it never falls back to the host). Hybrid is placed per lane by `placeLane` (#4256). */
 export function placement(exec) {
-  return exec?.mode === "remote" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1 ? "remote" : "local";
+  return exec?.mode === "remote" ? "remote" : "local";
 }
 
 /** An explicit need written in prose (#5725): `needs: sops`, `needs sops`, `host capability: sops`. */
@@ -387,7 +387,7 @@ const DOCS_LABELS = new Set(["docs", "documentation", "type:docs"]);
 /**
  * Hybrid placement (#4256), pure: facts in, `{where: "local"|"remote", reason}` out. `exec` is parseExecution output,
  * `verifyMode` forge.yaml `verify.mode`, `labels` the issue's label names (the lane kind), `weight` from
- * `validationWeight`, `headroom` from `hostHeadroom`. In order: a non-hybrid mode keeps `placement()`; `max_remote` 0 is
+ * `validationWeight`, `headroom` from `hostHeadroom`. In order: a non-hybrid mode keeps `placement()` (remote mode stays remote at `max_remote` 0: orchestrate holds it pending); `max_remote` 0 is
  * local; `verify.mode: ci` is local (heavy validation already runs, and is billed, on CI); a docs-only lane is local; a
  * heavy-validation lane is remote; a host without headroom sends the lane remote; anything else stays on the host.
  * A `needs` entry (host-only capability, #4542) the provider does not `relays` is local first, in `remote` mode too.

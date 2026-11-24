@@ -1791,6 +1791,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { id, patch } = liveExec.parseSetExecution(argv);
     const execution = liveExec.applySetExecution(batchMod.openBatch(root, id), patch);
     sink.line(`batch ${id}: ${liveExec.formatOverride(patch)}`);
+    const drain = liveExec.drainNote(patch);
+    if (drain) sink.line(drain);
     return { ok: true, batch: id, execution };
   }
   if (["--show-env", "--set-env", "--unset-env"].some((f) => argv.includes(f))) return envBatch({ argv, root, print: (l) => sink.line(l) });
@@ -2012,7 +2014,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     execForNeeds = exec ?? null;
     hybrid = exec?.mode === "hybrid" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1;
     let remoteStop = null; // #4612: the sandbox provider's checkpoint stop, used only when the cancel asks for it
-    if (exec && (execMod.placement(exec) === "remote" || hybrid)) {
+    if (exec && ((execMod.placement(exec) === "remote" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1) || hybrid)) {
       // #4253: lanes run in sandboxes, ledger-tracked per lane, admitted against max_remote instead of the host cap.
       let gitDir = null;
       try { gitDir = resolvePath(cwd, String(await leanIo.git(["rev-parse", "--git-common-dir"], { cwd })).trim()); } catch { gitDir = null; }
