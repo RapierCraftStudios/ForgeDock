@@ -217,6 +217,13 @@ export function batchStatusLines(root, id, { now = Date.now() } = {}) {
     const due = checkpointsOf(created, DEFAULT_HEALTH.checksMin).filter((c) => !h?.checks?.[c.label]);
     if (due.length && !b.readReport()) out.push(`  next checks: ${due.map((c) => `${c.label} ${new Date(c.at).toISOString().slice(11, 16)}Z${c.at < now ? " (due)" : ""}`).join(", ")}`);
   }
+  // #5859: an agent/VM restart is one batch event (its lanes were requeued as sandbox.lost), not a health cause
+  let st = null;
+  try { st = b.store.load(); } catch { st = null; }
+  for (const g of Array.isArray(st?.agentRestarts) ? st.agentRestarts : []) {
+    const k = Array.isArray(g?.lanes) ? g.lanes.length : Number(g?.requeued) || 0;
+    if (g?.agent) out.push(`  agent ${g.agent} restarted at ${g.at ?? "?"}; ${k} lane${k === 1 ? "" : "s"} requeued (sandbox.lost)${g.closed ? "" : ", waiting for the agent"}`);
+  }
   return out;
 }
 

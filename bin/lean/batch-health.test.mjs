@@ -102,6 +102,15 @@ describe("#5167 checkpoints, alert-once and persistence", () => {
     assert.match(one, /forgedock orchestrate --cancel b20260101-000000-1/);
   });
 
+  it("#5859 agent restart event is shown by status --batch with its requeued count, not as a health cause", () => {
+    const { root, b } = mkBatch(base({ 1: { outcome: "merged" } }, { agentRestarts: [{ agent: "legion", at: "2026-01-01T00:05:00.000Z", last: 0, lanes: [1, 2, 3], requeued: 3, closed: true }] }));
+    const lines = statusLines(root, { batch: b.id });
+    assert.ok(lines.includes("  agent legion restarted at 2026-01-01T00:05:00.000Z; 3 lanes requeued (sandbox.lost)"), lines.join("\n"));
+    assert.equal(statusLines(root).length, 0, "not an unhealthy batch");
+    const { root: r2, b: b2 } = mkBatch(base({ 1: { outcome: "merged" } }));
+    assert.ok(!statusLines(r2, { batch: b2.id }).some((l) => /restarted/.test(l)), "older state without the field");
+  });
+
   it("a healthy check records no alert, and a throwing channel never escapes", async () => {
     const { b, root } = mkBatch(base({ 1: { outcome: "merged" } }, { running: { 3: {} }, pending: [2, 4] }));
     const r = await runCheck({ batch: b, checkpoint: "T+15", alert: async () => { throw new Error("x"); } });

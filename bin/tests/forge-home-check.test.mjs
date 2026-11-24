@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpDir } from "./_tmp.mjs";
-import { assessForgeHome, isProblem, describe as describeFh, readUserForgeHomeWin, clearUserForgeHomeWin } from "../forge-home-check.mjs";
+import { assessForgeHome, isProblem, describe as describeFh, readUserForgeHomeWin, clearUserForgeHomeWin, hookScriptTree } from "../forge-home-check.mjs";
 
 const CLI = resolve(import.meta.dirname, "../forgedock.mjs");
 
@@ -90,4 +90,19 @@ describe("doctor surfaces a stale FORGE_HOME by default (no --verbose)", () => {
   it("says nothing about staleness when unset", () => {
     assert.doesNotMatch(doctor(undefined), /Stale FORGE_HOME/);
   });
+});
+
+describe("hookScriptTree", () => {
+  const root = tmpDir("fh-hook-");
+  const src = join(root, "src"), persisted = join(root, ".forge"), oldTree = join(root, "src-old");
+  for (const d of [src, persisted, oldTree]) mkdirSync(join(d, "bin"), { recursive: true });
+  const t = (scriptPath) => hookScriptTree({ scriptPath, sourceDir: src, persistedHome: persisted });
+  it("treats a script inside the running source as current", () => assert.equal(t(join(src, "bin", "h.mjs")), "current"));
+  it("treats a script inside ~/.forge as current", () => assert.equal(t(join(persisted, "bin", "h.mjs")), "current"));
+  it("flags an existing script in another checkout as foreign", () => assert.equal(t(join(root, "other", "bin", "h.mjs")), "foreign"));
+  it("does not treat a sibling-prefix dir (src-old) as inside src", () => assert.equal(t(join(oldTree, "bin", "h.mjs")), "foreign"));
+  it("flags everything foreign when no persisted home is given", () =>
+    assert.equal(hookScriptTree({ scriptPath: join(persisted, "bin", "h.mjs"), sourceDir: src }), "foreign"));
+  it("folds case and backslashes on win32", { skip: process.platform !== "win32" }, () =>
+    assert.equal(t(join(src, "bin", "h.mjs").toUpperCase().replaceAll("\\", "/")), "current"));
 });

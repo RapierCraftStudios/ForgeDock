@@ -15,6 +15,10 @@ describe("page-capture (#5770)", () => {
     assert.equal(routeSlug("/site/removal"), "site-removal");
     assert.deepEqual(changedRoutes(["web/app/bot/page.tsx", "src/a.ts"], { routes: [], exclude: [], design_only: [], generated: [], rewrite_threshold: 0.6 }), ["/bot"]);
   });
+  it("#5793: design_only app pages are captured; excluded, test and non-app routes-glob files are not", () => {
+    const c = { routes: ["src/routes/**"], exclude: ["web/app/x/**"], design_only: ["web/app/dash/**", "web/app/x/**"], generated: [], rewrite_threshold: 0.6 };
+    assert.deepEqual(changedRoutes(["web/app/dash/page.tsx", "web/app/dash/page.test.tsx", "web/app/x/page.tsx", "src/routes/a.tsx"], c), ["/dash"]);
+  });
   it("captures every route x viewport, publishes and renders markdown", async () => {
     const m = mk({ "bot-390.png": big, "bot-1440.png": big });
     const c = await captureVisualCheck({ cfg, routes: ["/bot"], dir: "/d", ...m });
