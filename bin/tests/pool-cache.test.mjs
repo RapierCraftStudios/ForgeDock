@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync, existsSync, utimesSync } from "node:fs";
 import { join } from "node:path";
-import { planCacheCap, planIdleEviction, sweepVolume, PACKAGE_STORES, CACHE_LABEL } from "../pool/cache-sweep.mjs";
+import { planCacheCap, planIdleEviction, sweepVolume, PACKAGE_STORES, LEGACY_STORES, CACHE_LABEL } from "../pool/cache-sweep.mjs";
 import { createAgent } from "../pool/agent.mjs";
 import { tmpDir } from "./_tmp.mjs";
 
@@ -59,6 +59,23 @@ describe("sweepVolume age-out", () => {
     assert.ok(names.length >= 5);
     for (const n of names) assert.ok(PACKAGE_STORES.includes(n === "pnpm-store" ? "forge-depcache/stores/pnpm-store" : `forge-depcache/stores/${n}`), n);
     assert.ok(PACKAGE_STORES.includes("pnpm-store"));
+  });
+  it("every /cache path exported by entrypoint.sh is under a PACKAGE_STORES entry (#5969)", () => {
+    const src = readFileSync(new URL("../../pool/image/entrypoint.sh", import.meta.url), "utf8");
+    const paths = src.split("\n").filter((l) => /^\s*export\s/.test(l)).flatMap((l) => [...l.matchAll(/=(\/cache\/[\w./-]+)/g)].map((m) => m[1]));
+    assert.ok(paths.length >= 4);
+    for (const p of paths) assert.ok(PACKAGE_STORES.some((s) => p === `/cache/${s}` || p.startsWith(`/cache/${s}/`)) || p === "/cache/forge-depcache", p);
+  });
+  it("legacy dirs an old entrypoint exported (/cache/uv ...) stay covered and age out (#5969)", () => {
+    for (const d of ["uv", "npm", "pip", "poetry"]) assert.ok(LEGACY_STORES.includes(d) && PACKAGE_STORES.includes(d), d);
+    const root = tmpDir("cs-sweep-");
+    const old = (Date.now() - 40 * DAY) / 1000, fresh = join(root, "uv/k/new");
+    for (const d of LEGACY_STORES) { const f = join(root, d, "k/blob"); mkdirSync(join(f, ".."), { recursive: true }); writeFileSync(f, "x"); utimesSync(f, old, old); }
+    writeFileSync(fresh, "x");
+    const r = sweepVolume({ root, maxAgeDays: 14, keep: [] });
+    for (const d of LEGACY_STORES) assert.ok(!existsSync(join(root, d, "k/blob")), d);
+    assert.ok(existsSync(fresh));
+    assert.equal(r.errors.length, 0);
   });
   it("cap shrinks work dirs oldest-first but keeps live ones; reports last use", () => {
     const root = tmpDir("cs-sweep-");

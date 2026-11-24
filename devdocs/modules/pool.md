@@ -16,6 +16,7 @@ Rolling per-module knowledge log. Hard cap: 150 lines.
 - `bin/pool/mirror-seed.mjs` applies the bundle in a helper container on the cache volume: copy of `/cache/git/<slug>.git` (or a fresh bare repo) -> `git fetch <bundle>` -> `fsck --connectivity-only` -> rename, under a per-slug flock; a `cs-seeded` marker is written. Any failure removes the tmp copy and leaves the mirror untouched.
 - Router: `GET /sandboxes/:id/mirrors` and `POST /sandboxes/:id/seed` relay to the agent chosen for that sandbox id (remembered so `launch` prefers it), over direct and poll transports; chunks over 768 KB (base64) are 413. Older router/agent: 404/405 means the dispatcher falls back.
 - `pool/image/entrypoint.sh`: a seeded mirror is cloned `--shared` with no GitHub fetch when it already has the lane ref (else a best-effort fetch, 3 tries); origin is reset to GitHub, so pushes stay there. Unseeded mirrors keep the old clone/fetch path.
+- Seed upload limits (#5970): `<state>/seed/*.part` idle over 1 h are swept (at start and on each chunk); one upload is capped at 2 GiB and all `.part` files at 4 GiB (413).
 - `execution.repo_source: dispatcher | github | auto` (default auto): github never seeds; dispatcher fails the launch when seeding fails; auto falls back to the GitHub path.
 
 ## Entry 2026-11-21 — Per-host lane ceiling (#5735)
@@ -123,3 +124,7 @@ The router ships agents only `AGENT_BUNDLE_PATHS` (`package.json`, `bin/pool`, `
 - `launch` answers 503 `pool.host_mem` (reason `host_mem`) under `host_mem_floor_gb` (4), after the disk gate, before any docker run; `Retry-After` is `host_mem_retry_after_s` (60). The router skips `host_mem_low` agents and defers with the same code (lane `SANDBOX_CAPACITY`). `reap()` pauses the newest running sandbox below floor/2 (`memPaused`, lease kept) and resumes at floor + `host_mem_resume_margin_gb` (1).
 - `pool status` prints `<agent>: host_mem_free_gb N, other VMs: ...` and a WARNING when low (stderr, like the disk line). Tests: `bin/tests/pool-host-mem-gate.test.mjs`.
 - The VM-restart class is the existing `sandbox.lost` (#5859, breaker-exempt); no separate `pool.vm_restart` code. `orchestrate-envhold.test.mjs` covers N lanes lost together.
+
+## Entry 2026-11-24 — package cache layout pinned to entrypoint (#5969)
+
+- `pool/image/entrypoint.sh` points `UV_CACHE_DIR`, `npm_config_cache`, `POETRY_CACHE_DIR` and `PIP_CACHE_DIR` at `/cache/forge-depcache/stores/*`, the same layout as `depcache.mjs` `env()`. `cache-sweep.mjs` `PACKAGE_STORES` still includes `LEGACY_STORES` (`uv`, `npm`, `pip`, `poetry`) so old volumes and old images stay swept, capped and pruned. `pool-cache.test.mjs` pins every `/cache/...` path exported by the entrypoint to a `PACKAGE_STORES` entry.
