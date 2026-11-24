@@ -34,15 +34,15 @@ const TMP_RE = /^(pnpm|npm|yarn|uv|poetry)-[0-9a-f]{16}\.tmp-(\d+)$/;
 const LOCK_RE = /^(pnpm|npm|yarn|uv|poetry)-[0-9a-f]{16}\.lock$/;
 
 const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e?.code === "EPERM"; } };
+/** #5731: how long a failed (lock, interpreter) install is remembered, and the failures that mean "these pins do not build under this interpreter" (retried under the next candidate). */
+const NEG_TTL_MS = 6 * 3600 * 1000;
+const PY_BUILD_RE = /build requirements are incompatible|incompatible with your operating system|_finalize_license_expression|Failed building wheel|No matching distribution|no matching wheel|Could not find a version that satisfies/i;
+/** #5592: poetry cannot install the project itself (not package-mode: no package dir, no `package-mode = false`). */
+const NO_ROOT_RE = /--no-root|current project could not be installed|No file\/folder found for package|does not contain any element/i;
 /**
  * Error text for a reason: pnpm prints its ERR_PNPM_* errors on stdout (#4522), so the first such line from either
  * stream leads, then the last lines of stderr and stdout; the message only when both streams are empty.
  */
-/** #5731: an install failure that means "these pins do not build under this interpreter" (retried under the next candidate). */
-const NEG_TTL_MS = 6 * 3600 * 1000; // #5731: how long a failed (lock, interpreter) install is remembered
-const PY_BUILD_RE = /build requirements are incompatible|incompatible with your operating system|_finalize_license_expression|Failed building wheel|No matching distribution|no matching wheel|Could not find a version that satisfies/i;
-/** #5592: poetry cannot install the project itself (not package-mode: no package dir, no `package-mode = false`). */
-const NO_ROOT_RE = /--no-root|current project could not be installed|No file\/folder found for package|does not contain any element/i;
 const msg = (e) => {
   const lines = (s) => String(s ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
   const err = lines(e?.stderr), out = lines(e?.stdout);
@@ -498,7 +498,6 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
   }
   const failedRun = (r) => r.status === "failed" || r.status === "materialize-fallback" || (r.published === false && /^(publish failed|cache is on another filesystem)/.test(String(r.reason ?? "")));
 
-  /** #5731: an install that fails with a build/wheel incompatibility is retried once per remaining in-range interpreter; the last failure names every one tried. */
   /** #5731: the in-range minors on PATH that were not used (`python3.X`), for the final failure to name. */
   async function untriedAlternatives(wt, d, exclude) {
     let range = null;
