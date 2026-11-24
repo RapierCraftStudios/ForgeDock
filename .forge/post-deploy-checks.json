@@ -160,5 +160,11 @@
     "pass": "exit 0",
     "timeout": 120,
     "for": "7d"
+  },
+  "5923-no-egress-timeout-after-pin": {
+    "run": "test \"$(gh api \"repos/{owner}/{repo}/issues/comments?since=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)&per_page=100\" --paginate --jq '[.[]|select(.body|contains(\"FORGE\") and contains(\"sandbox.egress_timeout\"))]|length' | awk '{s+=$1} END{print s+0}')\" -eq 0",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "7d"
   }
 }

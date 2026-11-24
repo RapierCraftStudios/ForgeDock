@@ -32,7 +32,7 @@ describe("pool unit hardening (#4673)", () => {
   });
   it("StartLimitIntervalSec=0 lands in [Unit], not [Service], of every generated unit", () => {
     for (const [f, mode] of [["install-router.sh", "user"], ["install-agent.sh", "system"], ["install-schedd.sh", "user"]]) {
-      const heredoc = read(`pool/install/${f}`).match(/<<-?\s*\\?'?(\w+)'?\n(\[Unit\][\s\S]*?)\n\1\n/)[2];
+      const heredoc = [...read(`pool/install/${f}`).matchAll(/<<-?\s*\\?'?(\w+)'?\n(\[Unit\][\s\S]*?)\n\1\n/g)].map((m) => m[2]).find((h) => /unit_hardening/.test(h));
       const script = `. ${root}pool/install/unit-hardening.sh; cat <<EOF\n${heredoc}\nEOF`;
       const unit = spawnSync("bash", ["-c", script], { encoding: "utf8" }).stdout;
       const sections = {};

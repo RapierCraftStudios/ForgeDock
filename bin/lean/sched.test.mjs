@@ -555,6 +555,13 @@ describe("sched show lists remote (pool) lanes (#4964)", () => {
     assert.deepEqual(remoteLines({}), []);
   });
 
+  it("#5938: a placed remote lane shows its agent name, from the registry or the batch run record; `-` only when neither knows it", () => {
+    const e = { issue: 7, repo: "o/r", batch: "B", sandbox: "sb1", pid: 9 };
+    assert.match(remoteLines({ remote: [{ ...e, agent: "legion" }] })[0], /agent legion /);
+    assert.match(remoteLines({ remote: [e] }, { agentOf: () => "atlas" })[0], /agent atlas /);
+    assert.match(remoteLines({ remote: [e] }, { agentOf: () => { throw new Error("no batch"); } })[0], /agent - /);
+  });
+
   it("orchestrate publishes a remote lane while it runs, drops it after, and never acquires a slot", async () => {
     const { handle } = world();
     const reg = handle(531);

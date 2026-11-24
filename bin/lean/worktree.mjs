@@ -39,6 +39,11 @@ export function sparsePatterns(excludes) {
   return ["/*", ...excludes.map((p) => `!/${esc(p)}`)];
 }
 
+/** forge#5890: a git spawn failure (missing cwd/binary, no exit status), as opposed to a git exit failure. */
+export const isSpawnError = (e) => (e?.code === "ENOENT" || e?.code === "EACCES") && String(e?.syscall ?? "").startsWith("spawn") && typeof e?.status !== "number";
+/** forge#5890: tag a spawn error with the typed deferral (sandbox.repo_missing, requeued); returns the same error. */
+export const repoMissing = (e) => Object.assign(e, { deferCode: "sandbox.repo_missing", deferDetail: `lane repo directory is missing or git cannot run there (${e.code} ${e.syscall}); the lane is requeued`, retryInSeconds: 120 });
+
 /**
  * Add a lane worktree, sparse when the plan is non-empty. `git(args, {cwd})` is the injected io.git; `write(path, text)`
  * writes the pattern file (argv-safe for any number of patterns). `addArgs` is the plain `["worktree","add",...]` argv.
@@ -47,13 +52,13 @@ export function sparsePatterns(excludes) {
 export async function addLaneWorktree(git, write, { cwd, wt, addArgs, ref, maxBlobBytes = DEFAULT_SPARSE_MAX_KB * 1024 }) {
   let plan = { excludes: [], bytes: 0 };
   if (maxBlobBytes > 0 && typeof write === "function") {
-    try { plan = sparsePlan(await git(["ls-tree", "-r", "-l", "-z", ref], { cwd }), { maxBlobBytes }); } catch { /* no plan: full checkout */ }
+    try { plan = sparsePlan(await git(["ls-tree", "-r", "-l", "-z", ref], { cwd }), { maxBlobBytes }); } catch (e) { if (isSpawnError(e)) throw repoMissing(e); /* no plan: full checkout */ }
   }
   if (!plan.excludes.length) {
-    await git(addArgs, { cwd });
+    try { await git(addArgs, { cwd }); } catch (e) { throw isSpawnError(e) ? repoMissing(e) : e; }
     return { sparse: false, excluded: 0, bytes: 0 };
   }
-  await git([...addArgs.slice(0, 2), "--no-checkout", ...addArgs.slice(2)], { cwd });
+  try { await git([...addArgs.slice(0, 2), "--no-checkout", ...addArgs.slice(2)], { cwd }); } catch (e) { throw isSpawnError(e) ? repoMissing(e) : e; }
   const g = (a) => git(a, { cwd: wt });
   try {
     await g(["sparse-checkout", "set", "--no-cone", "/*"]);

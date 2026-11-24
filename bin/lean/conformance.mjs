@@ -958,6 +958,16 @@ export function envProvisioningCommand(command) {
 }
 /** #5732: true when a failed run's output carries test-failure text (an assertion, a runner's failed-test mark), not only an environment error. */
 const ASSERTION_RE = /AssertionError|\bassert(?:ion)?\b[^\n]*(?:==|!=|failed|error)|^FAILED\s+\S+::|^\s*E\s+(?:assert|Expected)|\bExpected\b[^\n]*\b(?:Received|got|to (?:be|equal))|expect\(|^not ok \d+|^\s*[✗×✖]\s|^\s*● |\bTests?:\s+\d+ failed/m;
+// #5730: sandbox-only failures a validate rerun can show beyond ENV_SIGNATURES: a missing command, a refused connection, an unresolved host, an absent venv path, no display
+const VALIDATE_ENV_RE = /: command not found|: not found\b|ECONNREFUSED|connection refused|no such host|\.venv\/bin\/[\w.-]+: No such file or directory|cannot open display|Missing X server|\$DISPLAY/i;
+/** #5730: a validate output that is the executor's environment (not a red test, not a stale artifact): only these defer to a host replay. */
+export function isEnvValidateFailure(output) {
+  const out = String(output ?? "");
+  if (!out || isDriftFailure(out) || ASSERTION_RE.test(out)) return false;
+  return Boolean(envSignature(out)) || VALIDATE_ENV_RE.test(out);
+}
+/** #5730: the redacted last 4000 characters of a rerun's output, kept on a validate_failed failure so the lane can classify it. */
+const rawTail = (output) => String(output ?? "").replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").slice(-4000).replace(SECRET_PAIR_RE, "$1[redacted]").replace(SECRET_SHAPE_RE, "[redacted]");
 export function assertionFailure(output) {
   return ASSERTION_RE.test(String(output ?? ""));
 }
@@ -1155,6 +1165,8 @@ export function interfaceDecisionFailures(contract, result, changedFiles) {
   return out;
 }
 
+const tagText = (q) => String(q ?? "").replace(/`[^`\n]*`/g, (span, at, all) => (/[^\s.,;:)]/.test(all.slice(at + span.length).replace(/`[^`\n]*\[type:[^`\n]*`/g, "")) ? "" : span));
+const wantsE2e = (r) => /\[type:(?:e2e|manual)\]/i.test(tagText(r?.quote));
 /**
  * Deterministic checks before any reviewer tokens are spent: unauthorized files, failed or missing validation,
  * requirements not implemented, deferrals without a tracking issue, and unexempted hotspot growth. Returns {ok, failures[], superseded[]}; each failure carries a
@@ -1175,6 +1187,10 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
     if (r.disposition === "post-deploy" && !(r.check && checkIds.has(r.check))) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "check_unknown", detail: `${r.id} post-deploy check ${r.check ? `'${r.check}'` : "id"} is neither on the default branch nor added by this PR (.forge/post-deploy-checks.json)` });
+  }
+  // #5754: a deliver [type:e2e]/[type:manual] row whose observable exists only in production (live stack, deploy, prod window) cannot be produced by the placement: fail fast with a typed code instead of spending builder resumes
+  for (const r of contract.requirements ?? []) {
+    if (r.disposition === "deliver" && wantsE2e(r) && !isOutOfBand(r) && r.verify !== "in_lane" && prodOnlyE2e(r.quote)) failures.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_placement", detail: `${r.id} is a [type:e2e]/[type:manual] criterion observable only in production or on the live stack, which this lane cannot produce; mark ${r.id} post-deploy so it is transferred to the epic's acceptance instead of spending builder resumes (#5754)` });
   }
   // #4769: a default-off rollout entry added by the diff needs an activation row
   if (newOffKeys?.length) for (const f of activationFailures(contract, newOffKeys)) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, ...f });
@@ -1198,7 +1214,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       if (verdict === "unverified") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "substitute_unverified", detail: `${from}, but the engine has no rerun of the frozen command to show it cannot run` }); continue; }
       // #5653: the frozen command runs, and the substitute ran the same test ids with the same exit: recorded, not failed
       if (verdict === "runs" && equivalentRuns(substitutedRuns[v.id], substitutedRuns[v.id].sub)) equivalent.push({ id: v.id, from: v.substituted.from, to: v.command });
-      else if (verdict === "runs") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `${from}, but the frozen command runs and fails (exit ${substitutedRuns[v.id].rc}): a substitute-validate replaces only a command that cannot run, never a failing check${outputTail(substitutedRuns[v.id].output)}` }); continue; }
+      else if (verdict === "runs") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", output: rawTail(substitutedRuns[v.id].output), detail: `${from}, but the frozen command runs and fails (exit ${substitutedRuns[v.id].rc}): a substitute-validate replaces only a command that cannot run, never a failing check${outputTail(substitutedRuns[v.id].output)}` }); continue; }
       if (verdict === "timeout" && !ciVerified) { failures.push({ code: ENV_VALIDATE_TIMEOUT, kind: "validate_timeout", detail: `${from}, and the frozen command timed out (exit 124) on the engine's rerun, so its substitution cannot be judged: infrastructure (host load)` }); continue; }
     }
     const r = runs.find((x) => x?.id === v.id);
@@ -1224,7 +1240,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)${outputTail(rerun.output)}` });
       else if (amendedOnly && isScopeCheck(v.command)) superseded.push({ id: v.id, files: amendedOnly });
       else if (rerun && isDriftFailure(rerun.output)) failures.push({ code: C.BASE_CONFLICT, kind: "validate_drift", detail: `validate ${v.id} (\`${v.command}\`) failed on a stale generated artifact (base drift, not the change): base-sync, regenerate the artifact (forge.yaml validate.regenerate) and rerun${outputTail(rerun.output)}` }); // #5653: a mechanical base-sync recovery, not unimplemented work
-      else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${engineRun ? rerun.rc : r.exit}${engineRun ? ", run by the engine: no recorded result" : ""})${outputTail(rerun?.output)}` });
+      else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", output: rawTail(rerun?.output), detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${engineRun ? rerun.rc : r.exit}${engineRun ? ", run by the engine: no recorded result" : ""})${outputTail(rerun?.output)}` });
     }
   }
   const st = Array.isArray(result?.requirements) ? result.requirements : [];
@@ -1534,8 +1550,6 @@ export function checkCompleteness(rv, { contract, changedFiles, issueText, pathE
 
 /** #4726, #5339: a requirement quote that carries a `[type:e2e]` or `[type:manual]` criterion. */
 /** #5547: a tag inside a mid-sentence code span (`` `[type:e2e]` row whose ... ``) is a mention of the tag, not the tag; a trailing backticked tag still counts. */
-const tagText = (q) => String(q ?? "").replace(/`[^`\n]*`/g, (span, at, all) => (/[^\s.,;:)]/.test(all.slice(at + span.length).replace(/`[^`\n]*\[type:[^`\n]*`/g, "")) ? "" : span));
-const wantsE2e = (r) => /\[type:(?:e2e|manual)\]/i.test(tagText(r?.quote));
 /** #5339: failure kinds enforced without an `engine.conformance_kinds` entry (the entry still overrides). */
 // #5449: test_missing/test_weak are only generated for bug lanes (testadequacy.mjs), so enforcing the kinds is bug-only.
 const DEFAULT_ENFORCED_KINDS = ["e2e_row", "test_missing", "test_weak"];
@@ -1551,12 +1565,14 @@ export function isE2eCommand(command, e2e = null) {
   if (typeof e2e?.isSpec === "function" && cmd.split(/\s+/).some((t) => t && e2e.isSpec(t.replace(/^["']+|["']+$/g, "")))) return true;
   return E2E_CMD_RE.test(cmd);
 }
+/** #5754: a criterion verified against the running live stack/service/environment/cluster: observable only in production, so post-deploy at freeze instead of builder resumes. Checked after the local-runnable exclusion. */
+const LIVE_STACK_RE = /\b(?:against|on|in)\s+(?:the\s+)?live\s+(?:stack|service|environment|cluster)\b|\breal traffic\s+(?:against|on)\s+(?:the\s+)?live\b/i;
 /** #5468: a `[type:e2e]`/`[type:manual]` quote whose observable only exists in production (live URL, deploy, prod probe); local stack, browser and sandbox wording is runnable pre-merge. */
 export function prodOnlyE2e(quote) {
   const q = String(quote ?? "");
   if (LIVE_INFRA_RE.test(q)) return true; // #5547
   if (/\b(?:localhost|127\.0\.0\.1|local stack|playwright|browser|sandbox|staging)\b/i.test(q)) return false;
-  return /https?:\/\//i.test(q) || /\b(?:after (?:the )?deploy|production|prod probe|live (?:domain|site)|prod)\b/i.test(q) || PROD_WINDOW_RE.test(q);
+  return /https?:\/\//i.test(q) || /\b(?:after (?:the )?deploy|production|prod probe|live (?:domain|site)|prod)\b/i.test(q) || PROD_WINDOW_RE.test(q) || LIVE_STACK_RE.test(q);
 }
 /** #5547: criteria whose run needs a live benchmark, a paid run, remote infra or host-level load: observable only outside the lane, by shape not by repo name. */
 const LIVE_INFRA_RE = /\b(?:live|paid|remote)\s+(?:benchmarks?|runs?|infra(?:structure)?|hosts?)\b|\bbench(?:mark)?[\w.-]*\.(?:mjs|js|py|sh)\b|\bre-?run\b[^.]{0,60}\bbench(?:mark)?\b|\b(?:sandbox pool|(?:remote|rented|cloud|gpu) (?:infra|hosts?|runners?|clusters?|boxe?s?|machines?|gpus?|pool)|on (?:a|the) (?:remote|rented|cloud|gpu) \w+)\b|\bsynthetic load\b|\b\d+\s*[×x]\s*(?:nproc|cores?|cpus?)\b|\bCPU hogs?\b|\bhost[- ]level (?:load|run)\b|\b[≤<]=?\s*[\d.]+\s*[×x]\s*(?:the\s+)?(?:control\s+)?cost\b/i;

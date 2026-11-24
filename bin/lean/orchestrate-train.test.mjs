@@ -1,0 +1,130 @@
+// SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// #5836: the merge train in the batch runner: pr-ready frees the slot, dependents wait, hand-backs recover, resume continues.
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { tmpDir } from "../tests/_tmp.mjs";
+import { orchestrate } from "./orchestrate.mjs";
+import { createMergeTrain, formatTrainSummary } from "./mergetrain.mjs";
+
+process.env.FORGEDOCK_SCHED_DIR = tmpDir("train-sched-");
+const H = "a".repeat(40);
+const READY = (pr) => ({ terminalReason: "pr-ready", pr, head: H, required: ["build"], policy: "required", lane: "staging" });
+/** A fake gh: `checks[pr]` is the list of rollups the PR shows poll by poll (the last repeats). */
+function world(checks) {
+  const merged = new Set(), calls = [];
+  const gh = async (a) => {
+    calls.push(a);
+    if (a[0] === "pr" && a[1] === "view") {
+      const pr = Number(a[2]); const seq = checks[pr]; const c = seq.length > 1 ? seq.shift() : seq[0];
+      return JSON.stringify({ state: merged.has(pr) ? "MERGED" : "OPEN", headRefOid: H, headRefName: `b${pr}`, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", baseRefName: "staging", statusCheckRollup: [{ name: "build", status: c === "pending" ? "IN_PROGRESS" : "COMPLETED", conclusion: c === "pending" ? "" : c === "red" ? "FAILURE" : "SUCCESS", detailsUrl: `https://ci/${pr}` }] });
+    }
+    if (a[0] === "pr" && a[1] === "merge") merged.add(Number(a[2]));
+    return "";
+  };
+  return { gh, merged, calls };
+}
+const go = (extra) => orchestrate({ parallel: 1, readBody: async () => "", pollMs: 1, trainEveryMs: 0, sleep: async () => {}, ...extra });
+
+describe("merge train in the batch runner (#5836)", () => {
+  it("frees the slot at pr-ready, merges via the train, and counts it in the report line", async () => {
+    const w = world({ 10: ["pending", "green"] }); const train = createMergeTrain({ gh: w.gh, repo: "o/r" });
+    const started = [];
+    const rows = await go({ issues: [1, 2], train, runOne: async (n) => { started.push([n, w.merged.size]); return n === 1 ? READY(10) : { terminalReason: "merged" }; } });
+    assert.deepEqual(started, [[1, 0], [2, 0]], "issue 2 started before the train merged PR 10");
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+    assert.ok(w.calls.some((a) => a[1] === "merge" && a.slice(-2).join() === `--match-head-commit,${H}`));
+    assert.match(formatTrainSummary(train.stats()), /^merge train: merged 1, handed back 0/);
+  });
+  it("a dependent waits for the train's merge", async () => {
+    const w = world({ 10: ["pending", "pending", "green"] }); const train = createMergeTrain({ gh: w.gh, repo: "o/r" });
+    const seen = [];
+    const rows = await go({ issues: [1, 2], train, readBody: async (n) => (n === 2 ? "Depends on #1" : ""),
+      runOne: async (n) => { seen.push([n, w.merged.has(10)]); return n === 1 ? READY(10) : { terminalReason: "merged" }; } });
+    assert.deepEqual(seen, [[1, false], [2, true]]);
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+  });
+  it("a red PR is handed back as ci.red and a recovery lane runs, then merges", async () => {
+    const w = world({ 10: ["red"] }); const train = createMergeTrain({ gh: w.gh, repo: "o/r" });
+    const marks = []; let k = 0;
+    const rows = await go({ issues: [1], train, recovery: { maxAttempts: 1 }, markRecovering: async (x) => { marks.push(x); },
+      runOne: async () => (k++ === 0 ? READY(10) : { terminalReason: "merged" }) });
+    assert.deepEqual(marks.map((m) => m.code), ["ci.red"]);
+    assert.equal(rows[0].outcome, "merged"); assert.equal(rows[0].recovered, "ci.red");
+    assert.equal(train.stats().handedBack["ci.red"], 1);
+    assert.equal(w.merged.size, 0, "the train never merged the red PR");
+  });
+  it("a hand-back with no recovery budget ends needs-human with the failing check URL", async () => {
+    const w = world({ 10: ["red"] }); const train = createMergeTrain({ gh: w.gh, repo: "o/r" });
+    const rows = await go({ issues: [1], train, recovery: { maxAttempts: 0 }, runOne: async () => READY(10) });
+    assert.equal(rows[0].outcome, "needs-human"); assert.equal(rows[0].code, "ci.red");
+    assert.match(rows[0].detail, /build https:\/\/ci\/10/);
+  });
+  it("a stopped batch reports the pr-ready row and --resume continues it through the train", async () => {
+    const w = world({ 10: ["pending"] }); let state = null;
+    const ac = new AbortController();
+    const store = { load: () => null, save: (s) => { state = JSON.parse(JSON.stringify(s)); if (s.train?.entries.length) ac.abort(); }, log: () => {} };
+    await go({ issues: [1], train: createMergeTrain({ gh: w.gh, repo: "o/r" }), store, signal: ac.signal, runOne: async () => READY(10) }).catch(() => {});
+    assert.equal(state.results[1].outcome, "pr-ready");
+    assert.equal(state.train.entries[0].pr, 10);
+    const w2 = world({ 10: ["green"] }); const train2 = createMergeTrain({ gh: w2.gh, repo: "o/r" });
+    const rows = await go({ issues: [1], train: train2, store: { load: () => state, save: () => {}, log: () => {} }, runOne: async () => { throw new Error("must not relaunch"); } });
+    assert.equal(rows[0].outcome, "merged"); assert.ok(w2.merged.has(10));
+  });
+  it("without a train nothing changes: a merged lane is a merged row", async () => {
+    const rows = await go({ issues: [1, 2], runOne: async () => ({ terminalReason: "merged" }) });
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+  });
+});
+
+describe("batched merge train resume (#5837)", () => {
+  it("a saved snapshot with a validating batch is restored by orchestrate; tick re-reads checks and does not rebuild", async () => {
+    const calls = []; const ac = new AbortController();
+    const gh = async (a) => {
+      calls.push(a);
+      const s = a.join(" ");
+      if (s.includes("/check-runs")) ac.abort();
+      if (a[0] === "pr" && a[1] === "view") return JSON.stringify({ state: "OPEN", headRefOid: H, headRefName: "b", mergeable: "MERGEABLE", mergeStateStatus: "BEHIND", baseRefName: "staging", statusCheckRollup: [{ name: "build", conclusion: "SUCCESS" }] });
+      if (s.includes("/check-runs")) return JSON.stringify({ check_runs: [{ name: "build", status: "in_progress", conclusion: null }] });
+      return "";
+    };
+    const mk = (n) => ({ issue: n, pr: 10 + n, head: H, required: ["build"], policy: "required", lane: "staging", since: 1 });
+    const saved = { entries: [mk(1), mk(2)], stats: { merged: 0, handedBack: {}, waits: [], syncs: 0, batches: 1, candidateRuns: 1 },
+      batches: [{ id: "x", base: "staging", baseSha: "c".repeat(40), prs: [1, 2].map((n) => ({ issue: n, pr: 10 + n, head: H })), candidate: "forge-train/staging/x", candSha: "d".repeat(40), state: "validating", startedAt: Date.now() }] };
+    const train = createMergeTrain({ gh, repo: "o/r", batchSize: 4 });
+    const store = { load: () => ({ order: [1, 2], results: { 1: { issue: 1, outcome: "pr-ready", pr: 11 }, 2: { issue: 2, outcome: "pr-ready", pr: 12 } }, train: saved }), save: () => {}, log: () => {} };
+    await go({ issues: [1, 2], train, store, signal: ac.signal, runOne: async () => { throw new Error("must not relaunch"); } }).catch(() => {});
+    assert.ok(calls.some((a) => a.join(" ").includes("/check-runs")), "orchestrate restored the train and ticked it");
+    assert.ok(calls.some((a) => a.join(" ").includes("/check-runs")));
+    assert.ok(!calls.some((a) => a.join(" ").includes("git/refs") && a.includes("POST")), "candidate not rebuilt");
+    assert.equal(train.snapshot().batches.length, 1);
+  });
+});
+
+describe("merge train bisection culprit in the batch runner (#5838)", () => {
+  it("a culprit handback reaches settleLane with a merged-tree recovery note; only the culprit is requeued", async () => {
+    const w = world({ 10: ["pending", "green"], 11: ["pending", "green"] }); const real = createMergeTrain({ gh: w.gh, repo: "o/r" });
+    const culprit = { pr: 10, check: "build", url: "https://ci/batch", batch: "b1" };
+    const train = { ...real, tick: async () => {
+      if (!real.has(1)) return real.tick();
+      const entry = real.snapshot().entries.find((e) => e.issue === 1); real.drop(1);
+      return [{ kind: "handback", issue: 1, pr: 10, code: "ci.red", detail: "PR #10 broke the merged tree of train batch b1", entry, culprit }, ...await real.tick()];
+    } };
+    const runs = [], decisions = [], marks = [];
+    const rows = await go({ issues: [1, 2], train, recovery: { maxAttempts: 1 }, decide: (d) => decisions.push(d), markRecovering: async (x) => { marks.push(x); },
+      runOne: async (n) => { runs.push(n); return runs.filter((x) => x === n).length === 1 ? READY(n === 1 ? 10 : 11) : { terminalReason: "merged" }; } });
+    assert.deepEqual(runs.sort(), [1, 1, 2], "only the culprit gets a fix lane");
+    assert.deepEqual(marks.map((m) => [m.issue, m.code]), [[1, "ci.red"]]);
+    const why = decisions.find((d) => d.issue === 1 && /recovery lane for ci\.red/.test(d.what))?.why ?? "";
+    assert.match(why, /PR #10 broke the merged tree of train batch b1 \(required check build https:\/\/ci\/batch\), not its own head/);
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+  });
+  it("with no recovery budget the needs-human row carries the culprit and the merged-tree note", async () => {
+    const w = world({ 10: ["pending"] }); const real = createMergeTrain({ gh: w.gh, repo: "o/r" });
+    const train = { ...real, tick: async () => { const entry = real.snapshot().entries[0]; real.drop(1); return [{ kind: "handback", issue: 1, pr: 10, code: "ci.red", detail: "d", entry, culprit: { pr: 10, check: "build", url: null, batch: "b2" } }]; } };
+    const rows = await go({ issues: [1], train, recovery: { maxAttempts: 0 }, runOne: async () => READY(10) });
+    assert.equal(rows[0].outcome, "needs-human");
+    assert.deepEqual(rows[0].culprit, { pr: 10, check: "build", url: null, batch: "b2" });
+    assert.match(rows[0].detail, /^Recovery note: PR #10 broke the merged tree of train batch b2/);
+  });
+});
