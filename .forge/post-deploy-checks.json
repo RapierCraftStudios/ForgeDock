@@ -166,5 +166,23 @@
     "pass": "exit 0",
     "timeout": 120,
     "for": "7d"
+  },
+  "merge-train-ab-r7": {
+    "run": "test \"$(grep -c \"| pending |\" devdocs/decisions/5839-merge-train-default.md)\" -eq 0",
+    "pass": "exit 0",
+    "timeout": 60,
+    "for": "30d"
+  },
+  "merge-train-ab-r9": {
+    "run": "test \"$(grep -c \"| pending |\" devdocs/decisions/5839-merge-train-default.md)\" -eq 0",
+    "pass": "exit 0",
+    "timeout": 60,
+    "for": "30d"
+  },
+  "merge-train-ab-r11": {
+    "run": "test \"$(grep -c \"| pending |\" devdocs/decisions/5839-merge-train-default.md)\" -eq 0",
+    "pass": "exit 0",
+    "timeout": 60,
+    "for": "30d"
   }
 }

@@ -116,6 +116,24 @@ export function makeIo() {
 }
 
 /** forge.yaml `engine.ci_pending_max_minutes` from the cwd checkout; undefined when absent or invalid. */
+/**
+ * #5839: the merge-train A/B reader. Per batch: merged issues per wall-clock hour, slot-hours per merge (summed lane minutes / merged)
+ * and post-merge fix sessions (rows that are fix lanes for a merged PR). Compare a batch with orchestration.merge_train on against off at equal parallelism.
+ */
+export function mergeThroughput(rows, wallMs) {
+  const list = Array.isArray(rows) ? rows : [];
+  const merged = list.filter((r) => r?.outcome === "merged").length;
+  const slotHours = list.reduce((n, r) => n + (Number(r?.minutes) || 0), 0) / 60;
+  const fixes = list.filter((r) => r?.postMergeFix === true || /post-merge fix|broke the merged tree/i.test(String(r?.detail ?? ""))).length;
+  const hours = Number(wallMs) > 0 ? wallMs / 3600000 : null;
+  return { merged, perHour: hours && merged ? Math.round((merged / hours) * 100) / 100 : null, slotHoursPerMerge: merged ? Math.round((slotHours / merged) * 100) / 100 : null, postMergeFixSessions: fixes };
+}
+export function formatMergeThroughput(rows, wallMs) {
+  const t = mergeThroughput(rows, wallMs);
+  if (!t.merged) return null;
+  return `throughput: merged ${t.merged}, ${t.perHour ?? "n/a"}/hour, slot-hours per merge ${t.slotHoursPerMerge ?? "n/a"}, post-merge fix sessions ${t.postMergeFixSessions}`;
+}
+
 export function readCiPendingMaxMinutes(cwd = process.cwd()) {
   try {
     const n = Number(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.ci_pending_max_minutes);
@@ -2341,6 +2359,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   try { heavyStats = deps.heavyStats !== undefined ? deps.heavyStats : (await import("./lean/heavy.mjs")).openHeavy(schedMod.schedDir()).stats(); } catch { heavyStats = null; }
   const trainLine = train ? (await import("./lean/mergetrain.mjs")).formatTrainSummary(train.stats()) : null; // #5836
   if (trainLine) report.push(trainLine);
+  { const tl = formatMergeThroughput(rows, Date.now() - (Date.parse(batch.startedAt ?? batch.started_at ?? "") || NaN)); if (tl) report.push(tl); } // #5839
   const waitLine = formatWaitSummary(rows, heavyStats);
   if (waitLine) report.push(waitLine);
   report.push(formatLedgerSummary(rows)); // #4908: per-phase wall time, n/a without ledger rows
