@@ -28,7 +28,8 @@ import { areaOf, acquireHotArea, countCounters } from "./hotarea.mjs"; // #5751
 import { isEnvValidateFailure, outputTail, contractRuleCounts, onlyTestPlanProblems, isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, applyRequirementDecisions, dedupeAddRequirements, loneE2eRows, reproEnvMiss, resolveForgedockPaths, resolvingIo, portableForgedockPaths, FORGEDOCK_CHECKS_VAR, FORGEDOCK_ENTRY_VAR, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment, prodFailureSignal } from "./prefilter.mjs";
-import { writeStatus, postUpsert, isStatusPost, isUpsertPost, hasSection, clearPipelineLabels } from "./statuscomment.mjs";
+import { validateAmendments } from "./attempts.mjs";
+import { writeStatus, postUpsert, postKeyed, isKeyedPost, isStatusPost, isUpsertPost, hasSection, clearPipelineLabels } from "./statuscomment.mjs";
 import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs";
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
@@ -473,6 +474,9 @@ export async function runCore(o) {
     }
     if (on === issue && isUpsertPost(marker)) { // one comment edited in place across requeues (the marker still leads the body)
       return postUpsert({ gh: ghw, repo, issue: on, markers: marker, body, comments: iss?.comments, cap: capComment });
+    }
+    if (on === issue && isKeyedPost(marker)) { // #5986: one comment per (kind, content hash) with a repeat counter; at 12 engine comments edit in place only
+      return postKeyed({ gh: ghw, repo, issue: on, marker: Array.isArray(marker) ? marker[0] : marker, body, cap: capComment });
     }
     const marks = (Array.isArray(marker) ? marker : [marker]).map((m) => `<!-- ${m} -->`).join("\n");
     const out = String(await ghw(["issue", "comment", String(on), "-R", repo, "--body", capComment(`${marks}\n${body}`)])).trim();
@@ -3514,9 +3518,9 @@ export async function runCore(o) {
         domainsLogged = domains.join(",");
         ev({ event: "REVIEW_DOMAINS", domains, enforced: dHits.length ? dHits : undefined, ...(pd === null ? { error: "roster.failed" } : {}) });
       }
-      if (!amendFixed && sessionId && amendmentKindProblems(result?.amendments).length) { // #5089: one in-lane correction, outside the conformance resume budget
+      if (!amendFixed && sessionId && validateAmendments(result?.amendments).length) { // #5089/#5986: one in-lane correction (the shared amendment schema), outside the conformance resume budget; a still-invalid shape is never posted
         amendFixed = true;
-        const bad = amendmentKindProblems(result.amendments);
+        const bad = validateAmendments(result.amendments);
         T.decisions.push(`Amendment kinds invalid (${bad.length}); builder asked to correct ${RESULT_FILE} once`);
         await builder(++attemptN, amendmentCorrectionPrompt(bad), sessionId, false, undefined, { mode: "resume", trigger: "contract_correction" });
         result = (await readResult()) ?? result;

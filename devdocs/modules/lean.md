@@ -3696,3 +3696,13 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 
 - `closed` resolves as soon as `close()` finishes, before `selfStop()` has spawned and probed the successor. `selfStop` now keeps its whole async body (close, spawn, wait for listening, retry, rehost) as one promise, and the `startDaemon` handle gains an additive `settled()` (`selfStopping ?? closed`, so idle and lost-lock closes settle via `closed`).
 - `scheddFromCli` awaits `d.settled?.()` after `d.closed`, and in the rehosted follow loop awaits each `cur.closed` then `cur.settled?.()` before reading `stopCode` and exiting. A unitless handover no longer exits(1) with no daemon. Under a unit the exit path is unchanged.
+
+## Entry 2026-11-25 — per-issue attempts ledger, input-hash admission, escalation, keyed upserts (#5986)
+
+- `bin/lean/attempts.mjs` holds the ledger `{attempts, signatures[], lastInputHash, spend}` per issue: the batch `state.json` `attempts` map (cache) and one hidden `<!-- FORGE:ATTEMPTS {json} -->` comment (register). `releaseHeld`, `--requeue` and `--set-env` never touch it, so it survives `--resume` and a schedd restart.
+- `orchestrate` takes an `attempts` seam (`makeAttemptsSeam`, wired in `engine-cli.mjs`; off under test seams). A final failed lane (`needs-human`, `engine-error`, `budget-exceeded`, `failed`) is recorded with its failure signature; a missing ledger or an unreadable input always admits (a merged-first-try issue sees nothing).
+- Readmission (needs-human label removed, engine/env change) calls `gateAdmit`: the same input hash after a failure is refused with `loop.no_new_input` (one note per hash, the label is put back). The hash covers title+body, labels without needs-human, trusted FORGE:DECISION comments, engine and sandbox major.minor and the contract hash (null today: the contract is frozen inside the lane).
+- Lifetime budget `orchestration.max_attempts_per_issue` (4) and `max_identical_signature` (2, the 3rd identical signature breaches): on breach one `FORGE:ESCALATION` comment (upserted), `needs-human`, dependents held by the existing root hold, no lanes until the hash changes.
+- `statuscomment.postKeyed` upserts FORGE:AMENDMENT/NEEDS_HUMAN/FACTS by (kind, content hash) with an `n=` counter; at 12 trusted engine comments it edits the newest comment of that kind in place and posts nothing new.
+- `validateAmendments` is the shared amendment schema (kind checks plus field types); the lane returns a rejected shape to the builder once and a still-invalid one is never applied or posted.
+- `forgedock stats --attempts` reports lanes per merged issue and engine comments per issue from local batch files.
