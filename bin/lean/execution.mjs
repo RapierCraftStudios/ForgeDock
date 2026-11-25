@@ -178,7 +178,7 @@ const KEEP_DAYS = 7;
 
 /**
  * The execution budget (#4255). `record(key, {minutes, cost_usd})` adds one lane attempt to today's host total; the key
- * (`<batch>#<sandbox id>#<startedAt>`) makes a repeated record a no-op. `admit({minutes, cost_usd, running})` gets the
+ * (`<batch>#<sandbox id>`) holds one entry per sandbox with its latest cumulative usage (#5987); an identical repeat is a no-op. `admit({minutes, cost_usd, running})` gets the
  * batch's settled + running usage (`running` the running part alone) and refuses once a batch cap, or a day cap with
  * today's host total plus this batch's running usage, is reached. A corrupt or unreadable day file refuses while a day
  * cap is set (a hard cap fails closed) and is ignored otherwise; it is never overwritten.
@@ -207,8 +207,10 @@ export function openExecutionBudget({ budget = {}, file = executionBudgetFile(),
       const r = read();
       if (!r.ok) return false;
       const d = utcDay(now()), today = { ...(r.days[d] ?? {}) };
-      if (today[key]) return false;
-      today[key] = { minutes: nonNeg(u?.minutes) ?? 0, cost_usd: nonNeg(u?.cost_usd) ?? 0, at: now() };
+      // #5987: one entry per key, holding the latest cumulative usage of that sandbox (a repeated sample replaces, never adds)
+      const m = nonNeg(u?.minutes) ?? 0, c = nonNeg(u?.cost_usd) ?? 0;
+      if (today[key] && today[key].minutes === m && today[key].cost_usd === c) return false;
+      today[key] = { minutes: m, cost_usd: c, at: now() };
       const days = { [d]: today };
       for (const [k, v] of Object.entries(r.days)) if (k !== d && Date.parse(k) > now() - KEEP_DAYS * 86400000) days[k] = v;
       writeAtomic(file, JSON.stringify({ v: 1, days }, null, 2) + "\n");

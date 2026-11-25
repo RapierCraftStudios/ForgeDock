@@ -642,6 +642,13 @@ describe("execution budget and sandbox cost (#4255)", () => {
     const a = openExecutionBudget({ budget: { dayMinutes: 15 }, file, now });
     assert.equal(a.record("b1#fdsbx-1#100", { minutes: 10, cost_usd: 1 }), true);
     assert.equal(a.record("b1#fdsbx-1#100", { minutes: 10, cost_usd: 1 }), false);
+    // #5987: cumulative samples of one sandbox are one entry holding the latest usage; the day sum tracks the log's minutes
+    const u = openExecutionBudget({ budget: {}, file: join(tmpDir("exec-up-"), "b.json"), now });
+    for (const m of [1, 2, 3, 5, 8, 10]) u.record("b2#fdsbx-2", { minutes: m, cost_usd: m / 10 });
+    u.record("b2#fdsbx-3", { minutes: 20, cost_usd: 2 });
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(u.file, "utf8")).days["2026-10-20"]).sort(), ["b2#fdsbx-2", "b2#fdsbx-3"]);
+    const logMinutes = 10 + 20;
+    assert.ok(Math.abs(u.dayTotals().minutes - logMinutes) <= logMinutes * 0.05);
     const b = openExecutionBudget({ budget: { dayMinutes: 15 }, file, now }); // a fresh daemon
     assert.deepEqual(b.dayTotals(), { ok: true, day: "2026-10-20", minutes: 10, cost_usd: 1 });
     assert.equal(b.admit({ minutes: 0, cost_usd: 0, running: { minutes: 0, cost_usd: 0 } }).ok, true);

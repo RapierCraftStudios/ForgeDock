@@ -3696,3 +3696,22 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 
 - `closed` resolves as soon as `close()` finishes, before `selfStop()` has spawned and probed the successor. `selfStop` now keeps its whole async body (close, spawn, wait for listening, retry, rehost) as one promise, and the `startDaemon` handle gains an additive `settled()` (`selfStopping ?? closed`, so idle and lost-lock closes settle via `closed`).
 - `scheddFromCli` awaits `d.settled?.()` after `d.closed`, and in the rehosted follow loop awaits each `cur.closed` then `cur.settled?.()` before reading `stopCode` and exiting. A unitless handover no longer exits(1) with no daemon. Under a unit the exit path is unchanged.
+
+## Efficiency ledger and SLOs (#5987)
+
+`bin/lean/efficiency.mjs` folds `log.jsonl` + batch state + the schedd's per-pass pool sample into `<batch>/efficiency.json` (`v:1`) every `watchPass`; `bin/lean/slo.mjs` evaluates breaches and files them. Both are advisory (never throw, never change dispatch). `forgedock status --batch <id>` prints `efficiency: 3/12 lanes (25%) - limiter <causes>; N SLO breaches -> FD#NNNN` from the file.
+
+`efficiency.json` keys: `concurrency {achieved, ceiling, ratio, windowMin:15, running, ready, lowSinceMin}` (time-weighted); `idle {slotMinutes, byCause, share}` (causes: capacity, lease-held, base.red, hold, breaker, auth-pause, no-ready); `limiters`; `attemptsPerMerged`, `merged`; `commentsPerIssue {max, issues}`; `repeats [{signature, count, issues}]`; `interventionsPerDay` (decision/set/requeue/hold/restart rows); `capacityRefusalsPerHour`; `phases {id: {p50, p90, baselineP90, ratio}}`; `mergedPerHour`; `wastedLaneHours {laterMerged, neverMerged}`; `usdPerMerge`; `samples` (24 h ring); `slo.sigs` (filing state); `breaches`.
+
+| SLO (`orchestrate.slo.*`) | default | code |
+| --- | --- | --- |
+| `concurrency_min` for `concurrency_minutes` while ready>0 | 0.6 / 30 | concurrency |
+| `repeat_max` identical failure signature | 3 | repeat |
+| `attempts_max` per merged issue (24 h) | 2 | attempts |
+| `comments_max` per issue | 20 | comments |
+| `interventions_max` per day | 6 | interventions |
+| `phase_ratio_max` p90 vs baseline | 1.5 | phase |
+| `capacity_refusals_max` per hour | 20 | capacity |
+| `idle_share_max` per cause (not no-ready) | 0.2 | idle-<cause> |
+
+Filing: `file_issues` is **default off** (breaches are still written to efficiency.json). When on, each signature `slo:<code>:<repo>` gets one `engine-gap` issue in `orchestrate.slo.repo` (default RapierCraftStudios/ForgeDock), found by a `forge-slo` marker so a restart adopts rather than duplicates; a re-breach appends a counter comment at most once per 6 h; 24 h green closes it. `bin/introspect-schedule.mjs` installs the daily introspect timer (only while `file_issues` is on). The execution budget (`execution-budget.json`) now keeps one entry per `<batch>#<sandbox id>` holding its latest cumulative usage.
