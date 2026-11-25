@@ -3,6 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { computeEfficiency, efficiencyLine, concurrencyOver, idleCause, operatorEvents } from "./efficiency.mjs";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { evaluateSlo, DEFAULT_SLO } from "./slo.mjs";
 
 const NOW = Date.parse("2026-11-24T12:00:00Z"), MIN = 60000;
@@ -67,8 +68,8 @@ describe("#5987 efficiency ledger", () => {
   });
 
   it("operatorEvents reads requeue, hold-info and parallel files", async () => {
-    const { mkdtempSync, writeFileSync } = await import("node:fs"), { tmpdir } = await import("node:os"), { join } = await import("node:path");
-    const d = mkdtempSync(join(tmpdir(), "opev-"));
+    const { writeFileSync } = await import("node:fs"), { join } = await import("node:path");
+    const d = tmpDir("opev-");
     writeFileSync(join(d, "requeue"), JSON.stringify([{ issue: 4, at: iso(5) }, { issue: "x" }]));
     writeFileSync(join(d, "hold-info"), JSON.stringify({ 5: { owner: "operator", since: iso(4) }, 6: { owner: "engine", since: iso(3) } }));
     writeFileSync(join(d, "parallel"), "4\n");
