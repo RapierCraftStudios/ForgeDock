@@ -67,7 +67,7 @@ import { reserveForBuild, revalidate } from "./seqreserve.mjs";
 import { patchEcho, mutationsOf, runReproMutations, classifyRepro } from "./reproquality.mjs";
 import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, amendmentCorrectionPrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, docsPlanNote, pagePlanNote, contextPackNote, buildOpeningNote, sequenceBuildRule, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, routeDigestPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
-import { classifyBaseRed, attribute as attributeBaseRed, runOnBase, reportBaseRed } from "./basered.mjs"; // #5239
+import { classifyBaseRed, attribute as attributeBaseRed, runOnBase, reportBaseRed, recordBaseVerdict } from "./basered.mjs"; // #5239
 import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
 import { parseProdParity, prodParityFailures as prodParityOf } from "./prodparity.mjs";
 import { routePathsFromFiles, routeReachabilityFailures } from "./routecheck.mjs";
@@ -3138,6 +3138,7 @@ export async function runCore(o) {
       const cmds = baseRed.map((f) => f.command), outputs = Object.fromEntries(cmds.map((c) => [c, tailOf(c)]));
       const n = await reportBaseRed({ ghc: ghw, repo, base, att, laneIssue: issue, commands: cmds, outputs, baseSha, commitDate });
       T.decisions.push(`Guard command(s) ${cmds.map((c) => `\`${c}\``).join(", ")} also fail on ${base}${att ? ` (last change ${att.sha.slice(0, 12)}${att.issue ? `, #${att.issue}` : ""})` : ""}; lane deferred behind ${n ? `#${n}` : "the base fix"}`);
+      recordBaseVerdict({ repo, base, sha: baseSha, red: true, att, commands: cmds, outputs }); // #5992: later lanes and the dispatcher's probe reuse this verdict
       ev({ event: "BASE_RED", commands: cmds, output: cmds.map((c) => tailOf(c).slice(-500)), sha: att?.sha ?? null, issue: att?.issue ?? null, tracked: n });
       return await finish("deferred", `base ${base} is red on guard command(s) ${cmds.join(", ")}; deferred behind ${n ? `#${n}` : "the base fix"}`, { code: OUTCOME_CODES.BASE_RED, retryInSeconds: 900 }, OUTCOME_CODES.BASE_RED);
     }

@@ -183,7 +183,7 @@ export const HOST_BUSY_RETRY_S = 60;
 // #4528: a busy host or a full sandbox pool is a wait, not a failure: requeued after its retry-in, never capped.
 // A lane that could not be resolved because gh/git failed (network blip) is the same kind of wait (#4791).
 // #4788: an unreachable pool is a wait too (the lane already retried for unreachable_window_min); a stall is reported by poolStall.
-const UNCAPPED_DEFERRALS = new Set(["host.busy", "sandbox.capacity", "sandbox.unreachable", "sandbox.repo_missing", "lane.unresolved"]);
+const UNCAPPED_DEFERRALS = new Set(["host.busy", "sandbox.capacity", "sandbox.unreachable", "sandbox.repo_missing", "lane.unresolved", "base.red"]); // #5992: a red base is the base's wait, never the issue's
 export const POOL_OFFLINE_ALERT_MIN = 10;
 // #5112: `sandbox.capacity` deferrals of one issue after which `execution.fallback_local` runs it on the host (headroom permitting).
 export const CAPACITY_FALLBACK_AFTER = 3;
@@ -337,7 +337,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
  */
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), blockedRefreshMs = 60000, onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000, getClearBreaker = null, consumeClearBreaker = null, ackClearBreaker = null,
-  classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
+  classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null, baseProbe = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getPause = null, expirePause = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
   getChildren = null, autoChildren = null, baseWait = null, rotator = null, stacking = "off", readPrReady = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null, envHold = null, envIssue = null, logicalDeps = null,
@@ -405,6 +405,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const quota = toMap(saved?.quota); // issue -> {cost_usd, minutes, resumeAt (epoch ms), rotations}
   let tripped = saved?.breaker ?? null;
   let pfAll = false, pfRemote = false, pfNoted = new Set(); // #4866: lane preflight holds
+  let baseRedHold = null; // #5992: {sha, issue, detail}: the base is red; only the attributed fixer is admitted until the sha moves or the guard passes
   let opHeld = new Set(); // #4592: operator-held issues this pass (the batch `hold` file is the authority)
   const opHeldHit = new Set(); // held issues that were pending this pass
   let opPause = null, pauseHit = false; // #5975: the batch-level pause (the `pause` file is the authority); pauseHit: an issue was pending behind it this pass
@@ -1902,10 +1903,22 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         if (pfNoted.size && !keys.size) update({ issue: null, outcome: "preflight", detail: "preflight cleared; admissions resumed" });
         pfNoted = keys;
       }
+      // #5992: one dispatcher probe per (repo, base sha) while lanes wait; red holds every admission but the attributed fixer's.
+      if (baseProbe && !tripped && !cancelled && !holdUntil && pending.length) {
+        let v = null;
+        try { v = await baseProbe(); } catch { v = null; }
+        if (v?.red) {
+          const issue = Number.isInteger(v.att?.issue) ? v.att.issue : null;
+          const detail = `base.red: base ${String(v.sha).slice(0, 12)} is red on ${(v.commands ?? []).join(", ") || "a guard command"}${v.att ? `; last change ${String(v.att.sha).slice(0, 12)}${issue ? ` (#${issue})` : ""}` : ""}; admissions paused until the base moves`;
+          if (baseRedHold?.sha !== v.sha) update({ issue: null, outcome: "preflight", code: "base.red", detail });
+          baseRedHold = { sha: v.sha, issue, detail };
+        } else if (baseRedHold) { update({ issue: null, outcome: "preflight", detail: "base.red cleared; admissions resumed" }); baseRedHold = null; }
+      }
       let planPass = false; // #5831: the plan pass evaluates every other gate but the in-batch dependencies
       await gateEnvSigs(); // #5755
       const isReady = (n) => {
         if (pfAll || (pfRemote && isRemote(n))) return false;
+        if (baseRedHold && n !== baseRedHold.issue) return false; // #5992
         if (opPause) { pauseHit = true; return false; } // #5975: every admission path (dependency merge, env/engine re-admit, requeue, add, recovery) ends here
         if (opHeld.has(n)) { opHeldHit.add(n); return false; }
         if (blocked.has(n)) { blockedHit.add(n); return false; } // #4773
@@ -2050,7 +2063,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (pending.some((n) => remoteCapped.has(n))) wake = Math.min(wake ?? pollMs, pollMs); // #5138: a live --set-max-remote raise
       if ((getAdded || getRequeued || (getChildren && addsEpicChildren(autoChildren?.mode))) && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408/#4550: an add or requeue while only lanes run
       if (getRequeued && pending.some((n) => quota.has(n) || notBefore.has(n))) wake = Math.min(wake ?? pollMs, pollMs); // #5203: a --requeue releasing a quota pause
-      if ((pfAll || pfRemote) && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #4866
+      if ((pfAll || pfRemote || baseRedHold) && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #4866
       if (baseWait && pending.length && baseHeld.size) wake = Math.min(wake ?? pollMs, pollMs); // #5031: a landed commit releases on the next tick
       if (getBlocked && pending.length && blockedHit.size) wake = Math.min(wake ?? pollMs, pollMs); // #4773: a removed label releases on the next tick
       if (getHeld && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4592: a release while only lanes run
@@ -2066,7 +2079,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       } else if (started) continue; // only lane-refused rows settled (synchronously): re-resolve skips first
       else if (train?.size()) await nap(wake ?? trainEveryMs); // #5836: only train-held PRs are left: poll the train
       else if (pending.length && offered.size) await nap(wake); // waiting for a host slot
-      else if (pending.length && (pfAll || pfRemote)) await nap(Math.min(wake ?? pollMs, pollMs)); // #4866: a failing lane preflight is re-checked on the next poll
+      else if (pending.length && (pfAll || pfRemote || baseRedHold)) await nap(Math.min(wake ?? pollMs, pollMs)); // #4866: a failing lane preflight is re-checked on the next poll
       else if (pending.length && blockedHit.size) await nap(wake ?? pollMs); // #4773: only blocked issues wait: poll for the label's removal
       else if (pending.length && baseHit.size) await nap(wake ?? pollMs); // #5031: only issues waiting for a base commit: poll for it
       else if (pending.length && waits.length) await nap(Math.min(wake, getCancelled ? pollMs : Infinity)); // wake is poll-capped by a hold or a live K; #4454: nap wakes on a stop

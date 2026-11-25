@@ -158,3 +158,47 @@ async function fileBaseRed({ ghc, repo, att, body, title, key, commitDate }) {
     return n ? Number(n[1]) : null;
   } catch { return null; }
 }
+
+// #5992: one red-base verdict per (repo, base ref), valid for BASE_PROBE_TTL_MS and only while the base sha is unchanged.
+export const BASE_PROBE_TTL_MS = 10 * 60 * 1000;
+const probeCache = new Map();
+const probeKey = (repo, base) => `${repo ?? ""}\u0000${base}`;
+
+/** Cached verdict `{red, sha, att, commands, outputs}` for (repo, base) at `sha`; null on a miss, an expired entry or a moved sha. */
+export function cachedBaseVerdict({ repo, base, sha, now = Date.now(), ttlMs = BASE_PROBE_TTL_MS } = {}) {
+  const e = probeCache.get(probeKey(repo, base));
+  if (!e || !sha || e.sha !== sha || now - e.at >= ttlMs) return null;
+  return e.verdict;
+}
+
+/** Record a verdict for (repo, base) at `sha` (a lane's guardRed shares its red result so later lanes and the dispatcher skip the probe). */
+export function recordBaseVerdict({ repo, base, sha, red, att = null, commands = [], outputs = {}, now = Date.now() } = {}) {
+  if (!sha) return null;
+  const verdict = { red: !!red, sha, att, commands, outputs };
+  probeCache.set(probeKey(repo, base), { sha, at: now, verdict });
+  return verdict;
+}
+
+export function clearBaseVerdicts() { probeCache.clear(); }
+
+/**
+ * #5992: the dispatcher's one probe per (repo, base sha). `readSha()` gives the current base sha; a fresh cache entry for it is
+ * returned as is, otherwise `commands` run once on the base (runOnBase) and the verdict, with its attribution, is cached.
+ * Never throws; null when the sha or the base run gives no evidence (a timeout or env failure is not a red base).
+ */
+export async function probeBase({ repo, base, commands = [], readSha, git, runCommand, cwd, env, timeoutMs, now = Date.now(), ttlMs = BASE_PROBE_TTL_MS, fs = nodeFs } = {}) {
+  try {
+    if (!commands.length) return null;
+    const sha = String((await readSha()) ?? "").trim();
+    if (!sha) return null;
+    const hit = cachedBaseVerdict({ repo, base, sha, now, ttlMs });
+    if (hit) return hit;
+    const baseRuns = await runOnBase({ commands, git, runCommand, mergeBase: sha, cwd, env, timeoutMs, fs });
+    const { baseRed } = classifyBaseRed({ failed: commands.map((command) => ({ command })), baseRuns });
+    if (!baseRuns.length) return null;
+    const cmds = baseRed.map((f) => f.command);
+    const att = cmds.length ? await attribute({ failed: baseRuns.filter((b) => cmds.includes(b.command)), git, base: sha }) : null;
+    const outputs = Object.fromEntries(baseRuns.filter((b) => cmds.includes(b.command)).map((b) => [b.command, b.output]));
+    return recordBaseVerdict({ repo, base, sha, red: cmds.length > 0, att, commands: cmds, outputs, now });
+  } catch { return null; }
+}

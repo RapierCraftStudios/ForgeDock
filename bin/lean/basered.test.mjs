@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { classifyBaseRed, baseRedPaths, issueOf, attribute, runOnBase, reportBaseRed } from "./basered.mjs";
+import { classifyBaseRed, baseRedPaths, issueOf, attribute, runOnBase, reportBaseRed, probeBase, cachedBaseVerdict, recordBaseVerdict, clearBaseVerdicts, BASE_PROBE_TTL_MS } from "./basered.mjs";
 
 const SHA = "13834f1c51".padEnd(40, "0");
 
@@ -115,5 +115,58 @@ describe("reportTrainBaseRed (#5838)", () => {
     const body = cr[cr.indexOf("--body") + 1];
     assert.match(body, /FORGE:BASE_RED/); assert.match(body, /`build` https:\/\/ci\/1/); assert.match(body, /batch b1/); assert.doesNotMatch(body, /Lane #/);
     assert.match(cr[cr.indexOf("--title") + 1], /staging is red on required check build/);
+  });
+});
+
+describe("base probe cache (#5992)", () => {
+  const SHA2 = "2".repeat(40);
+  const mk = (sha, rc = 1) => {
+    const calls = { run: 0 };
+    const git = async (a) => (a[0] === "rev-parse" ? sha : a[0] === "log" ? `${sha}\x1ffix: x (#7)\x1f` : "");
+    const runCommand = async () => { calls.run++; return { rc, output: "tests/guard.test.mjs failed" }; };
+    return { calls, git, runCommand, readSha: async () => sha };
+  };
+  const base = { repo: "o/r", base: "staging", commands: ["guard"], cwd: process.cwd(), timeoutMs: 1000 };
+
+  it("hit within the TTL: one probe run serves every later call and carries the attribution", async () => {
+    clearBaseVerdicts();
+    const m = mk(SHA);
+    const a = await probeBase({ ...base, ...m, now: 1000 });
+    const b = await probeBase({ ...base, ...m, now: 1000 + BASE_PROBE_TTL_MS - 1 });
+    assert.equal(m.calls.run, 1);
+    assert.equal(a.red, true);
+    assert.deepEqual(b, a);
+    assert.equal(b.att.issue, 7);
+  });
+
+  it("miss after the TTL", async () => {
+    clearBaseVerdicts();
+    const m = mk(SHA);
+    await probeBase({ ...base, ...m, now: 1000 });
+    await probeBase({ ...base, ...m, now: 1000 + BASE_PROBE_TTL_MS });
+    assert.equal(m.calls.run, 2);
+  });
+
+  it("miss when the base sha moves; a green base is cached as not red", async () => {
+    clearBaseVerdicts();
+    const m = mk(SHA);
+    await probeBase({ ...base, ...m, now: 1000 });
+    const m2 = mk(SHA2, 0);
+    const v = await probeBase({ ...base, ...m2, now: 1001 });
+    assert.equal(m2.calls.run, 1);
+    assert.equal(v.red, false);
+    assert.equal(cachedBaseVerdict({ repo: "o/r", base: "staging", sha: SHA, now: 1002 }), null);
+  });
+
+  it("a lane's recorded red verdict is reused without a probe run; an env failure is no verdict of red", async () => {
+    clearBaseVerdicts();
+    recordBaseVerdict({ repo: "o/r", base: "staging", sha: SHA, red: true, commands: ["guard"], now: 5 });
+    const m = mk(SHA);
+    assert.equal((await probeBase({ ...base, ...m, now: 6 })).red, true);
+    assert.equal(m.calls.run, 0);
+    clearBaseVerdicts();
+    const env = mk(SHA);
+    env.runCommand = async () => ({ rc: 1, output: "ModuleNotFoundError: x" });
+    assert.equal((await probeBase({ ...base, ...env, now: 7 })).red, false);
   });
 });
