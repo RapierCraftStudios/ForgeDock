@@ -2332,6 +2332,19 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const hostIo = await laneCheck.hostLaneIo({ env });
     preflight = async () => (await laneCheck.runLaneChecks({ exec: execForNeeds, env, io: hostIo })).filter((c) => !c.ok);
   }
+  // #5992: the base is probed once per (repo, base sha) on the dispatcher, before any sandbox launch; a red verdict holds admissions.
+  let baseProbe = deps.baseProbe === undefined ? null : deps.baseProbe;
+  const guardCmds = readInvariants(cwd) ?? [];
+  if (deps.baseProbe === undefined && !testDeps && guardCmds.length) {
+    const { probeBase } = await import("./lean/basered.mjs"), { runCheckCommand } = await import("./lean/effects.mjs");
+    const baseRef = readBranches(cwd).staging ?? readBranches(cwd).default ?? "main", vcfg = readVerify(cwd) ?? {};
+    const gitIn = (a) => leanIo.git(a, { cwd });
+    const readSha = async () => {
+      try { const m = String(await gitIn(["ls-remote", "origin", `refs/heads/${baseRef}`])).trim().split(/\s+/)[0]; if (/^[0-9a-f]{40}$/.test(m)) { await gitIn(["fetch", "origin", baseRef]).catch(() => ""); return m; } } catch { /* offline: the local ref */ }
+      return gitIn(["rev-parse", `origin/${baseRef}`]);
+    };
+    baseProbe = () => probeBase({ repo, base: baseRef, commands: guardCmds, readSha, git: gitIn, runCommand: runCheckCommand, cwd, env, timeoutMs: (vcfg.precheckTimeoutSeconds ?? 300) * 1000 });
+  }
   const { hostMissingTools } = await import("./lean/toolplace.mjs");
   const envHold = deps.envHold !== undefined ? deps.envHold : testDeps ? null : {
     version: () => scheddMod.readInstalledVersion() ?? ENGINE_VERSION,
@@ -2386,6 +2399,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       ...(estimate ? { estimate } : {}),
       beforeAdmit,
       ...(preflight ? { preflight } : {}),
+      ...(baseProbe ? { baseProbe } : {}),
       ...(orch.blockedLabel ? { getBlocked: async () => JSON.parse(await leanIo.gh(["issue", "list", "-R", repo, "--label", orch.blockedLabel, "--state", "open", "--limit", "200", "--json", "number"])).map((x) => x.number) } : {}), // #4773
       trusted: (n) => trustedOf.get(n) === true,
       autoChildren,
