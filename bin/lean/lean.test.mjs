@@ -10132,3 +10132,16 @@ describe("#5820 required CI checks run in the lane before the PR opens", () => {
     assert.equal(readLog(dir, 7).filter((e) => /^CI_PRECHECK/.test(e.event)).length, 0);
   });
 });
+
+describe("#5992 verify.guard_bypass: a lane clear of the red guard's files proceeds", () => {
+  it("bypasses only when opted in and the lane diff misses the guarded files", async () => {
+    for (const opt of [false, true]) {
+      const w = world(), git = w.io.git;
+      w.io.runCommand = async () => ({ rc: 1, output: "bare 429 at app/routers/listing_feeds.py" });
+      w.io.git = async (a, o) => a[0] === "log" && a.includes("--format=%H%x1f%s%x1f%b") ? `${"a".repeat(40)}\x1ffeat: feeds (#39805)\x1f` : a[0] === "diff" && a.includes("--name-only") ? "docs/readme.md\n" : git(a, o);
+      const r = await run(w, { verify: { invariants: ["bash scripts/guard.sh"], ...(opt ? { guardBypass: true } : {}) } });
+      if (opt) assert.notEqual(r.code, "base.red", "bypassed");
+      else assert.equal(r.code, "base.red", "default stays deferred (#5239)");
+    }
+  });
+});

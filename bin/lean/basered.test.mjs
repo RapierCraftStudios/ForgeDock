@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { classifyBaseRed, baseRedPaths, issueOf, attribute, runOnBase, reportBaseRed, probeBase, cachedBaseVerdict, recordBaseVerdict, clearBaseVerdicts, BASE_PROBE_TTL_MS } from "./basered.mjs";
+import { classifyBaseRed, baseRedPaths, issueOf, attribute, runOnBase, reportBaseRed, probeBase, bypassesGuard, cachedBaseVerdict, recordBaseVerdict, clearBaseVerdicts, BASE_PROBE_TTL_MS } from "./basered.mjs";
 
 const SHA = "13834f1c51".padEnd(40, "0");
 
@@ -168,5 +168,19 @@ describe("base probe cache (#5992)", () => {
     const env = mk(SHA);
     env.runCommand = async () => ({ rc: 1, output: "ModuleNotFoundError: x" });
     assert.equal((await probeBase({ ...base, ...env, now: 7 })).red, false);
+  });
+});
+
+describe("#5992: path-scoped guard bypass", () => {
+  const att = { sha: "a".repeat(40), files: ["src/guard.mjs", "tests/dir"] };
+  it("bypasses a lane clear of the guarded surface", () => assert.equal(bypassesGuard({ laneFiles: ["docs/a.md"], att }), true));
+  it("does not bypass when the lane touches a named file or a file under a named dir", () => {
+    assert.equal(bypassesGuard({ laneFiles: ["docs/a.md", "src/guard.mjs"], att }), false);
+    assert.equal(bypassesGuard({ laneFiles: ["tests/dir/x.mjs"], att }), false);
+  });
+  it("does not bypass without a known surface or lane diff, or on a sibling-prefix name", () => {
+    assert.equal(bypassesGuard({ laneFiles: ["a"], att: null }), false);
+    assert.equal(bypassesGuard({ laneFiles: [], att }), false);
+    assert.equal(bypassesGuard({ laneFiles: ["tests/directory.mjs"], att }), true);
   });
 });

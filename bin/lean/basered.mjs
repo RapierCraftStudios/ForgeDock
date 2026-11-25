@@ -202,3 +202,14 @@ export async function probeBase({ repo, base, commands = [], readSha, git, runCo
     return recordBaseVerdict({ repo, base, sha, red: cmds.length > 0, att, commands: cmds, outputs, now });
   } catch { return null; }
 }
+
+/**
+ * #5992: a lane that touches none of the files the red guard names (the attributed `att.files`) may bypass the base.red hold;
+ * the guard is re-run on the merged tree at merge. False without both a known surface and a known lane diff (never guess a bypass).
+ */
+export function bypassesGuard({ laneFiles = [], att = null } = {}) {
+  const surface = (att?.files ?? []).map((f) => String(f).replace(/^\.\//, "").replace(/\/+$/, "")).filter(Boolean);
+  const lane = (laneFiles ?? []).map((f) => String(f).trim().replace(/^\.\//, "")).filter(Boolean);
+  if (!surface.length || !lane.length) return false;
+  return !lane.some((f) => surface.some((s) => f === s || f.startsWith(`${s}/`)));
+}
