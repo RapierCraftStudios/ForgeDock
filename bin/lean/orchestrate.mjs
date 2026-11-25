@@ -920,17 +920,19 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   };
   // #5988: engine-errors with one host-bound signature on one agent are counted per (signature, agent): at the breaker's threshold only that
   // agent is quarantined (its cache reseeded once); the batch breaker never sees them, so unaffected agents keep admitting.
-  const scopedSeen = new Map(), quarantined = new Set(), reseeded = new Set();
+  const scopedSeen = new Map(), quarantined = new Map(), reseeded = new Set(); // quarantined: key -> until
   const scopedEngineError = async (agent, sig) => {
-    const t = now(), key = `${sig}|${agent}`, win = [...(scopedSeen.get(key) ?? []).filter((x) => t - x < breaker.window_min * 60000), t];
+    const t = now(), key = `${sig}|${agent}`, windowMs = breaker.window_min * 60000, win = [...(scopedSeen.get(key) ?? []).filter((x) => t - x < windowMs), t];
     scopedSeen.set(key, win);
-    if (win.length >= breaker.errors && !quarantined.has(key)) {
-      quarantined.add(key);
+    if (quarantined.get(key) > t) return { quarantined: true };
+    if (win.length >= breaker.errors) {
+      quarantined.set(key, t + windowMs);
       if (!reseeded.has(agent)) { reseeded.add(agent); try { await reseedCache?.({ agent, signature: sig }); } catch { /* advisory */ } }
       try { await quarantineAgent?.({ agent, signature: sig, errors: win.length }); } catch { /* advisory */ }
       update({ issue: null, outcome: "agent-quarantine", detail: `agent ${agent} quarantined: ${win.length} engine-errors (${sig}) within ${breaker.window_min} min; other agents keep admitting` });
+      return { quarantined: true };
     }
-    return undefined;
+    return { quarantined: false };
   };
   const lostSeen = new Map(); // agent -> [{n, at, err, ee, tr, sig}]: lost lanes settled as ordinary engine-errors in the window
   const openRestart = (agent, t) => agentRestarts.find((g) => g.agent === agent && !g.closed && t - g.last < AGENT_LOST_WINDOW_MS);
@@ -1209,8 +1211,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       lostSeen.set(la, [...win, lostNow]);
     }
     if (row.outcome === "engine-error") {
-      const ag = r?.agent ?? r?.sandbox?.agent ?? null, hs = ag && breaker && quarantineAgent ? hostSignature(r, row.detail) : null; // scoped only when the placement layer can really quarantine an agent; else the batch breaker keeps counting
-      const errAt = hs ? await scopedEngineError(ag, hs) : noteEngineError(r?.detail);
+      const ag = r?.agent ?? r?.sandbox?.agent ?? null, hs = ag && breaker ? hostSignature(r, row.detail) : null;
+      const sc = hs ? await scopedEngineError(ag, hs) : null;
+      if (sc?.quarantined) { // #5988: an agent in quarantine: its lane waits and is requeued without a relaunch or breaker count; unaffected agents keep admitting
+        requeue(n, AGENT_LOST_REQUEUE_MS); done(); save();
+        update({ ...row, outcome: "requeued", detail: `requeued: agent ${ag} is quarantined (${hs}); retried in ${Math.round(AGENT_LOST_REQUEUE_MS / 1000)}s` });
+        return;
+      }
+      const errAt = hs ? undefined : noteEngineError(r?.detail);
       if (lostNow) lostNow.err = errAt;
       // #5161: a transient failure (gateway 5xx, reset) waits out the outage with backoff instead of the single immediate relaunch.
       if (transientMax > 0 && isTransientEngineError(row.detail)) {
