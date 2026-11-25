@@ -2233,6 +2233,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   // #5990: one batched GraphQL refresh for the pass's issues; a failure leaves reads to the TTL cache / per-issue fallback
   reader.beginPass();
   try { await reader.refresh(issues); } catch (e) { process.stderr.write(`gh-reader: refresh failed (${String(e?.message ?? e).slice(0, 120)}); serving cache\n`); }
+  reader.endPass("refresh"); // the pass's spawn count against the budget, in schedd.log (R7 evidence)
   let budget = {};
   if (maint) {
     const mLabels = maint.labels ?? DEFAULT_MAINTENANCE_LABELS;
