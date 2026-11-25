@@ -2938,6 +2938,7 @@ export async function schedFromCli(argv, deps = {}) {
     const batchMod = await import("./lean/batch.mjs");
     const agentOf = (e) => { const bm = batchMod; const r = bm.openBatch(bm.batchRoot(), e.batch).store.peek()?.running?.[e.issue]; return r?.placement?.agent ?? r?.agent ?? null; };
     for (const l of schedMod.remoteLines(st, { agentOf })) console.log(l); // #4964
+    for (const l of schedMod.concurrencyLines(st, { eventsOf: (b) => batchMod.openBatch(batchMod.batchRoot(), b).store.readLog() })) console.log(l); // #5985
     try { for (const l of (await import("./lean/batch-health.mjs")).summaryLines((await import("./lean/batch.mjs")).batchRoot())) console.log(l); } catch { /* advisory */ } // #5314
     return st;
   }

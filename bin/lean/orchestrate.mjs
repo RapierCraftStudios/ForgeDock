@@ -141,6 +141,7 @@ import { formatOverload } from "./hostload.mjs";
 import { normalizeStacking, planAdmissible, stackAdmissible } from "./stacking.mjs";
 import { lackedTools } from "./toolplace.mjs";
 import { openPrerequisites } from "./prereq.mjs";
+import { makeController, classifyRepo, formatConcurrency } from "./concurrency.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
@@ -336,7 +337,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
  * @returns {Promise<Array<{issue:number, outcome:string, pr:?number, cost_usd:number, minutes:number, detail?:string}>>}
  */
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), blockedRefreshMs = 60000, onUpdate = () => {}, onCrossLane = () => {},
-  store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000, getClearBreaker = null, consumeClearBreaker = null, ackClearBreaker = null,
+  store = null, adopt = null, getParallel = null, usageRows = null, repoSlug = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000, getClearBreaker = null, consumeClearBreaker = null, ackClearBreaker = null,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getPause = null, expirePause = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
@@ -493,6 +494,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const everRelabelled = new Set(saved?.relabelled ?? []); // #4656: issues the runner already relabelled; never parked on top
   const relabelled = new Set(saved?.relabelled ?? []); // #4315: queued recoveries relabelled needs-human when a batch stopped
   // #4267: decisions are recorded, never awaited: a failing or slow recorder cannot block the batch.
+  // #5985: the controller moves are persisted to log.jsonl with their inputs (the post-deploy check reads them)
+  const conc = makeController({ ceiling: parallel, now });
+  const concEmit = (e) => { if (!e) return; const ev = { ...e, batch: batchId ?? null, running: running.size, line: formatConcurrency({ running: running.size, k: e.k, ceiling: e.ceiling, factor: e.factor }) }; try { store?.log?.(ev); } catch { /* advisory */ } onUpdate(ev); };
   const decided = (d) => { try { Promise.resolve(decide?.(d)).catch(() => {}); } catch { /* best effort */ } };
   const firstLine = (x) => String(x ?? "").split("\n")[0].slice(0, 300);
 
@@ -780,7 +784,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         let cap = null, probeFailed = false;
         try { cap = remote.capacity?.() ?? null; } catch { probeFailed = true; }
         // #5048: only a failed probe (a throw) marks the pool down; null is unknown (first pass, no capacity()) and leaves the state; a sample clears it.
-        if (probeFailed) notePool(true, "capacity probe failed"); else if (cap !== null) notePool(false);
+        if (probeFailed) notePool(true, "capacity probe failed"); else if (cap !== null) { notePool(false); concEmit(conc.observe(cap)); } // #5985: the live sample moves the operating point
         // #4788: zero live agents for longer than `remote.poolOfflineMin` (default 10): one loud batch event, none while online > 0.
         if (cap && cap.online === 0) {
           poolOfflineSince ??= now();
@@ -800,10 +804,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
             decided({ issue: n, what: `run #${n} on the host: the pool refused it ${capDefers.get(n)} times for capacity (execution.fallback_local)`, why: "sustained sandbox.capacity and the host has headroom",
               alternative: "keep deferring until a pool slot frees" });
           }
-        } else if (cap && Number.isInteger(cap.free)) {
+        } else if (cap && (Number.isInteger(cap.free) || capWait.conditional(n, cap))) {
           if (cap.at !== capAt) { capAt = cap.at; capAdmits = 0; }
-          if (capWait.blocked(n, cap)) { notBefore.set(n, now() + Math.max(pollMs, 1)); return false; }
-          if (capAdmits >= cap.free && remoteRun.size < remoteMax()) { notBefore.set(n, now() + Math.max(pollMs, 1)); return false; }
+          // #5985: a refusal's named condition (load < 1.0, free mem > floor) and the per-lane refusal hold gate the relaunch, not the timer
+          if (capWait.blocked(n, cap) || conc.holding(n, cap)) { notBefore.set(n, now() + Math.max(pollMs, 1)); return false; }
+          if (Number.isInteger(cap.free) && capAdmits >= cap.free && remoteRun.size < remoteMax()) { notBefore.set(n, now() + Math.max(pollMs, 1)); return false; }
         }
         if (p.where === "remote" && remoteRun.size < remoteMax()) { remoteCapped.delete(n); capWait.admitted(n); remoteRun.add(n); capAdmits++; placed.set(n, p); return true; }
         if (p.where === "remote" && !remote.fallbackLocal) { remoteCapped.add(n); return false; }
@@ -1044,10 +1049,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       let capGated = false; // #4909: the pool reports free slots, so the slot (not the retry-in timer) gates the relaunch
       if (r?.code === "sandbox.unreachable") notePool(true, r.detail ?? "sandbox unreachable");
       if (r?.code === "sandbox.capacity") {
-        capWait.refused(n);
+        capWait.refused(n, r.reason ?? null);
+        concEmit(conc.refused({ issue: n, code: r.code, reason: r.reason, live: r.live ?? null })); // #5985
         if (r.detail) capReasons.set(n, String(r.detail).slice(0, 300));
         capDefers.set(n, (capDefers.get(n) ?? 0) + 1); // #5112: counted for the fallback_local capacity fallback
-        try { capGated = Number.isInteger(remote?.capacity?.()?.free); } catch { capGated = false; }
+        try { const c = remote?.capacity?.(); capGated = Number.isInteger(c?.free) || capWait.conditional(n, c); } catch { capGated = false; }
       }
       if (!pol.capped) {
         if (!pol.host && !pol.hold) deferrals.set(n, (deferrals.get(n) ?? 0) + 1);
@@ -1812,7 +1818,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     if (back.size) save();
   };
-  const K = () => { let k = null; try { k = getParallel?.(); } catch { k = null; } return Number.isInteger(k) && k >= 1 ? k : parallel; };
+  const ceilingK = () => { let k = null; try { k = getParallel?.(); } catch { k = null; } return Number.isInteger(k) && k >= 1 ? k : parallel; };
+  // #5985: K is the ceiling; the controller's operating point (and a lower heavy-lane cap) sits under it. A pool with no load/memory data leaves K unchanged.
+  const laneClass = usageRows ? classifyRepo(usageRows, repoSlug) : "light";
+  const K = () => { conc.setCeiling(ceilingK()); return conc.operating(laneClass); };
   // #5836: one train poll (throttled): a merged PR becomes a merged row; a red, conflicting or moved-head PR is handed back as a
   // needs-human row through the normal settle path, so in-batch recovery requeues a fix lane.
   let lastTrainTick = -Infinity;

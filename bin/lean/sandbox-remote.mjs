@@ -78,6 +78,8 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
     const e = new Error(`sandbox ${what}: HTTP ${r.status}${who ? ` (${who} auth${reason ? `: ${reason}` : ""})` : ""}`);
     e.status = r.status;
     if (hop) e.hop = hop;
+    if (typeof r.data?.code === "string" && r.data.code.startsWith("pool.")) e.poolCode = r.data.code; // #5985: the pool's refusal code reaches the deferral row
+    if (r.data?.live && typeof r.data.live === "object") e.live = { load_per_core: r.data.live.load_per_core, mem_available_gb: r.data.live.mem_available_gb };
     if (reason) e.reason = reason;
     if ([500, 502, 503, 504].includes(r.status)) e.transient = true; // #4672: a router restart or gateway blip, retried by the lane poll; #5095: 500 too
     if (r.status === 429 || r.status === 503) e.retryable = true;
@@ -152,13 +154,19 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
         reached = true;
         if (r.ok) { const { free, online, total } = r.data ?? {}; out = { ...(ok(free) ? { free } : {}), ...(ok(online) ? { online } : {}), ...(ok(total) ? { total } : {}) }; }
       } catch (e) { out = {}; lastErr = e; }
-      if (out.online === undefined) {
+      if (out.online === undefined || out.load_per_core === undefined) {
         // #4788: a router without /status liveness: online = agents answering and not paused, as bin/pool/router.mjs status() does.
         try {
           const r = await call("GET", "/agents");
           reached = true;
           const list = r.ok && Array.isArray(r.data?.agents) ? r.data.agents : null;
-          if (list) out = { ...out, online: list.filter((a) => a?.ok === true && !a.paused).length, total: list.length };
+          if (list && out.online === undefined) out = { ...out, online: list.filter((a) => a?.ok === true && !a.paused).length, total: list.length };
+          // #5985: live host figures (worst agent); a pool reporting none leaves them unknown
+          const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+          const loads = (list ?? []).map((a) => num(a?.load_per_core ?? a?.live?.load_per_core)).filter((v) => v !== null);
+          const mems = (list ?? []).map((a) => num(a?.mem_available_gb ?? a?.live?.mem_available_gb)).filter((v) => v !== null);
+          if (loads.length) out = { ...out, load_per_core: Math.max(...loads) };
+          if (mems.length) out = { ...out, mem_available_gb: Math.min(...mems) };
         } catch (e) { lastErr = e; /* liveness stays unknown */ }
       }
       // #5048 (release review REG-2): a router that answered neither call is unreachable: throw, so the pool is marked down

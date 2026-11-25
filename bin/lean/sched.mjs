@@ -25,6 +25,7 @@ import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statS
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { writeAtomic } from "./batch.mjs";
+import { formatConcurrency } from "./concurrency.mjs";
 
 export const DEFAULT_PRIORITY = 2;
 export const LOCK_WAIT_MS = 2000;
@@ -257,6 +258,24 @@ export function remoteLines(st, { agentOf = null } = {}) {
   const out = (st?.remote ?? []).map((e) => `  remote #${e.issue} ${e.repo ?? "-"} batch ${e.batch ?? "-"} sandbox ${e.sandbox ?? "-"} agent ${agent(e)}  dispatcher ${e.pid}`);
   const down = st?.pool ?? [];
   if (down.length) out.push(`pool: unreachable (${down.map((e) => `batch ${e.batch}${e.reason ? `: ${e.reason}` : ""}`).join("; ")})`);
+  return out;
+}
+
+/**
+ * #5985: `sched show`/status lines `batch B concurrency: running/K/ceiling (limiting factor)`, from each running batch's last
+ * controller event in `log.jsonl` (`eventsOf(batch) -> rows`); `achieved` is running over the configured ceiling. Empty when none logged.
+ */
+export function concurrencyLines(st, { eventsOf = null } = {}) {
+  if (typeof eventsOf !== "function") return [];
+  const batches = [...new Set([...(st?.slots ?? []), ...(st?.remote ?? [])].map((e) => e.batch).filter(Boolean))];
+  const out = [];
+  for (const b of batches) {
+    let last = null;
+    try { for (const r of eventsOf(b) ?? []) if (r?.event === "concurrency") last = r; } catch { last = null; }
+    if (!last || !Number.isInteger(last.ceiling)) continue;
+    const running = Number.isInteger(last.running) ? last.running : 0;
+    out.push(`batch ${b} ${formatConcurrency({ running, k: last.k, ceiling: last.ceiling, factor: last.factor })}; achieved ${running} of ${last.ceiling} configured`);
+  }
   return out;
 }
 

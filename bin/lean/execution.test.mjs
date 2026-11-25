@@ -1150,6 +1150,15 @@ describe("#5095: launch 5xx and a pool usage limit are deferred, never needs-hum
     assert.equal((await lanesFor(prov).runOne(7, null)).code, "sandbox.capacity");
   });
 
+  it("a pool refusal code and live figures ride the sandbox.capacity deferral row as reason/live (#5985)", async () => {
+    const prov = fakeProvider();
+    prov.start = async () => { throw Object.assign(new Error("sandbox launch: HTTP 503"), { status: 503, retryable: true, poolCode: "pool.host_load", live: { load_per_core: 2.1, mem_available_gb: 8 }, retryInSeconds: 60 }); };
+    const r = await lanesFor(prov).runOne(7, null);
+    assert.deepEqual([r.code, r.reason, r.live.load_per_core, r.retryInSeconds], ["sandbox.capacity", "host_load", 2.1, 60]);
+    prov.start = async () => { throw Object.assign(new Error("x"), { status: 503, retryable: true, poolCode: "pool.disk_low" }); };
+    assert.equal((await lanesFor(prov).runOne(7, null)).reason, "disk");
+  });
+
   it("usageLimitInTail reads the lean finish line and the CLI's own limit message", () => {
     assert.deepEqual(usageLimitInTail("x\n[lane] deferred: usage limit hit; resets at 3:20pm (UTC)\n"), { resetAt: "3:20pm (UTC)" });
     assert.equal(usageLimitInTail("sandbox exited 1\nclone ok"), null);
