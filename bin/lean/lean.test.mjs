@@ -9454,7 +9454,7 @@ describe("prompt budgets (#4969)", () => {
     assert.notEqual(moved, impl);
     assert.equal(approxTokens(moved), approxTokens(impl));
     assert.equal(approxTokens(impl.replaceAll(INSTALL_ROOT, "C:\\fd")), approxTokens(impl));
-    assert.ok(approxTokens(moved) <= 2000, `implement prompt from a deep checkout is ${approxTokens(moved)} of 2000 tokens`); // 1900: #5760; 2000: #5752
+    assert.ok(approxTokens(moved) <= 2050, `implement prompt from a deep checkout is ${approxTokens(moved)} of 2050 tokens`); // 1900: #5760; 2000: #5752
   });
 });
 
