@@ -142,6 +142,7 @@ import { formatOverload } from "./hostload.mjs";
 import { normalizeStacking, planAdmissible, stackAdmissible } from "./stacking.mjs";
 import { lackedTools } from "./toolplace.mjs";
 import { openPrerequisites } from "./prereq.mjs";
+import { admitInput, breach, recordFailure, markEscalated, NO_NEW_INPUT } from "./attempts.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
@@ -149,6 +150,7 @@ const DEFAULT_TRAIN_EVERY_MS = 30000; // #5836: merge-train poll period
 // #5836: a lane that ended pr-ready is waiting on the merge train, not failed: its dependents wait
 const WAITING_ON_TRAIN = (row) => row?.outcome === "pr-ready";
 // #5162: a dependent of a root that ended like this is held (resumable), not skipped. #5805: also behind a root held on an engine/env change.
+const ATTEMPT_FAILED = ["needs-human", "engine-error", "budget-exceeded", "failed"]; // #5986: final lane outcomes that count as a failed attempt
 const HOLD_ROOT = new Set(["needs-human", "engine-error", "deferred", "budget-exceeded", "held"]);
 /** #5162: members of a real dependency cycle (a nontrivial SCC or a self-loop) among `nodes`; `edgesOf(n)` lists n's dependencies. */
 export function cyclicNodes(nodes, edgesOf) {
@@ -342,7 +344,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getPause = null, expirePause = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
   getChildren = null, autoChildren = null, baseWait = null, rotator = null, stacking = "off", readPrReady = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null, envHold = null, envIssue = null, logicalDeps = null,
-  train = null, trainEveryMs = DEFAULT_TRAIN_EVERY_MS }) {
+  train = null, trainEveryMs = DEFAULT_TRAIN_EVERY_MS, attempts = null }) {
   const saved = store?.load?.() ?? null;
   if (train && saved?.train) train.restore(saved.train); // #5836: the merge train resumes with the batch
   const order = saved ? [...saved.order] : [];
@@ -372,6 +374,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const envSigs = toMap(saved?.envSigs);
   const engineSigs = toMap(saved?.engineSigs);
   const readmit = toMap(saved?.readmit); // #5978: re-admission policy state (backoff step, version and base seen) per ended issue
+  const ledgers = toMap(saved?.attempts); // #5986: issue -> attempts ledger; never cleared by releaseHeld, --requeue or --set-env (see attempts.mjs)
   const deterministic = new Set(saved?.deterministicSigs ?? []);
   const toolReadmits = new Set(saved?.toolReadmits ?? []);
   const ehMaxMs = Number(envHold?.maxMs) > 0 ? Number(envHold.maxMs) : ENV_HOLD_MAX_MS;
@@ -513,7 +516,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       ...(requeueApplied.size ? { requeueApplied: [...requeueApplied], requeued: toObj(requeuedInfo) } : {}),
       ...(relabelled.size ? { relabelled: [...relabelled] } : {}), ...(cancelled ? { cancelled } : {}), ...(train ? { train: train.snapshot() } : {}),
       ...(estimate ? { estimates: toObj(estimates), enqueued: toObj(enqueued) } : {}), ...(heads.size ? { heads: [...heads] } : {}),
-      ...(engineSigs.size ? { engineSigs: toObj(engineSigs) } : {}), ...(deterministic.size ? { deterministicSigs: [...deterministic] } : {}), ...(toolReadmits.size ? { toolReadmits: [...toolReadmits] } : {}), ...(select ? { select } : {}), ...(readmit.size ? { readmit: toObj(readmit) } : {}), ...(envSigs.size ? { envSigs: toObj(envSigs) } : {}) });
+      ...(engineSigs.size ? { engineSigs: toObj(engineSigs) } : {}), ...(deterministic.size ? { deterministicSigs: [...deterministic] } : {}), ...(toolReadmits.size ? { toolReadmits: [...toolReadmits] } : {}), ...(select ? { select } : {}), ...(readmit.size ? { readmit: toObj(readmit) } : {}), ...(envSigs.size ? { envSigs: toObj(envSigs) } : {}), ...(ledgers.size ? { attempts: toObj(ledgers) } : {}) });
   };
   const update = (row) => { store?.log?.(row); onUpdate(row); };
   // #5978 R11: a merge into a staging lane branch does not fire `Closes`: the seam closes the issue and folds its post-deploy checks into the release rollup.
@@ -911,6 +914,24 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (changed) save();
   };
 
+  // #5986: a failed lane lands in the issue's ledger; a lifetime-budget breach escalates once (FORGE:ESCALATION, needs-human) and parks the row.
+  const recordAttempt = async (n, row, r) => {
+    try {
+      const hash = (await attempts.hash?.(n)) ?? null;
+      let l = ledgers.get(n) ?? (await attempts.load?.(n)) ?? null;
+      l = recordFailure(l, { signature: failureSignature(row.code ?? r?.code, row.detail), hash, spend: Number(row.cost_usd) || 0, run: r?.runUrl ?? null });
+      const b = breach(l, attempts.cfg);
+      if (b && !l.escalated) {
+        l = markEscalated(l);
+        await attempts.notify?.({ issue: n, code: "escalate", ledger: l, reason: b.detail });
+        if (row.outcome !== "needs-human") { row.detail = `attempts.exhausted: ${b.detail}\n${String(row.detail ?? "")}`; row.outcome = "needs-human"; }
+        decided({ issue: n, what: `escalated #${n} to a person: ${b.detail}`, why: "lifetime attempt budget (#5986)", alternative: "run another lane on the same input" });
+      }
+      ledgers.set(n, l);
+      const comments = await attempts.mirror?.(n, l);
+      if (Number.isInteger(comments)) ledgers.set(n, { ...l, comments });
+    } catch { /* the ledger is best effort: a failed write never changes the lane's outcome */ }
+  };
   // Apply one lane's result: requeue it (deferred, dependency-open, engine-error) or record its final row.
   const settleLane = async (n, r, rec, pf) => {
     if (halted) return; // #4454: a resume adopts the lane and settles it
@@ -1263,6 +1284,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (row.outcome === "needs-human" && !row.parkedQueued && !row.securityEscalated && !everRelabelled.has(n) && typeof relabelNeedsHuman === "function" && (cls => cls === "parked" || (cls === "recoverable" && prior))(classifyNeedsHuman({ ...row, issueEdited: r?.issueEdited === true }, { parked: true }))) { // a recoverable row with a finished recovery has used its attempts
       try { const res = await relabelNeedsHuman({ issue: n, parked: { code: row.code, pr: Number.isInteger(row.pr) ? row.pr : null }, evidence: `Mechanical park \`${row.code}\`${Number.isInteger(row.pr) ? ` (PR #${row.pr})` : ""}:\n${String(row.detail ?? "")}` }); if (res !== false && res !== "failed" && res !== "skipped") row.parkedQueued = true; else if (res === false || res === "failed") { const ev = { event: "relabel.failed", issue: n, batch: batchId ?? null, detail: `parked relabel failed (${row.code}): needs-human kept` }; try { store?.log?.(ev); } catch { /* best effort */ } onUpdate(ev); } } catch { /* best effort */ }
     }
+    if (attempts && ATTEMPT_FAILED.includes(row.outcome)) await recordAttempt(n, row, r); // #5986
     results.set(n, row);
     if (row.outcome === "merged" && lifecycle && r?.milestone) lifecycleTitles.add(String(r.milestone)); // #4657
     if (row.outcome === "merged") await closeOnLane(n, rec?.lane ?? r?.lane, row);
@@ -1740,6 +1762,26 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const readmitted = new Set(); // "n:b": re-admit n on blocker b once; a lane that re-skips on b stays skipped
   const blockerOf = (n) => { const r = results.get(n); const m = r?.outcome === "skipped" ? /^dependency #(\d+) /.exec(r.detail ?? "") : null; return m ? Number(m[1]) : null; };
   const watchable = () => !!dispatchCheck && [...results.keys()].some((n) => blockerOf(n) !== null);
+  // #5986: readmission needs a new input hash. false = refused (loop.no_new_input: the label stays, one note per hash); a missing ledger or unreadable input admits.
+  const refusedNoted = new Set();
+  const gateAdmit = async (n, { relabel = false } = {}) => {
+    if (!attempts) return true;
+    try {
+      let l = ledgers.get(n) ?? null;
+      if (!l) { l = (await attempts.load?.(n)) ?? null; if (l) ledgers.set(n, l); }
+      if (!l) return true;
+      const hash = (await attempts.hash?.(n)) ?? null, a = admitInput(l, hash, attempts.cfg);
+      if (a.ok) return true;
+      const key = `${n}|${hash}|${a.code}`;
+      if (!refusedNoted.has(key)) {
+        refusedNoted.add(key);
+        if (a.code === "escalate") { l = markEscalated(l); ledgers.set(n, l); save(); await attempts.mirror?.(n, l); }
+        await attempts.notify?.({ issue: n, code: a.code, ledger: l, reason: a.reason, relabel });
+        update({ issue: n, event: NO_NEW_INPUT, code: NO_NEW_INPUT, detail: `${NO_NEW_INPUT}: ${a.reason}`, batch: batchId ?? null });
+      }
+      return false;
+    } catch { return true; }
+  };
   // #5162: held rows behind `root` return to pending (and the root too when `withRoot`: requeued, counters reset), parents first via the edges.
   const releaseHeld = (root, withRoot, why) => {
     const moved = withRoot && results.has(root) ? [root] : [];
@@ -1785,7 +1827,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (!why && v && h.version && v !== h.version) why = `engine version changed v${h.version} → v${v}`;
       if (why) { /* env issue closed */ } else if (fp && h.env && fp !== h.env) why = "batch env changed (--set-env)";
       else if (h.tools?.length && !toolReadmits.has(`${n}|${h.sig}`) && (await missingTools(h.tools))?.length === 0) { why = `${h.tools.join(", ")} now found on the host`; toolReadmits.add(`${n}|${h.sig}`); }
-      if (why) { engineSigs.delete(n); releaseHeld(n, true, `re-admitted: ${why}`); continue; }
+      if (why) { if (!(await gateAdmit(n))) continue; engineSigs.delete(n); releaseHeld(n, true, `re-admitted: ${why}`); continue; }
       if (now() - (Number(h.since) || 0) >= ehMaxMs && !/no engine\/env change within/.test(r.detail ?? "")) { // the wait is over: the row stays held (resumable, --requeue), the batch may end
         const { waiting, ...rest } = r;
         const [head, ...tail] = String(rest.detail ?? "").split("\n");
@@ -1802,7 +1844,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (restoredHeld.has(root) && ["needs-human", "budget-exceeded"].includes(ro) && typeof issueLabels === "function") { // label removed: requeue the root, its subtree follows
         let names = null;
         try { names = await issueLabels(root); } catch { names = null; }
-        if (Array.isArray(names) && !names.includes("needs-human")) { releaseHeld(root, true, "needs-human label removed"); continue; }
+        if (Array.isArray(names) && !names.includes("needs-human")) { if (await gateAdmit(root, { relabel: true })) releaseHeld(root, true, "needs-human label removed"); continue; }
       }
       if (!dispatchCheck) continue;
       let g = null;
