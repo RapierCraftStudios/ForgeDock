@@ -1719,6 +1719,27 @@ describe("#5087 a plan decision may not weaken an e2e/integration criterion to m
   });
 });
 
+describe("supersedes naming a validate row (#5979)", () => {
+  const frozen = { requirements: [], deliverables: [], validate: [{ id: "V1", command: "true" }, { id: "G2", command: "node --test a.test.mjs" }] };
+  it("rejects guard G2 with a substitute-validate hint and records no supersedes", () => {
+    const r = applyAmendments(frozen, [{ kind: "supersedes", guard: "G2", why: "w" }]);
+    assert.equal(r.problems.length, 1);
+    assert.match(r.problems[0], /substitute-validate/);
+    assert.deepEqual(r.contract.supersedes ?? [], []);
+  });
+  it("amendmentKindProblems reports it only when given the validate ids", () => {
+    const a = [{ kind: "supersedes", guard: "G2", why: "w" }];
+    assert.match(amendmentKindProblems(a, ["G2"])[0], /substitute-validate/);
+    assert.deepEqual(amendmentKindProblems(a), []);
+  });
+  it("a #N guard and a mechanism still apply", () => {
+    const r = applyAmendments(frozen, [{ kind: "supersedes", guard: "#123", why: "w" }, { kind: "supersedes", mechanism: "m", why: "w" }]);
+    assert.deepEqual(r.problems, []);
+    assert.equal(r.contract.supersedes[0].guard, "#123");
+    assert.equal(r.contract.mechanisms[0].mechanism, "m");
+  });
+});
+
 describe("amendmentKindProblems (#5089)", () => {
   it("flags the invented deliverable_change kind and names the valid kinds", () => {
     const p = amendmentKindProblems([{ kind: "deliverable_change", requirement: "R1", why: "no Linux build" }]);

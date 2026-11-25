@@ -3514,9 +3514,10 @@ export async function runCore(o) {
         domainsLogged = domains.join(",");
         ev({ event: "REVIEW_DOMAINS", domains, enforced: dHits.length ? dHits : undefined, ...(pd === null ? { error: "roster.failed" } : {}) });
       }
-      if (!amendFixed && sessionId && amendmentKindProblems(result?.amendments).length) { // #5089: one in-lane correction, outside the conformance resume budget
+      const vIds = [...(frozen?.validate ?? []), ...(frozen?.regression ?? [])].map((v) => v?.id);
+      if (!amendFixed && sessionId && amendmentKindProblems(result?.amendments, vIds).length) { // #5089: one in-lane correction, outside the conformance resume budget
         amendFixed = true;
-        const bad = amendmentKindProblems(result.amendments);
+        const bad = amendmentKindProblems(result.amendments, vIds);
         T.decisions.push(`Amendment kinds invalid (${bad.length}); builder asked to correct ${RESULT_FILE} once`);
         await builder(++attemptN, amendmentCorrectionPrompt(bad), sessionId, false, undefined, { mode: "resume", trigger: "contract_correction" });
         result = (await readResult()) ?? result;
