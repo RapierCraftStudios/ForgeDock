@@ -551,9 +551,13 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     stopCode = 1;
     const underUnit = ["active", "activating"].includes(unit());
     let hard;
-    if (exit) { hard = setTimeout(() => { log(`schedd: stop did not finish within ${hardExitMs} ms, exiting`); exit(1); }, hardExitMs); hard.unref?.(); }
+    // Path-scoped bound: under a unit it covers the whole stop (close only); unitless it covers close(), then a last-resort bound
+    // outlasts the two successor waits and the re-host (a flat hardExitMs equals the sum of those phases and would exit unhosted).
+    const arm = (ms, what) => { if (!exit) return undefined; const t = setTimeout(() => { log(`schedd: ${what} did not finish within ${ms} ms, exiting`); exit(1); }, ms); t.unref?.(); return t; };
+    hard = arm(hardExitMs, "stop");
     try {
       await close();
+      if (!underUnit && exit) { clearTimeout(hard); hard = arm(2 * successorMs + 2 * successorPollMs + hardExitMs, "successor handover"); }
       const spawnOnce = () => { try { respawnFn?.(); } catch (e) { log(`schedd: respawn failed: ${e?.message ?? e}`); } };
       spawnOnce();
       if (probeFn && !underUnit) {

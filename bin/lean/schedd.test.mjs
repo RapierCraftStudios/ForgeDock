@@ -836,6 +836,33 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     assert.deepEqual(exits2, [1]);
   });
 
+  it("#5983: unitless, the hard bound does not cut the successor waits short of the re-host; a hung close still exits", async () => {
+    const dir = tmpDir("schedd-bound-"), lines = [], exits = [];
+    let version = "1.51.0";
+    const d = await startDaemon({ dir, root: join(dir, "batches"), log: (m) => lines.push(m), resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => null,
+      exit: (c) => exits.push(c), hardExitMs: 100, respawn: () => {}, probe: async () => false, successorMs: 150, successorPollMs: 10, runBatch: async () => ({}) });
+    version = "1.52.0";
+    await until(() => d.rehosted());
+    try {
+      assert.equal(d.rehosted().running, true, "re-hosted after waits longer than hardExitMs");
+      await new Promise((r) => setTimeout(r, 250));
+      assert.deepEqual(exits, [], "the hard timer did not fire");
+    } finally { await d.rehosted().close(); }
+    const dir2 = tmpDir("schedd-bound2-"), exits2 = [];
+    let v2 = "1.51.0";
+    await startDaemon({ dir: dir2, root: join(dir2, "batches"), log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => v2, unit: () => null,
+      exit: (c) => exits2.push(c), hardExitMs: 150, stopMs: 400, respawn: () => {}, probe: async () => false, successorMs: 50, successorPollMs: 10,
+      runBatch: ({ sink }) => { sink.batch({ id: "x", dir: dir2 }); return new Promise(() => {}); } }).then(async (d3) => {
+      request(await connectDaemon({ dir: dir2, spawnDaemon: null }), { op: "submit", argv: ["x"], cwd: dir2, env: {} }).catch(() => {});
+      await until(() => d3.running);
+      v2 = "1.52.0";
+      await until(() => exits2.length > 0);
+      assert.deepEqual(exits2, [1]);
+      await until(() => d3.rehosted()); // the stop carries on after the bound fired; release what it re-hosts
+      await d3.rehosted().close();
+    });
+  });
+
   it("#5984 handover: settled() outlives closed until the successor is spawned and probed (CLI exits only after it)", async () => {
     const dir = tmpDir("schedd-settled-"), order = [];
     let version = "1.51.0";
