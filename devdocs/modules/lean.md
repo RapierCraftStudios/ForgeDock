@@ -3732,3 +3732,9 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 - `classifyTransportLoss` shortens `sandbox.unreachable` to `AGENT_UP_WINDOW_MS` (90 s) only when the pool agent answers (`agentOnline(handle)`, exposed by `sandbox-remote.mjs` from `/agents`); agent down, router error or no probe keeps the 300 s window. The typed deferral and the kept sandbox are unchanged.
 - Budget rows are keyed `sandboxBudgetKey(batchId, sandboxId)` with no `startedAt`; `record` upserts the single row with the larger minutes/cost, so replayed attempts of one sandbox no longer add rows. Host-day dedupe and `KEEP_DAYS` pruning are unchanged.
 - R5/R6 (cache-volume probe and quarantine) deferred to pool work.
+
+## Entry 2026-11-25 — watchdog restarts (not starts) an active unit with no daemon (#5982)
+
+- `systemctl start` is a no-op on an active unit, so the #5966 zombie (unit active, no live daemon) was never recovered. `schedd.restartUnit()` runs `systemctl --user restart --no-block` (best effort, like `startUnit`); `startUnit` and `connect()` are unchanged.
+- `watchdog` takes a separate `restart` dep (wired in `scheddFromCli`). Heartbeat down while `unit()` is `active`/`activating`: ALERT, `schedd.unit-no-daemon`, `restart()`, never `start()`. Only an inactive or absent unit with unfinished batches goes through `start()`.
+- Result gains `restarted`; `started` is `false` (and the failure is logged) when `restart()` throws.
