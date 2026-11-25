@@ -1,0 +1,14 @@
+bin/forgedock.mjs
+bin/introspect-schedule.mjs
+bin/introspect-schedule.test.mjs
+bin/lean/batch-health.mjs
+bin/lean/batch-health.test.mjs
+bin/lean/efficiency.mjs
+bin/lean/efficiency.test.mjs
+bin/lean/execution.mjs
+bin/lean/execution.test.mjs
+bin/lean/schedd.mjs
+bin/lean/slo.mjs
+bin/lean/slo.test.mjs
+commands/fd-introspect.md
+devdocs/modules/lean.md
