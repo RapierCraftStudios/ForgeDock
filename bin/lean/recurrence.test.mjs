@@ -97,3 +97,37 @@ describe("design lane (#5751)", () => {
     assert.deepEqual(designContractFailures({}, { recurs: false }), [], "an ordinary lane needs no design block");
   });
 });
+
+import { designDemanded } from "./recurrence.mjs";
+describe("symptom match and one-time design demand (#5979)", () => {
+  const files = { 10: NAMED, 11: NAMED };
+  it("path-only overlap without a symptom match does not recur", () => {
+    const rows = [row(10, { matched: ["billing"], title: "tidy billing" }), row(11, { matched: ["reserve"], title: "rename" })];
+    const d = detectRecurrence({ rows, mergedPrFiles: files, namedPaths: NAMED, body: "the page is slow" });
+    assert.equal(d.recurs, false);
+    assert.equal(d.count, 0);
+  });
+  it("a code-shaped symptom plus path still recurs", () => {
+    const rows = [row(10, { matched: ["reservation.leak"] }), row(11, { matched: ["reservation.leak"] })];
+    assert.equal(detectRecurrence({ rows, mergedPrFiles: files, namedPaths: NAMED }).recurs, true);
+  });
+  it("a backticked signature of the issue in the row title is a symptom match", () => {
+    const rows = [row(10, { matched: ["billing"], title: "fix `ERR_RESERVE` crash" }), row(11, { matched: ["billing"], title: "again ERR_RESERVE" })];
+    assert.equal(detectRecurrence({ rows, mergedPrFiles: files, namedPaths: NAMED, body: "throws `ERR_RESERVE`" }).recurs, true);
+  });
+  it("a Recurs link is unchanged", () => {
+    assert.equal(detectRecurrence({ rows: [], mergedPrFiles: { 5: NAMED, 6: NAMED }, body: "Recurs #5, #6", namedPaths: NAMED }).recurs, true);
+  });
+  it("a design block already demanded on an earlier run is not demanded again", () => {
+    const det = { recurs: true, count: 2, demanded: true };
+    const f = designContractFailures({}, det);
+    assert.equal(f.length, 1);
+    assert.equal(f[0].kind, "design_missing_repeated");
+    assert.equal(designContractFailures({}, { ...det, demanded: false })[0].kind, "design_missing");
+    assert.deepEqual(designContractFailures({ design: { why_failed: "w", disposition: "replace", outcome: { metric: "m", target: "t" } } }, det), []);
+  });
+  it("designDemanded reads an earlier NEEDS_HUMAN naming the design lane", () => {
+    assert.equal(designDemanded([{ body: "<!-- FORGE:NEEDS_HUMAN -->\nrecurring issue (2 earlier fixes) routed to a design lane: no design block" }]), true);
+    assert.equal(designDemanded([{ body: "<!-- FORGE:NEEDS_HUMAN -->\nother" }]), false);
+  });
+});

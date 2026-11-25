@@ -23,7 +23,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { otherLaneOwner } from "./lanelock.mjs";
 import { stampText, checkStamp } from "./stagestamp.mjs";
 import { acquireBranchLock, waitPidsExit } from "./branchlock.mjs";
-import { parseRecurrenceConfig, recurrenceFacts, recursLinks, designLaneNote } from "./recurrence.mjs"; // #5751
+import { parseRecurrenceConfig, recurrenceFacts, recursLinks, designLaneNote, designDemanded } from "./recurrence.mjs"; // #5751
 import { areaOf, acquireHotArea, countCounters } from "./hotarea.mjs"; // #5751
 import { isEnvValidateFailure, outputTail, contractRuleCounts, onlyTestPlanProblems, isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, applyRequirementDecisions, dedupeAddRequirements, loneE2eRows, reproEnvMiss, resolveForgedockPaths, resolvingIo, portableForgedockPaths, FORGEDOCK_CHECKS_VAR, FORGEDOCK_ENTRY_VAR, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
@@ -2441,6 +2441,7 @@ export async function runCore(o) {
       if (recCfg.mode === "on" && !recurrence && (namedPaths(iss.body ?? "").length || recursLinks(iss.body ?? "").length)) { // #5751: 0 LLM calls; an issue naming no path and no Recurs link cannot recur
         recurrence = await recurrenceFacts({ io: { gh: ghc, git: (a) => git(a) }, repo, issue, title: iss.title, body: iss.body ?? "", base, namedPaths: namedPaths(iss.body ?? ""), threshold: recCfg.threshold }).catch(() => null);
         if (recurrence?.recurs) {
+          recurrence.demanded = designDemanded(allComments()); // #5979: the design block is demanded once
           ev({ event: "RECURRENCE", count: recurrence.count, threshold: recurrence.threshold, fixes: recurrence.evidence.map((e) => e.number), reason: recurrence.reason });
           T.decisions.push(`Design lane (#5751): ${recurrence.reason}`);
           try { await post("FORGE:RECURRENCE", `Routed to a design lane: ${recurrence.reason}.\nThe contract must say why the earlier fixes did not hold, whether to delete or replace them, and a measurable outcome; it may decompose into ordinary lanes.`); } catch { /* best effort */ }
