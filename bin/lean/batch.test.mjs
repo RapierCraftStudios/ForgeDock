@@ -2173,3 +2173,17 @@ describe("#5992: base.red is a batch hold, not a per-issue capped deferral", () 
     assert.ok(c.t >= 1_000_000);
   });
 });
+
+// #5978: the selector is kept in the batch plan argv/state; coverage classifies every matching open issue.
+import { coverage as coverage5978 } from "./batch.mjs";
+describe("coverage (#5978)", () => {
+  it("every open match lands in exactly one class; human-blocked is the only unscheduled-allowed class", () => {
+    const state = { pending: [2], running: { 1: {} }, results: { 3: { outcome: "needs-human", detail: "needs a product decision" } } };
+    const c = coverage5978({ state, open: [1, 2, 3].map((number) => ({ number })) });
+    assert.deepEqual([c.running, c.queued, c.humanBlocked, c.unscheduled], [[1], [2], [3], []]);
+  });
+  it("a human label blocks an issue with no row; an unknown one is unscheduled", () => {
+    const c = coverage5978({ state: { pending: [] }, open: [{ number: 4, labels: ["human:credentials"] }, { number: 5, labels: ["bug"] }] });
+    assert.deepEqual([c.humanBlocked, c.unscheduled], [[4], [5]]);
+  });
+});
