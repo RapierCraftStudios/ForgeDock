@@ -207,3 +207,14 @@ show `invalid (pre-filter)`). Then print:
 5. one escalation list: the human-code `needs-human` issues only, asked once.
 
 Nothing else.
+
+## Standing orders (`--select`)
+
+`forgedock orchestrate --select '<query>'` (a GitHub issue search: `no:milestone`, `milestone:X`, `label:Y`) stores the selector in the batch and keeps owning it; no watcher process is needed (the schedd-hosted runner reconciles every few minutes):
+
+- matching open issues join under the same DAG, priority and lane rules as `--add`; closed or moved ones leave.
+- an issue stays scheduled until it is closed, merged, or blocked by a human code (credentials, spend, customer, promotion, product decision). Re-admission needs no operator command: `deferred` retries with exponential backoff (cap 2 h); `held` / `engine-error` re-admit on an agent or lane-image version change or after a 6 h cooldown; a conformance failure gets one more attempt after the base moves, then is listed in a single "needs decision" digest; the engine's `env.*` issue joins the order and its closure re-admits the waiters.
+- the breaker resets itself after a cooldown when the failures were environmental (VM restart, mirror, network) and the pool is healthy, with a FORGE:DECISION.
+- a merge into a staging lane branch closes the issue (and notes it on the post-deploy rollup when `FORGE_POSTDEPLOY_ROLLUP=<issue>` is set).
+
+`forgedock orchestrate --status <id>` shows the coverage: matching open = running + queued + backing-off + waiting on deps + human-blocked (listed) + unscheduled. `unscheduled: 0` is the healthy state.

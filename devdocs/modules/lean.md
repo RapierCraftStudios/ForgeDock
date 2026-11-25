@@ -3692,6 +3692,15 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 - Deferred to the operator/installer layer (no unit file or installer in this repo): `WatchdogSec` heartbeat on the unit, and the installer restarting the unit on `npm i -g` / plugin update.
 - Post-deploy check `schedd-handover-no-gap`.
 
+## Entry 2026-11-25 — standing orders: `orchestrate --select <query>` (#5978)
+
+- `--select` is kept in the plan argv. Every `RECONCILE_MS` the runner (hosted by `schedd`, no watcher process) calls `reconcile.mjs`: matching open issues join through the `--add` seam (same DAG, priority, lane rules), closed or moved ones leave. Batches without a selector are unchanged.
+- Re-admission (`readmitDue`): `deferred` backs off exponentially (cap 2 h); `held`/`engine-error` re-admit on a change of the engine or `FORGE_LANE_IMAGE` version or after a 6 h cooldown; conformance gets one more attempt after the base sha moves, then parks in a "needs decision" digest. `humanCode` (credentials, spend, customer, promotion, product decision) is the only permanent stop.
+- An engine-filed `env.*` issue joins the order; its closure re-admits the waiters (existing path).
+- `clear-breaker.mjs` `decideAutoReset`: a selector batch's breaker closes after a cooldown when the signature is environmental and the pool is healthy, with a FORGE:DECISION. `decideClear` is unchanged.
+- A staging lane closes the issue on merge into the lane branch and comments the `FORGE_POSTDEPLOY_ROLLUP` issue.
+- `batch.mjs` `coverage()` classifies each open match (running, queued, backing-off, waiting on deps, human-blocked, unscheduled); `orchestrate --status <id>` prints it, healthy is 0 unscheduled.
+
 ## Entry 2026-11-25 — scheddFromCli waits for selfStop to settle before exiting (#5984)
 
 - `closed` resolves as soon as `close()` finishes, before `selfStop()` has spawned and probed the successor. `selfStop` now keeps its whole async body (close, spawn, wait for listening, retry, rehost) as one promise, and the `startDaemon` handle gains an additive `settled()` (`selfStopping ?? closed`, so idle and lost-lock closes settle via `closed`).
