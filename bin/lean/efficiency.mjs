@@ -52,7 +52,7 @@ export function concurrencyOver(samples, since, now) {
 
 /**
  * Compute the ledger. `prev`: the prior efficiency.json (carries samples and SLO filing state), `sample`: this pass's pool sample,
- * `baseline`: `{phase: {p90}}` over the previous 14 days (default: this log's rows older than 24 h), `concurrencyMin`: threshold used
+ * `baseline`: `{phase: {p90}}` over the previous 14 days (default: this log's rows from the 14 days before the last 24 h), `concurrencyMin`: threshold used
  * for `lowSinceMin`. Pure; never throws on malformed rows.
  */
 export function computeEfficiency({ rows = [], state = null, prev = null, sample = null, now = Date.now(), batchId = null, repo = null, baseline = null, concurrencyMin = 0.6, windowMin = 15 } = {}) {
@@ -93,7 +93,7 @@ export function computeEfficiency({ rows = [], state = null, prev = null, sample
 
   // phases vs baseline
   const cur = phaseSpans(day);
-  const base = baseline ?? Object.fromEntries(Object.entries(phaseSpans(list.filter((r) => (atMs(r) ?? now) <= now - DAY))).map(([id, v]) => [id, { p90: v.p90 }]));
+  const base = baseline ?? Object.fromEntries(Object.entries(phaseSpans(list.filter((r) => { const t = atMs(r) ?? now; return t <= now - DAY && t > now - 15 * DAY; }))).map(([id, v]) => [id, { p90: v.p90 }]));
   const phases = Object.fromEntries(Object.entries(cur).map(([id, v]) => [id, { ...v, baselineP90: base[id]?.p90 ?? null, ratio: base[id]?.p90 ? round(v.p90 / base[id].p90) : null }]));
 
   // merged/hour, wasted lane-hours, $ per merge

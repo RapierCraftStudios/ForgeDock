@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_SLO, SLO_CLOSE_GREEN_MS, SLO_UPDATE_MS, evaluateSlo, fileSloIssues, parseSloConfig } from "./slo.mjs";
+import { computeEfficiency } from "./efficiency.mjs";
+import { DEFAULT_SLO, ledgerPass, SLO_CLOSE_GREEN_MS, SLO_UPDATE_MS, evaluateSlo, fileSloIssues, parseSloConfig } from "./slo.mjs";
 
 const eff = (o = {}) => ({ batch: "b1", repo: "o/r", at: "t", concurrency: { ready: 0, lowSinceMin: 0, windowMin: 15 }, repeats: [], commentsPerIssue: { max: 0, issues: [] }, phases: {}, idle: { share: {} }, ...o });
 const codes = (o) => evaluateSlo(eff(o), DEFAULT_SLO).map((b) => b.code);
@@ -70,5 +71,32 @@ describe("#5987 SLOs", () => {
     const cfg = { ...DEFAULT_SLO, fileIssues: true };
     const r = await fileSloIssues({ eff: eff(), breaches: evaluateSlo(eff({ interventionsPerDay: 9 }), cfg), gh: async () => { throw new Error("down"); }, cfg, now: 1 });
     assert.deepEqual(r.slo.sigs, {});
+  });
+
+  // R8: replay of the slow batches (11-20..11-24) files exactly one issue per breached signature; a healthy batch files none
+  const replay = async (rows, running) => {
+    const NOW = Date.parse("2026-11-24T12:00:00Z"), calls = [], cfg = { ...DEFAULT_SLO, fileIssues: true };
+    const prev = { v: 1, samples: Array.from({ length: 40 }, (_, i) => ({ t: NOW - (40 - i) * 60000, running, ceiling: 12, ready: 5 })) };
+    let stored = prev;
+    const batch = { id: "b", dir: "d", readLog: () => rows, store: { peek: () => null } };
+    const gh = async (a) => { calls.push(a); return a[1] === "list" ? "[]" : a[1] === "create" ? `https://github.com/x/y/issues/${100 + calls.length}\n` : ""; };
+    const run = () => ledgerPass({ batch, sample: null, cfg, gh, now: NOW, repo: "o/r", compute: computeEfficiency, readEff: () => stored, writeEff: (_d, e) => { stored = e; } });
+    const first = await run(), second = await run();
+    return { first, second, creates: calls.filter((c) => c[1] === "create") };
+  };
+  it("fixture replay: slow batch files one issue per signature, healthy files none", async () => {
+    const at = (m, r) => ({ at: new Date(Date.parse("2026-11-24T12:00:00Z") - m * 60000).toISOString(), ...r });
+    const slow = [
+      ...[1, 2, 3, 4].map((i) => at(300 - i, { issue: 7, outcome: "engine-error", reason: "sandbox.capacity", minutes: 30 })),
+      at(200, { issue: 7, outcome: "merged", minutes: 20 }), at(190, { issue: 8, outcome: "ci-failed", minutes: 10 }), at(180, { issue: 8, outcome: "merged", minutes: 10 }),
+      ...Array.from({ length: 7 }, (_, i) => at(100 - i, { ev: "requeue", issue: 9 })),
+    ];
+    const r = await replay(slow, 3);
+    const sigs = r.first.breaches.map((b) => b.sig);
+    for (const c of ["concurrency", "repeat", "attempts", "interventions"]) assert.ok(sigs.includes(`slo:${c}:o/r`), c);
+    assert.equal(r.creates.length, new Set(sigs).size, "one create per signature, the second pass adds none");
+    assert.equal(r.second.actions.length, 0);
+    const ok = await replay([at(60, { issue: 1, outcome: "merged", minutes: 20 })], 11);
+    assert.equal(ok.creates.length, 0);
   });
 });
