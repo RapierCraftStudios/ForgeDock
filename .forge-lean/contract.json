@@ -1,0 +1,207 @@
+{
+ "requirements": [
+  {
+   "id": "R1",
+   "quote": "One GitHub client per schedd: single GraphQL query per pass for all issues in the batch (state, labels, milestone, comment count, updatedAt), ETag/`If-None-Match` for the rest, results cached with a TTL; `gh` subprocesses only for writes.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R2",
+   "quote": "`lane.unresolved` from a network error becomes `gh.unavailable` (already uncapped, 60 s) and serves the last good cache; never a lane failure.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R3",
+   "quote": "Priority and `nice` for subprocesses; a per-pass budget of subprocess spawns, logged.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R4",
+   "quote": "Optional: allow the dispatcher to run on a non-workstation host (Legion WSL) when `orchestrate.dispatcher_host` is set.",
+   "disposition": "defer",
+   "why": "Marked optional in the issue; a separate placement feature, independent of the read layer.",
+   "bucket": "owner:product-decision on dispatcher placement"
+  },
+  {
+   "id": "R5",
+   "quote": "Test: a pass over 200 issues performs at most 2 GraphQL calls and 0 per-issue `gh` spawns when nothing changed.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R6",
+   "quote": "Test: GitHub unreachable for 15 min yields no `lane.unresolved` rows and no lost admissions; cached data used.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R7",
+   "quote": "`event loop stalled > 5 s` count under load test of 20 lanes: 0.",
+   "disposition": "deliver",
+   "verify": "out_of_band",
+   "evidence": "bin/lean/schedd-load.test.mjs is the existing load harness; stall count is measured from schedd.log on the host. In-lane, R5 bounds the spawns that cause the stalls."
+  },
+  {
+   "id": "R8",
+   "quote": "Idle free-lane minutes attributed to `dispatch-stalled` fall to near zero in the efficiency ledger.",
+   "disposition": "defer",
+   "why": "Only measurable from the efficiency ledger on the production host after the change runs under real load.",
+   "bucket": "host"
+  },
+  {
+   "id": "R9",
+   "quote": "A transient network error on the host is classified as a lane problem and each issue pays a 120-240 s requeue.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R10",
+   "quote": "Per-issue GitHub reads are spawned as one `gh` subprocess each (milestone, state, comments, labels) from several loops (orchestrate dispatch, hold/needs-human watcher `orchestrate.mjs:1756`, dependency checks, health, lane start `lean.mjs`), with no shared cache, no conditional requests and no batching.",
+   "disposition": "guidance",
+   "why": "adapt: scope to the dispatcher path (lane resolution, label/view reads, held-root watcher); lean.mjs lane-start reads already use a per-run gh cache and stay unchanged."
+  }
+ ],
+ "deliverables": [
+  {
+   "id": "D1",
+   "path": "bin/lean/gh-reader.mjs",
+   "change": "New schedd GitHub read client: injectable io.gh; one GraphQL call per refresh for all batch issues (state, labels, milestone, comment count, updatedAt), chunked to cap calls; TTL cache serving the last good value when gh fails; isNetworkError(err) classifier; spawn counter with a per-pass budget and log line; gh invoked under nice.",
+   "requirements": [
+    "R1",
+    "R2",
+    "R3",
+    "R5",
+    "R6"
+   ]
+  },
+  {
+   "id": "D2",
+   "path": "bin/lean/gh-reader.test.mjs",
+   "change": "New tests: 200 issues cost at most 2 GraphQL calls and 0 per-issue spawns when unchanged; 15 min of network failure serves cache; isNetworkError; budget log.",
+   "requirements": [
+    "R5",
+    "R6",
+    "R3"
+   ]
+  },
+  {
+   "id": "D3",
+   "path": "bin/lean/lane.mjs",
+   "change": "resolveLane: a network error on the milestone read returns a gh.unavailable result (not lane.unresolved); reads go through the reader when supplied.",
+   "requirements": [
+    "R2",
+    "R9"
+   ]
+  },
+  {
+   "id": "D4",
+   "path": "bin/lean/lane.test.mjs",
+   "change": "Add a case: network error gives gh.unavailable, a non-network error still gives lane.unresolved.",
+   "requirements": [
+    "R2",
+    "R9"
+   ]
+  },
+  {
+   "id": "D5",
+   "path": "bin/engine-cli.mjs",
+   "change": "Create one reader per schedd and route labelNames, viewOf, the milestone pre-read and makeDispatchCheck through it; refresh once per pass for the batch's issues.",
+   "requirements": [
+    "R1",
+    "R2",
+    "R3"
+   ]
+  },
+  {
+   "id": "D6",
+   "path": "bin/lean/orchestrate.mjs",
+   "change": "Held-root watcher and retryLane use cached reads; a gh.unavailable lane result defers uncapped at 60 s without a lane failure and without losing the admission.",
+   "requirements": [
+    "R2",
+    "R6",
+    "R9"
+   ]
+  },
+  {
+   "id": "D7",
+   "path": "bin/lean/orchestrate-transient-git.test.mjs",
+   "change": "Add a test: GitHub unreachable (fake clock, 15 min) yields no lane.unresolved rows and no lost admissions.",
+   "requirements": [
+    "R6"
+   ]
+  },
+  {
+   "id": "D8",
+   "path": "bin/lean/effects.mjs",
+   "change": "Wrap the dispatcher read gh with nice and count spawns through the reader.",
+   "requirements": [
+    "R3"
+   ]
+  },
+  {
+   "id": "D9",
+   "path": "bin/engine/outcome-codes.mjs",
+   "change": "Document that GH_UNAVAILABLE is also used for the dispatcher read path (comment only, if needed).",
+   "requirements": [
+    "R2"
+   ]
+  }
+ ],
+ "preserve": [
+  {
+   "id": "P1",
+   "what": "resolveLane result shape and the non-network transient lane.unresolved retry (bin/lean/lane.mjs:75-90)."
+  },
+  {
+   "id": "P2",
+   "what": "lean.mjs lane-start reads keep their per-run gh cache (bin/lean/lean.mjs:411) and are unchanged."
+  },
+  {
+   "id": "P3",
+   "what": "makeDispatchCheck semantics: a closed issue or merged feat/issue-N-lean PR ends the row (bin/engine-cli.mjs:2565)."
+  },
+  {
+   "id": "P4",
+   "what": "Writes (labels, comments, PRs) still go through gh subprocesses (bin/lean/effects.mjs:495)."
+  }
+ ],
+ "validate": [
+  {
+   "id": "V1",
+   "command": "node --test bin/lean/gh-reader.test.mjs bin/lean/lane.test.mjs bin/lean/orchestrate-transient-git.test.mjs"
+  },
+  {
+   "id": "V2",
+   "command": "node --test bin/lean/orchestrate-envhold.test.mjs bin/lean/orchestrate-reconcile.test.mjs bin/lean/orchestrate-blocked.test.mjs bin/lean/effects-cap.test.mjs"
+  },
+  {
+   "id": "G1",
+   "command": "node --test bin/lean/orchestrate-attempts.test.mjs bin/lean/orchestrate-hostfallback.test.mjs bin/lean/orchestrate-owned.test.mjs",
+   "regression": true
+  }
+ ],
+ "regression": [
+  {
+   "id": "G1",
+   "command": "node --test bin/lean/orchestrate-attempts.test.mjs bin/lean/orchestrate-hostfallback.test.mjs bin/lean/orchestrate-owned.test.mjs",
+   "covers": "orchestrate.mjs callers of issueLabels, dispatchCheck and retryLane"
+  }
+ ],
+ "decisions": [
+  {
+   "id": "K1",
+   "choice": "Batch reads with one GraphQL call via `gh api graphql` and a TTL cache, instead of per-issue ETag requests.",
+   "justification": "A single chunked query makes the 200-issues-in-at-most-2-calls criterion testable; the existing per-run gh cache (bin/lean/effects.mjs:461) cannot serve a long-lived schedd.",
+   "source": "spec"
+  },
+  {
+   "id": "K2",
+   "choice": "Reuse the existing GH_UNAVAILABLE code rather than adding a new outcome code.",
+   "justification": "bin/engine/outcome-codes.mjs:43 already defines it, and the issue names it.",
+   "source": "spec"
+  }
+ ]
+}
