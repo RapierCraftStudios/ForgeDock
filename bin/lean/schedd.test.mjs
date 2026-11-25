@@ -840,13 +840,15 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     const dir = tmpDir("schedd-settled-"), order = [];
     let version = "1.51.0";
     const d = await startDaemon({ dir, root: join(dir, "batches"), log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => null,
-      exit: (c) => order.push(`exit${c}`), respawn: () => order.push("respawn"), probe: async () => { order.push("probe"); return true; }, successorMs: 200, successorPollMs: 10, runBatch: async () => ({}) });
+      exit: (c) => order.push(`daemon-exit${c}`), respawn: () => order.push("respawn"), probe: async () => { order.push("probe"); return true; }, successorMs: 200, successorPollMs: 10, runBatch: async () => ({}) });
     version = "1.52.0";
     await d.closed;
     order.push("closed-seen"); // what scheddFromCli used to exit on
     await d.settled();
     order.push("settled");
+    order.push(`exit${d.stopCode()}`); // the CLI's exit(stopCode), issued only once settled() resolved
     assert.ok(order.indexOf("respawn") < order.indexOf("settled") && order.indexOf("probe") < order.indexOf("settled"), order.join(","));
+    assert.ok(order.indexOf("probe") < order.indexOf("settled") && order.indexOf("settled") < order.indexOf("exit1"), `exit1 after respawn, probe and settled: ${order.join(",")}`);
     assert.equal(d.stopCode(), 1);
   });
 
@@ -1184,6 +1186,29 @@ describe("schedd under load and restart (#4775)", () => {
       const e = await hung;
       assert.match(e.message, /did not start within 150 ms/);
     } finally { await d.close(); }
+  });
+
+  it("#6001 scheddFromCli handover: exit(stopCode) runs only after the successor is spawned and probed (awaits d.settled)", async () => {
+    const events = [], tick = () => new Promise((r) => setTimeout(r, 15));
+    const d = { running: true, closed: Promise.resolve(), stopCode: () => 1, rehosted: () => null,
+      settled: async () => { await tick(); events.push("respawn"); await tick(); events.push("probe"); } };
+    const res = await scheddFromCli([], { scheddDir: tmpDir("schedd-cli-h-"), startDaemon: async () => d, processOn: () => {}, exit: (c) => events.push(`exit${c}`), due: null, renice: () => {}, batchDeps: {} });
+    assert.deepEqual(events, ["respawn", "probe", "exit1"]);
+    assert.deepEqual(res, { running: false, exitCode: 1 });
+  });
+
+  it("#6001 scheddFromCli rehost: exit waits for the rehosted daemon's closed and settled", async () => {
+    const events = [], tick = () => new Promise((r) => setTimeout(r, 15));
+    let closeB, settleB;
+    const b = { running: true, closed: new Promise((r) => { closeB = r; }), stopCode: () => 1, rehosted: () => null, settled: () => new Promise((r) => { settleB = r; }) };
+    const a = { running: true, closed: Promise.resolve(), stopCode: () => 1, rehosted: () => b, settled: async () => {} };
+    const done = scheddFromCli([], { scheddDir: tmpDir("schedd-cli-r-"), startDaemon: async () => a, processOn: () => {}, exit: (c) => events.push(`exit${c}`), due: null, renice: () => {}, batchDeps: {} });
+    await tick();
+    assert.deepEqual(events, [], "exit must wait for the rehosted daemon's closed");
+    closeB(); await tick();
+    assert.deepEqual(events, [], "exit must wait for the rehosted daemon's settled");
+    settleB(); await done;
+    assert.deepEqual(events, ["exit1"]);
   });
 
   it("the unit stands by while another daemon holds the lock instead of exiting 0 (no Restart=always loop)", async () => {
