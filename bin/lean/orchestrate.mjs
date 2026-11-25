@@ -920,7 +920,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   };
   // #5988: engine-errors with one host-bound signature on one agent are counted per (signature, agent): at the breaker's threshold only that
   // agent is quarantined (its cache reseeded once); the batch breaker never sees them, so unaffected agents keep admitting.
-  const scopedSeen = new Map(), quarantined = new Map(), reseeded = new Set(); // quarantined: key -> until
+  const QUARANTINE_REQUEUES = 3, quarantineRequeues = new Map(), scopedSeen = new Map(), quarantined = new Map(), reseeded = new Set(); // quarantined: key -> until
   const scopedEngineError = async (agent, sig) => {
     const t = now(), key = `${sig}|${agent}`, windowMs = breaker.window_min * 60000, win = [...(scopedSeen.get(key) ?? []).filter((x) => t - x < windowMs), t];
     scopedSeen.set(key, win);
@@ -1213,12 +1213,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (row.outcome === "engine-error") {
       const ag = r?.agent ?? r?.sandbox?.agent ?? null, hs = ag && breaker ? hostSignature(r, row.detail) : null;
       const sc = hs ? await scopedEngineError(ag, hs) : null;
-      if (sc?.quarantined) { // #5988: an agent in quarantine: its lane waits and is requeued without a relaunch or breaker count; unaffected agents keep admitting
+      const qn = sc?.quarantined ? (quarantineRequeues.get(n) ?? 0) + 1 : 0; // a lane waits out the quarantine a bounded number of times, then counts as an ordinary engine-error (batch breaker included)
+      if (sc?.quarantined && qn <= QUARANTINE_REQUEUES) { quarantineRequeues.set(n, qn); // #5988: an agent in quarantine: its lane waits and is requeued without a relaunch or breaker count; unaffected agents keep admitting
         requeue(n, AGENT_LOST_REQUEUE_MS); done(); save();
         update({ ...row, outcome: "requeued", detail: `requeued: agent ${ag} is quarantined (${hs}); retried in ${Math.round(AGENT_LOST_REQUEUE_MS / 1000)}s` });
         return;
       }
-      const errAt = hs ? undefined : noteEngineError(r?.detail);
+      const errAt = hs && !sc?.quarantined ? undefined : noteEngineError(r?.detail);
       if (lostNow) lostNow.err = errAt;
       // #5161: a transient failure (gateway 5xx, reset) waits out the outage with backoff instead of the single immediate relaunch.
       if (transientMax > 0 && isTransientEngineError(row.detail)) {

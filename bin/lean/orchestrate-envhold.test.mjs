@@ -327,7 +327,7 @@ describe("#5988: breaker scoped by signature and agent", () => {
   it("12 sandbox.exited engine-errors on one agent quarantine only that agent; other agents keep admitting", async () => {
     const issues = [...Array.from({ length: 12 }, (_, i) => i + 1), 50], quarantined = [], reseeds = [];
     const sick = (n) => ({ terminalReason: "engine-error", code: "sandbox.exited", detail: `sandbox.exited before a result (run ${n})`, agent: "vm-a" });
-    const script = Object.fromEntries(issues.slice(0, 12).map((n) => [n, [sick(n)]]));
+    const script = Object.fromEntries(issues.slice(0, 12).map((n) => [n, [sick(n), MERGED]]));
     const r = await harness({ script, issues, parallel: 1, envHold: undefined,
       extra: { envHold: null, breaker: { errors: 3, window_min: 10 }, quarantineAgent: (q) => quarantined.push(q), reseedCache: (q) => reseeds.push(q) } });
     assert.deepEqual(quarantined.map((q) => q.agent), ["vm-a"], "that agent only, once");
@@ -339,10 +339,17 @@ describe("#5988: breaker scoped by signature and agent", () => {
 
   it("without placement callbacks the agent is still quarantined in-batch: its lanes are requeued, the breaker stays closed", async () => {
     const sick = (n) => ({ terminalReason: "engine-error", code: "sandbox.exited", detail: `sandbox.exited (run ${n})`, agent: "vm-a" });
-    const r = await harness({ script: { 1: [sick(1)], 2: [sick(2)], 3: [sick(3)], 4: [sick(4), MERGED] }, issues: [1, 2, 3, 4, 50], parallel: 1, envHold: undefined,
+    const r = await harness({ script: { 1: [sick(1), MERGED], 2: [sick(2), MERGED], 3: [sick(3), MERGED], 4: [sick(4), MERGED] }, issues: [1, 2, 3, 4, 50], parallel: 1, envHold: undefined,
       extra: { envHold: null, breaker: { errors: 3, window_min: 10 } } });
     assert.ok(r.updates.some((u) => u.outcome === "agent-quarantine"));
     assert.ok(!r.updates.some((u) => u.outcome === "breaker"));
     assert.equal(r.byIssue[50].outcome, "merged");
+  });
+
+  it("a persistently sick agent without placement callbacks cannot loop forever: the batch breaker counts it after bounded requeues", async () => {
+    const sick = (n) => ({ terminalReason: "engine-error", code: "sandbox.exited", detail: `sandbox.exited (run ${n})`, agent: "vm-a" });
+    const r = await harness({ script: Object.fromEntries([1, 2, 3, 4, 5].map((n) => [n, [sick(n)]])), issues: [1, 2, 3, 4, 5], parallel: 1, envHold: undefined,
+      extra: { envHold: null, breaker: { errors: 3, window_min: 10 } } });
+    assert.ok(r.updates.some((u) => u.outcome === "breaker"), "bounded: the batch breaker trips");
   });
 });
