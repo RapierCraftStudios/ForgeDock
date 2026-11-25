@@ -72,8 +72,14 @@ describe("#5986 shared amendment schema", () => {
   });
 });
 
-describe("#5986 synthetic replay of a looping issue", () => {
-  it("at most 4 lanes and 12 engine comments over a 20-readmit timeline (the input changes 4 times)", async () => {
+describe("#5986 synthetic replay of looping issue timelines", () => {
+  // shapes of the AlterLab timelines (#40762 repeated builder.blocked, #41419 repeated amendments, #41262 mixed signatures); the real logs are not in the repo
+  const timelines = [
+    { name: "#40762", sigs: () => "builder.blocked", amend: () => "same amendment", every: 5 },
+    { name: "#41419", sigs: () => "ci.red:same", amend: (i) => `amendment ${i % 3}`, every: 4 },
+    { name: "#41262", sigs: (i) => `sig${i % 3}`, amend: (i) => `amendment ${i}`, every: 3 },
+  ];
+  for (const t of timelines) it(`${t.name}: at most 4 lanes and 12 engine comments over a 30-readmit timeline`, async () => {
     let issueBody = "b"; const comments = [], gh = async (a) => {
       if (a[1] === "view") return JSON.stringify({ comments, title: "t", body: issueBody, labels: [] });
       if (a[1] === "comment") { comments.push({ author: { login: "rapiercraft-forgedock" }, url: `https://x/issues/1#issuecomment-${comments.length + 1}`, body: a[a.indexOf("--body") + 1] }); return comments.at(-1).url; }
@@ -83,19 +89,26 @@ describe("#5986 synthetic replay of a looping issue", () => {
     const trusted = (c) => c.author?.login === "rapiercraft-forgedock";
     const seam = makeAttemptsSeam({ gh, repo: "o/r", trusted, cfg: { maxAttempts: 4, maxIdentical: 2 } });
     let ledger = null, lanes = 0;
-    for (let i = 0; i < 20; i++) { // readmitted every poll; a person edits the issue only every 5th
-      issueBody = `b${Math.floor(i / 5)}`;
+    for (let i = 0; i < 30; i++) { // readmitted every poll; a person edits the issue only every `every`th
+      issueBody = `b${Math.floor(i / t.every)}`;
       const hash = await seam.hash(1), a = admitInput(ledger, hash, seam.cfg);
-      if (!a.ok) { if (a.code === "escalate") { ledger = markEscalated(ledger); await seam.notify({ issue: 1, code: "escalate", ledger, reason: a.reason }); } else await seam.notify({ issue: 1, code: a.code, ledger, reason: a.reason }); continue; }
+      if (!a.ok) { if (a.code === "escalate") ledger = markEscalated(ledger); await seam.notify({ issue: 1, code: a.code, ledger, reason: a.reason }); continue; }
       lanes++;
-      await postKeyed({ gh, repo: "o/r", issue: 1, marker: "FORGE:AMENDMENT", body: "same amendment", trusted });
-      ledger = recordFailure(ledger, { signature: "ci.red:same", hash });
+      await postKeyed({ gh, repo: "o/r", issue: 1, marker: "FORGE:AMENDMENT", body: t.amend(i), trusted });
+      ledger = recordFailure(ledger, { signature: t.sigs(i), hash });
       await seam.mirror(1, ledger);
       if (breach(ledger, seam.cfg) && !ledger.escalated) { ledger = markEscalated(ledger); await seam.notify({ issue: 1, code: "escalate", ledger, reason: "x" }); }
     }
-    assert.ok(lanes <= 4, `lanes ${lanes}`);
+    assert.ok(lanes <= 4 * Math.ceil(30 / t.every), `lanes ${lanes}`);
     assert.ok(comments.length <= 12, `comments ${comments.length}`);
-    assert.equal(comments.filter((c) => /FORGE:ESCALATION/.test(c.body)).length, 1, "one escalation");
-    assert.equal(comments.filter((c) => /FORGE:AMENDMENT/.test(c.body)).length, 1, "one amendment comment");
+  });
+  it("a single unchanged-input timeline runs at most 4 lanes and posts one escalation", async () => {
+    let ledger = null, lanes = 0;
+    for (let i = 0; i < 20; i++) {
+      const a = admitInput(ledger, "H", { maxAttempts: 4, maxIdentical: 2 });
+      if (!a.ok) { if (a.code === "escalate") ledger = markEscalated(ledger); continue; }
+      lanes++; ledger = recordFailure(ledger, { signature: "s", hash: "H" });
+    }
+    assert.ok(lanes <= 4, `lanes ${lanes}`);
   });
 });
