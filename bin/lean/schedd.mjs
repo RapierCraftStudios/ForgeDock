@@ -636,7 +636,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       if (reported && cfg.fileIssues && !existsSync(mark)) {
         writeEfficiency(b.dir, { ...r.eff, introspect: { at: new Date(now).toISOString() } });
         writeFileSync(mark, JSON.stringify({ at: new Date(now).toISOString() }) + "\n", { mode: 0o600 });
-        (introspect ?? ((id) => spawn(process.execPath, [join(fileURLToPath(new URL("..", import.meta.url)), "introspect-schedule.mjs"), "--run"], { stdio: "ignore", detached: true }).unref()))(b.id);
+        (introspect ?? ((id) => spawn(process.execPath, [join(fileURLToPath(new URL("..", import.meta.url)), "introspect-schedule.mjs"), "--run"], { stdio: "ignore", detached: true, windowsHide: true }).unref()))(b.id);
       }
     } catch { /* advisory */ }
   }
