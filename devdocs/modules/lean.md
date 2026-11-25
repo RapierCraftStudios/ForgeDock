@@ -3691,3 +3691,8 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 - `watchdog` takes `unit` and `emit`: heartbeat down while `unit()` is `active`/`activating` logs `ALERT ...`, emits `schedd.unit-no-daemon` and restarts the unit via `start`, whether or not batches are unfinished.
 - Deferred to the operator/installer layer (no unit file or installer in this repo): `WatchdogSec` heartbeat on the unit, and the installer restarting the unit on `npm i -g` / plugin update.
 - Post-deploy check `schedd-handover-no-gap`.
+
+## Lane overhead share (#5989)
+- `overheadStats(phases, wallMs, modelMs)` in `phaseledger.mjs` returns `{ fixed_overhead_ms, model_share }`: `max(0, wall - model)` and `model / wall` to 3 decimals (0 when wall <= 0). `phases` is unused; queue_wait is already outside `wall_ms`.
+- `RUN_TERMINAL` (run log and `FORGE:TELEMETRY`) carries both fields. Observational only: no gate, conformance or merge decision reads them, and `wall_ms`, `model_ms` and the `flattenPhases` keys are unchanged.
+- Deferred follow-ups: env snapshot as default, recovery reuse, parallel precheck/plan, path-scoped guard.
