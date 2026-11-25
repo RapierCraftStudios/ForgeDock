@@ -840,14 +840,15 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     const dir = tmpDir("schedd-settled-"), order = [];
     let version = "1.51.0";
     const d = await startDaemon({ dir, root: join(dir, "batches"), log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => null,
-      exit: (c) => order.push(`exit${c}`), respawn: () => order.push("respawn"), probe: async () => { order.push("probe"); return true; }, successorMs: 200, successorPollMs: 10, runBatch: async () => ({}) });
+      exit: (c) => order.push(`daemon-exit${c}`), respawn: () => order.push("respawn"), probe: async () => { order.push("probe"); return true; }, successorMs: 200, successorPollMs: 10, runBatch: async () => ({}) });
     version = "1.52.0";
     await d.closed;
     order.push("closed-seen"); // what scheddFromCli used to exit on
     await d.settled();
     order.push("settled");
+    order.push(`exit${d.stopCode()}`); // the CLI's exit(stopCode), issued only once settled() resolved
     assert.ok(order.indexOf("respawn") < order.indexOf("settled") && order.indexOf("probe") < order.indexOf("settled"), order.join(","));
-    assert.ok(order.indexOf("exit1") >= 0 && order.indexOf("exit1") < order.indexOf("settled"), `exit(1) runs before settled resolves: ${order.join(",")}`);
+    assert.ok(order.indexOf("probe") < order.indexOf("settled") && order.indexOf("settled") < order.indexOf("exit1"), `exit1 after respawn, probe and settled: ${order.join(",")}`);
     assert.equal(d.stopCode(), 1);
   });
 
