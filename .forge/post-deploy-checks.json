@@ -204,19 +204,17 @@
     "timeout": 120,
     "for": "7d"
   },
-<<<<<<< HEAD
   "R12-followup": {
     "run": "test \"$(gh api \"repos/{owner}/{repo}/issues/comments?since=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)&per_page=100\" --paginate --jq '.[]|select(.body|startswith(\"<!-- FORGE:\"))|.issue_url' | sort | uniq -c | awk '$1>6' | wc -l)\" -eq 0",
     "pass": "exit 0",
     "timeout": 120,
     "for": "7d",
     "why": "#5979 R12: over one day no issue gains more than 6 ForgeDock comments (upper bound on churn; state-change exemption is not machine-checkable, so a hit is reviewed by hand). Baseline: count of issues over 6 comments/day before the churn fixes is unmeasured, target 0."
-=======
+  },
   "R7-basered-idle-slot-replay": {
     "run": "test \"$(gh api \"repos/{owner}/{repo}/issues/comments?since=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)&per_page=100\" --paginate --jq '[.[]|select(.body|contains(\"gave up after\"))|select(.body|contains(\"base.red\"))]|length' | awk '{s+=$1} END{print s+0}')\" -eq 0",
     "pass": "exit 0",
     "timeout": 120,
     "for": "7d"
->>>>>>> origin/staging
   }
 }
