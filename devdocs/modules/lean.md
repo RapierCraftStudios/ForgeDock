@@ -3738,3 +3738,10 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 - `systemctl start` is a no-op on an active unit, so the #5966 zombie (unit active, no live daemon) was never recovered. `schedd.restartUnit()` runs `systemctl --user restart --no-block` (best effort, like `startUnit`); `startUnit` and `connect()` are unchanged.
 - `watchdog` takes a separate `restart` dep (wired in `scheddFromCli`). Heartbeat down while `unit()` is `active`/`activating`: ALERT, `schedd.unit-no-daemon`, `restart()`, never `start()`. Only an inactive or absent unit with unfinished batches goes through `start()`.
 - Result gains `restarted`; `started` is `false` (and the failure is logged) when `restart()` throws.
+
+## Entry 2026-11-25 — per-resource halts instead of batch halts (#5988)
+
+- `backend.auth`: `orchestrate` probes the login every `AUTH_PROBE_MS` (5 min) through an injectable `authProbe`, resumes at once on success, and on failure tries the next rotator account (`rotator.nextAccountAfterAuthFailure`, tried first on resume). After `AUTH_ESCALATE_MS` (30 min) it escalates once (`auth-escalation` row, `onEscalate` notify + one issue comment). The pause no longer runs to the quoted reset; rate_limited/quota.exhausted holds keep their known-reset delay.
+- Holds: `limits.holdExpiryWarnings` lists hold-info entries within `HOLD_EXPIRY_WARN_MS` (T-30 min) of `expiresAt`, once per expiry; `refreshHeld` posts one `hold-alert` each and releases expired holds through the concurrency controller, so expiry re-admits at its pace. `--hold` on more than 10 issues needs `--ttl`/`--for` (`engine.holdTtlRefusal`) and prints `holdResumePlan`.
+- Breaker: engine-errors are keyed by signature plus agent (generalising the `lostSeen` window of #5859). A tripped key quarantines only that agent (`quarantineAgent`) and reseeds the cache once (`reseedCache`), emits `agent-quarantine`, and keeps admitting other work; the batch breaker and `--clear-breaker` are unchanged.
+- Stall recovery: `recordStallRecovery` stores the `dispatch-stalled` cause plus gates (`stallCause`); `decideStallAction` refuses a second restart for the same cause and alerts instead.
