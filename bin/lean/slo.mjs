@@ -3,12 +3,12 @@
 /**
  * Batch efficiency SLOs (#5987): `orchestrate.slo.*` thresholds with defaults, breach evaluation over an efficiency.json ledger
  * (efficiency.mjs), and the filer that turns a breach into one rolling `engine-gap` issue per signature `slo:<code>:<repo>`.
- * Filing is default-off (`orchestrate.slo.file_issues: true` opts in); breaches are always recorded in efficiency.json.
+ * Filing is default-on (`orchestrate.slo.file_issues: false` opts out); breaches are always recorded in efficiency.json.
  * The filer takes an injected `gh(args) -> stdout`, appends a counter comment on a re-breach at most once per 6 h, and closes the
  * issue after 24 h green. Its state lives in efficiency.json (`slo.sigs`), so a daemon restart neither re-files nor re-comments.
  */
 export const DEFAULT_SLO = Object.freeze({ concurrencyMin: 0.6, concurrencyMinutes: 30, repeatMax: 3, attemptsMax: 2, commentsMax: 20, interventionsMax: 6,
-  phaseRatioMax: 1.5, capacityRefusalsMax: 20, idleShareMax: 0.2, fileIssues: false, repo: "RapierCraftStudios/ForgeDock", label: "engine-gap" });
+  phaseRatioMax: 1.5, capacityRefusalsMax: 20, idleShareMax: 0.2, fileIssues: true, repo: "RapierCraftStudios/ForgeDock", label: "engine-gap" });
 export const SLO_UPDATE_MS = 6 * 3_600_000;
 export const SLO_CLOSE_GREEN_MS = 24 * 3_600_000;
 const SNAKE = { concurrencyMin: "concurrency_min", concurrencyMinutes: "concurrency_minutes", repeatMax: "repeat_max", attemptsMax: "attempts_max", commentsMax: "comments_max",
@@ -21,7 +21,7 @@ export function parseSloConfig(yaml) {
   const out = { ...DEFAULT_SLO };
   for (const [k, snake] of Object.entries(SNAKE)) { const v = s[snake] ?? s[`slo_${snake}`]; if (v !== undefined && String(v).trim() !== "" && Number.isFinite(Number(v)) && Number(v) >= 0) out[k] = Number(v); }
   const f = s.file_issues ?? s.slo_file_issues;
-  out.fileIssues = f !== undefined && String(f).trim().toLowerCase() === "true";
+  out.fileIssues = f === undefined || String(f).trim().toLowerCase() !== "false";
   const repo = String(s.repo ?? s.slo_repo ?? "").trim();
   if (/^[\w.-]+\/[\w.-]+$/.test(repo)) out.repo = repo;
   return out;

@@ -3725,7 +3725,7 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 | `capacity_refusals_max` per hour | 20 | capacity |
 | `idle_share_max` per cause (not no-ready) | 0.2 | idle-<cause> |
 
-Filing: `file_issues` is **default off** (breaches are still written to efficiency.json). When on, each signature `slo:<code>:<repo>` gets one `engine-gap` issue in `orchestrate.slo.repo` (default RapierCraftStudios/ForgeDock), found by a `forge-slo` marker so a restart adopts rather than duplicates; a re-breach appends a counter comment at most once per 6 h; 24 h green closes it. `bin/introspect-schedule.mjs` installs the daily introspect timer (only while `file_issues` is on). The execution budget (`execution-budget.json`) now keeps one entry per `<batch>#<sandbox id>` holding its latest cumulative usage.
+Filing: `file_issues` is **default on** (`file_issues: false` opts out; breaches are always written to efficiency.json). When on, each signature `slo:<code>:<repo>` gets one `engine-gap` issue in `orchestrate.slo.repo` (default RapierCraftStudios/ForgeDock), found by a `forge-slo` marker so a restart adopts rather than duplicates; a re-breach appends a counter comment at most once per 6 h; 24 h green closes it. `bin/introspect-schedule.mjs` installs the daily introspect timer (unless `file_issues: false`). The execution budget (`execution-budget.json`) now keeps one entry per `<batch>#<sandbox id>` holding its latest cumulative usage.
 
 ## Entry 2026-11-25 — Owner-based liveness under the clocks (#5991)
 

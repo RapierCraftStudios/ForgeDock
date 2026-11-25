@@ -45,10 +45,11 @@ describe("#5987 introspect schedule", () => {
     assert.ok(["off", "failed", "removed"].includes(r.status) || r.status === "installed");
   });
 
-  it("runIntrospect files the report once, dedupes an unchanged report, adopts an open issue, and stays off by default", async () => {
+  it("runIntrospect files the report once, dedupes an unchanged report, adopts an open issue, and honors file_issues: false", async () => {
     const home = tmpDir("isch-run-"), cwd = tmpDir("isch-cwd-"), calls = [];
     const gh = async (a) => { calls.push(a); return a[1] === "list" ? "[]" : a[1] === "create" ? "https://x/issues/9\n" : ""; };
     const run = async () => "adequate 80%";
+    fs.writeFileSync(join(cwd, "forge.yaml"), "orchestrate:\n  slo:\n    file_issues: false\n");
     assert.equal((await runIntrospect({ cwd, home, run, gh })).action, "disabled");
     assert.equal(calls.length, 0);
     fs.writeFileSync(join(cwd, "forge.yaml"), "orchestrate:\n  slo:\n    file_issues: true\n");

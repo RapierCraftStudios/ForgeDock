@@ -3,8 +3,8 @@
 /**
  * Daily `fd-introspect --file-issues` (#5987): the lean-lane test-quality trend (`forgedock stats --conformance-outcomes`) run on a
  * systemd user timer, with a tagged cron entry as the fallback, modelled on gc-schedule.mjs. Installed by `doctor --fix` and
- * `forgedock init`. Findings are filed (deduped against open issues and prior reports) only when `orchestrate.slo.file_issues`
- * is true; `enabled` false removes the entry. All I/O is injected (`exec`, `fs`). Never throws.
+ * `forgedock init`. Findings are filed (deduped against open issues and prior reports) unless `orchestrate.slo.file_issues: false`
+ * is set; `enabled` false removes the entry. All I/O is injected (`exec`, `fs`). Never throws.
  */
 import * as nodeFs from "node:fs";
 import { createHash } from "node:crypto";

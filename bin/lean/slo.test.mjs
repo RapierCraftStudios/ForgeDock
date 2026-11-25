@@ -10,11 +10,12 @@ const codes = (o) => evaluateSlo(eff(o), DEFAULT_SLO).map((b) => b.code);
 const fakeGh = () => { const calls = []; return { calls, gh: async (a) => { calls.push(a); return a[1] === "list" ? "[]" : a[1] === "create" ? "https://github.com/x/y/issues/42\n" : ""; } }; };
 
 describe("#5987 SLOs", () => {
-  it("defaults and file_issues off", () => {
+  it("defaults and file_issues on", () => {
     const c = parseSloConfig({});
-    assert.equal(c.fileIssues, false); assert.equal(c.repeatMax, 3); assert.equal(c.concurrencyMin, 0.6);
+    assert.equal(c.fileIssues, true); assert.equal(c.repeatMax, 3); assert.equal(c.concurrencyMin, 0.6);
     assert.equal(parseSloConfig({ orchestrate: { slo: { file_issues: "true", repeat_max: "5", attempts_max: "bad" } } }).repeatMax, 5);
     assert.equal(parseSloConfig({ orchestrate: { file_issues: "true" } }).fileIssues, true);
+    assert.equal(parseSloConfig({ orchestrate: { slo: { file_issues: "false" } } }).fileIssues, false);
     assert.equal(parseSloConfig({ orchestrate: { slo: { attempts_max: "bad" } } }).attemptsMax, 2);
   });
 
@@ -36,7 +37,7 @@ describe("#5987 SLOs", () => {
 
   it("files nothing unless enabled", async () => {
     const f = fakeGh(), b = evaluateSlo(eff({ interventionsPerDay: 9 }), DEFAULT_SLO);
-    const r = await fileSloIssues({ eff: eff(), breaches: b, gh: f.gh, cfg: DEFAULT_SLO, now: 1e9 });
+    const r = await fileSloIssues({ eff: eff(), breaches: b, gh: f.gh, cfg: { ...DEFAULT_SLO, fileIssues: false }, now: 1e9 });
     assert.equal(f.calls.length, 0); assert.deepEqual(r.slo.sigs, {});
   });
 
