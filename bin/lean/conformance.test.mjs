@@ -2453,3 +2453,34 @@ describe("#5754 precheck fails fast on a deliver row the placement cannot produc
     assert.equal(run("zero 429 lines against the live stack").failures.some((x) => x.kind === "e2e_placement"), false);
   });
 });
+
+import { AMENDMENT_EXAMPLES, AMEND_KINDS as SCHEMA_KINDS } from "./amendment-schema.mjs";
+import { builderImplementPrompt, amendmentCorrectionPrompt } from "./prompts.mjs";
+
+describe("builder prompt amendments agree with the validator (#5979)", () => {
+  const frozen = {
+    requirements: [{ id: "R1", quote: "q", disposition: "deliver" }],
+    deliverables: [{ id: "D1", path: "a.mjs", change: "c", requirements: ["R1"] }],
+    validate: [{ id: "V1", command: "true" }, { id: "G2", command: "node --test a.test.mjs" }],
+  };
+  it("every documented example passes the shape check and applies without problems", () => {
+    assert.equal(AMENDMENT_EXAMPLES.length, SCHEMA_KINDS.length);
+    for (const ex of AMENDMENT_EXAMPLES) {
+      assert.deepEqual(amendmentKindProblems([ex], ["V1", "G2"]), [], ex.kind);
+      const r = applyAmendments(frozen, [ex]);
+      assert.deepEqual(r.problems, [], `${ex.kind}: ${r.problems}`);
+    }
+  });
+  it("the builder prompt names every kind and the substitute-validate path", () => {
+    const p = builderImplementPrompt();
+    for (const k of SCHEMA_KINDS) assert.ok(p.includes(`"${k.replace("defer|post-deploy", "defer")}`) || p.includes(k), k);
+    assert.match(p, /"kind":"substitute-validate","validate":"G2"/);
+    assert.match(p, /never a supersedes guard/);
+    assert.match(amendmentCorrectionPrompt(["x"]), /substitute-validate/);
+  });
+  it("substitute-validate for G2 validates; supersedes G2 is still rejected", () => {
+    const ok = applyAmendments(frozen, [{ kind: "substitute-validate", validate: "G2", command: "node --test a.test.mjs", why: "w" }]);
+    assert.deepEqual(ok.problems, []);
+    assert.match(applyAmendments(frozen, [{ kind: "supersedes", guard: "G2", why: "w" }]).problems[0], /substitute-validate/);
+  });
+});
