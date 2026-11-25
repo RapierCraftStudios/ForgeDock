@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { computeInputHash, emptyLedger, normalizeLedger, recordFailure, breach, admit, markEscalated, renderEscalation, renderAttempts, parseAttempts, validateAmendments, budgets, makeAttemptsSeam } from "./attempts.mjs";
+import { computeInputHash, emptyLedger, normalizeLedger, recordFailure, breach, admitInput, markEscalated, renderEscalation, renderAttempts, parseAttempts, validateAmendments, budgets, makeAttemptsSeam } from "./attempts.mjs";
 import { postKeyed } from "./statuscomment.mjs";
 
 const base = { title: "t", body: "b", labels: ["bug"], decisions: [], engineVersion: "1.2.3", sandboxVersion: "1.2.0", contractHash: "c1" };
@@ -22,12 +22,12 @@ describe("#5986 admission, budgets, escalation", () => {
   const cfg = {};
   it("defaults are 4 and 2; a missing ledger admits; a changed hash admits", () => {
     assert.deepEqual(budgets(undefined), { maxAttempts: 4, maxIdentical: 2 });
-    assert.deepEqual(admit(null, "H1", cfg), { ok: true });
-    assert.deepEqual(admit(fail(null, "s", "H1"), "H2", cfg), { ok: true });
-    assert.deepEqual(admit(fail(null, "s", "H1"), null, cfg), { ok: true }, "unreadable input fails open");
+    assert.deepEqual(admitInput(null, "H1", cfg), { ok: true });
+    assert.deepEqual(admitInput(fail(null, "s", "H1"), "H2", cfg), { ok: true });
+    assert.deepEqual(admitInput(fail(null, "s", "H1"), null, cfg), { ok: true }, "unreadable input fails open");
   });
   it("same hash after a failure is refused with loop.no_new_input", () => {
-    const a = admit(fail(null, "ci.red:x", "H1"), "H1", cfg);
+    const a = admitInput(fail(null, "ci.red:x", "H1"), "H1", cfg);
     assert.equal(a.ok, false); assert.equal(a.code, "loop.no_new_input"); assert.match(a.reason, /ci\.red:x/);
   });
   it("the 3rd identical signature breaches; 4 lanes breach; different signatures stay under max_identical", () => {
@@ -40,10 +40,10 @@ describe("#5986 admission, budgets, escalation", () => {
   });
   it("a breach escalates once at the same hash, then loop.no_new_input; a new hash admits and clears the escalated flag after the next failure", () => {
     let l = null; for (let i = 1; i <= 3; i++) l = fail(l, "s", `H${i}`);
-    assert.equal(admit(l, "H3", cfg).code, "escalate");
+    assert.equal(admitInput(l, "H3", cfg).code, "escalate");
     l = markEscalated(l);
-    assert.equal(admit(l, "H3", cfg).code, "loop.no_new_input");
-    assert.deepEqual(admit(l, "H4", cfg), { ok: true });
+    assert.equal(admitInput(l, "H3", cfg).code, "loop.no_new_input");
+    assert.deepEqual(admitInput(l, "H4", cfg), { ok: true });
     assert.equal(fail(l, "s", "H4").escalated, undefined, "the next window escalates again");
   });
   it("the ledger round-trips through the FORGE:ATTEMPTS comment and the escalation names signatures, runs and spend", () => {
@@ -85,7 +85,7 @@ describe("#5986 synthetic replay of a looping issue", () => {
     let ledger = null, lanes = 0;
     for (let i = 0; i < 20; i++) { // readmitted every poll; a person edits the issue only every 5th
       issueBody = `b${Math.floor(i / 5)}`;
-      const hash = await seam.hash(1), a = admit(ledger, hash, seam.cfg);
+      const hash = await seam.hash(1), a = admitInput(ledger, hash, seam.cfg);
       if (!a.ok) { if (a.code === "escalate") { ledger = markEscalated(ledger); await seam.notify({ issue: 1, code: "escalate", ledger, reason: a.reason }); } else await seam.notify({ issue: 1, code: a.code, ledger, reason: a.reason }); continue; }
       lanes++;
       await postKeyed({ gh, repo: "o/r", issue: 1, marker: "FORGE:AMENDMENT", body: "same amendment", trusted });

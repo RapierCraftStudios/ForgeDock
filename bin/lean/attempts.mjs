@@ -13,7 +13,7 @@ import { postUpsert, findLeading, engineCommentCount } from "./statuscomment.mjs
 export const ATTEMPTS_MARKER = "FORGE:ATTEMPTS";
 export const ESCALATION_MARKER = "FORGE:ESCALATION";
 export const NO_NEW_INPUT = "loop.no_new_input";
-export const DEFAULT_MAX_ATTEMPTS = 4;
+export const DEFAULT_ISSUE_ATTEMPTS = 4;
 export const DEFAULT_MAX_IDENTICAL = 2;
 
 const sha = (s) => createHash("sha256").update(String(s)).digest("hex").slice(0, 16);
@@ -34,7 +34,7 @@ export function normalizeLedger(x) {
 }
 
 /** `{maxAttempts, maxIdentical}` from the orchestration config (posint, else the defaults 4 and 2). */
-export const budgets = (cfg) => ({ maxAttempts: Number(cfg?.maxAttempts) >= 1 ? Math.floor(cfg.maxAttempts) : DEFAULT_MAX_ATTEMPTS, maxIdentical: Number(cfg?.maxIdentical) >= 1 ? Math.floor(cfg.maxIdentical) : DEFAULT_MAX_IDENTICAL });
+export const budgets = (cfg) => ({ maxAttempts: Number(cfg?.maxAttempts) >= 1 ? Math.floor(cfg.maxAttempts) : DEFAULT_ISSUE_ATTEMPTS, maxIdentical: Number(cfg?.maxIdentical) >= 1 ? Math.floor(cfg.maxIdentical) : DEFAULT_MAX_IDENTICAL });
 
 /** The ledger after one failed lane (a new object): attempts+1, the signature with its run link, the hash it ran under, spend added. */
 export function recordFailure(ledger, { signature, hash = null, spend = 0, run = null }) {
@@ -59,7 +59,7 @@ export function breach(ledger, cfg) {
  * Admission of a re-run. `hash` null (unreadable input) fails open. Returns {ok:true} or {ok:false, code, reason}: `escalate` (a budget
  * breach not yet escalated), or `loop.no_new_input` (the same input after a failure).
  */
-export function admit(ledger, hash, cfg) {
+export function admitInput(ledger, hash, cfg) {
   const l = normalizeLedger(ledger);
   if (!hash || !l.attempts || !l.lastInputHash || hash !== l.lastInputHash) return { ok: true };
   const b = breach(l, cfg);
