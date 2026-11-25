@@ -24,6 +24,7 @@ import { memAvailableMb } from "./lean/heavy.mjs";
 import { liveOverload, formatOverload, formatHostLoad } from "./lean/hostload.mjs";
 import { join, resolve as resolvePath } from "node:path";
 import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost, ENGINE_VERSION } from "./engine.mjs";
+import { sandboxBudgetKey } from "./lean/liveness.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { decomposedSubissues, isDecomposedRecord, isTrustedActor, parseDependsOn } from "./engine/phases.mjs";
 import { readLog, readLogFile, deriveState, runLogPath, migrateRunLogs, attachRunLog } from "./engine/runlog.mjs";
@@ -1133,10 +1134,12 @@ export async function runFromCli(argv, deps = {}) {
     for (const [sig, f] of Object.entries(handlers)) on(sig, f);
     const env = deps.env ?? process.env;
     let lres;
+    // #5991: on the batch's own host a lease of another batch that no longer owns the issue is taken over at once; a sandbox has no batch dir, so it is unknown there
+    const liveBatches = env.FORGEDOCK_BATCH_ID ? await import("./lean/batch.mjs").then((bm) => { const root = bm.batchRoot(env); return (n) => (bm.listBatches(root).includes(env.FORGEDOCK_BATCH_ID) ? bm.batchesOwning(root, leanRepo, n, { exceptId: env.FORGEDOCK_BATCH_ID }).filter((b) => !b.cancelled).map((b) => b.id) : null); }).catch(() => null) : null;
     try {
       lres = await runCore({ issue, repo: leanRepo, deferPostRun: true, ...(adopt ? { adopt: true } : {}), ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       ...(rotatorKind({ execution: readExecution(process.cwd()), env }) ? { accountRotator: rotatorKind({ execution: readExecution(process.cwd()), env }) } : {}), // #5094, #5205: detected
-      onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}), ...(plan ? { plan: true } : {}), ...(planned ? { planned } : {}), ...(stackedOn ? { stackedOn } : {}), ...(stackedOn ? { stackedOn } : {}),
+      onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(liveBatches ? { liveBatches } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}), ...(plan ? { plan: true } : {}), ...(planned ? { planned } : {}), ...(stackedOn ? { stackedOn } : {}), ...(stackedOn ? { stackedOn } : {}),
       emitTelemetry: deps.emitTelemetry ?? composeEmit(makeEmitTelemetry({ repo: leanRepo }), makeEventEmitter({ repo: leanRepo, config: readEvents() }).emit),
       admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readConformanceKinds() ? { conformanceKinds: readConformanceKinds() } : {}), ...(readConformanceMutation() ? { conformanceMutation: "report" } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readSequenceVersioned() ? { sequenceVersioned: readSequenceVersioned() } : {}), ...(readSharedSurfaces() ? { sharedSurfaces: readSharedSurfaces() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readReproQuality() ? { reproQuality: readReproQuality() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readExperiment() ? { experiment: readExperiment() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readOrchestration().mergeTrain === "on" ? { mergeTrain: "on" } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}), hostFallback: readHostFallback(), ...readRelayCaps(), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}), ...(readBaseMerge() ? { baseMerge: readBaseMerge() } : {}), ...(readFollowupsDefaultMilestone() ? { followupsDefaultMilestone: readFollowupsDefaultMilestone() } : {}), ...(readFollowupsRollupLabel() ? { followupsRollupLabel: readFollowupsRollupLabel() } : {}), ...(readCiFailFast() ? { ci: { fail_fast: readCiFailFast() } } : {}), ...(Number.isInteger(Number(readLeanSetting("contract_max_corrections"))) && Number(readLeanSetting("contract_max_corrections")) >= 1 ? { contractMaxCorrections: Number(readLeanSetting("contract_max_corrections")) } : {}), ...(Number.isInteger(Number(readLeanSetting("review_max_resumes"))) && Number(readLeanSetting("review_max_resumes")) >= 1 ? { reviewMaxResumes: Number(readLeanSetting("review_max_resumes")) } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
@@ -1397,8 +1400,8 @@ async function envBatch({ argv, root, print = (l) => console.log(l) }) {
   return { ok: true, batch: id };
 }
 
-const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] [--auto-children off|decomposed|epic|all] [--epic N] | --resume <id> [issue...] | --set-parallel <id> <K> | --set-max-remote <id> <N> | --set-placement <id> remote|hybrid|local | --clear-breaker <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> --all [--for 2h] [--reason T] (sugar for --pause) | --hold <id> <issue...> [--for <4h|30m|1d>] [--reason <text>] | --pause <id> [--for <4h|30m|1d>] --reason <text> | --unpause <id> | --gc-orphans | --adopt <issue> [--repo owner/repo] [--lane L] | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
-const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force", "--auto-children", "--epic", "--for"];
+const ORCH_USAGE = "usage: forgedock orchestrate <issue...> | --select <query> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] [--auto-children off|decomposed|epic|all] [--epic N] | --resume <id> [issue...] | --set-parallel <id> <K> | --set-max-remote <id> <N> | --set-placement <id> remote|hybrid|local | --clear-breaker <id> | --status <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> --all [--for 2h] [--reason T] (sugar for --pause) | --hold <id> <issue...> [--for <4h|30m|1d>] [--reason <text>] | --pause <id> [--for <4h|30m|1d>] --reason <text> | --unpause <id> | --gc-orphans | --adopt <issue> [--repo owner/repo] [--lane L] | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
+const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force", "--auto-children", "--epic", "--for", "--select"];
 const issuesOf = (argv) => {
   const issues = [];
   for (let i = 0; i < argv.length; i++) {
@@ -1407,6 +1410,41 @@ const issuesOf = (argv) => {
   }
   return issues;
 };
+/**
+ * #5978: `--status <id>`: the coverage of a selector batch: running + queued + backing-off + waiting on deps + human-blocked = the open
+ * issues its selector matches; `unscheduled` is 0 when the order is healthy. A batch without a selector reports its own counts.
+ */
+async function statusBatch({ id, root, io, print = (l) => console.log(l) }) {
+  const batchMod = await import("./lean/batch.mjs"), { selectArgs, parseSelected } = await import("./lean/reconcile.mjs");
+  if (!id || String(id).startsWith("--")) throw new Error(ORCH_USAGE);
+  const b = batchMod.openBatch(root, id), plan = b.readPlan(), st = b.store.load();
+  if (!plan || !st) throw new Error(`no batch ${id} in ${root}`);
+  const select = flag(plan.argv ?? [], "--select");
+  if (!select) { print(`batch ${id}: no selector (a fixed list); ${(st.pending ?? []).length} pending, ${Object.keys(st.running ?? {}).length} running`); return { ok: true, batch: id, unscheduled: [] }; }
+  const open = parseSelected(await io.gh(selectArgs(plan.repo, select)));
+  if (!open) throw new Error(`cannot read the issues matching '${select}'`);
+  const c = batchMod.coverage({ state: st, open });
+  const n = (k) => c[k].length;
+  print(`batch ${id} selector '${select}': ${open.length} matching open = ${n("running")} running + ${n("queued")} queued + ${n("backingOff")} backing-off + ${n("waitingDeps")} waiting on deps + ${n("humanBlocked")} human-blocked + ${n("unscheduled")} unscheduled`);
+  if (c.humanBlocked.length) print(`human-blocked: ${c.humanBlocked.map((x) => `#${x}`).join(", ")}`);
+  print(c.unscheduled.length ? `UNSCHEDULED (${c.unscheduled.length}): ${c.unscheduled.map((x) => `#${x}`).join(", ")}` : "unscheduled: 0 (healthy)");
+  return { ok: true, batch: id, coverage: c, unscheduled: c.unscheduled };
+}
+/** #5978: the runner's reconcile seam for a `--select` batch: the gh search, the agent/lane-image version, the base sha, close-on-lane-merge. */
+async function makeReconcile({ select, repo, leanIo, orch, lane, argv }) {
+  const { selectArgs, parseSelected, RECONCILE_MS } = await import("./lean/reconcile.mjs");
+  const rollup = Number.parseInt(process.env.FORGE_POSTDEPLOY_ROLLUP ?? "", 10) > 0 ? Number.parseInt(process.env.FORGE_POSTDEPLOY_ROLLUP, 10) : null;
+  return {
+    everyMs: RECONCILE_MS,
+    list: async () => parseSelected(await leanIo.gh(selectArgs(repo, select))),
+    version: () => `${ENGINE_VERSION}|${process.env.FORGE_LANE_IMAGE ?? ""}`,
+    base: async () => { try { return String(await leanIo.gh(["api", `repos/${repo}/commits/${lane || flag(argv, "--lane") || "staging"}`, "--jq", ".sha"])).trim() || null; } catch { return null; } },
+    closeIssue: async (n, { lane: l }) => {
+      await leanIo.gh(["issue", "close", String(n), "-R", repo, "--comment", `Merged into \`${l}\`; closed by the batch (\`Closes\` does not fire on a lane branch).`]);
+      if (rollup) await leanIo.gh(["issue", "comment", String(rollup), "-R", repo, "--body", `#${n} merged into \`${l}\`: its post-deploy checks are folded into this release checklist.`]);
+    },
+  };
+}
 /** #5471: the reason of `--force <reason>` (null when absent or valueless): lifts the cross-batch ownership skip. */
 const forceOf = (argv) => { const v = flag(argv, "--force"); return v && !String(v).startsWith("--") ? v : null; };
 /** #4469: the operands among `tokens` (`--add`/`--resume` extras): no flags, and no value of a valued flag (`--parallel 5` is not issue #5). */
@@ -1738,6 +1776,7 @@ async function orchestrateClient(argv, deps = {}) {
     const i = argv.indexOf("--requeue"), id = argv[i + 1];
     return requeueBatch({ id, tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: requeueVia(id), requireHost: true, force: forceOf(argv) });
   }
+  if (argv.includes("--status")) return statusBatch({ id: flag(argv, "--status"), root: await batchRootOf(), io: deps.io ?? makeIo() });
   if (argv.includes("--gc-orphans")) return gcOrphans({ root: await batchRootOf(), viaDaemon: async () => {
     let sock = null;
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
@@ -1767,7 +1806,7 @@ async function orchestrateClient(argv, deps = {}) {
   let msg;
   if (resumeId) msg = { op: "attach", id: resumeId, resume: true };
   else {
-    if (!issuesOf(argv).length) throw new Error(ORCH_USAGE);
+    if (!issuesOf(argv).length && !flag(argv, "--select")) throw new Error(ORCH_USAGE);
     parallelOf(argv);
     let sub = [...argv];
     if (!flag(sub, "--repo")) {
@@ -1870,6 +1909,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const i = argv.indexOf("--requeue");
     return requeueBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root, io: deps.io ?? makeIo(), requireHost: true, force: forceOf(argv), print: (l) => sink.line(l) });
   }
+  if (argv.includes("--status")) return statusBatch({ id: flag(argv, "--status"), root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
   if (argv.includes("--gc-orphans")) return gcOrphans({ root, print: (l) => sink.line(l) });
   for (const [flagName, op] of [["--pause", "pause"], ["--unpause", "unpause"], ["--hold", "pause"]]) if (argv.includes(flagName) && (flagName !== "--hold" || argv.includes("--all"))) { // #5975: `--hold <id> --all` is sugar for `--pause`
     return pauseBatch({ op, id: flag(argv, flagName), root, meta: op === "pause" ? holdMetaAll(argv) : null, print: (l) => sink.line(l) });
@@ -1902,7 +1942,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     for (const [n, l] of Object.entries(plan.baseWaits ?? {})) if (Array.isArray(l) && l.length) baseWaits.set(Number(n), l.filter((w) => w && typeof w.sha === "string" && typeof w.base === "string"));
   }
   let issues = issuesOf(argv);
-  if (!issues.length) throw new Error(ORCH_USAGE);
+  const select = flag(argv, "--select"); // #5978: a standing order: the selector is kept in plan.argv and in the batch state
+  if (!issues.length && !select) throw new Error(ORCH_USAGE);
   const parallel = parallelOf(argv);
   // The lanes' env: a resumed daemon batch uses the env its plan kept, over the daemon's own.
   // A pre-#4192 batch resumed by the daemon kept no env: its lanes use the daemon's.
@@ -2052,6 +2093,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, deferPostRun: true, // #5437: orchestrate runs result.postRun once the slot is free
       laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), ...(ctx.plan ? { plan: true } : {}), ...(ctx.planned ? { planned: ctx.planned } : {}), ...(ctx.stackedOn ? { stackedOn: ctx.stackedOn } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
+      liveBatches: (issue) => batchMod.batchesOwning(root, repo, issue, { exceptId: batch.id }).filter((b) => !b.cancelled).map((b) => b.id), // #5991: a lease of any other batch is taken over at once
       ...(rotatorKind({ execution: readExecution(cwd), env }) ? { accountRotator: rotatorKind({ execution: readExecution(cwd), env }) } : {}), // #5094, #5205: detected
       admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readConformanceKinds(cwd) ? { conformanceKinds: readConformanceKinds(cwd) } : {}), ...(readConformanceMutation(cwd) ? { conformanceMutation: "report" } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readSequenceVersioned(cwd) ? { sequenceVersioned: readSequenceVersioned(cwd) } : {}), ...(readSharedSurfaces(cwd) ? { sharedSurfaces: readSharedSurfaces(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readReproQuality(cwd) ? { reproQuality: readReproQuality(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readExperiment(cwd) ? { experiment: readExperiment(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readOrchestration(cwd).mergeTrain === "on" ? { mergeTrain: "on" } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), hostFallback: readHostFallback(cwd), ...readRelayCaps(), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}), ...(readBaseMerge(cwd) ? { baseMerge: readBaseMerge(cwd) } : {}), ...(readFollowupsDefaultMilestone(cwd) ? { followupsDefaultMilestone: readFollowupsDefaultMilestone(cwd) } : {}), ...(readFollowupsRollupLabel(cwd) ? { followupsRollupLabel: readFollowupsRollupLabel(cwd) } : {}), ...(readCiFailFast(cwd) ? { ci: { fail_fast: readCiFailFast(cwd) } } : {}), ...(Number.isInteger(Number(readLeanSetting("contract_max_corrections", cwd))) && Number(readLeanSetting("contract_max_corrections", cwd)) >= 1 ? { contractMaxCorrections: Number(readLeanSetting("contract_max_corrections", cwd)) } : {}), ...(Number.isInteger(Number(readLeanSetting("review_max_resumes", cwd))) && Number(readLeanSetting("review_max_resumes", cwd)) >= 1 ? { reviewMaxResumes: Number(readLeanSetting("review_max_resumes", cwd)) } : {}) }) };
   } else {
@@ -2095,7 +2137,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       const ledgerFor = deps.sandboxLedger ?? ((n) => makeLedger({ batch: batch.id, lane: `sandbox-${n}`, owner: `orch_${process.pid}`, issue: n }));
       const bud = exec.budget ?? {};
       const holdId = execMod.remoteHoldId(provider); // #5095: the pool account's usage-limit hold key
-      const remoteLanes = execMod.providerLanes({ provider, laneArgs, ledgerFor, env, secrets: exec.secrets, costPerMinute: bud.costPerMinute ?? 0, holdId,
+      const remoteLanes = execMod.providerLanes({ provider, laneArgs, ...(typeof provider.agentOnline === "function" ? { agentOnline: (h) => provider.agentOnline(h) } : {}), ledgerFor, env, secrets: exec.secrets, costPerMinute: bud.costPerMinute ?? 0, holdId,
         ...(Number.isFinite(exec.unreachableWindowMin) ? { unreachableWindowMs: exec.unreachableWindowMin * 60000 } : {}),
         ...(deps.now ? { now: deps.now } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}),
         logTail: (h) => { try { return readFileSync(batch.logFile(h.issue), "utf8").slice(-4000); } catch { return ""; } } }); // #4866: a clone failure in the lane log types sandbox.clone
@@ -2140,8 +2182,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         hostFallback: readHostFallback(), capacity, isRemote: () => true, identity: () => holdId, ...(exec.fallbackLocal ? { offlineFallback: true, headroom: hostHeadroom, ...(exec.capacityFallbackAfter ? { capacityFallbackAfter: exec.capacityFallbackAfter } : {}) } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
         admit: (u) => execBudget.admit(u),
         onUsage: (n, sb, rec) => {
-          const startedAt = rec?.handle?.startedAt ?? rec?.startedAt ?? "?";
-          try { execBudget.record(`${batch.id}#${sb.id ?? n}#${startedAt}`, sb); } catch { /* the batch total still counts it */ }
+          try { execBudget.record(sandboxBudgetKey(batch.id, sb.id ?? n), sb); } catch { /* the batch total still counts it */ }
           Promise.resolve(emitSbx({ event: "SANDBOX_USAGE", issue: n, provider: sb.provider, sandbox_id: sb.id, minutes: sb.minutes, cost_usd: sb.cost_usd, batch: batch.id })).catch(() => {});
         },
       }, { exec, readOverride: batch.readExecution, place, onChange: (e) => sink.line(`execution: live placement ${e.mode}, max_remote ${e.maxRemote}`) });
@@ -2289,6 +2330,19 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const hostIo = await laneCheck.hostLaneIo({ env });
     preflight = async () => (await laneCheck.runLaneChecks({ exec: execForNeeds, env, io: hostIo })).filter((c) => !c.ok);
   }
+  // #5992: the base is probed once per (repo, base sha) on the dispatcher, before any sandbox launch; a red verdict holds admissions.
+  let baseProbe = deps.baseProbe === undefined ? null : deps.baseProbe;
+  const guardCmds = readInvariants(cwd) ?? [];
+  if (deps.baseProbe === undefined && !testDeps && guardCmds.length) {
+    const { probeBase } = await import("./lean/basered.mjs"), { runCheckCommand } = await import("./lean/effects.mjs");
+    const baseRef = readBranches(cwd).staging ?? readBranches(cwd).default ?? "main", vcfg = readVerify(cwd) ?? {};
+    const gitIn = (a) => leanIo.git(a, { cwd });
+    const readSha = async () => {
+      try { const m = String(await gitIn(["ls-remote", "origin", `refs/heads/${baseRef}`])).trim().split(/\s+/)[0]; if (/^[0-9a-f]{40}$/.test(m)) { await gitIn(["fetch", "origin", baseRef]).catch(() => ""); return m; } } catch { /* offline: the local ref */ }
+      return gitIn(["rev-parse", `origin/${baseRef}`]);
+    };
+    baseProbe = () => probeBase({ repo, base: baseRef, commands: guardCmds, readSha, git: gitIn, runCommand: runCheckCommand, cwd, env, timeoutMs: (vcfg.precheckTimeoutSeconds ?? 300) * 1000 });
+  }
   const { hostMissingTools } = await import("./lean/toolplace.mjs");
   const envHold = deps.envHold !== undefined ? deps.envHold : testDeps ? null : {
     version: () => scheddMod.readInstalledVersion() ?? ENGINE_VERSION,
@@ -2343,10 +2397,12 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       ...(estimate ? { estimate } : {}),
       beforeAdmit,
       ...(preflight ? { preflight } : {}),
+      ...(baseProbe ? { baseProbe } : {}),
       ...(orch.blockedLabel ? { getBlocked: async () => JSON.parse(await leanIo.gh(["issue", "list", "-R", repo, "--label", orch.blockedLabel, "--state", "open", "--limit", "200", "--json", "number"])).map((x) => x.number) } : {}), // #4773
       trusted: (n) => trustedOf.get(n) === true,
       autoChildren,
       ...(autoMod.addsEpicChildren(autoChildren.mode) ? { getChildren: async () => ({ list: await autoMod.readChildList({ gh: (a) => leanIo.gh(a), repo, fields: childFields ??= await autoMod.hostListFields((a) => leanIo.gh(a)) }), elsewhere: autoMod.liveElsewhere({ batchMod, root, self: batch.id, repo }) }) } : {}),
+      ...(select ? { select, reconcile: await makeReconcile({ select, repo, leanIo, orch, lane, argv }) } : {}),
       issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getClearBreaker: batch.peekClearBreaker, consumeClearBreaker: batch.readClearBreaker, ackClearBreaker: batch.ackClearBreaker, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, expireHolds: batch.expireHolds, getPause: batch.readPause, expirePause: batch.expirePause, getHoldInfo: batch.readHoldInfo, getGates: batch.readGates, baseWait: baseWaits.size ? baseWaitOf(baseWaits, { io, leanIo, cwd }) : null, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(Number.isInteger(orch.transientRetries) ? { transientRetries: orch.transientRetries } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, rotator, batchId: batch.id, drift, lifecycle, integration,
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd), host: { cores: () => cpus().length, memAvailableMb, rampingMb: rampProbe.rampingMb } }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
