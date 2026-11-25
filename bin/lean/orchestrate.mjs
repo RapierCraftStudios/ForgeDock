@@ -906,7 +906,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     if (o.escalated || !authProbe || t < o.nextProbe) return;
     const next = nextAccountAfterAuthFailure(rotator, o.last ? [o.last] : []); // the account after the one that failed last
-    let ok = false; try { ok = Boolean((await authProbe({ account: next }))?.ok); } catch { ok = false; }
+    let ok = false; try { ok = Boolean((await authProbe({ account: next, configDir: next ? rotator?.configDir?.(next) ?? null : null }))?.ok); } catch { ok = false; }
     if (ok) {
       try { holds.clear(o.key); } catch { /* fail-open */ }
       for (const m of o.issues) notBefore.delete(m);
@@ -1209,7 +1209,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       lostSeen.set(la, [...win, lostNow]);
     }
     if (row.outcome === "engine-error") {
-      const ag = r?.agent ?? r?.sandbox?.agent ?? null, hs = ag && breaker ? hostSignature(r, row.detail) : null;
+      const ag = r?.agent ?? r?.sandbox?.agent ?? null, hs = ag && breaker && quarantineAgent ? hostSignature(r, row.detail) : null; // scoped only when the placement layer can really quarantine an agent; else the batch breaker keeps counting
       const errAt = hs ? await scopedEngineError(ag, hs) : noteEngineError(r?.detail);
       if (lostNow) lostNow.err = errAt;
       // #5161: a transient failure (gateway 5xx, reset) waits out the outage with backoff instead of the single immediate relaunch.

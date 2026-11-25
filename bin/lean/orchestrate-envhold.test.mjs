@@ -336,4 +336,12 @@ describe("#5988: breaker scoped by signature and agent", () => {
     assert.equal(r.byIssue[50].outcome, "merged", "unaffected work keeps admitting");
     assert.ok(r.updates.some((u) => u.outcome === "agent-quarantine"));
   });
+
+  it("without a placement layer that can quarantine, the same errors still trip the batch breaker (no regression)", async () => {
+    const issues = [1, 2, 3, 4];
+    const sick = (n) => ({ terminalReason: "engine-error", code: "sandbox.exited", detail: `sandbox.exited (run ${n})`, agent: "vm-a" });
+    const r = await harness({ script: Object.fromEntries(issues.map((n) => [n, [sick(n)]])), issues, parallel: 1, envHold: undefined,
+      extra: { envHold: null, breaker: { errors: 3, window_min: 10 } } });
+    assert.ok(r.updates.some((u) => u.outcome === "breaker"));
+  });
 });
