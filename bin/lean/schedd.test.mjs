@@ -836,6 +836,37 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     assert.deepEqual(exits2, [1]);
   });
 
+  it("#5984 handover: settled() outlives closed until the successor is spawned and probed (CLI exits only after it)", async () => {
+    const dir = tmpDir("schedd-settled-"), order = [];
+    let version = "1.51.0";
+    const d = await startDaemon({ dir, root: join(dir, "batches"), log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => null,
+      exit: (c) => order.push(`exit${c}`), respawn: () => order.push("respawn"), probe: async () => { order.push("probe"); return true; }, successorMs: 200, successorPollMs: 10, runBatch: async () => ({}) });
+    version = "1.52.0";
+    await d.closed;
+    order.push("closed-seen"); // what scheddFromCli used to exit on
+    await d.settled();
+    order.push("settled");
+    assert.ok(order.indexOf("respawn") < order.indexOf("settled") && order.indexOf("probe") < order.indexOf("settled"), order.join(","));
+    assert.equal(d.stopCode(), 1);
+  });
+
+  it("#5984 rehost: settled() of the stopped daemon resolves once the rehosted daemon is up; lost-lock/idle close settles via closed", async () => {
+    const dir = tmpDir("schedd-settled2-");
+    let version = "1.51.0";
+    const d = await startDaemon({ dir, root: join(dir, "batches"), log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => null,
+      exit: () => {}, respawn: () => {}, probe: async () => false, successorMs: 30, successorPollMs: 10, runBatch: async () => ({}) });
+    version = "1.52.0";
+    await d.closed; await d.settled();
+    const d2 = d.rehosted();
+    assert.equal(d2?.running, true, "rehosted before settled resolves");
+    await d2.close();
+    const dir3 = tmpDir("schedd-settled3-");
+    const d3 = await startDaemon({ dir: dir3, root: join(dir3, "batches"), log: () => {}, resumeOnStart: false, runBatch: async () => ({}) });
+    await d3.close();
+    await d3.settled();
+    assert.equal(d3.stopCode(), null);
+  });
+
   it("#5966: a stall-recovery restart also exits (shared self-stop path)", async () => {
     const dir = tmpDir("schedd-stallexit-"), root = join(dir, "batches"), exits = [];
     let version = "1.51.0";

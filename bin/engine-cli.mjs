@@ -2756,9 +2756,10 @@ export async function scheddFromCli(argv, deps = {}) {
   // #4454: a signal stops the hosted batch loops, then releases the lock and socket, then exits 128+signo
   schedd.exitOnSignals(d, { ...(deps.processOn ? { on: deps.processOn } : {}), ...(deps.exit ? { exit: deps.exit } : {}) });
   await d.closed;
+  await d.settled?.(); // #5984: a self-stop keeps spawning/probing the successor after `closed`; exiting now would leave no daemon
   // #5966 R1: a handover whose successor never listened re-hosted the batches in a new daemon; follow it to its end
   let cur = d;
-  while (cur.rehosted?.()) { cur = cur.rehosted(); await cur.closed; }
+  while (cur.rehosted?.()) { cur = cur.rehosted(); await cur.closed; await cur.settled?.(); }
   // #5966: a self-initiated stop (handover, stall recovery, lost socket) exits non-zero so systemd restarts the unit instead of leaving a zombie
   const code = cur.stopCode?.();
   if (code) (deps.exit ?? ((c) => process.exit(c)))(code);
