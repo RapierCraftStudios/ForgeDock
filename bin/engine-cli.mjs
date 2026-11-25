@@ -53,6 +53,7 @@ import { parseCiPrecheckConfig } from "./lean/ci-precheck.mjs";
 import { OUTCOME_CODES } from "./engine/outcome-codes.mjs";
 import { USER_ERRORS } from "./help-text.mjs";
 import * as batchHealth from "./lean/batch-health.mjs";
+import { makeAttemptsSeam } from "./lean/attempts.mjs";
 import * as _autoChildren from "./lean/autochildren.mjs";
 
 /**
@@ -2085,6 +2086,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const needsOf = new Map(); // issue -> host-only capabilities its body names (#4542), filled by readBody
   const prefetchOf = new Map(); // issue -> the frozen contract's relayable read-only commands (#4778), filled by readBody
   let execForNeeds = null;
+  let poolUsage = []; // #5985: pool usage-history rows (cpu_avg per repo), refreshed in the background; classify lanes light/heavy
   let lanes, remote = null, execBudget = null, execConf = null, hybrid = false;
   const execMode = () => (deps.execution !== undefined ? deps.execution : readExecution(cwd))?.mode ?? "local";
   if (deps.leanModule) {
@@ -2168,14 +2170,16 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       if (batch.readExecution()?.provider !== true) batch.setExecution({ provider: true });
       // #4540: provider free slots, refreshed in the background (admission is sync); unknown (null) never blocks.
       let capSample = null, onlineSample = null, capAt = 0, capLast = -Infinity, capFailed = false; // #5048: capFailed = last probe rejected // #4547: online = agents alive, null unknown
+      let liveSample = {}, usageLast = -Infinity; // #5985: the pool's live load/memory ride the capacity sample
       const capacity = () => {
+        if (typeof provider.usageHistory === "function" && (deps.now ? deps.now() : Date.now()) - usageLast >= 600000) { usageLast = deps.now ? deps.now() : Date.now(); Promise.resolve().then(() => provider.usageHistory()).then((rows) => { if (Array.isArray(rows)) poolUsage = rows; }, () => {}); }
         if (capFailed) throw new Error("capacity probe failed"); // #5048: until the next successful sample, so every caller sees it (release review CONC-1)
         const t = deps.now ? deps.now() : Date.now();
         if (typeof provider.capacity === "function" && t - capLast >= (deps.pollMs ?? 5000)) {
           capLast = t;
-          Promise.resolve().then(() => provider.capacity()).then((c) => { capFailed = false; capSample = c && Number.isInteger(c.free) ? c.free : null; onlineSample = c && Number.isInteger(c.online) ? c.online : null; capAt++; }, () => { capSample = null; onlineSample = null; capFailed = true; capAt++; });
+          Promise.resolve().then(() => provider.capacity()).then((c) => { capFailed = false; capSample = c && Number.isInteger(c.free) ? c.free : null; onlineSample = c && Number.isInteger(c.online) ? c.online : null; liveSample = { ...(Number.isFinite(c?.load_per_core) ? { load_per_core: c.load_per_core } : {}), ...(Number.isFinite(c?.mem_available_gb) ? { mem_available_gb: c.mem_available_gb } : {}) }; capAt++; }, () => { capSample = null; onlineSample = null; capFailed = true; capAt++; });
         }
-        return capSample === null && onlineSample === null ? null : { free: capSample, online: onlineSample, at: capAt };
+        return capSample === null && onlineSample === null ? null : { free: capSample, online: onlineSample, ...liveSample, at: capAt };
       };
       remote = liveExec.liveRemote({
         hostFallback: readHostFallback(), capacity, isRemote: () => true, identity: () => holdId, ...(exec.fallbackLocal ? { offlineFallback: true, headroom: hostHeadroom, ...(exec.capacityFallbackAfter ? { capacityFallbackAfter: exec.capacityFallbackAfter } : {}) } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
@@ -2407,7 +2411,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd), host: { cores: () => cpus().length, memAvailableMb, rampingMb: rampProbe.rampingMb } }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       // #5174: hold new local admissions while loadavg/cores is above engine.overload_load_per_core (host-wide batches only)
       ...(overload ? { overload } : {}),
-      ...(remote ? { remote } : {}),
+      ...(remote ? { remote, usageRows: () => poolUsage, repoSlug: repo } : {}),
       // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
       ...(recoveryOn ? { recovery: orch.recovery } : {}),
       ...(stackingOn ? { stacking: orch.stacking, ...(orch.stacking === "full" ? { readPrReady: async (n) => (await makeProjector(io, { repo }).readState(n))?.prReady ?? null } : {}) } : {}), // #5831, #5832: PR-ready is read from the dependency lane's FORGE:STATE
@@ -2433,6 +2437,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       onInterrupted: deps.onInterrupted ?? (async (n) => leanIo.gh(["issue", "edit", String(n), "-R", repo, "--remove-label", "workflow:building"]).catch(() => {})),
       // #4387: an out-of-set dependency labelled needs-human is not pulled into the batch
       issueLabels: labelNames,
+      // #5986: per-issue attempts ledger and input-hash admission (off under the test seams)
+      ...((deps.attempts !== undefined ? deps.attempts : testDeps ? null : true) ? { attempts: deps.attempts !== undefined ? deps.attempts : makeAttemptsSeam({ gh: (a) => leanIo.gh(a), repo, engineVersion: ENGINE_VERSION, sandboxVersion: scheddMod.readInstalledVersion?.() ?? null, cfg: { maxAttempts: orch.maxAttemptsPerIssue, maxIdentical: orch.maxIdenticalSignature } }) } : {}),
       // #4725: a closed (completed) dependency is satisfied even when it still carries a stale needs-human label
       // #5152: a NOT_PLANNED close labelled workflow:merged, or a decomposition whose sub-issues all closed, is delivered: CLOSED
       issueState: async (n) => {
@@ -2795,7 +2801,7 @@ export async function scheddFromCli(argv, deps = {}) {
     const start = () => { if (schedd.unitState() === null) schedd.defaultSpawn({ dir }); else schedd.startUnit(); };
     const unit = deps.unitState ?? schedd.unitState; // #5966: active unit but no daemon is alerted and the unit restarted
     const batchVerdicts = () => schedd.batchVerdicts(bm.batchRoot());
-    return (deps.watchdog ?? health.watchdog)({ dir, ...(sec > 0 ? { stallMs: sec * 1000 } : {}), unfinished, start, batchVerdicts, unit });
+    return (deps.watchdog ?? health.watchdog)({ dir, ...(sec > 0 ? { stallMs: sec * 1000 } : {}), unfinished, start, restart: () => schedd.restartUnit(), batchVerdicts, unit });
   }
   if (argv.length) throw new Error("usage: forgedock schedd [status | watchdog [--stall-sec N]]");
   (deps.renice ?? (await import("./lean/schedd-health.mjs")).bestEffortRenice)(); // #4780: lanes must not starve the scheduler
@@ -2994,6 +3000,7 @@ export async function schedFromCli(argv, deps = {}) {
     const batchMod = await import("./lean/batch.mjs");
     const agentOf = (e) => { const bm = batchMod; const r = bm.openBatch(bm.batchRoot(), e.batch).store.peek()?.running?.[e.issue]; return r?.placement?.agent ?? r?.agent ?? null; };
     for (const l of schedMod.remoteLines(st, { agentOf })) console.log(l); // #4964
+    for (const l of schedMod.concurrencyLines(st, { eventsOf: (b) => batchMod.openBatch(batchMod.batchRoot(), b).store.readLog() })) console.log(l); // #5985
     try { for (const l of (await import("./lean/batch-health.mjs")).summaryLines((await import("./lean/batch.mjs")).batchRoot())) console.log(l); } catch { /* advisory */ } // #5314
     return st;
   }
@@ -3046,7 +3053,7 @@ export function readOrchestration(cwd = process.cwd()) {
   const errors = int(o.breaker_errors ?? o.errors, 3), windowMin = int(o.breaker_window_min ?? o.window_min, 30);
   const gp = int(o.global_parallel, null);
   const recoveryMax = int(o.recovery_max_attempts ?? o.max_attempts, 1);
-  return { mergeTrain: String(o.merge_train ?? "off").trim().toLowerCase() === "on" ? "on" : "off", /* #5836 */ mergeTrainBatch: int(o.merge_train_batch, 4) >= 1 ? int(o.merge_train_batch, 4) : 4, /* #5837 */ breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), transientRetries: int(o.transient_retries, 4), blockedLabel: String(o.blocked_label ?? "blocked").trim(), globalParallel: gp >= 1 ? gp : null,
+  return { maxAttemptsPerIssue: int(o.max_attempts_per_issue, 4) >= 1 ? int(o.max_attempts_per_issue, 4) : 4, maxIdenticalSignature: int(o.max_identical_signature, 2) >= 1 ? int(o.max_identical_signature, 2) : 2, /* #5986 */ mergeTrain: String(o.merge_train ?? "off").trim().toLowerCase() === "on" ? "on" : "off", /* #5836 */ mergeTrainBatch: int(o.merge_train_batch, 4) >= 1 ? int(o.merge_train_batch, 4) : 4, /* #5837 */ breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), transientRetries: int(o.transient_retries, 4), blockedLabel: String(o.blocked_label ?? "blocked").trim(), globalParallel: gp >= 1 ? gp : null,
     stacking: normalizeStacking(o.stacking), // #5831
     recovery: { maxAttempts: recoveryMax, mechanicalMaxAttempts: Math.max(int(o.recovery_mechanical_max_attempts ?? o.mechanical_max_attempts, 2), recoveryMax) }, // #4725: env/base/sequence codes have their own budget
     // #4525: parked-PR base sync. The parser flattens one level, so `base_sync.enabled|union_globs` arrive as `enabled|union_globs` (or flat `base_sync_*`).

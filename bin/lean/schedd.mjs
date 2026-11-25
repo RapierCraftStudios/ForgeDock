@@ -772,6 +772,11 @@ export function startUnit({ run = execFileSync } = {}) {
   try { run("systemctl", ["--user", "start", "--no-block", UNIT], { timeout: 5000, stdio: "ignore" }); } catch { /* reported by the connect retry */ }
 }
 
+/** Restart the installed unit (best effort); `start` is a no-op on an active unit with no daemon (#5966). */
+export function restartUnit({ run = execFileSync } = {}) {
+  try { run("systemctl", ["--user", "restart", "--no-block", UNIT], { timeout: 5000, stdio: "ignore" }); } catch { /* the next watchdog run alerts again */ }
+}
+
 /**
  * Connect to the daemon. When nobody listens it is started: a systemd-managed instance (`unitState()` active, activating
  * or reloading: restarting) is waited for and never raced by a second daemon, an installed but stopped unit is started

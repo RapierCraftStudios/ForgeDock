@@ -3727,9 +3727,33 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 
 Filing: `file_issues` is **default on** (`file_issues: false` opts out; breaches are always written to efficiency.json). When on, each signature `slo:<code>:<repo>` gets one `engine-gap` issue in `orchestrate.slo.repo` (default RapierCraftStudios/ForgeDock), found by a `forge-slo` marker so a restart adopts rather than duplicates; a re-breach appends a counter comment at most once per 6 h; 24 h green closes it. `bin/introspect-schedule.mjs` installs the daily introspect timer (unless `file_issues: false`). The execution budget (`execution-budget.json`) now keeps one entry per `<batch>#<sandbox id>` holding its latest cumulative usage.
 
+## Entry 2026-11-25 — closed-loop lane concurrency under K, pool refusal reasons, named-condition capwait (#5985)
+
+- New pure `concurrency.mjs`: `makeController({ceiling})` keeps an operating point `k` under the ceiling (`--parallel`/`getParallel` is now only the ceiling; `orchestrate.mjs` `K()` returns `min(ceiling, operating)`). `observe(cap)` adds 1 while `/agents` reports `mem_available_gb` above floor (4) + headroom (2), `load_per_core` < 1 and no refusal for 5 min; `refused()` halves (floor 1) on a `pool.*` code/reason or load > 1.5/core, one halving per storm. Unknown pool figures leave K unchanged. Each change is a `concurrency` event in `log.jsonl` with its inputs; the post-deploy check `lane-concurrency-achieved-70pct` reads them.
+- `classifyRepo(usageRows, repo)` marks a repo heavy when recent `usage-history.jsonl` `cpu_avg` averages > 1.5; heavy lanes have their own cap (default `ceil(ceiling/3)`) so a wave of test-suite lanes cannot starve light ones.
+- Refusal reason: `bin/pool/agent.mjs` host-busy 503 now carries `code: pool.host_load` with live figures and `/agents` exposes `load_per_core`/`mem_available_gb`. `sandbox-remote.mjs` keeps them as `e.poolCode`/`e.live` and `capacity()` returns the two figures; the `sandbox.capacity` deferral row from `execution.mjs` gains `reason` (`host_load|host_mem|projected_peak|disk`) and `live`.
+- `capwait.mjs`: `refused(issue, reason)` records the reason; `blocked()` holds until the named condition clears (`conditionCleared`: load < 1.0, or free mem > floor), falling back to the slot count when no figure is known. `UNCAPPED_DEFERRALS` is unchanged. A refused lane is also held at most 5 min by the controller.
+- `sched.mjs` `concurrencyLines` prints `concurrency: running/K/ceiling (limiting factor)` from the last controller event in `sched show` (wired in `engine-cli.mjs`).
+
+## Entry 2026-11-25 — per-issue attempts ledger, input-hash admission, escalation, keyed upserts (#5986)
+
+- `bin/lean/attempts.mjs` holds the ledger `{attempts, signatures[], lastInputHash, spend}` per issue: the batch `state.json` `attempts` map (cache) and one hidden `<!-- FORGE:ATTEMPTS {json} -->` comment (register). `releaseHeld`, `--requeue` and `--set-env` never touch it, so it survives `--resume` and a schedd restart.
+- `orchestrate` takes an `attempts` seam (`makeAttemptsSeam`, wired in `engine-cli.mjs`; off under test seams). A final failed lane (`needs-human`, `engine-error`, `budget-exceeded`, `failed`) is recorded with its failure signature; a missing ledger or an unreadable input always admits (a merged-first-try issue sees nothing).
+- Readmission (needs-human label removed, engine/env change) calls `gateAdmit`: the same input hash after a failure is refused with `loop.no_new_input` (one note per hash, the label is put back). The hash covers title+body, labels without needs-human, trusted FORGE:DECISION comments, engine and sandbox major.minor and the contract hash (null today: the contract is frozen inside the lane).
+- Lifetime budget `orchestration.max_attempts_per_issue` (4) and `max_identical_signature` (2, the 3rd identical signature breaches): on breach one `FORGE:ESCALATION` comment (upserted), `needs-human`, dependents held by the existing root hold, no lanes until the hash changes.
+- `statuscomment.postKeyed` upserts FORGE:AMENDMENT/NEEDS_HUMAN/FACTS by (kind, content hash) with an `n=` counter; at 12 trusted engine comments it edits the newest comment of that kind in place and posts nothing new.
+- `validateAmendments` is the shared amendment schema (kind checks plus field types); the lane returns a rejected shape to the builder once and a still-invalid one is never applied or posted.
+- `forgedock stats --attempts` reports lanes per merged issue and engine comments per issue from local batch files.
+
 ## Entry 2026-11-25 — Owner-based liveness under the clocks (#5991)
 
 - `bin/lean/liveness.mjs` holds three pure helpers. `holderGone(lease, {liveBatches})` says a lease whose batch no longer owns the issue is takeover-able at once; `lean.mjs` consults it (`o.liveBatches`) beside `holderDead`. A live batch's lease stays `lease-held`, and an unknown liveness (`null`, e.g. inside a sandbox with no batch dir) keeps the 25 min TTL.
 - `classifyTransportLoss` shortens `sandbox.unreachable` to `AGENT_UP_WINDOW_MS` (90 s) only when the pool agent answers (`agentOnline(handle)`, exposed by `sandbox-remote.mjs` from `/agents`); agent down, router error or no probe keeps the 300 s window. The typed deferral and the kept sandbox are unchanged.
 - Budget rows are keyed `sandboxBudgetKey(batchId, sandboxId)` with no `startedAt`; `record` upserts the single row with the larger minutes/cost, so replayed attempts of one sandbox no longer add rows. Host-day dedupe and `KEEP_DAYS` pruning are unchanged.
 - R5/R6 (cache-volume probe and quarantine) deferred to pool work.
+
+## Entry 2026-11-25 — watchdog restarts (not starts) an active unit with no daemon (#5982)
+
+- `systemctl start` is a no-op on an active unit, so the #5966 zombie (unit active, no live daemon) was never recovered. `schedd.restartUnit()` runs `systemctl --user restart --no-block` (best effort, like `startUnit`); `startUnit` and `connect()` are unchanged.
+- `watchdog` takes a separate `restart` dep (wired in `scheddFromCli`). Heartbeat down while `unit()` is `active`/`activating`: ALERT, `schedd.unit-no-daemon`, `restart()`, never `start()`. Only an inactive or absent unit with unfinished batches goes through `start()`.
+- Result gains `restarted`; `started` is `false` (and the failure is logged) when `restart()` throws.
