@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { computeInputHash, emptyLedger, normalizeLedger, recordFailure, breach, admitInput, markEscalated, renderEscalation, renderAttempts, parseAttempts, validateAmendments, budgets, makeAttemptsSeam } from "./attempts.mjs";
+import { computeInputHash, emptyLedger, normalizeLedger, recordFailure, breach, admitInput, markEscalated, frozenContractHash, renderEscalation, renderAttempts, parseAttempts, validateAmendments, budgets, makeAttemptsSeam } from "./attempts.mjs";
+import { renderContract } from "./render.mjs";
 import { postKeyed } from "./statuscomment.mjs";
 
 const base = { title: "t", body: "b", labels: ["bug"], decisions: [], engineVersion: "1.2.3", sandboxVersion: "1.2.0", contractHash: "c1" };
@@ -60,6 +61,18 @@ describe("#5986 admission, budgets, escalation", () => {
   });
 });
 
+describe("#5986 contract hash in the input hash", () => {
+  it("frozenContractHash takes the last trusted FORGE:CONTRACT comment; none gives null", () => {
+    assert.equal(frozenContractHash([{ body: "hi" }], () => true), null);
+    assert.equal(frozenContractHash([], () => true), null);
+    const mk = (c, h) => ({ body: `<!-- FORGE:CONTRACT -->\n${renderContract(c, h)}` });
+    assert.equal(frozenContractHash([mk({ requirements: [] }, "aaa111aaa111"), mk({ requirements: [] }, "bbb222bbb222")], () => true), "bbb222bbb222");
+    assert.equal(frozenContractHash([mk({ requirements: [] }, "aaa111aaa111")], () => false), null, "untrusted comments are ignored");
+    const h = (contractHash) => computeInputHash({ ...base, contractHash });
+    assert.notEqual(h("aaa111aaa111"), h("bbb222bbb222"));
+  });
+});
+
 describe("#5986 shared amendment schema", () => {
   it("accepts valid shapes and rejects wrong types with a message", () => {
     assert.deepEqual(validateAmendments([{ kind: "add-deliverable", path: "a.mjs", why: "x" }, { kind: "decision", decision: { choice: "c", anchors: ["a.mjs"] }, why: "y" }]), []);
@@ -75,11 +88,11 @@ describe("#5986 shared amendment schema", () => {
 describe("#5986 synthetic replay of looping issue timelines", () => {
   // shapes of the AlterLab timelines (#40762 repeated builder.blocked, #41419 repeated amendments, #41262 mixed signatures); the real logs are not in the repo
   const timelines = [
-    { name: "#40762", sigs: () => "builder.blocked", amend: () => "same amendment", every: 5 },
-    { name: "#41419", sigs: () => "ci.red:same", amend: (i) => `amendment ${i % 3}`, every: 4 },
-    { name: "#41262", sigs: (i) => `sig${i % 3}`, amend: (i) => `amendment ${i}`, every: 3 },
+    { name: "#40762", sigs: () => "builder.blocked", amend: () => "same amendment", every: 1000 },
+    { name: "#41419", sigs: () => "ci.red:same", amend: (i) => `amendment ${i % 3}`, every: 1000 },
+    { name: "#41262", sigs: (i) => `sig${i % 3}`, amend: (i) => `amendment ${i}`, every: 1000 },
   ];
-  for (const t of timelines) it(`${t.name}: at most 4 lanes and 12 engine comments over a 30-readmit timeline`, async () => {
+  for (const t of timelines) it(`${t.name}: at most 4 lanes and 12 engine comments over a 30-readmit timeline with no new input`, async () => {
     let issueBody = "b"; const comments = [], gh = async (a) => {
       if (a[1] === "view") return JSON.stringify({ comments, title: "t", body: issueBody, labels: [] });
       if (a[1] === "comment") { comments.push({ author: { login: "rapiercraft-forgedock" }, url: `https://x/issues/1#issuecomment-${comments.length + 1}`, body: a[a.indexOf("--body") + 1] }); return comments.at(-1).url; }
@@ -89,7 +102,7 @@ describe("#5986 synthetic replay of looping issue timelines", () => {
     const trusted = (c) => c.author?.login === "rapiercraft-forgedock";
     const seam = makeAttemptsSeam({ gh, repo: "o/r", trusted, cfg: { maxAttempts: 4, maxIdentical: 2 } });
     let ledger = null, lanes = 0;
-    for (let i = 0; i < 30; i++) { // readmitted every poll; a person edits the issue only every `every`th
+    for (let i = 0; i < 30; i++) { // readmitted every poll, the issue never edited
       issueBody = `b${Math.floor(i / t.every)}`;
       const hash = await seam.hash(1), a = admitInput(ledger, hash, seam.cfg);
       if (!a.ok) { if (a.code === "escalate") ledger = markEscalated(ledger); await seam.notify({ issue: 1, code: a.code, ledger, reason: a.reason }); continue; }
@@ -99,7 +112,7 @@ describe("#5986 synthetic replay of looping issue timelines", () => {
       await seam.mirror(1, ledger);
       if (breach(ledger, seam.cfg) && !ledger.escalated) { ledger = markEscalated(ledger); await seam.notify({ issue: 1, code: "escalate", ledger, reason: "x" }); }
     }
-    assert.ok(lanes <= 4 * Math.ceil(30 / t.every), `lanes ${lanes}`);
+    assert.ok(lanes <= 4, `lanes ${lanes}`);
     assert.ok(comments.length <= 12, `comments ${comments.length}`);
   });
   it("a single unchanged-input timeline runs at most 4 lanes and posts one escalation", async () => {

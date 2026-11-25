@@ -8,6 +8,7 @@
  */
 import { createHash } from "node:crypto";
 import { amendmentKindProblems } from "./conformance.mjs";
+import { parseContractComment } from "./render.mjs";
 import { postUpsert, findLeading, engineCommentCount } from "./statuscomment.mjs";
 
 export const ATTEMPTS_MARKER = "FORGE:ATTEMPTS";
@@ -108,11 +109,23 @@ export function validateAmendments(amendments) {
   return [...new Set(out)];
 }
 
+/** Hash of the last trusted, parseable FORGE:CONTRACT comment (the frozen contract), or null. */
+export function frozenContractHash(comments, trusted) {
+  let h = null;
+  for (const c of comments ?? []) {
+    const b = String(c?.body ?? "");
+    if (!b.startsWith("<!-- FORGE:CONTRACT -->") || !trusted(c)) continue;
+    const fc = parseContractComment(b);
+    if (fc?.hash) h = fc.hash;
+  }
+  return h;
+}
+
 /**
  * The orchestrate seam, bound to GitHub: `hash(n)` reads the issue and computes the input hash (null on any read failure: fail open),
  * `load(n)` reads the FORGE:ATTEMPTS comment, `mirror(n, ledger)` upserts it, `notify(...)` posts the one escalation or the no-new-input note.
  */
-export function makeAttemptsSeam({ gh, repo, engineVersion = null, sandboxVersion = null, cfg = {}, trusted = null, contractHash = () => null }) {
+export function makeAttemptsSeam({ gh, repo, engineVersion = null, sandboxVersion = null, cfg = {}, trusted = null, contractHash = null }) {
   const view = async (n) => JSON.parse(String(await gh(["issue", "view", String(n), "-R", repo, "--json", "title,body,labels,comments"])));
   const isTrusted = async () => trusted ?? (await import("./prefilter.mjs")).isTrustedIssueComment;
   return {
@@ -121,7 +134,7 @@ export function makeAttemptsSeam({ gh, repo, engineVersion = null, sandboxVersio
       try {
         const v = await view(n), t = await isTrusted();
         const decisions = (v.comments ?? []).filter((c) => /^\s*<!--\s*FORGE:DECISION\b/.test(c?.body ?? "") && t(c)).map((c) => c.body);
-        return computeInputHash({ title: v.title, body: v.body, labels: v.labels, decisions, engineVersion, sandboxVersion, contractHash: await contractHash(n) });
+        return computeInputHash({ title: v.title, body: v.body, labels: v.labels, decisions, engineVersion, sandboxVersion, contractHash: contractHash ? await contractHash(n) : frozenContractHash(v.comments, t) });
       } catch { return null; }
     },
     async load(n) {
