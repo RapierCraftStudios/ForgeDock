@@ -3691,3 +3691,8 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 - `watchdog` takes `unit` and `emit`: heartbeat down while `unit()` is `active`/`activating` logs `ALERT ...`, emits `schedd.unit-no-daemon` and restarts the unit via `start`, whether or not batches are unfinished.
 - Deferred to the operator/installer layer (no unit file or installer in this repo): `WatchdogSec` heartbeat on the unit, and the installer restarting the unit on `npm i -g` / plugin update.
 - Post-deploy check `schedd-handover-no-gap`.
+
+## Entry 2026-11-25 — scheddFromCli waits for selfStop to settle before exiting (#5984)
+
+- `closed` resolves as soon as `close()` finishes, before `selfStop()` has spawned and probed the successor. `selfStop` now keeps its whole async body (close, spawn, wait for listening, retry, rehost) as one promise, and the `startDaemon` handle gains an additive `settled()` (`selfStopping ?? closed`, so idle and lost-lock closes settle via `closed`).
+- `scheddFromCli` awaits `d.settled?.()` after `d.closed`, and in the rehosted follow loop awaits each `cur.closed` then `cur.settled?.()` before reading `stopCode` and exiting. A unitless handover no longer exits(1) with no daemon. Under a unit the exit path is unchanged.
