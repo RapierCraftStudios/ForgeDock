@@ -1934,7 +1934,7 @@ describe("#5168: --requeue accepts engine-error; a claude login failure is held,
       } });
     assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
     assert.equal(starts[1].length, 4, "deferred past maxDeferrals: the hold is uncapped");
-    assert.ok(starts[2][0] >= t0 + 900_000, "the held account admits nothing until the hold ends");
+    assert.ok(starts[2][0] >= t0 + 300_000, "the held account admits nothing until the next probe (#5988: held at most 5 min, not the 15 min retry hint)");
     assert.ok(!updates.some((u) => u.outcome === "breaker" || u.outcome === "engine-error"));
     assert.ok(updates.some((u) => u.outcome === "paused" && /paused \(backend\.auth\)/.test(u.detail ?? "")));
   });
