@@ -3705,3 +3705,10 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 
 - `closed` resolves as soon as `close()` finishes, before `selfStop()` has spawned and probed the successor. `selfStop` now keeps its whole async body (close, spawn, wait for listening, retry, rehost) as one promise, and the `startDaemon` handle gains an additive `settled()` (`selfStopping ?? closed`, so idle and lost-lock closes settle via `closed`).
 - `scheddFromCli` awaits `d.settled?.()` after `d.closed`, and in the rehosted follow loop awaits each `cur.closed` then `cur.settled?.()` before reading `stopCode` and exiting. A unitless handover no longer exits(1) with no daemon. Under a unit the exit path is unchanged.
+
+## Entry 2026-11-25 — Owner-based liveness under the clocks (#5991)
+
+- `bin/lean/liveness.mjs` holds three pure helpers. `holderGone(lease, {liveBatches})` says a lease whose batch no longer owns the issue is takeover-able at once; `lean.mjs` consults it (`o.liveBatches`) beside `holderDead`. A live batch's lease stays `lease-held`, and an unknown liveness (`null`, e.g. inside a sandbox with no batch dir) keeps the 25 min TTL.
+- `classifyTransportLoss` shortens `sandbox.unreachable` to `AGENT_UP_WINDOW_MS` (90 s) only when the pool agent answers (`agentOnline(handle)`, exposed by `sandbox-remote.mjs` from `/agents`); agent down, router error or no probe keeps the 300 s window. The typed deferral and the kept sandbox are unchanged.
+- Budget rows are keyed `sandboxBudgetKey(batchId, sandboxId)` with no `startedAt`; `record` upserts the single row with the larger minutes/cost, so replayed attempts of one sandbox no longer add rows. Host-day dedupe and `KEEP_DAYS` pruning are unchanged.
+- R5/R6 (cache-volume probe and quarantine) deferred to pool work.
