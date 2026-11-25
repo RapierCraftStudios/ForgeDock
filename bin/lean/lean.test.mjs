@@ -549,6 +549,29 @@ describe("core work-on", () => {
     assert.equal(r.code, "review.no_verdict"); assert.equal(w.merges.length, 0);
   });
 
+  it("#5979 a second identical failure parks with one PARKED summary (failure.repeated), no relaunch; an unchanged DEPENDENCY is not re-posted", async () => {
+    const block = { status: "blocked", summary: "need creds", block: { kind: "human", why: "credentials" } };
+    const opts = { changed: [] };
+    const first = world(opts);
+    const r1 = await run(first);
+    assert.notEqual(r1.code, "failure.repeated", "the 1st failure is not parked");
+    const nh = first.comments.find((c) => c.includes("<!-- FORGE:NEEDS_HUMAN -->"));
+    assert.ok(nh && /sig=[0-9a-f]{12}/.test(nh), "every NEEDS_HUMAN carries its signature");
+    const again = world({ ...opts, viewComments: [{ author: { login: "rapiercraft-forgedock" }, body: nh }] });
+    const r2 = await run(again);
+    assert.equal(r2.code, "failure.repeated");
+    {
+      assert.equal(again.comments.filter((c) => c.includes("<!-- FORGE:PARKED -->")).length, 1);
+      assert.ok(again.edits.some((e) => e.includes("parked:failure.repeated")));
+      assert.ok(!again.comments.some((c) => c.includes("<!-- FORGE:NEEDS_HUMAN -->")), "the repeat posts the summary instead of another NEEDS_HUMAN");
+    }
+    const dep = depWorld({ changed: [], result: { status: "blocked", summary: "needs #3", block: { kind: "dependency", issues: [3] } } }, { 3: { state: "OPEN", labels: [] } });
+    await run(dep);
+    const posted = dep.comments.find((c) => c.includes("<!-- FORGE:DEPENDENCY -->"));
+    const dep2 = depWorld({ changed: [], viewComments: [{ author: { login: "rapiercraft-forgedock" }, body: posted }], result: block.block ? { status: "blocked", summary: "needs #3", block: { kind: "dependency", issues: [3] } } : null }, { 3: { state: "OPEN", labels: [] } });
+    await run(dep2);
+    assert.ok(!dep2.comments.some((c) => c.includes("<!-- FORGE:DEPENDENCY -->")), "same state: skipped");
+  });
   it("builder blocked on a typed human reason, or no commit, is needs-human", async () => {
     assert.equal((await run(world({ result: { status: "blocked", summary: "need creds", block: { kind: "human", why: "credentials" } } }))).terminalReason, "needs-human");
     assert.equal((await run(world({ changed: [] }))).terminalReason, "needs-human");
@@ -2712,7 +2735,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 2750: #5750 (outcome vs guidance rows). 2650: #5557 (classification record line) on top of the base's growth. 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule). 1675 (hotspot case): #5284 (rubric prod_parity clause). 2375/1825: #5345 (self-check and pitfall lines).
     assert.ok(approxTokens(plan) <= 2750, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
-    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 2025, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 2025 tokens`); // 2025: #5752 (mechanism supersedes, negative examples, outcome evidence) // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule) // 1925: #5760 (CI budget rule)
+    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 2075, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 2075 tokens`); // 2075: #5979 (substitute-validate and out-of-band from the shared amendment schema); 2025: #5752 (mechanism supersedes, negative examples, outcome evidence) // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule) // 1925: #5760 (CI budget rule)
   });
 
   it("#4519 generated_paths: both prompts name the globs (even with the gate off), and an amendment adding one blocks", async () => {
@@ -3252,7 +3275,7 @@ describe("comment templates", () => {
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
     assert.ok(approxTokens(plan) <= 2700, `plan prompt is ${approxTokens(plan)} tokens`); // 2700: #5750 (outcome vs guidance split) on top of 2650; 2550: first-pass check-id + dependency-block rule; 2500: #5445 (Test plan heading); 2475: staging; 2375: #5432 (duplicate rule); 2075: #5284 (prod_parity plan line); 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule) // 2325: #5333 (git stash rule + stage stamp line)
-    assert.ok(approxTokens(impl) <= 2000, `implement prompt is ${approxTokens(impl)} of 2000 tokens`); // 2000: #5752 // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule // 1850: #5333 (git stash rule + stage stamp) // 1900: #5760 (CI budget rule)
+    assert.ok(approxTokens(impl) <= 2050, `implement prompt is ${approxTokens(impl)} of 2050 tokens`); // 2050: #5979; 2000: #5752 // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule // 1850: #5333 (git stash rule + stage stamp) // 1900: #5760 (CI budget rule)
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues", "### Test plan",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
     for (const h of ["### Approach", "### Changes", "### Acceptance Criteria Status", "### Verification", "### Notes", "implementation.md", "result.json",
@@ -9055,7 +9078,7 @@ describe("#4395 lane profile", () => {
       assert.match(p, /One turn, many calls: when several reads, greps, git show\/log\/blame or gh calls do not depend on each other, issue them all in the same turn/);
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
-    assert.ok(approxTokens(builderImplementPrompt()) <= 2000, `implement prompt is ${approxTokens(builderImplementPrompt())} of 2000 tokens`); // 1900: #5760; 2000: #5752
+    assert.ok(approxTokens(builderImplementPrompt()) <= 2050, `implement prompt is ${approxTokens(builderImplementPrompt())} of 2050 tokens`); // 2050: #5979; 1900: #5760; 2000: #5752
     assert.ok(approxTokens(builderPlanPrompt(7)) <= 2700, `plan prompt is ${approxTokens(builderPlanPrompt(7))} of 2125 tokens`);
   });
 
@@ -9098,11 +9121,11 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     const DESIGN = { why_failed: "#10 and #11 guarded one caller each", disposition: "replace", outcome: { metric: "null-input crashes in foo tests", target: "0" } };
     const ghApi = (a) => {
       const j = a.join(" ");
-      if (j.includes("search/issues")) return [10, 11].map((n) => JSON.stringify({ number: n, title: `fix foo null ${n}`, pr: true, merged: true })).join("\n");
+      if (j.includes("search/issues")) return [10, 11].map((n) => JSON.stringify({ number: n, title: `fix foo null ${n} ERR_NULL_INPUT`, pr: true, merged: true })).join("\n"); // #5979: a symptom match (the issue's backticked signature), not only the path
       if (/pulls\/1[01]\/files/.test(j)) return "src/foo.js\n";
       return null;
     };
-    const w = lworld({ ghApi, body: `${BODY}\n\nRecurs #10`, contract: { ...CONTRACT, test_plan: TEST_PLAN, repro_test: RT, design: DESIGN } }), dir = tmpDir("light-");
+    const w = lworld({ ghApi, body: `${BODY}\n\nThrows \`ERR_NULL_INPUT\`. Recurs #10`, contract: { ...CONTRACT, test_plan: TEST_PLAN, repro_test: RT, design: DESIGN } }), dir = tmpDir("light-");
     await run(w, { dir, ...ON });
     const rec = events(dir, "RECURRENCE");
     assert.equal(rec.length, 1);
@@ -9112,7 +9135,7 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     const plan = builders(w).find((c) => /PLANNING ONLY/.test(c[4]));
     assert.ok(plan, "the full lane's plan session ran");
     assert.match(plan[4], /DESIGN LANE \(#5751\)/);
-    assert.match(plan[4], /#10 fix foo null 10/);
+    assert.match(plan[4], /#10 fix foo null 10 ERR_NULL_INPUT/);
     assert.ok(w.comments.some((c) => c.includes("<!-- FORGE:RECURRENCE -->") && /Routed to a design lane: recurrence: 2/.test(c)), "the reason is posted on the issue");
     assert.ok(!readLog(dir, 7).some((e) => JSON.stringify(e).includes("design_missing")), "a contract with a design block passes the design check");
   });
