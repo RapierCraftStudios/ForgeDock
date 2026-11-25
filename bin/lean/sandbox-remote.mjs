@@ -143,6 +143,13 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
     },
     async relayPending(id) { const r = await call("GET", `${p(id)}/relay`); return r.ok && Array.isArray(r.data?.requests) ? r.data.requests : []; },
     async relayAnswer(id, rid, out) { const r = await call("POST", `${p(id)}/relay/${encodeURIComponent(rid)}`, out); if (!r.ok) throw fail("relay answer", r); return true; },
+    /** #5991: the pool agent that runs `agent` (any agent when unnamed) answers `GET /agents` and is not paused; errors propagate. */
+    async agentOnline(agent = null) {
+      const r = await call("GET", "/agents");
+      const list = r.ok && Array.isArray(r.data?.agents) ? r.data.agents : null;
+      if (!list) throw fail("agents", r);
+      return list.some((a) => a?.ok === true && !a.paused && (!agent || a.name === agent));
+    },
     async capacity() {
       // `free` (#4540) and agent liveness `online`/`total` (#4547) are each optional; none valid is unknown.
       const ok = (v) => Number.isInteger(v) && v >= 0;
@@ -301,6 +308,11 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
       const { runLog, ...rest } = r; // #5697: the lane's run log goes to the host run log, not into the result
       if (runLog) mergeRemoteLog(env.FORGE_RUNS_DIR || join(homedir(), ".forge", "runs"), h.issue, runLog, { repo });
       return rest;
+    },
+    /** #5991: is the pool agent of this handle answering? Unknown (null) without transport support; transport errors propagate. */
+    async agentOnline(h) {
+      if (typeof transport.agentOnline !== "function") return null;
+      return transport.agentOnline(typeof h?.agent === "string" && h.agent ? h.agent : null);
     },
     async capacity() {
       // #5048: no capacity() is unknown (null); a transport error propagates, so the caller can report the pool down
