@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { openBatch, isLaneAlive, listBatches, SECRET_ENV, scanStats } from "./batch.mjs";
 import { killTrackedChildren, runWithInput, trackedChildCount } from "./effects.mjs";
-import { findUnhosted, startDaemon, scheddPaths, connectDaemon, request, unitState, SCHEDD_SCRIPT, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals, readInstalledVersion, batchVerdicts } from "./schedd.mjs";
+import { findUnhosted, startDaemon, scheddPaths, connectDaemon, request, unitState, SCHEDD_SCRIPT, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals, readInstalledVersion, batchVerdicts, restartUnit } from "./schedd.mjs";
 import { schedDir } from "./sched.mjs";
 import { readHeartbeat } from "./schedd-health.mjs";
 import { formatTable, orchestrate } from "./orchestrate.mjs";
@@ -1105,6 +1105,15 @@ describe("schedd under load and restart (#4775)", () => {
     await assert.rejects(connectDaemon({ dir: tmpDir("schedd-unit-"), waitMs: 0, sleep: noSleep, spawnDaemon: () => calls.push("spawn"), unit: () => null, start: () => calls.push("unit") }), /did not start/);
     assert.deepEqual(calls, ["spawn"]);
     await assert.rejects(connectDaemon({ dir: tmpDir("schedd-unit-"), spawnDaemon: null, unit: () => { throw new Error("not consulted"); } }), { code: "ENOENT" });
+  });
+
+  it("restartUnit issues systemctl --user restart --no-block and never throws", () => {
+    const calls = [];
+    restartUnit({ run: (...a) => { calls.push(a); } });
+    assert.equal(calls[0][0], "systemctl");
+    assert.deepEqual(calls[0][1].slice(0, 3), ["--user", "restart", "--no-block"]);
+    assert.equal(calls[0][1].length, 4);
+    restartUnit({ run: () => { throw new Error("x"); } });
   });
 
   it("unitState reads the systemctl state (also from a non-zero exit) and is null without a unit file", () => {

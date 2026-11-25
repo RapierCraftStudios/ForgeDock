@@ -2801,7 +2801,7 @@ export async function scheddFromCli(argv, deps = {}) {
     const start = () => { if (schedd.unitState() === null) schedd.defaultSpawn({ dir }); else schedd.startUnit(); };
     const unit = deps.unitState ?? schedd.unitState; // #5966: active unit but no daemon is alerted and the unit restarted
     const batchVerdicts = () => schedd.batchVerdicts(bm.batchRoot());
-    return (deps.watchdog ?? health.watchdog)({ dir, ...(sec > 0 ? { stallMs: sec * 1000 } : {}), unfinished, start, batchVerdicts, unit });
+    return (deps.watchdog ?? health.watchdog)({ dir, ...(sec > 0 ? { stallMs: sec * 1000 } : {}), unfinished, start, restart: () => schedd.restartUnit(), batchVerdicts, unit });
   }
   if (argv.length) throw new Error("usage: forgedock schedd [status | watchdog [--stall-sec N]]");
   (deps.renice ?? (await import("./lean/schedd-health.mjs")).bestEffortRenice)(); // #4780: lanes must not starve the scheduler
