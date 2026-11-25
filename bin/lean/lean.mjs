@@ -28,7 +28,8 @@ import { areaOf, acquireHotArea, countCounters } from "./hotarea.mjs"; // #5751
 import { isEnvValidateFailure, outputTail, contractRuleCounts, onlyTestPlanProblems, isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, applyRequirementDecisions, dedupeAddRequirements, loneE2eRows, reproEnvMiss, resolveForgedockPaths, resolvingIo, portableForgedockPaths, FORGEDOCK_CHECKS_VAR, FORGEDOCK_ENTRY_VAR, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment, prodFailureSignal } from "./prefilter.mjs";
-import { writeStatus, postUpsert, isStatusPost, isUpsertPost, hasSection, clearPipelineLabels, IN_PLACE_MARKERS, commentId } from "./statuscomment.mjs";
+import { validateAmendments } from "./attempts.mjs";
+import { writeStatus, postUpsert, postKeyed, isKeyedPost, isStatusPost, isUpsertPost, hasSection, clearPipelineLabels, IN_PLACE_MARKERS, commentId } from "./statuscomment.mjs";
 import { decidePost } from "./commentstate.mjs"; // #5979
 import { repeatSignature, countIdentical, shouldPark, summaryComment } from "./failure-stop.mjs"; // #5979
 import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs";
@@ -125,7 +126,7 @@ import { makePostRun } from "./postrun.mjs";
 import { ensureSignedOff, salvageBranch, dropSalvageTracking } from "./signoff.mjs";
 import { reconcileCheckpoints } from "./checkpoint-reconcile.mjs";
 import { guardStagedDeletions, deletionEvidence, maxForeignDeletions } from "./delguard.mjs";
-import { createLedger, flattenPhases } from "./phaseledger.mjs";
+import { createLedger, flattenPhases, overheadStats } from "./phaseledger.mjs";
 import { DEFAULT_CATALOG_SOURCES, deriveCatalog, mergeRecipes, rewriteMissed, isDriftFailure, rewriteSubprojectVenv } from "./validate-catalog.mjs";
 import { holderGone } from "./liveness.mjs";
 import { planStale, stackedBaseBlock, validStackedOn, cascadeDecision, invalidatedChecks } from "./stacking.mjs";
@@ -479,6 +480,9 @@ export async function runCore(o) {
     if (on === issue && isUpsertPost(marker)) { // one comment edited in place across requeues (the marker still leads the body)
       return postUpsert({ gh: ghw, repo, issue: on, markers: marker, body, comments: iss?.comments, cap: capComment });
     }
+    if (on === issue && isKeyedPost(marker)) { // #5986: one comment per (kind, content hash) with a repeat counter; at 12 engine comments edit in place only
+      return postKeyed({ gh: ghw, repo, issue: on, marker: Array.isArray(marker) ? marker[0] : marker, body, cap: capComment });
+    }
     const marks = (Array.isArray(marker) ? marker : [marker]).map((m) => `<!-- ${m} -->`).join("\n");
     const full = capComment(`${marks}\n${body}`);
     const first = Array.isArray(marker) ? marker[0] : marker;
@@ -517,7 +521,7 @@ export async function runCore(o) {
   const leaseTtlMs = o.leaseTtlMs ?? 25 * 60000; // below the projector's 30 min honour cap
   let leaseState = null, leaseTimer = null;
   const writeLease = (lease, extra = {}) => io.projector.writeState(issue, { ...leaseState, ...extra, lease });
-  const renew = async () => { if (io.projector && leaseState && !finishing) { /* never re-take a lease a finish (or signal) released */ try { await writeLease(leaseObj()); } catch { /* best effort */ } } };
+  const renew = async () => { if (io.projector && leaseState && !finishing) { /* never re-take a lease a finish (or signal) released */ try { if (o.batchId && io.projector.readState && (await io.projector.readState(issue))?.suspend) return; /* #6008: the dispatcher's suspend marker stays; the lease is not renewed under it */ await writeLease(leaseObj()); } catch { /* best effort */ } } };
   async function releaseLease(reason, code = null, mergedTo = null) {
     if (leaseTimer) { clearInterval(leaseTimer); leaseTimer = null; }
     if (!io.projector || !leaseState) return;
@@ -769,6 +773,7 @@ export async function runCore(o) {
       ...(reproQ ? { repro_quality: reproQ } : {}), conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}), ...(firstReview ? { first_review: firstReview } : {}), ...(adequacyTel ?? {}),
       ...(laneHead && reason !== "merged" ? { lane_branch: laneHead.pushedTo ?? "unpushed", lane_sha: laneHead.sha } : {}), context_pack: ctxCfg.mode, ...ctxAb, ...expTag, explore: exploreCfg.mode, wall_ms: now() - t0, ...(guardAddedMs ? { guard_added_ms: guardAddedMs } : {}), model_ms: modelMs, ...(usageUnknown ? { usage_unknown: true } : {}), light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
       ...(route ? { builder_tier: route.tier, builder_class: route.class, builder_escalated: escalated, builder_model: route.model ?? "default" } : {}) }; // forge#4275: the on/off A/B groups runs by these; #4394: per-tier stats
+    Object.assign(term, overheadStats(null, term.wall_ms, term.model_ms)); // fixed_overhead_ms + model_share for the SLO
     const phases = phaseLedger.snapshot(); // #4908: run log gets the nested ledger, FORGE:TELEMETRY the flattened scalars
     ev({ ...term, phases });
     await emit({ ...term, ...flattenPhases(phases) });
@@ -1072,9 +1077,23 @@ export async function runCore(o) {
     } else if (r.state === "foreign" || r.state === "error") ev({ event: "CHECKPOINT_RECONCILE_SKIPPED", state: r.state, ...(r.commits ? { commits: r.commits.length } : {}), ...(r.error ? { error: r.error } : {}) });
     return r;
   };
+  /** #6008: a batch-dispatched lane re-reads its FORGE:STATE before it pushes or merges. No current lease of its batch, or a dispatcher hold/pause marker (`suspend`), suspends it (deferred, sandbox kept for adopt). Lanes without a batch (run-issue, tests) are not guarded. */
+  const suspensionGuard = async (what) => {
+    if (!o.batchId || !io.projector?.readState || !leaseState) return;
+    let st = null;
+    try { st = await io.projector.readState(issue); } catch { return; /* unreadable: fail open like admission */ }
+    if (!st) return; // no FORGE:STATE readable at all: unknown, fail open
+    const l = st?.lease, mine = l && (l.by === agentId || l.batch === o.batchId);
+    const why = st?.suspend ? `the issue is ${st.suspend.reason ?? "held"} by the dispatcher (${st.suspend.batch ?? "batch"})`
+      : !l ? "no dispatcher lease is current" : l.until <= now() ? "the dispatcher lease expired" : !mine && !gone(l) ? `the lease belongs to ${l.batch ?? l.by}, not batch ${o.batchId}` : null;
+    if (!why) return;
+    ev({ event: "LANE_SUSPENDED", what, reason: why });
+    throw Object.assign(new Error(`refusing to ${what}: ${why}`), { deferCode: "lane.suspended", deferDetail: `suspended before ${what}: ${why}; the sandbox is kept for adopt` });
+  };
   const gitPush = async (args) => {
     if (deletionRefusal && !args.includes("--delete")) throw Object.assign(new Error(deletionRefusal), { engineCode: OUTCOME_CODES.ENGINE_ERROR }); // #5819
     await assertConfined(`git ${args.join(" ").slice(0, 80)}`); // #5825
+    if (!args.includes("--delete")) await suspensionGuard("push"); // #6008
     if (!args.includes("--delete")) { await untrackToolState({ git, base, ev, keep: await keepPaths() });
       await reconcileLaneBranch();
       try { await signOffUnpushed(); }
@@ -3555,9 +3574,10 @@ export async function runCore(o) {
         ev({ event: "REVIEW_DOMAINS", domains, enforced: dHits.length ? dHits : undefined, ...(pd === null ? { error: "roster.failed" } : {}) });
       }
       const vIds = [...(frozen?.validate ?? []), ...(frozen?.regression ?? [])].map((v) => v?.id);
-      if (!amendFixed && sessionId && amendmentKindProblems(result?.amendments, vIds).length) { // #5089: one in-lane correction, outside the conformance resume budget
+      const amendBad = (am) => [...new Set([...validateAmendments(am), ...amendmentKindProblems(am, vIds)])]; // #5089/#5986: the shared amendment schema, plus #5979's validate-row supersedes hint
+      if (!amendFixed && sessionId && amendBad(result?.amendments).length) { // one in-lane correction, outside the conformance resume budget; a still-invalid shape is never posted
         amendFixed = true;
-        const bad = amendmentKindProblems(result.amendments, vIds);
+        const bad = amendBad(result.amendments);
         T.decisions.push(`Amendment kinds invalid (${bad.length}); builder asked to correct ${RESULT_FILE} once`);
         await builder(++attemptN, amendmentCorrectionPrompt(bad), sessionId, false, undefined, { mode: "resume", trigger: "contract_correction" });
         result = (await readResult()) ?? result;
@@ -4456,6 +4476,7 @@ export async function runCore(o) {
       }
       T.merge = [policyText, `merged at ${localHead.slice(0, 12)}`];
       laneGuard(resumed?.base ?? lane, "merge");
+      await suspensionGuard("merge"); // #6008
       try {
         phaseLedger.enter("merge");
         await ghc(["pr", "merge", String(pr), "-R", repo, "--merge", "--match-head-commit", localHead]);

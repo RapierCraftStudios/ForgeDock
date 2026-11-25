@@ -53,6 +53,7 @@ import { parseCiPrecheckConfig } from "./lean/ci-precheck.mjs";
 import { OUTCOME_CODES } from "./engine/outcome-codes.mjs";
 import { USER_ERRORS } from "./help-text.mjs";
 import * as batchHealth from "./lean/batch-health.mjs";
+import { makeAttemptsSeam } from "./lean/attempts.mjs";
 import * as _autoChildren from "./lean/autochildren.mjs";
 
 /**
@@ -1413,11 +1414,20 @@ const issuesOf = (argv) => {
  * #5978: `--status <id>`: the coverage of a selector batch: running + queued + backing-off + waiting on deps + human-blocked = the open
  * issues its selector matches; `unscheduled` is 0 when the order is healthy. A batch without a selector reports its own counts.
  */
+/** #6008: writes/clears the `suspend` marker on an issue's FORGE:STATE: the lane re-reads it before push and merge and stops renewing under it. */
+const suspendMarker = (projector, batchId) => async (n, on, reason) => {
+  const cur = (await projector.readState(n)) ?? {};
+  if (on) await projector.writeState(n, { ...cur, suspend: { reason, batch: batchId, at: new Date().toISOString() } });
+  else if (cur.suspend) { const { suspend: _s, ...rest } = cur; await projector.writeState(n, rest); }
+};
 async function statusBatch({ id, root, io, print = (l) => console.log(l) }) {
   const batchMod = await import("./lean/batch.mjs"), { selectArgs, parseSelected } = await import("./lean/reconcile.mjs");
   if (!id || String(id).startsWith("--")) throw new Error(ORCH_USAGE);
   const b = batchMod.openBatch(root, id), plan = b.readPlan(), st = b.store.load();
   if (!plan || !st) throw new Error(`no batch ${id} in ${root}`);
+  const kept = b.keptSandboxes(!b.readReport() && b.lastProgressMs() !== null && Date.now() - b.lastProgressMs() <= 10 * 60000); // #6008: a batch with no progress for 10 min has no dispatcher
+  const showKept = () => { if (kept.length) print(`kept sandboxes (${kept.length}): ${kept.map((k) => `#${k.issue} age ${Math.round((k.ageMs ?? 0) / 60000)}m phase ${k.phase ?? "?"}`).join(", ")}`); };
+  showKept();
   const select = flag(plan.argv ?? [], "--select");
   if (!select) { print(`batch ${id}: no selector (a fixed list); ${(st.pending ?? []).length} pending, ${Object.keys(st.running ?? {}).length} running`); return { ok: true, batch: id, unscheduled: [] }; }
   const open = parseSelected(await io.gh(selectArgs(plan.repo, select)));
@@ -1427,7 +1437,7 @@ async function statusBatch({ id, root, io, print = (l) => console.log(l) }) {
   print(`batch ${id} selector '${select}': ${open.length} matching open = ${n("running")} running + ${n("queued")} queued + ${n("backingOff")} backing-off + ${n("waitingDeps")} waiting on deps + ${n("humanBlocked")} human-blocked + ${n("unscheduled")} unscheduled`);
   if (c.humanBlocked.length) print(`human-blocked: ${c.humanBlocked.map((x) => `#${x}`).join(", ")}`);
   print(c.unscheduled.length ? `UNSCHEDULED (${c.unscheduled.length}): ${c.unscheduled.map((x) => `#${x}`).join(", ")}` : "unscheduled: 0 (healthy)");
-  return { ok: true, batch: id, coverage: c, unscheduled: c.unscheduled };
+  return { ok: true, batch: id, coverage: c, unscheduled: c.unscheduled, kept };
 }
 /** #5978: the runner's reconcile seam for a `--select` batch: the gh search, the agent/lane-image version, the base sha, close-on-lane-merge. */
 async function makeReconcile({ select, repo, leanIo, orch, lane, argv }) {
@@ -1617,6 +1627,9 @@ async function pauseBatch({ op, id, root, viaDaemon = null, meta = null, print =
  */
 async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = null, meta = null, print = (l) => console.log(l) }) {
   const issues = tokens.filter((t) => /^#?\d+$/.test(String(t))).map((t) => parseInt(String(t).replace("#", ""), 10));
+  if (op === "hold" && tokens.includes("pending") && id) { // #6008: every issue not running: queued, deferred (notBefore, capacity backoff) and retry-timer ones, not only the ones in `pending` right now
+    try { const st = (await import("./lean/batch.mjs")).openBatch(root, id).store.load(); for (const n of st?.pending ?? []) if (!issues.includes(n)) issues.push(n); for (const n of Object.keys(st?.notBefore ?? {})) if (!issues.includes(Number(n))) issues.push(Number(n)); } catch { /* unreadable: the explicit list stands */ }
+  }
   if (!id || String(id).startsWith("--") || !issues.length) throw new Error(ORCH_USAGE);
   let res = viaDaemon ? await viaDaemon(op, issues, meta) : null;
   if (!res) {
@@ -2085,6 +2098,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const needsOf = new Map(); // issue -> host-only capabilities its body names (#4542), filled by readBody
   const prefetchOf = new Map(); // issue -> the frozen contract's relayable read-only commands (#4778), filled by readBody
   let execForNeeds = null;
+  let poolUsage = []; // #5985: pool usage-history rows (cpu_avg per repo), refreshed in the background; classify lanes light/heavy
   let lanes, remote = null, execBudget = null, execConf = null, hybrid = false;
   const execMode = () => (deps.execution !== undefined ? deps.execution : readExecution(cwd))?.mode ?? "local";
   if (deps.leanModule) {
@@ -2136,7 +2150,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       const ledgerFor = deps.sandboxLedger ?? ((n) => makeLedger({ batch: batch.id, lane: `sandbox-${n}`, owner: `orch_${process.pid}`, issue: n }));
       const bud = exec.budget ?? {};
       const holdId = execMod.remoteHoldId(provider); // #5095: the pool account's usage-limit hold key
-      const remoteLanes = execMod.providerLanes({ provider, laneArgs, ...(typeof provider.agentOnline === "function" ? { agentOnline: (h) => provider.agentOnline(h) } : {}), ledgerFor, env, secrets: exec.secrets, costPerMinute: bud.costPerMinute ?? 0, holdId,
+      const remoteLanes = execMod.providerLanes({ provider, laneArgs, ...(leanIo?.projector ? { suspendKept: (n) => suspendMarker(leanIo.projector, batch.id)(n, true, "kept for adopt"), resumeKept: (n) => suspendMarker(leanIo.projector, batch.id)(n, false, "adopted") } : {}), ...(typeof provider.agentOnline === "function" ? { agentOnline: (h) => provider.agentOnline(h) } : {}), ledgerFor, env, secrets: exec.secrets, costPerMinute: bud.costPerMinute ?? 0, holdId,
         ...(Number.isFinite(exec.unreachableWindowMin) ? { unreachableWindowMs: exec.unreachableWindowMin * 60000 } : {}),
         ...(deps.now ? { now: deps.now } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}),
         logTail: (h) => { try { return readFileSync(batch.logFile(h.issue), "utf8").slice(-4000); } catch { return ""; } } }); // #4866: a clone failure in the lane log types sandbox.clone
@@ -2168,14 +2182,16 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       if (batch.readExecution()?.provider !== true) batch.setExecution({ provider: true });
       // #4540: provider free slots, refreshed in the background (admission is sync); unknown (null) never blocks.
       let capSample = null, onlineSample = null, capAt = 0, capLast = -Infinity, capFailed = false; // #5048: capFailed = last probe rejected // #4547: online = agents alive, null unknown
+      let liveSample = {}, usageLast = -Infinity; // #5985: the pool's live load/memory ride the capacity sample
       const capacity = () => {
+        if (typeof provider.usageHistory === "function" && (deps.now ? deps.now() : Date.now()) - usageLast >= 600000) { usageLast = deps.now ? deps.now() : Date.now(); Promise.resolve().then(() => provider.usageHistory()).then((rows) => { if (Array.isArray(rows)) poolUsage = rows; }, () => {}); }
         if (capFailed) throw new Error("capacity probe failed"); // #5048: until the next successful sample, so every caller sees it (release review CONC-1)
         const t = deps.now ? deps.now() : Date.now();
         if (typeof provider.capacity === "function" && t - capLast >= (deps.pollMs ?? 5000)) {
           capLast = t;
-          Promise.resolve().then(() => provider.capacity()).then((c) => { capFailed = false; capSample = c && Number.isInteger(c.free) ? c.free : null; onlineSample = c && Number.isInteger(c.online) ? c.online : null; capAt++; }, () => { capSample = null; onlineSample = null; capFailed = true; capAt++; });
+          Promise.resolve().then(() => provider.capacity()).then((c) => { capFailed = false; capSample = c && Number.isInteger(c.free) ? c.free : null; onlineSample = c && Number.isInteger(c.online) ? c.online : null; liveSample = { ...(Number.isFinite(c?.load_per_core) ? { load_per_core: c.load_per_core } : {}), ...(Number.isFinite(c?.mem_available_gb) ? { mem_available_gb: c.mem_available_gb } : {}) }; capAt++; }, () => { capSample = null; onlineSample = null; capFailed = true; capAt++; });
         }
-        return capSample === null && onlineSample === null ? null : { free: capSample, online: onlineSample, at: capAt };
+        return capSample === null && onlineSample === null ? null : { free: capSample, online: onlineSample, ...liveSample, at: capAt };
       };
       remote = liveExec.liveRemote({
         hostFallback: readHostFallback(), capacity, isRemote: () => true, identity: () => holdId, ...(exec.fallbackLocal ? { offlineFallback: true, headroom: hostHeadroom, ...(exec.capacityFallbackAfter ? { capacityFallbackAfter: exec.capacityFallbackAfter } : {}) } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
@@ -2195,7 +2211,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const stopLane = deps.stopLane ?? ((n, rec) => (rec?.remote || rec?.handle ? remoteStop?.(n, rec) ?? false : rec?.pid ? killLedgerPid(rec.pid, batch.resultFile(n)) : false));
     // #5241: a cancelled lane that ended gives its issue lease back, unless a live lane of another batch runs the issue.
     const releaseLease = deps.releaseLease ?? (leanIo?.projector ? async (n) => { await clearLease({ projector: leanIo.projector, issue: n, shouldClear: () => !batchMod.batchesOwning(root, repo, n, { exceptId: batch.id }).some((o) => !o.cancelled && o.running) }); } : null);
-    lanes = { ...lanes, stopLane, releaseLease };
+    // #6008: hold/pause/keep reach a kept sandbox through the `suspend` marker on the issue's FORGE:STATE (the sandbox cannot read batch files)
+    const suspendLane = deps.suspendLane ?? (leanIo?.projector ? suspendMarker(leanIo.projector, batch.id) : null);
+    lanes = { ...lanes, stopLane, releaseLease, suspendLane };
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
   const train = orch.mergeTrain === "on" ? (deps.train ?? (await import("./lean/mergetrain.mjs")).createMergeTrain({ gh: (a) => leanIo.gh(a), repo, batchSize: orch.mergeTrainBatch ?? 4,
@@ -2407,7 +2425,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd), host: { cores: () => cpus().length, memAvailableMb, rampingMb: rampProbe.rampingMb } }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       // #5174: hold new local admissions while loadavg/cores is above engine.overload_load_per_core (host-wide batches only)
       ...(overload ? { overload } : {}),
-      ...(remote ? { remote } : {}),
+      ...(remote ? { remote, usageRows: () => poolUsage, repoSlug: repo } : {}),
       // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
       ...(recoveryOn ? { recovery: orch.recovery } : {}),
       ...(stackingOn ? { stacking: orch.stacking, ...(orch.stacking === "full" ? { readPrReady: async (n) => (await makeProjector(io, { repo }).readState(n))?.prReady ?? null } : {}) } : {}), // #5831, #5832: PR-ready is read from the dependency lane's FORGE:STATE
@@ -2433,6 +2451,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       onInterrupted: deps.onInterrupted ?? (async (n) => leanIo.gh(["issue", "edit", String(n), "-R", repo, "--remove-label", "workflow:building"]).catch(() => {})),
       // #4387: an out-of-set dependency labelled needs-human is not pulled into the batch
       issueLabels: labelNames,
+      // #5986: per-issue attempts ledger and input-hash admission (off under the test seams)
+      ...((deps.attempts !== undefined ? deps.attempts : testDeps ? null : true) ? { attempts: deps.attempts !== undefined ? deps.attempts : makeAttemptsSeam({ gh: (a) => leanIo.gh(a), repo, engineVersion: ENGINE_VERSION, sandboxVersion: scheddMod.readInstalledVersion?.() ?? null, cfg: { maxAttempts: orch.maxAttemptsPerIssue, maxIdentical: orch.maxIdenticalSignature } }) } : {}),
       // #4725: a closed (completed) dependency is satisfied even when it still carries a stale needs-human label
       // #5152: a NOT_PLANNED close labelled workflow:merged, or a decomposition whose sub-issues all closed, is delivered: CLOSED
       issueState: async (n) => {
@@ -2796,12 +2816,12 @@ export async function scheddFromCli(argv, deps = {}) {
     const start = () => { if (schedd.unitState() === null) schedd.defaultSpawn({ dir }); else schedd.startUnit(); };
     const unit = deps.unitState ?? schedd.unitState; // #5966: active unit but no daemon is alerted and the unit restarted
     const batchVerdicts = () => schedd.batchVerdicts(bm.batchRoot());
-    return (deps.watchdog ?? health.watchdog)({ dir, ...(sec > 0 ? { stallMs: sec * 1000 } : {}), unfinished, start, batchVerdicts, unit });
+    return (deps.watchdog ?? health.watchdog)({ dir, ...(sec > 0 ? { stallMs: sec * 1000 } : {}), unfinished, start, restart: () => schedd.restartUnit(), batchVerdicts, unit });
   }
   if (argv.length) throw new Error("usage: forgedock schedd [status | watchdog [--stall-sec N]]");
   (deps.renice ?? (await import("./lean/schedd-health.mjs")).bestEffortRenice)(); // #4780: lanes must not starve the scheduler
   process.title = "forgedock-schedd"; // distinctive name for OOM-killer avoid lists and ps (#4673)
-  const d = await schedd.startDaemon({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }), exit: deps.exit ?? ((c) => process.exit(c)), ...(deps.due !== undefined ? { due: deps.due } : { due: scheddDue }),
+  const d = await (deps.startDaemon ?? schedd.startDaemon)({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }), exit: deps.exit ?? ((c) => process.exit(c)), ...(deps.due !== undefined ? { due: deps.due } : { due: scheddDue }),
     ...(deps.daemonPreflight !== undefined ? { preflight: deps.daemonPreflight } : deps.batchDeps ? {} : { preflight: async () => { const lc = await import("./lean/lanecheck.mjs"); return (await lc.runLaneChecks({ exec: readExecution(process.cwd()), io: await lc.hostLaneIo() })).filter((c) => !c.ok); } }) });
   if (!d.running) {
     // #4775: under systemd, exiting here (code 0) makes `Restart=always` loop while another daemon holds the lock: stand by, take over when it dies
@@ -2995,6 +3015,7 @@ export async function schedFromCli(argv, deps = {}) {
     const batchMod = await import("./lean/batch.mjs");
     const agentOf = (e) => { const bm = batchMod; const r = bm.openBatch(bm.batchRoot(), e.batch).store.peek()?.running?.[e.issue]; return r?.placement?.agent ?? r?.agent ?? null; };
     for (const l of schedMod.remoteLines(st, { agentOf })) console.log(l); // #4964
+    for (const l of schedMod.concurrencyLines(st, { eventsOf: (b) => batchMod.openBatch(batchMod.batchRoot(), b).store.readLog() })) console.log(l); // #5985
     try { for (const l of (await import("./lean/batch-health.mjs")).summaryLines((await import("./lean/batch.mjs")).batchRoot())) console.log(l); } catch { /* advisory */ } // #5314
     return st;
   }
@@ -3047,7 +3068,7 @@ export function readOrchestration(cwd = process.cwd()) {
   const errors = int(o.breaker_errors ?? o.errors, 3), windowMin = int(o.breaker_window_min ?? o.window_min, 30);
   const gp = int(o.global_parallel, null);
   const recoveryMax = int(o.recovery_max_attempts ?? o.max_attempts, 1);
-  return { mergeTrain: String(o.merge_train ?? "off").trim().toLowerCase() === "on" ? "on" : "off", /* #5836 */ mergeTrainBatch: int(o.merge_train_batch, 4) >= 1 ? int(o.merge_train_batch, 4) : 4, /* #5837 */ breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), transientRetries: int(o.transient_retries, 4), blockedLabel: String(o.blocked_label ?? "blocked").trim(), globalParallel: gp >= 1 ? gp : null,
+  return { maxAttemptsPerIssue: int(o.max_attempts_per_issue, 4) >= 1 ? int(o.max_attempts_per_issue, 4) : 4, maxIdenticalSignature: int(o.max_identical_signature, 2) >= 1 ? int(o.max_identical_signature, 2) : 2, /* #5986 */ mergeTrain: String(o.merge_train ?? "off").trim().toLowerCase() === "on" ? "on" : "off", /* #5836 */ mergeTrainBatch: int(o.merge_train_batch, 4) >= 1 ? int(o.merge_train_batch, 4) : 4, /* #5837 */ breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), transientRetries: int(o.transient_retries, 4), blockedLabel: String(o.blocked_label ?? "blocked").trim(), globalParallel: gp >= 1 ? gp : null,
     stacking: normalizeStacking(o.stacking), // #5831
     recovery: { maxAttempts: recoveryMax, mechanicalMaxAttempts: Math.max(int(o.recovery_mechanical_max_attempts ?? o.mechanical_max_attempts, 2), recoveryMax) }, // #4725: env/base/sequence codes have their own budget
     // #4525: parked-PR base sync. The parser flattens one level, so `base_sync.enabled|union_globs` arrive as `enabled|union_globs` (or flat `base_sync_*`).

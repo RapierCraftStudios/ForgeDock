@@ -702,7 +702,15 @@ const HALTED = { terminalReason: "deferred", detail: "batch halted (schedd hando
  * (`backendId`; the sandbox's own id kept as `laneBackendId`), so orchestrate can place lanes away from a limited pool.
  */
 export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env, secrets = [], pollMs = 5000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
-  costPerMinute = 0, now = () => Date.now(), unreachableWindowMs = 300000, logTail = null, holdId = null, agentOnline = null }) {
+  costPerMinute = 0, now = () => Date.now(), unreachableWindowMs = 300000, logTail = null, holdId = null, agentOnline = null, suspendKept = null, resumeKept = null, phaseOf = null }) {
+  // #6008: a sandbox kept for adopt keeps running with no dispatcher: record it (issue, since, phase) and tell it to suspend (the lane refuses push/merge until adopted)
+  const keepNote = (r, n, h) => {
+    if (!Number.isInteger(n)) return r;
+    let phase = null; try { phase = phaseOf?.(n) ?? null; } catch { phase = null; }
+    const kept = { issue: n, since: now(), phase, ...(h?.id ? { id: h.id } : {}) };
+    try { Promise.resolve(suspendKept?.(n, kept)).catch(() => {}); } catch { /* best effort */ }
+    return { ...r, kept };
+  };
   const cpm = nonNeg(Number(costPerMinute)) ?? 0;
   // #4255: the sandbox's usage: the provider's `usage()`, else the billable minutes it put on the handle (#4254), else wall
   // clock since the handle's startedAt; cost is the provider's, else minutes x cost_per_minute.
@@ -748,10 +756,11 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
       }
     }
   };
-  const unreachable = (h, e) => (e?.auth
+  const unreachable0 = (h, e) => (e?.auth
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_AUTH, retryInSeconds: 300, detail: `sandbox ${h.id} kept answering 401 (${e.hop === "agent" ? "the pool agent refused the router" : "check the pool token"}): ${errText(e)}; kept for adopt on resume` }
     : { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_UNREACHABLE, retryInSeconds: 60,
       detail: `sandbox ${h.id} ${errText(e)}; kept for adopt on resume` });
+  const unreachable = (h, e) => keepNote(unreachable0(h, e), h?.issue, h);
   const tailOf = async (h) => { try { return typeof logTail === "function" ? String(await logTail(h) ?? "") : ""; } catch { return ""; } };
   const settleClone = (r, id) => (r?.terminalReason === "engine-error" && r.code === undefined && isEgressTimeout(r.detail) ? egressDeferred(id, errLine(r.detail))
     : r?.terminalReason === "engine-error" && r.code === undefined && isCloneFailure(r.detail) ? cloneDeferred(id, errLine(r.detail)) : r);
@@ -786,7 +795,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
   const startFailed = (id, e) => ([401, 403].includes(e?.status)
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_AUTH, retryInSeconds: 300, detail: `sandbox ${id} could not start (auth): ${errText(e)}; ${e?.hop === "agent" ? "the pool agent refused the router (re-enroll or fix the agent token)" : "check the pool token (COMPUTESHARE_TOKEN or ~/.config/computeshare/forgedock.token)"}` }
     : e?.retryable === true
-    ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, detail: `sandbox ${id} could not start (capacity): ${errText(e)}`, ...(Number(e.retryInSeconds) > 0 ? { retryInSeconds: Number(e.retryInSeconds) } : {}) }
+    ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, detail: `sandbox ${id} could not start (capacity): ${errText(e)}`, ...(typeof e.poolCode === "string" ? { reason: e.poolCode.replace(/^pool\./, "").replace(/^disk_(low|cap)$/, "disk") } : {}), ...(e.live ? { live: e.live } : {}), ...(Number(e.retryInSeconds) > 0 ? { retryInSeconds: Number(e.retryInSeconds) } : {}) }
     // #5095: a 5xx from the pool router or agent is infrastructure: deferred with backoff (capped), never needs-human
     : (Number.isInteger(e?.status) && e.status >= 500 && e.status <= 599) || e?.transient === true || (isTransportError(e) && !isCloneFailure(errText(e))) // #5656: fetch failed, ECONNRESET, ETIMEDOUT; a clone timeout keeps its own code
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_TRANSIENT, retryInSeconds: Number(e.retryInSeconds) > 0 ? Number(e.retryInSeconds) : TRANSIENT_RETRY_S,
@@ -824,7 +833,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
         started = true;
         ctx.onStart?.({ ...(Number.isInteger(h.pid) ? { pid: h.pid } : {}), handle: h, remote: true });
         r = settleClone(await wait(h, undefined, ctx.signal), base.id);
-        if (ctx.signal?.aborted) return HALTED; // #5669: the sandbox stays for adopt, whatever `r` is
+        if (ctx.signal?.aborted) return keepNote(HALTED, n, h); // #5669: the sandbox stays for adopt, whatever `r` is
       } catch (e) {
         if (started && e?.unreachable) return withUsage(unreachable(h, e), h); // #4672: no tear, the ledger keeps it
         r = started ? settleClone({ terminalReason: "engine-error", detail: `sandbox ${base.id}: ${errText(e)}` }, base.id) : startFailed(base.id, e);
@@ -843,6 +852,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
         saved = (ledgerFor(n)?.entries("sandbox") ?? []).find((e) => e.value === id && (e.provider ?? e.handle?.provider) === provider.name)?.handle;
       }
       if (!saved?.id || saved.provider !== provider.name) return null;
+      try { Promise.resolve(resumeKept?.(n)).catch(() => {}); } catch { /* best effort */ } // #6008: adopted: the lease is re-established
       // Usage runs from the sandbox's real start (persisted on the handle), not from this adopt.
       const h = { ...saved, ...(Number.isFinite(saved.startedAt) ? {} : Number.isFinite(rec?.startedAt) ? { startedAt: rec.startedAt } : {}) };
       const led = ledgerFor(n);
@@ -853,7 +863,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
         const ended = await g(() => provider.fetchResult(h));
         if (!ended && (await g(() => provider.status(h))) !== "running") r = null; // relaunched
         else { if (!ended) ctx.onLive?.(); r = await wait(h, g, ctx.signal); } // #4504: a live sandbox is awaited in the background
-        if (ctx.signal?.aborted) return null; // #5669: halted: left for the next adopt, no tear
+        if (ctx.signal?.aborted) { keepNote(HALTED, n, h); return null; } // #5669: halted: left for the next adopt, no tear
       } catch (e) {
         if (e?.unreachable) return withUsage(unreachable(h, e), h); // #4672: same tolerance; no tear, left for the next adopt
         r = { terminalReason: "engine-error", detail: `sandbox ${h.id}: ${errText(e)}` };

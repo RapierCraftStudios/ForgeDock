@@ -7,7 +7,7 @@ import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
 import { phasesOf } from "./orchestrate.mjs";
 import { aggregate } from "../stats/aggregate.mjs";
-import { LANE_PHASES, createLedger, laneSum, withinWall, flattenPhases, unflattenPhases, summarizePhases, formatLedgerSummary, WAIT_CAUSES, summarizeWaits, comparePhases, formatPhaseComparison, readBaselineRows } from "./phaseledger.mjs";
+import { LANE_PHASES, createLedger, laneSum, withinWall, flattenPhases, unflattenPhases, overheadStats, summarizePhases, formatLedgerSummary, WAIT_CAUSES, summarizeWaits, comparePhases, formatPhaseComparison, readBaselineRows } from "./phaseledger.mjs";
 
 const clock = () => { let t = 1000; const f = () => t; f.tick = (ms) => { t += ms; }; return f; };
 
@@ -165,5 +165,17 @@ describe("phase comparison vs previous 7 days (#5649)", () => {
     const rows = readBaselineRows({ root, excludeId: "cur", now });
     assert.deepEqual(rows.map((r) => r.minutes).sort(), [2, 3]);
     assert.equal(readBaselineRows({ root: join(root, "missing"), now }), null);
+  });
+});
+
+describe("overheadStats", () => {
+  it("splits wall into model share and fixed overhead", () => {
+    assert.deepEqual(overheadStats({}, 1000, 320), { fixed_overhead_ms: 680, model_share: 0.32 });
+  });
+  it("zero wall gives zero share", () => {
+    assert.deepEqual(overheadStats({}, 0, 50), { fixed_overhead_ms: 0, model_share: 0 });
+  });
+  it("model > wall clamps overhead to 0", () => {
+    assert.equal(overheadStats({}, 100, 150).fixed_overhead_ms, 0);
   });
 });
