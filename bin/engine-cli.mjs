@@ -1414,11 +1414,20 @@ const issuesOf = (argv) => {
  * #5978: `--status <id>`: the coverage of a selector batch: running + queued + backing-off + waiting on deps + human-blocked = the open
  * issues its selector matches; `unscheduled` is 0 when the order is healthy. A batch without a selector reports its own counts.
  */
+/** #6008: writes/clears the `suspend` marker on an issue's FORGE:STATE: the lane re-reads it before push and merge and stops renewing under it. */
+const suspendMarker = (projector, batchId) => async (n, on, reason) => {
+  const cur = (await projector.readState(n)) ?? {};
+  if (on) await projector.writeState(n, { ...cur, suspend: { reason, batch: batchId, at: new Date().toISOString() } });
+  else if (cur.suspend) { const { suspend: _s, ...rest } = cur; await projector.writeState(n, rest); }
+};
 async function statusBatch({ id, root, io, print = (l) => console.log(l) }) {
   const batchMod = await import("./lean/batch.mjs"), { selectArgs, parseSelected } = await import("./lean/reconcile.mjs");
   if (!id || String(id).startsWith("--")) throw new Error(ORCH_USAGE);
   const b = batchMod.openBatch(root, id), plan = b.readPlan(), st = b.store.load();
   if (!plan || !st) throw new Error(`no batch ${id} in ${root}`);
+  const kept = b.keptSandboxes(!b.readReport() && b.lastProgressMs() !== null && Date.now() - b.lastProgressMs() <= 10 * 60000); // #6008: a batch with no progress for 10 min has no dispatcher
+  const showKept = () => { if (kept.length) print(`kept sandboxes (${kept.length}): ${kept.map((k) => `#${k.issue} age ${Math.round((k.ageMs ?? 0) / 60000)}m phase ${k.phase ?? "?"}`).join(", ")}`); };
+  showKept();
   const select = flag(plan.argv ?? [], "--select");
   if (!select) { print(`batch ${id}: no selector (a fixed list); ${(st.pending ?? []).length} pending, ${Object.keys(st.running ?? {}).length} running`); return { ok: true, batch: id, unscheduled: [] }; }
   const open = parseSelected(await io.gh(selectArgs(plan.repo, select)));
@@ -1428,7 +1437,7 @@ async function statusBatch({ id, root, io, print = (l) => console.log(l) }) {
   print(`batch ${id} selector '${select}': ${open.length} matching open = ${n("running")} running + ${n("queued")} queued + ${n("backingOff")} backing-off + ${n("waitingDeps")} waiting on deps + ${n("humanBlocked")} human-blocked + ${n("unscheduled")} unscheduled`);
   if (c.humanBlocked.length) print(`human-blocked: ${c.humanBlocked.map((x) => `#${x}`).join(", ")}`);
   print(c.unscheduled.length ? `UNSCHEDULED (${c.unscheduled.length}): ${c.unscheduled.map((x) => `#${x}`).join(", ")}` : "unscheduled: 0 (healthy)");
-  return { ok: true, batch: id, coverage: c, unscheduled: c.unscheduled };
+  return { ok: true, batch: id, coverage: c, unscheduled: c.unscheduled, kept };
 }
 /** #5978: the runner's reconcile seam for a `--select` batch: the gh search, the agent/lane-image version, the base sha, close-on-lane-merge. */
 async function makeReconcile({ select, repo, leanIo, orch, lane, argv }) {
@@ -1618,6 +1627,9 @@ async function pauseBatch({ op, id, root, viaDaemon = null, meta = null, print =
  */
 async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = null, meta = null, print = (l) => console.log(l) }) {
   const issues = tokens.filter((t) => /^#?\d+$/.test(String(t))).map((t) => parseInt(String(t).replace("#", ""), 10));
+  if (op === "hold" && tokens.includes("pending") && id) { // #6008: every issue not running: queued, deferred (notBefore, capacity backoff) and retry-timer ones, not only the ones in `pending` right now
+    try { const st = (await import("./lean/batch.mjs")).openBatch(root, id).store.load(); for (const n of st?.pending ?? []) if (!issues.includes(n)) issues.push(n); for (const n of Object.keys(st?.notBefore ?? {})) if (!issues.includes(Number(n))) issues.push(Number(n)); } catch { /* unreadable: the explicit list stands */ }
+  }
   if (!id || String(id).startsWith("--") || !issues.length) throw new Error(ORCH_USAGE);
   const refusal = op === "hold" ? holdTtlRefusal(issues, meta?.forMs) : null; // #5988
   if (refusal) throw new Error(refusal);
@@ -2141,7 +2153,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       const ledgerFor = deps.sandboxLedger ?? ((n) => makeLedger({ batch: batch.id, lane: `sandbox-${n}`, owner: `orch_${process.pid}`, issue: n }));
       const bud = exec.budget ?? {};
       const holdId = execMod.remoteHoldId(provider); // #5095: the pool account's usage-limit hold key
-      const remoteLanes = execMod.providerLanes({ provider, laneArgs, ...(typeof provider.agentOnline === "function" ? { agentOnline: (h) => provider.agentOnline(h) } : {}), ledgerFor, env, secrets: exec.secrets, costPerMinute: bud.costPerMinute ?? 0, holdId,
+      const remoteLanes = execMod.providerLanes({ provider, laneArgs, ...(leanIo?.projector ? { suspendKept: (n) => suspendMarker(leanIo.projector, batch.id)(n, true, "kept for adopt"), resumeKept: (n) => suspendMarker(leanIo.projector, batch.id)(n, false, "adopted") } : {}), ...(typeof provider.agentOnline === "function" ? { agentOnline: (h) => provider.agentOnline(h) } : {}), ledgerFor, env, secrets: exec.secrets, costPerMinute: bud.costPerMinute ?? 0, holdId,
         ...(Number.isFinite(exec.unreachableWindowMin) ? { unreachableWindowMs: exec.unreachableWindowMin * 60000 } : {}),
         ...(deps.now ? { now: deps.now } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}),
         logTail: (h) => { try { return readFileSync(batch.logFile(h.issue), "utf8").slice(-4000); } catch { return ""; } } }); // #4866: a clone failure in the lane log types sandbox.clone
@@ -2202,7 +2214,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const stopLane = deps.stopLane ?? ((n, rec) => (rec?.remote || rec?.handle ? remoteStop?.(n, rec) ?? false : rec?.pid ? killLedgerPid(rec.pid, batch.resultFile(n)) : false));
     // #5241: a cancelled lane that ended gives its issue lease back, unless a live lane of another batch runs the issue.
     const releaseLease = deps.releaseLease ?? (leanIo?.projector ? async (n) => { await clearLease({ projector: leanIo.projector, issue: n, shouldClear: () => !batchMod.batchesOwning(root, repo, n, { exceptId: batch.id }).some((o) => !o.cancelled && o.running) }); } : null);
-    lanes = { ...lanes, stopLane, releaseLease };
+    // #6008: hold/pause/keep reach a kept sandbox through the `suspend` marker on the issue's FORGE:STATE (the sandbox cannot read batch files)
+    const suspendLane = deps.suspendLane ?? (leanIo?.projector ? suspendMarker(leanIo.projector, batch.id) : null);
+    lanes = { ...lanes, stopLane, releaseLease, suspendLane };
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
   const train = orch.mergeTrain === "on" ? (deps.train ?? (await import("./lean/mergetrain.mjs")).createMergeTrain({ gh: (a) => leanIo.gh(a), repo, batchSize: orch.mergeTrainBatch ?? 4,

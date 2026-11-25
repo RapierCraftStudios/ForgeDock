@@ -3694,6 +3694,11 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 - Deferred to the operator/installer layer (no unit file or installer in this repo): `WatchdogSec` heartbeat on the unit, and the installer restarting the unit on `npm i -g` / plugin update.
 - Post-deploy check `schedd-handover-no-gap`.
 
+## Lane overhead share (#5989)
+- `overheadStats(phases, wallMs, modelMs)` in `phaseledger.mjs` returns `{ fixed_overhead_ms, model_share }`: `max(0, wall - model)` and `model / wall` to 3 decimals (0 when wall <= 0). `phases` is unused; queue_wait is already outside `wall_ms`.
+- `RUN_TERMINAL` (run log and `FORGE:TELEMETRY`) carries both fields. Observational only: no gate, conformance or merge decision reads them, and `wall_ms`, `model_ms` and the `flattenPhases` keys are unchanged.
+- Deferred follow-ups: env snapshot as default, recovery reuse, parallel precheck/plan, path-scoped guard.
+
 ## Entry 2026-11-25 — standing orders: `orchestrate --select <query>` (#5978)
 
 - `--select` is kept in the plan argv. Every `RECONCILE_MS` the runner (hosted by `schedd`, no watcher process) calls `reconcile.mjs`: matching open issues join through the `--add` seam (same DAG, priority, lane rules), closed or moved ones leave. Batches without a selector are unchanged.
@@ -3745,3 +3750,9 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 - Holds: `limits.holdExpiryWarnings` lists hold-info entries within `HOLD_EXPIRY_WARN_MS` (T-30 min) of `expiresAt`, once per expiry; `refreshHeld` posts one `hold-alert` each and releases expired holds through the concurrency controller, so expiry re-admits at its pace. `--hold` on more than 10 issues needs `--ttl`/`--for` (`engine.holdTtlRefusal`) and prints `holdResumePlan`.
 - Breaker: engine-errors are keyed by signature plus agent (generalising the `lostSeen` window of #5859). A tripped key quarantines only that agent (`quarantineAgent`) and reseeds the cache once (`reseedCache`), emits `agent-quarantine`, and keeps admitting other work; the batch breaker and `--clear-breaker` are unchanged.
 - Stall recovery: `recordStallRecovery` stores the `dispatch-stalled` cause plus gates (`stallCause`); `decideStallAction` refuses a second restart for the same cause and alerts instead.
+
+## Lease/hold/pause guard and kept sandboxes (#6008)
+
+- A lane dispatched with a batch id re-reads its FORGE:STATE before every non-delete `git push` and before `gh pr merge` (`suspensionGuard`, `bin/lean/lean.mjs`). A missing or expired lease, a lease of another batch, or the dispatcher's `suspend` marker (`reason` held/paused/kept for adopt) ends the lane `deferred` with `lane.suspended`; the sandbox stays for adopt. No readable state, or no batch id (interactive `run-issue`), is not guarded. `renew()` does not renew under a `suspend` marker.
+- The dispatcher writes the marker (`suspendLane`, `suspendMarker` in `bin/engine-cli.mjs`): when a kept sandbox is recorded (halted, `sandbox.unreachable`, `sandbox.auth`; `providerLanes` `suspendKept`), when a kept issue is held (`--hold`) or its batch paused (`--pause`); cleared on release, unpause and adopt (`resumeKept`). Held/paused batches still admit nothing, including deferred issues whose retry timer fires (`isReady`, launch re-read); `--hold <id> pending` holds every pending and backing-off issue.
+- Kept sandboxes are recorded in `state.kept` (issue, since, phase) and listed by `orchestrate --status` and `pool status` (table section and `kept_sandboxes` in `--json`) via `keptSandboxes` (`bin/lean/batch.mjs`).
