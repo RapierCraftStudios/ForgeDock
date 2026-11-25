@@ -2291,6 +2291,7 @@ builder once; shadow records it in `CONFORMANCE_SHADOW` `would` (it is not in `S
 The only override is `{"kind":"supersedes","guard":"#X","why":"..."}` in result.json amendments (`applyAmendments` records
 `contract.supersedes`; the reviewer sees it on the effective contract). After the lane merges with the amendment, the engine
 comments on #X and logs `supersedes_accepted`. Events: `guard_run` (with `wall_ms`), `guard_broken`, `supersedes_accepted`.
+#5979: a `supersedes` whose `guard` is a frozen validate/regression row id (`G2`, `V1`) is not a guard issue: `applyAmendments` rejects it (nothing added to `contract.supersedes`) and `amendmentKindProblems(amendments, validateIds)` reports it pre-gate (`lean.mjs` passes the contract ids) with a hint naming `substitute-validate {validate, command, why}`; `#N` and `mechanism` supersedes are unchanged.
 #5752 weak vs strong: `materialize` tags each job with `isWeakGuardTest(body, path)` (`weakguard.mjs`, deterministic, over the base body).
 A weak guard (reads file text, imports no local non-test module, runs no process, every assertion a literal-presence form) that fails is
 excluded from `guardFailures`; `weakGuardNotes` turns it into a trajectory decision and a `guard_weak` event (`guard_run` gains `weak`).
