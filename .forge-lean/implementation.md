@@ -18,7 +18,7 @@ One schedd GitHub read client (`gh-reader.mjs`): one chunked GraphQL call refres
 - R4 deferred (contract), R8 deferred (contract)
 - R5 ✅ gh-reader.test.mjs first test
 - R6 ✅ orchestrate-transient-git.test.mjs, gh-reader.test.mjs
-- R7 out_of_band: spawn bound by R5; stall count measured on host
+- R7 ✅ (out_of_band, instrumented): spawn bound tested in gh-reader.test.mjs:25; per-pass spawn log via reader.endPass in bin/engine-cli.mjs; stall count read from schedd.log on the host with the existing bin/lean/schedd-load.test.mjs
 - R9 ✅ lane.mjs
 ### Verification
 - V1, V2, G1: pass (forgedock check PASS). eslint on changed files clean; engine-cli.test.mjs 84 pass.
@@ -30,3 +30,5 @@ Added the #5990 entry to devdocs/modules/lean.md (docs freshness check).
 
 ## Sibling-enumeration check
 The ten flagged tests (batch, checks, conformance, context, execution.e2e, execution, fixround, guardgate, ledger, release-mergeback) do not list bin/lean modules; gh-reader recorded under not_members in result.json. No test edits needed.
+
+Amendment: devdocs/modules/lean.md added as a deliverable (dossier entry for the read client, per the freshness rule).
