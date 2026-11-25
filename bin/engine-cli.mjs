@@ -2806,7 +2806,7 @@ export async function scheddFromCli(argv, deps = {}) {
   if (argv.length) throw new Error("usage: forgedock schedd [status | watchdog [--stall-sec N]]");
   (deps.renice ?? (await import("./lean/schedd-health.mjs")).bestEffortRenice)(); // #4780: lanes must not starve the scheduler
   process.title = "forgedock-schedd"; // distinctive name for OOM-killer avoid lists and ps (#4673)
-  const d = await schedd.startDaemon({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }), exit: deps.exit ?? ((c) => process.exit(c)), ...(deps.due !== undefined ? { due: deps.due } : { due: scheddDue }),
+  const d = await (deps.startDaemon ?? schedd.startDaemon)({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }), exit: deps.exit ?? ((c) => process.exit(c)), ...(deps.due !== undefined ? { due: deps.due } : { due: scheddDue }),
     ...(deps.daemonPreflight !== undefined ? { preflight: deps.daemonPreflight } : deps.batchDeps ? {} : { preflight: async () => { const lc = await import("./lean/lanecheck.mjs"); return (await lc.runLaneChecks({ exec: readExecution(process.cwd()), io: await lc.hostLaneIo() })).filter((c) => !c.ok); } }) });
   if (!d.running) {
     // #4775: under systemd, exiting here (code 0) makes `Restart=always` loop while another daemon holds the lock: stand by, take over when it dies
