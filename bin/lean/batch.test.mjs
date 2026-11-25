@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { resolveLane, makeLaneCache } from "./lane.mjs";
 import { orchestrate, deferPolicy, DEFER_BACKOFF_S, formatOutcomeLists, CAPACITY_FALLBACK_AFTER, isTransientEngineError, transientRetryDelayMs, DEFAULT_TRANSIENT_RETRIES } from "./orchestrate.mjs";
-import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane, detachedLanes, stackedOnOf } from "./batch.mjs";
+import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane, detachedLanes, stackedOnOf, keptSandboxes } from "./batch.mjs";
 import { makeLedger } from "./ledger.mjs";
 import { placeLane } from "./execution.mjs";
 import { liveRemote } from "./live-execution.mjs";
@@ -2185,5 +2185,14 @@ describe("coverage (#5978)", () => {
   it("a human label blocks an issue with no row; an unknown one is unscheduled", () => {
     const c = coverage5978({ state: { pending: [] }, open: [{ number: 4, labels: ["human:credentials"] }, { number: 5, labels: ["bug"] }] });
     assert.deepEqual([c.humanBlocked, c.unscheduled], [[4], [5]]);
+  });
+});
+
+describe("#6008 kept-sandbox listing", () => {
+  it("lists issue, age and phase from state.kept and, with no live dispatcher, from remote run records", () => {
+    const state = { kept: { 5: { issue: 5, since: 1_000, phase: "review", id: "sbx-5" } }, running: { 6: { startedAt: 4_000, remote: true, handle: { id: "sbx-6" } }, 7: { startedAt: 4_000, pid: 99 } } };
+    const rows = keptSandboxes(state, { now: 61_000 });
+    assert.deepEqual(rows.map((r) => [r.issue, r.ageMs, r.phase]), [[5, 60_000, "review"], [6, 57_000, null]]);
+    assert.deepEqual(keptSandboxes(state, { now: 61_000, live: true }).map((r) => r.issue), [5], "a live dispatcher's running lanes are not kept");
   });
 });

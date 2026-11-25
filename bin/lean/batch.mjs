@@ -114,6 +114,23 @@ const readAdded = (file) => {
 export const REQUEUABLE = (outcome) => ["needs-human", "engine-error", "held", "invalid", "skipped", "ci-pending", "pr-ready", "budget-exceeded", "lane-refused", "deferred"].includes(outcome) || /^dependency-/.test(String(outcome));
 /** Key of one requeue entry; the runner records the applied keys in state.json `requeueApplied`. */
 /** #5832: the `{dependency, branch, sha}` a stacked build of `issue` was admitted on (batch state `stacked`), or null. Rows carry `stacked`/`stackedOn`. */
+/**
+ * #6008: sandboxes kept for adopt (issue, since, age, phase). `state.kept` records them as the lane returned them; a running
+ * remote record (handle) of a batch whose dispatcher is gone (`live` false) is a kept sandbox too. Newest listing order: by issue.
+ */
+export function keptSandboxes(state, { now = Date.now(), live = false } = {}) {
+  const out = new Map();
+  for (const [k, v] of Object.entries(state?.kept ?? {})) {
+    const issue = Number(k); if (!Number.isSafeInteger(issue) || !v) continue;
+    out.set(issue, { issue, since: v.since ?? null, phase: v.phase ?? null, ...(v.id ? { id: v.id } : {}) });
+  }
+  if (!live) for (const [k, rec] of Object.entries(state?.running ?? {})) {
+    const issue = Number(k);
+    if (!Number.isSafeInteger(issue) || out.has(issue) || !(rec?.handle || rec?.remote)) continue;
+    out.set(issue, { issue, since: rec.startedAt ?? null, phase: rec.phase ?? null, ...(rec.handle?.id ? { id: rec.handle.id } : {}) });
+  }
+  return [...out.values()].sort((a, b) => a.issue - b.issue).map((e) => ({ ...e, ageMs: (() => { const t = typeof e.since === "number" ? e.since : Date.parse(e.since); return Number.isFinite(t) ? Math.max(0, now - t) : null; })() }));
+}
 export const stackedOnOf = (state, issue) => state?.stacked?.[issue] ?? null;
 
 export const requeueKey = (e) => `${e.issue}@${e.at}`;
@@ -326,6 +343,8 @@ export function openBatch(root, id) {
     readRequeued: () => readRequeueFile(f("requeue")),
     /** Entries the runner has not applied yet (a finished or unhosted batch with a pending requeue). */
     unrunRequeues: () => { const done = new Set(readJson(f("state.json"))?.requeueApplied ?? []); return readRequeueFile(f("requeue")).filter((e) => !done.has(requeueKey(e))); },
+    /** #6008: the kept-sandbox listing of this batch (issue, since, ageMs, phase); `live` = its dispatcher is running. */
+    keptSandboxes: (live = false) => keptSandboxes(readJson(f("state.json")), { live }),
     /** Issues held by `--hold` (#4592): the `hold` file, sorted unique positive integers; [] when missing or invalid. */
     readHeld: () => readAdded(f("hold")),
     /** #4656: gates waiting on issues (`gates` file: [{ name, waitsOn: [n...], since? }], written by the ship/settle pre-flight); [] when missing or invalid. */

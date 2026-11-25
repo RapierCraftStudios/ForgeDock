@@ -10158,3 +10158,33 @@ describe("#5992 verify.guard_bypass: a lane clear of the red guard's files proce
     }
   });
 });
+
+describe("#6008 lease/hold/pause guard before push and merge (kept sandbox)", () => {
+  // admission reads (first two) see no state; every later read sees `scenario`
+  const guarded = (scenario) => { const w = world(); w.leaseWrites = []; let reads = 0;
+    w.io.projector = { readState: async () => (++reads <= 2 ? null : scenario()), writeState: async (_i, st) => { w.leaseWrites.push(st); } }; return w; };
+  const live = () => ({ v: 1, lease: { by: "x", batch: "b1", until: Date.now() + 600000 } });
+  const refused = async (scenario, extra = {}) => { const w = guarded(scenario); const r = await run(w, { batchId: "b1", ...extra }); return { w, r }; };
+  it("kept: a current lease of the lane's own batch merges", async () => {
+    const { r } = await refused(live);
+    assert.equal(r.terminalReason, "merged");
+  });
+  it("kept: no current lease, an expired lease or another batch's lease refuses push and merge and ends deferred", async () => {
+    for (const sc of [() => ({ v: 1, lease: null }), () => ({ v: 1, lease: { by: "x", batch: "b1", until: 0 } }), () => ({ v: 1, lease: { by: "y", batch: "other", until: Date.now() + 600000 } })]) {
+      const { w, r } = await refused(sc);
+      assert.deepEqual([r.terminalReason, r.code], ["deferred", "lane.suspended"]);
+      assert.ok(!(w.ghCalls ?? []).some?.((c) => /pr.*merge/.test(String(c))));
+    }
+  });
+  it("kept: a held issue or a paused batch (dispatcher suspend marker) refuses push and merge", async () => {
+    for (const reason of ["held", "paused"]) {
+      const { r } = await refused(() => ({ ...live(), suspend: { reason, batch: "b1" } }));
+      assert.deepEqual([r.terminalReason, r.code], ["deferred", "lane.suspended"]);
+      assert.match(r.detail, new RegExp(reason));
+    }
+  });
+  it("a lane without a batch id (interactive run-issue) is not guarded", async () => {
+    const w = guarded(() => ({ v: 1, lease: null }));
+    assert.equal((await run(w)).terminalReason, "merged");
+  });
+});
