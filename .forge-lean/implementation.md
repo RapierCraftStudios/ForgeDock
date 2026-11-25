@@ -5,6 +5,7 @@ Recovery pass: the CI failure was scripts/check-test-tmp-cleanup.sh flagging bin
 - bin/lean/efficiency.test.mjs: use tmpDir from bin/tests/_tmp.mjs (earlier commits hold the ledger, SLO filer, introspect timer, budget guard).
 ### Acceptance Criteria Status
 - R1-R11 ✅ delivered in earlier commits (bin/lean/efficiency.mjs, slo.mjs, schedd.mjs, introspect-schedule.mjs, execution.mjs, devdocs/modules/lean.md). R12 deferred and R13 not-applicable per the contract. Note the filing default was later changed to on, per the binding decision.
+- R12 ✅ bin/lean/slo.mjs:23 (filing default on per binding decision; supersedes the contract deferral).
 ### Verification
 - check-test-tmp-cleanup.sh: OK (failed before the fix).
 - node --test bin/lean/efficiency.test.mjs: pass 6.
