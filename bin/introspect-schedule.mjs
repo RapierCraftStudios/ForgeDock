@@ -19,6 +19,8 @@ const CRON_TAG = "# forgedock-introspect";
 const ARGS = "--run"; // this file is the entry: runs the introspect report and files it (see runIntrospect)
 
 export const introspectUnitName = (cwd) => `forgedock-introspect-${createHash("sha1").update(resolve(cwd)).digest("hex").slice(0, 8)}`;
+/** Where today's report for `cwd` is saved; the SLO rolling issue links it (#5987). */
+export const introspectReportPath = (cwd, home = homedir(), now = Date.now()) => join(home, ".forge", "introspect", `${new Date(now).toISOString().slice(0, 10)}-${introspectUnitName(cwd).slice(-8)}.txt`);
 const q = (s) => `"${String(s).replace(/(["\\$`])/g, "\\$1")}"`;
 const SELF = fileURLToPath(import.meta.url);
 const forgedockBin = () => join(dirname(SELF), "forgedock.mjs");
@@ -80,7 +82,7 @@ export async function runIntrospect({ cwd = process.cwd(), home = homedir(), fs 
     let cfg; try { cfg = parseSloConfig(parseForgeYaml(fs.readFileSync(join(cwd, "forge.yaml"), "utf8"))); } catch { cfg = parseSloConfig({}); }
     const report = await run(), dir = join(home, ".forge", "introspect"), scope = introspectUnitName(cwd).slice(-8);
     fs.mkdirSync(dir, { recursive: true });
-    const reportPath = join(dir, `${new Date(now).toISOString().slice(0, 10)}-${scope}.txt`);
+    const reportPath = introspectReportPath(cwd, home, now);
     fs.writeFileSync(reportPath, report);
     if (!cfg.fileIssues) return { action: "disabled", reportPath };
     const stateFile = join(dir, `filed-${scope}.json`);

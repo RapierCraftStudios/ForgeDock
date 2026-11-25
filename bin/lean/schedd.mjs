@@ -56,6 +56,7 @@ import { DEFAULT_STALL_MIN, FIRST_HOUR_FILE, FIRST_HOUR_MIN, batchVerdict, clear
 import { probeBatchEnv } from "./lanecheck.mjs";
 import { computeEfficiency, idleCause, operatorEvents, readEfficiency, writeEfficiency } from "./efficiency.mjs";
 import { ledgerPass, parseSloConfig } from "./slo.mjs";
+import { introspectReportPath } from "../introspect-schedule.mjs";
 import { parseForgeYaml } from "../forge-utils.mjs";
 import { HEARTBEAT_MS, writeHeartbeat, clearHeartbeat } from "./schedd-health.mjs";
 import { batchRoot, listBatches, openBatch, SECRET_ENV } from "./batch.mjs";
@@ -629,7 +630,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       try { cfg = parseSloConfig(parseForgeYaml(readFileSync(join(process.cwd(), "forge.yaml"), "utf8"))); } catch { cfg = parseSloConfig({}); }
       const ceiling = b.readParallel() ?? Number(state.parallel ?? plan.parallel) ?? 0, running = Object.keys(state.running ?? {}).length;
       const sample = reported ? null : { t: now, running, ceiling: Number.isFinite(ceiling) ? ceiling : running, ready: (state.pending ?? []).length, ...((c) => (c ? { cause: c } : {}))(b.readPause?.() ? "auth-pause" : idleCause(b.readLog(), now) ?? (b.readHeld().length ? "hold" : undefined)) };
-      const r = await ledgerPass({ batch: b, sample, cfg, gh: sloGh ?? sloGhDefault, now, repo: plan.repo ?? null, operator: operatorEvents(b.dir), compute: computeEfficiency, readEff: readEfficiency, writeEff: writeEfficiency });
+      const r = await ledgerPass({ batch: b, sample, cfg, gh: sloGh ?? sloGhDefault, now, repo: plan.repo ?? null, operator: operatorEvents(b.dir), compute: computeEfficiency, readEff: readEfficiency, writeEff: writeEfficiency, reportPath: cfg.fileIssues ? introspectReportPath(process.cwd()) : null });
       if (r?.actions?.length) log(`schedd: slo ${r.actions.map((a) => `${a.op} ${a.sig} #${a.issue}`).join(", ")}`);
       const mark = join(b.dir, "introspect.json");
       if (reported && cfg.fileIssues && !existsSync(mark)) {
