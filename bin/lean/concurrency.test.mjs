@@ -92,3 +92,22 @@ describe("503-storm replay (#5985)", () => {
     assert.ok([...refusals.values()].flat().length < unreplayed / 3);
   });
 });
+
+describe("heavy lanes in orchestrate (#5985)", () => {
+  it("a heavy repo's lanes run at most the heavy cap at once while light lanes keep the rest of K", async () => {
+    const { orchestrate } = await import("./orchestrate.mjs");
+    const usageRows = [{ repo: "o/heavy", cpu_avg: 3 }, { repo: "o/light", cpu_avg: 0.3 }];
+    const run = async (repo) => {
+      let cur = 0, max = 0;
+      const events = [];
+      await orchestrate({ issues: [1, 2, 3, 4, 5, 6], parallel: 6, usageRows: () => usageRows, repoSlug: "o/none", repoOf: () => repo, readBody: async () => "", onUpdate: (e) => events.push(e),
+        sleep: async () => { await new Promise((r) => setImmediate(r)); },
+        runOne: async () => { cur++; max = Math.max(max, cur); await new Promise((r) => setTimeout(r, 20)); cur--; return { terminalReason: "merged", pr: 1 }; } });
+      return { max, events };
+    };
+    const heavy = await run("o/heavy"), light = await run("o/light");
+    assert.equal(heavy.max, 2, "ceiling 6, heavy cap ceil(6/3)");
+    assert.equal(light.max, 6);
+    assert.ok(heavy.events.some((e) => e.event === "concurrency" && e.change === "heavy-cap"));
+  });
+});

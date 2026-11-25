@@ -337,7 +337,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
  * @returns {Promise<Array<{issue:number, outcome:string, pr:?number, cost_usd:number, minutes:number, detail?:string}>>}
  */
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), blockedRefreshMs = 60000, onUpdate = () => {}, onCrossLane = () => {},
-  store = null, adopt = null, getParallel = null, usageRows = null, repoSlug = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000, getClearBreaker = null, consumeClearBreaker = null, ackClearBreaker = null,
+  store = null, adopt = null, getParallel = null, usageRows = null, repoSlug = null, repoOf = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000, getClearBreaker = null, consumeClearBreaker = null, ackClearBreaker = null,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getPause = null, expirePause = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
@@ -496,6 +496,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #4267: decisions are recorded, never awaited: a failing or slow recorder cannot block the batch.
   // #5985: the controller moves are persisted to log.jsonl with their inputs (the post-deploy check reads them)
   const conc = makeController({ ceiling: parallel, now });
+  let heavyHeldHit = false;
   const concEmit = (e) => { if (!e) return; const ev = { ...e, batch: batchId ?? null, running: running.size, line: formatConcurrency({ running: running.size, k: e.k, ceiling: e.ceiling, factor: e.factor }) }; try { store?.log?.(ev); } catch { /* advisory */ } onUpdate(ev); };
   const decided = (d) => { try { Promise.resolve(decide?.(d)).catch(() => {}); } catch { /* best effort */ } };
   const firstLine = (x) => String(x ?? "").split("\n")[0].slice(0, 300);
@@ -1820,8 +1821,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   };
   const ceilingK = () => { let k = null; try { k = getParallel?.(); } catch { k = null; } return Number.isInteger(k) && k >= 1 ? k : parallel; };
   // #5985: K is the ceiling; the controller's operating point (and a lower heavy-lane cap) sits under it. A pool with no load/memory data leaves K unchanged.
-  const laneClass = usageRows ? classifyRepo(usageRows, repoSlug) : "light";
-  const K = () => { conc.setCeiling(ceilingK()); return conc.operating(laneClass); };
+  // #5985: light/heavy per lane (its repo's recent cpu_avg from usage-history rows, array or getter); heavy lanes have their own concurrent cap
+  const laneClassOf = (n) => { let rows = null; try { rows = typeof usageRows === "function" ? usageRows() : usageRows; } catch { rows = null; } let repo = repoSlug; try { repo = repoOf?.(n) ?? repoSlug; } catch { repo = repoSlug; } return rows && repo ? classifyRepo(rows, repo) : "light"; };
+  const heavyFull = (n) => { if (laneClassOf(n) !== "heavy") return false; let h = 0; for (const m of running.keys()) if (m !== n && laneClassOf(m) === "heavy") h++; if (h < conc.heavyLimit()) return false; if (!heavyHeldHit) { heavyHeldHit = true; concEmit({ event: "concurrency", change: "heavy-cap", k: conc.operating("light"), ceiling: ceilingK(), factor: "heavy cap", inputs: { heavy_limit: conc.heavyLimit() } }); } return true; };
+  const K = () => { conc.setCeiling(ceilingK()); return conc.operating("light"); };
   // #5836: one train poll (throttled): a merged PR becomes a merged row; a red, conflicting or moved-head PR is handed back as a
   // needs-human row through the normal settle path, so in-batch recovery requeues a fix lane.
   let lastTrainTick = -Infinity;
@@ -1920,6 +1923,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         if (blocked.has(n)) { blockedHit.add(n); return false; } // #4773
         if (baseHeld.has(n)) { baseHit.add(n); return false; } // #5031
         if (!((notBefore.get(n) ?? 0) <= t && (planPass || edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome))))) return false;
+        if (heavyFull(n)) return false; // #5985: a wave of heavy (test-suite) lanes never takes the whole ceiling
         if (integration?.holds) {
           let why = null;
           try { why = integration.holds(n, { lane: lanes.get(n)?.lane ?? null }); } catch { why = null; }
@@ -1959,6 +1963,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         for (const n of want) wanted.add(n);
         for (const n of ready) {
           if (running.size >= K()) break;
+          if (heavyFull(n)) continue; // #5985
           const g = grant(n, wanted);
           if (g === "busy") continue; // #4481
           if (!g && (notBefore.get(n) ?? 0) > t) continue; // #5592: per-issue wait, not a full host queue
@@ -1968,6 +1973,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       } else if (!tripped && !cancelled && !holdUntil) {
         for (const n of rank(pending.filter(isReady))) {
           if (running.size >= K()) break;
+          if (heavyFull(n)) continue; // #5985
           if (grant(n, new Set()) === true) { pending.splice(pending.indexOf(n), 1); start(n); started++; }
         }
       }
@@ -1986,6 +1992,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         try { sc = rank(pending.filter((n) => stackAdmissible({ n, edges: edges(n), results, pending, running, prReady, stackedTried, satisfied: SATISFIED }) && isReady(n))); } finally { planPass = false; }
         for (const n of sc) {
           if (running.size >= K()) break;
+          if (heavyFull(n)) continue; // #5985
           if (lanes.get(n)?.ok === false || (notBefore.get(n) ?? 0) > t) continue;
           const so = stackAdmissible({ n, edges: edges(n), results, pending, running, prReady, stackedTried, satisfied: SATISFIED });
           if (!so || grant(n, new Set()) !== true) continue;
@@ -2005,6 +2012,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         try { cands = rank(pending.filter((n) => planAdmissible({ n, edges: edges(n), results, pending, running, planTried, satisfied: SATISFIED }) && isReady(n))); } finally { planPass = false; }
         for (const n of cands) {
           if (running.size >= K()) break;
+          if (heavyFull(n)) continue; // #5985
           if (lanes.get(n)?.ok === false || (notBefore.get(n) ?? 0) > t) continue;
           if (grant(n, new Set()) !== true) continue;
           pending.splice(pending.indexOf(n), 1);

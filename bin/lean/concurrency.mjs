@@ -44,6 +44,8 @@ export function makeController({ ceiling, heavyCap = null, now = Date.now, memFl
     /** The operating point under the ceiling; a heavy lane class has its own, lower cap. */
     operating(klass = "light") { return Math.min(top, k, klass === "heavy" ? hcap() : Infinity); },
     ceiling: () => top,
+    /** Concurrent heavy lanes allowed, separate from light lanes. */
+    heavyLimit: () => hcap(),
     limiting(klass = "light") { return klass === "heavy" && hcap() < Math.min(top, k) ? "heavy cap" : k < top ? factor : "ceiling"; },
     /** A launch was refused. Halves on a `pool.*` reason or load above 1.5/core. Returns the event, or null when nothing moved. */
     refused({ issue = null, code = "", reason = "", live = null } = {}) {

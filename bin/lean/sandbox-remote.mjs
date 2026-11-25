@@ -143,6 +143,15 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
       const sb = r.data.sandboxes && typeof r.data.sandboxes === "object" ? Object.keys(r.data.sandboxes) : [];
       return { agents, total: int(r.data.remote_lanes) ?? sb.filter((id) => id.startsWith("fdrsbx-")).length };
     },
+    /** #5985: finished-lane usage rows (`{repo, cpu_avg, ...}`) of every pool agent (`GET /agents/:name/usage`), for the light/heavy lane class. A bad answer throws. */
+    async usageHistory() {
+      const r = await call("GET", "/agents");
+      if (!r.ok) throw fail("usage history", r);
+      const names = (Array.isArray(r.data?.agents) ? r.data.agents : []).map((a) => a?.name).filter((n) => typeof n === "string");
+      const rows = [];
+      for (const n of names) { try { const u = await call("GET", `/agents/${encodeURIComponent(n)}/usage`); if (u.ok && Array.isArray(u.data?.rows)) rows.push(...u.data.rows); } catch { /* one agent down: its rows are unknown */ } }
+      return rows;
+    },
     async relayPending(id) { const r = await call("GET", `${p(id)}/relay`); return r.ok && Array.isArray(r.data?.requests) ? r.data.requests : []; },
     async relayAnswer(id, rid, out) { const r = await call("POST", `${p(id)}/relay/${encodeURIComponent(rid)}`, out); if (!r.ok) throw fail("relay answer", r); return true; },
     async capacity() {
@@ -315,6 +324,8 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
       if (typeof transport.capacity !== "function") return null;
       return (await transport.capacity()) ?? null;
     },
+    /** #5985: the pool's usage-history rows; null when the transport has none. */
+    async usageHistory() { return typeof transport.usageHistory === "function" ? (await transport.usageHistory()) ?? null : null; },
     /** #4612: a graceful stop at the lane's checkpoint; false when unsupported or failed. Never destroys the sandbox. */
     async stop(h) {
       if (typeof transport.stop !== "function") { stopWhy.set(h.id, "the transport has no stop"); return false; }

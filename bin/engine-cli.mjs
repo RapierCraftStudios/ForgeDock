@@ -2044,6 +2044,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const needsOf = new Map(); // issue -> host-only capabilities its body names (#4542), filled by readBody
   const prefetchOf = new Map(); // issue -> the frozen contract's relayable read-only commands (#4778), filled by readBody
   let execForNeeds = null;
+  let poolUsage = []; // #5985: pool usage-history rows (cpu_avg per repo), refreshed in the background; classify lanes light/heavy
   let lanes, remote = null, execBudget = null, execConf = null, hybrid = false;
   const execMode = () => (deps.execution !== undefined ? deps.execution : readExecution(cwd))?.mode ?? "local";
   if (deps.leanModule) {
@@ -2126,14 +2127,16 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       if (batch.readExecution()?.provider !== true) batch.setExecution({ provider: true });
       // #4540: provider free slots, refreshed in the background (admission is sync); unknown (null) never blocks.
       let capSample = null, onlineSample = null, capAt = 0, capLast = -Infinity, capFailed = false; // #5048: capFailed = last probe rejected // #4547: online = agents alive, null unknown
+      let liveSample = {}, usageLast = -Infinity; // #5985: the pool's live load/memory ride the capacity sample
       const capacity = () => {
+        if (typeof provider.usageHistory === "function" && (deps.now ? deps.now() : Date.now()) - usageLast >= 600000) { usageLast = deps.now ? deps.now() : Date.now(); Promise.resolve().then(() => provider.usageHistory()).then((rows) => { if (Array.isArray(rows)) poolUsage = rows; }, () => {}); }
         if (capFailed) throw new Error("capacity probe failed"); // #5048: until the next successful sample, so every caller sees it (release review CONC-1)
         const t = deps.now ? deps.now() : Date.now();
         if (typeof provider.capacity === "function" && t - capLast >= (deps.pollMs ?? 5000)) {
           capLast = t;
-          Promise.resolve().then(() => provider.capacity()).then((c) => { capFailed = false; capSample = c && Number.isInteger(c.free) ? c.free : null; onlineSample = c && Number.isInteger(c.online) ? c.online : null; capAt++; }, () => { capSample = null; onlineSample = null; capFailed = true; capAt++; });
+          Promise.resolve().then(() => provider.capacity()).then((c) => { capFailed = false; capSample = c && Number.isInteger(c.free) ? c.free : null; onlineSample = c && Number.isInteger(c.online) ? c.online : null; liveSample = { ...(Number.isFinite(c?.load_per_core) ? { load_per_core: c.load_per_core } : {}), ...(Number.isFinite(c?.mem_available_gb) ? { mem_available_gb: c.mem_available_gb } : {}) }; capAt++; }, () => { capSample = null; onlineSample = null; capFailed = true; capAt++; });
         }
-        return capSample === null && onlineSample === null ? null : { free: capSample, online: onlineSample, at: capAt };
+        return capSample === null && onlineSample === null ? null : { free: capSample, online: onlineSample, ...liveSample, at: capAt };
       };
       remote = liveExec.liveRemote({
         hostFallback: readHostFallback(), capacity, isRemote: () => true, identity: () => holdId, ...(exec.fallbackLocal ? { offlineFallback: true, headroom: hostHeadroom, ...(exec.capacityFallbackAfter ? { capacityFallbackAfter: exec.capacityFallbackAfter } : {}) } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
@@ -2351,7 +2354,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd), host: { cores: () => cpus().length, memAvailableMb, rampingMb: rampProbe.rampingMb } }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       // #5174: hold new local admissions while loadavg/cores is above engine.overload_load_per_core (host-wide batches only)
       ...(overload ? { overload } : {}),
-      ...(remote ? { remote } : {}),
+      ...(remote ? { remote, usageRows: () => poolUsage, repoSlug: repo } : {}),
       // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
       ...(recoveryOn ? { recovery: orch.recovery } : {}),
       ...(stackingOn ? { stacking: orch.stacking, ...(orch.stacking === "full" ? { readPrReady: async (n) => (await makeProjector(io, { repo }).readState(n))?.prReady ?? null } : {}) } : {}), // #5831, #5832: PR-ready is read from the dependency lane's FORGE:STATE
