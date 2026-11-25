@@ -1044,6 +1044,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       const pol = deferPolicy(r, { now: now(), deferrals: deferrals.get(n) ?? 0, maxDeferrals });
       let capGated = false; // #4909: the pool reports free slots, so the slot (not the retry-in timer) gates the relaunch
       if (r?.code === "sandbox.unreachable") notePool(true, r.detail ?? "sandbox unreachable");
+      if (r?.code === "base.red" && baseProbe && !baseRedHold) { // #5992: a lane's base.red result raises the one batch hold at once (its guardRed verdict is cached, so this runs no second probe)
+        try { const v = await baseProbe(); if (v?.red) { const issue = Number.isInteger(v.att?.issue) ? v.att.issue : null, detail = `base.red: base ${String(v.sha).slice(0, 12)} is red on ${(v.commands ?? []).join(", ") || "a guard command"}${v.att ? `; last change ${String(v.att.sha).slice(0, 12)}${issue ? ` (#${issue})` : ""}` : ""}; admissions paused until the base moves`; update({ issue: null, outcome: "preflight", code: "base.red", detail }); baseRedHold = { sha: v.sha, issue, detail }; } } catch { /* the next pass probes */ }
+      }
       if (r?.code === "sandbox.capacity") {
         capWait.refused(n);
         if (r.detail) capReasons.set(n, String(r.detail).slice(0, 300));
