@@ -1464,6 +1464,22 @@ describe("#4592: forgedock orchestrate --hold / --release", () => {
     assert.ok(!lines.some((x) => /held \(none\)/.test(x)));
   });
 
+  it("#5988: --hold on more than 10 issues needs an explicit --ttl and prints the resume plan; --ttl is parsed like --for", async () => {
+    const root = tmpDir("batch-hold-ttl-");
+    const b = openBatch(root, "b1");
+    const many = Array.from({ length: 12 }, (_, i) => i + 1);
+    b.writePlan({ argv: [], repo: "o/r" });
+    b.store.save({ order: many });
+    const io = { gh: async () => JSON.stringify({ state: "OPEN" }) };
+    await assert.rejects(orchestrateFromCli(["--hold", "b1", ...many.map(String)], { batchRoot: root, io }), /requires an explicit --ttl/);
+    assert.deepEqual(b.readHeld(), []);
+    const lines = []; const l = console.log; console.log = (x) => lines.push(String(x));
+    let res; try { res = await orchestrateFromCli(["--hold", "b1", ...many.map(String), "--ttl", "4h"], { batchRoot: root, io }); } finally { console.log = l; }
+    assert.equal(res.changed.length, 12);
+    assert.ok(lines.some((x) => /resume plan: 12 issues held for 4h; an alert posts 30 min before expiry/.test(x)), lines.join("\n"));
+    assert.ok(Object.values(b.readHoldInfo()).every((h) => Number.isFinite(Date.parse(h.expiresAt))), "the ttl set an expiry");
+  });
+
   it("through the CLI: --hold / --release write the hold file (usage and unknown batch reject); --resume <id> N releases N", async () => {
     const root = tmpDir("batch-hold-cli-");
     const b = openBatch(root, "b1");

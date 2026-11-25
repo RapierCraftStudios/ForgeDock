@@ -187,6 +187,7 @@ export const AGENT_LOST_REQUEUE_MS = 60000;
 // #5988: a backend.auth outage is probed every AUTH_PROBE_MS, holds admissions at most AUTH_ESCALATE_MS, then escalates once.
 export const AUTH_PROBE_MS = 5 * 60000;
 export const AUTH_ESCALATE_MS = 30 * 60000;
+export const HOLD_RAMP_STEP_MS = 30000; // #5988: hold-expiry release ramp: one more lane per step
 /** #5988: a cause that belongs to one placement host: errors are counted per (signature, agent), not batch-wide. */
 const hostSignature = (r, detail) => (/\bsandbox\.exited\b/.test(`${r?.code ?? ""} ${detail ?? ""}`) ? "sandbox.exited" : null);
 export const HOST_BUSY_RETRY_S = 60;
@@ -1727,6 +1728,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (!getHeld) return;
     if (expireHolds) { // #5469: a hold past its expiry is released here; the diff below then admits it. A dead owner session is an alert.
       let due = []; try { due = expireHolds() ?? []; } catch { due = []; }
+      if (due.length > 1) holdRamp = { at: now() };
       if (due.length > 1) concEmit({ event: "concurrency", change: "hold-release", k: conc.operating("light"), ceiling: ceilingK(), factor: "hold expiry", inputs: { released: due.length } }); // #5988: the release is paced by K(), never all at once
       for (const e of due) {
         decided({ issue: null, what: `hold on #${e.issue} expired (held by ${e.owner} since ${e.since}${e.reason ? `: ${e.reason}` : ""}); re-admitted`, why: "hold expiry (--hold --for)", alternative: "hold it again" });
@@ -1992,7 +1994,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #5985: light/heavy per lane (its repo's recent cpu_avg from usage-history rows, array or getter); heavy lanes have their own concurrent cap
   const laneClassOf = (n) => { let rows = null; try { rows = typeof usageRows === "function" ? usageRows() : usageRows; } catch { rows = null; } let repo = repoSlug; try { repo = repoOf?.(n) ?? repoSlug; } catch { repo = repoSlug; } return rows && repo ? classifyRepo(rows, repo) : "light"; };
   const heavyFull = (n) => { if (laneClassOf(n) !== "heavy") return false; let h = 0; for (const m of running.keys()) if (m !== n && laneClassOf(m) === "heavy") h++; if (h < conc.heavyLimit()) return false; if (!heavyHeldHit) { heavyHeldHit = true; concEmit({ event: "concurrency", change: "heavy-cap", k: conc.operating("light"), ceiling: ceilingK(), factor: "heavy cap", inputs: { heavy_limit: conc.heavyLimit() } }); } return true; };
-  const K = () => { conc.setCeiling(ceilingK()); return conc.operating("light"); };
+  // #5988: a hold expiry releasing several issues re-admits them on a ramp (one more lane per HOLD_RAMP_STEP_MS), as new work ramps, not all at once.
+  let holdRamp = null;
+  const K = () => { conc.setCeiling(ceilingK()); const k = conc.operating("light"); if (!holdRamp) return k; const step = 1 + Math.floor((now() - holdRamp.at) / HOLD_RAMP_STEP_MS); if (step >= k) { holdRamp = null; return k; } return step; };
   // #5836: one train poll (throttled): a merged PR becomes a merged row; a red, conflicting or moved-head PR is handed back as a
   // needs-human row through the normal settle path, so in-batch recovery requeues a fix lane.
   let lastTrainTick = -Infinity;

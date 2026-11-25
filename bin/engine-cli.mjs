@@ -1401,7 +1401,7 @@ async function envBatch({ argv, root, print = (l) => console.log(l) }) {
 }
 
 const ORCH_USAGE = "usage: forgedock orchestrate <issue...> | --select <query> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] [--auto-children off|decomposed|epic|all] [--epic N] | --resume <id> [issue...] | --set-parallel <id> <K> | --set-max-remote <id> <N> | --set-placement <id> remote|hybrid|local | --clear-breaker <id> | --status <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> --all [--for 2h] [--reason T] (sugar for --pause) | --hold <id> <issue...> [--for <4h|30m|1d>] [--reason <text>] | --pause <id> [--for <4h|30m|1d>] --reason <text> | --unpause <id> | --gc-orphans | --adopt <issue> [--repo owner/repo] [--lane L] | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
-const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force", "--auto-children", "--epic", "--for", "--select"];
+const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force", "--auto-children", "--epic", "--for", "--ttl", "--select"];
 const issuesOf = (argv) => {
   const issues = [];
   for (let i = 0; i < argv.length; i++) {
@@ -1569,7 +1569,7 @@ function parseHoldFor(v) {
 }
 /** #5469: the hold's owner (the operator session: the CLI's parent pid on this host), expiry (`--for`) and `--reason`. */
 function holdMeta(argv) {
-  const forLabel = flag(argv, "--for"), reason = flag(argv, "--reason");
+  const forLabel = flag(argv, "--for") ?? flag(argv, "--ttl"), reason = flag(argv, "--reason");
   return { owner: process.env.FORGE_HOLD_OWNER || `${process.env.USER || process.env.USERNAME || "operator"}@${hostname()}`, ownerPid: process.ppid, ownerHost: hostname(), forMs: parseHoldFor(forLabel), forLabel, reason: reason && !reason.startsWith("--") ? reason : null };
 }
 

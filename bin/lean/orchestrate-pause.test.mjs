@@ -3,7 +3,7 @@
 // #5975: a batch-level pause stops admission for every issue (dependency merge, engine/env re-admit, expiry), never a running lane.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { orchestrate, AUTH_PROBE_MS, AUTH_ESCALATE_MS } from "./orchestrate.mjs";
+import { orchestrate, AUTH_PROBE_MS, AUTH_ESCALATE_MS, HOLD_RAMP_STEP_MS } from "./orchestrate.mjs";
 
 const memStore = () => { let st = null; return { load: () => (st ? JSON.parse(JSON.stringify(st)) : null), save: (s) => { st = JSON.parse(JSON.stringify(s)); }, log: () => {} }; };
 const EE = (detail) => ({ terminalReason: "engine-error", detail });
@@ -96,16 +96,18 @@ describe("#5988: auth outage probe and hold expiry", () => {
 
   it("expiry of 100 holds is announced once at T-30 and released at the controller's pace, not all at once", async () => {
     const issues = Array.from({ length: 100 }, (_, i) => i + 1), clock = { t: 2_000_000 };
-    let held = new Set(issues), live = 0, peak = 0;
+    let held = new Set(issues), live = 0, peak = 0; const starts = [], release = clock.t + 20 * 60000;
     const info = Object.fromEntries(issues.map((n) => [n, { owner: "op", since: "x", expiresAt: new Date(clock.t + 20 * 60000).toISOString() }]));
     const rows = [];
     await orchestrate({ issues, parallel: 4, pollMs: 1000, readBody: async () => "", trusted: () => true, now: () => clock.t, store: memStore(),
       sleep: async (ms) => { clock.t += Math.max(1, Number(ms) || 0); }, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 3 },
       getHeld: () => [...held], getHoldInfo: () => info,
       expireHolds: () => { if (clock.t < Date.parse(info[1].expiresAt) || !held.size) return []; const due = [...held].map((n) => ({ issue: n, owner: "op", since: "x" })); held = new Set(); return due; },
-      runOne: async () => { live++; peak = Math.max(peak, live); clock.t += 1000; await Promise.resolve(); live--; return MERGED; }, onUpdate: (x) => rows.push(x) });
+      runOne: async () => { live++; peak = Math.max(peak, live); starts.push({ live, since: clock.t - release }); clock.t += 1000; await Promise.resolve(); live--; return MERGED; }, onUpdate: (x) => rows.push(x) });
     assert.equal(rows.filter((x) => x.outcome === "hold-alert").length, 100, "one T-30 alert per hold");
     assert.ok(peak <= 4, `peak ${peak} never exceeds the controller's cap`);
+    const early = starts.filter((x) => x.since < HOLD_RAMP_STEP_MS);
+    assert.ok(early.length > 0 && early.every((x) => x.live === 1), "the first step after expiry admits one lane, not the parallel cap of 4");
     assert.equal(rows.filter((x) => x.outcome === "merged").length, 100);
   });
 });
