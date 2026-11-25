@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { describeConcurrency, grantOrder, openSched, priorityFromLabels, remoteLines } from "./sched.mjs";
+import { concurrencyLines, describeConcurrency, grantOrder, openSched, priorityFromLabels, remoteLines } from "./sched.mjs";
 import { orchestrate, estimateLaneMinutes, laneHistory, formatEstimateSummary, EST_DEFAULT_MIN, POST_DEPLOY_EST_MIN } from "./orchestrate.mjs";
 import { schedFromCli } from "../engine-cli.mjs";
 
@@ -599,5 +599,15 @@ describe("describeConcurrency", () => {
     const r = describeConcurrency({ parallel: 1, yamlFound: false, cwd: "/x" });
     assert.match(r.warnings[0], /no forge\.yaml in \/x; defaults apply/);
     assert.deepEqual(describeConcurrency({ parallel: 1 }).warnings, []);
+  });
+});
+
+describe("concurrencyLines (#5985)", () => {
+  it("prints running/K/ceiling (limiting factor) with achieved vs configured from the last controller event", () => {
+    const rows = [{ event: "concurrency", k: 8, ceiling: 8, running: 8, factor: "ceiling" }, { issue: 3, outcome: "merged" }, { event: "concurrency", k: 4, ceiling: 8, running: 3, factor: "host_load" }];
+    const st = { slots: [{ batch: "b1" }], remote: [{ batch: "b1" }, { batch: "b2" }] };
+    const lines = concurrencyLines(st, { eventsOf: (b) => (b === "b1" ? rows : []) });
+    assert.deepEqual(lines, ["batch b1 concurrency: 3/4/8 (host_load); achieved 3 of 8 configured"]);
+    assert.deepEqual(concurrencyLines(st), []);
   });
 });

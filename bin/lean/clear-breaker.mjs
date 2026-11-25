@@ -13,3 +13,17 @@ export function decideClear({ tripped, requestAt }) {
   if (tripped && Number.isFinite(tripped.at) && tripped.at > requestAt) return { clear: false, stale: true };
   return { clear: true, stale: false };
 }
+
+/**
+ * #5978: the runner's own reset of a tripped breaker. It closes after `cooldownMs` when the failures were environmental
+ * (VM restart, mirror, network: `environmental`) and the pool is healthy again (#5947 classes); anything else needs `--clear-breaker`.
+ * @param {{tripped: ({at?: number}|null|undefined), now: number, cooldownMs: number, environmental: boolean, poolHealthy: boolean}} p
+ * @returns {{reset: boolean, why: string}}
+ */
+export function decideAutoReset({ tripped, now, cooldownMs, environmental, poolHealthy }) {
+  if (!tripped || !Number.isFinite(tripped.at)) return { reset: false, why: "not tripped" };
+  if (!environmental) return { reset: false, why: "failure signature is not environmental" };
+  if (now - tripped.at < cooldownMs) return { reset: false, why: "cooldown not elapsed" };
+  if (!poolHealthy) return { reset: false, why: "pool not healthy" };
+  return { reset: true, why: "environmental signature, cooldown elapsed, pool healthy" };
+}

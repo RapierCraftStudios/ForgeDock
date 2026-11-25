@@ -273,9 +273,9 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.equal(isLaneAlive(42, "lane", { kill: () => true, procDir: proc }), false);
     assert.deepEqual(stackedOnOf({ stacked: { 7: { dependency: 6, branch: "b", sha: "abcdef1" } } }, 7), { dependency: 6, branch: "b", sha: "abcdef1" }, "#5832: stackedOn read from batch state");
     assert.equal(stackedOnOf({}, 7), null);
-    assert.deepEqual(readOrchestration(root), { breaker: { errors: 3, window_min: 30 }, maxDeferrals: 3, transientRetries: 4, blockedLabel: "blocked", globalParallel: null, stacking: "off", recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] }, mergeTrain: "off", mergeTrainBatch: 4 });
+    assert.deepEqual(readOrchestration(root), { breaker: { errors: 3, window_min: 30 }, maxDeferrals: 3, transientRetries: 4, blockedLabel: "blocked", globalParallel: null, stacking: "off", recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] }, mergeTrain: "off", mergeTrainBatch: 4, maxAttemptsPerIssue: 4, maxIdenticalSignature: 2 });
     writeFileSync(join(root, "forge.yaml"), "orchestration:\n  breaker:\n    errors: 5\n    window_min: 10\n  max_deferrals: 2\n  global_parallel: 4\n  transient_retries: 2\n");
-    assert.deepEqual(readOrchestration(root), { breaker: { errors: 5, window_min: 10 }, maxDeferrals: 2, transientRetries: 2, blockedLabel: "blocked", globalParallel: 4, stacking: "off", recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] }, mergeTrain: "off", mergeTrainBatch: 4 });
+    assert.deepEqual(readOrchestration(root), { breaker: { errors: 5, window_min: 10 }, maxDeferrals: 2, transientRetries: 2, blockedLabel: "blocked", globalParallel: 4, stacking: "off", recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] }, mergeTrain: "off", mergeTrainBatch: 4, maxAttemptsPerIssue: 4, maxIdenticalSignature: 2 });
   });
 
   it("run-issue --result-file writes the lane result, also when the run throws", async () => {
@@ -2143,5 +2143,47 @@ describe("#5975: batch pause", () => {
     const opts = { hosted: true, lastProgressMs: 0, now: 3600000 * 5, windowMin: 10 };
     assert.ok(evaluateDispatchStall(state, opts), "unpaused: a stall");
     assert.equal(evaluateDispatchStall(state, { ...opts, paused: { reason: "x" } }), null);
+  });
+});
+
+describe("#5992: base.red is a batch hold, not a per-issue capped deferral", () => {
+  it("base.red is uncapped; other codes still cap", () => {
+    assert.deepEqual(deferPolicy({ code: "base.red", retryInSeconds: 900 }, { now: 0, deferrals: 99, maxDeferrals: 3 }), { delayMs: 900000, host: true });
+    assert.deepEqual(deferPolicy({ code: "merge.transient", retryInSeconds: 60 }, { now: 0, deferrals: 3, maxDeferrals: 3 }), { capped: true });
+  });
+
+  it("10 lanes + red base: 1 probe run, only the fixer launches, no 'gave up'; a sha move resumes admission in one pass", async () => {
+    const { c, now, sleep } = fakeClock();
+    const issues = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    const launches = [], updates = [];
+    let sha = "a".repeat(40), probes = 0;
+    const baseProbe = async () => { probes++; return sha === "a".repeat(40) ? { red: true, sha, commands: ["guard"], att: { sha: "f".repeat(40), issue: 10 } } : { red: false, sha }; };
+    let passes = 0;
+    const rows = await orchestrate({ issues, parallel: 10, maxDeferrals: 3, now, readBody: async () => "", baseProbe, pollMs: 10,
+      onUpdate: (u) => updates.push(u),
+      sleep: async (ms) => { await sleep(ms); if (++passes === 3) sha = "b".repeat(40); },
+      runOne: async (n) => { launches.push([n, sha === "a".repeat(40) ? "red" : "green"]); return { terminalReason: "merged", pr: 100 + n }; } });
+    const redLaunches = launches.filter((l) => l[1] === "red").map((l) => l[0]);
+    assert.deepEqual(redLaunches, [10], "only the attributed fixer is admitted while the base is red");
+    assert.equal(launches.length, 10, "every lane runs once after the base moves");
+    assert.ok(rows.every((r) => r.outcome === "merged"));
+    assert.ok(!rows.some((r) => /gave up/.test(r.detail ?? "")));
+    assert.equal(updates.filter((u) => u.code === "base.red").length, 1, "one batch-level hold row");
+    assert.ok(updates.some((u) => /base\.red cleared/.test(u.detail ?? "")));
+    assert.ok(c.t >= 1_000_000);
+  });
+});
+
+// #5978: the selector is kept in the batch plan argv/state; coverage classifies every matching open issue.
+import { coverage as coverage5978 } from "./batch.mjs";
+describe("coverage (#5978)", () => {
+  it("every open match lands in exactly one class; human-blocked is the only unscheduled-allowed class", () => {
+    const state = { pending: [2], running: { 1: {} }, results: { 3: { outcome: "needs-human", detail: "needs a product decision" } } };
+    const c = coverage5978({ state, open: [1, 2, 3].map((number) => ({ number })) });
+    assert.deepEqual([c.running, c.queued, c.humanBlocked, c.unscheduled], [[1], [2], [3], []]);
+  });
+  it("a human label blocks an issue with no row; an unknown one is unscheduled", () => {
+    const c = coverage5978({ state: { pending: [] }, open: [{ number: 4, labels: ["human:credentials"] }, { number: 5, labels: ["bug"] }] });
+    assert.deepEqual([c.humanBlocked, c.unscheduled], [[4], [5]]);
   });
 });

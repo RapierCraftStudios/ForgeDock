@@ -34,6 +34,8 @@
  * Exit reasons (#4503): every exit logs a line: `idle, exiting`, `exiting (<signal>|uncaught: …)`, `lost lock|socket …,
  * exiting` (checked every `lockCheckMs`: the lock no longer holds this pid, or the socket is gone; nothing it does not own
  * is removed), then `exited (code N)`. Taking over a dead owner's lock is logged, so a SIGKILLed daemon leaves a trace.
+ * Standing orders (#5978): a `--select` batch's reconcile tick (selector join/leave, re-admission, breaker auto-reset) runs inside the
+ * batch's runner, which this daemon hosts: no watcher process, and no change to how the daemon or its batches are kept alive.
  * Upgrade handover (#5204): the same `lockCheckMs` tick compares `installedVersion()` (the `version` of the package.json of
  * this install) with the version loaded at start. When the install moved (`npm i -g`, `forgedock update`) it logs
  * `schedd: install moved v<old> → v<new>; handing over` once, runs `close()` (no admission, lanes keep running, lock and
@@ -544,7 +546,8 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       await new Promise((r) => setTimeout(r, successorPollMs));
     }
   };
-  const selfStop = async () => {
+  let selfStopping = null;
+  const selfStop = () => (selfStopping ??= (async () => {
     stopCode = 1;
     const underUnit = ["active", "activating"].includes(unit());
     let hard;
@@ -568,7 +571,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     } catch (e) { log(`schedd: stop failed: ${e?.message ?? e}`); }
     clearTimeout(hard);
     if (exit) exit(1);
-  };
+  })());
   idleTimer = setInterval(() => {
     if (!hosted.size && !conns.size && Date.now() - lastActive >= idleMs) { log("schedd: idle, exiting"); close(); }
   }, Math.min(idleMs, 30_000));
@@ -699,7 +702,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       started.catch((e) => log(`schedd: resume ${id} failed: ${e?.message ?? e}`)).finally(() => starting.delete(id));
     }
   }
-  return { running: true, pid, sock: p.sock, close: () => (rehosted ? rehosted.close() : close()), closed, stopCode: () => stopCode, rehosted: () => rehosted };
+  return { running: true, pid, sock: p.sock, close: () => (rehosted ? rehosted.close() : close()), closed, stopCode: () => stopCode, rehosted: () => rehosted, settled: () => selfStopping ?? closed };
 }
 
 /** #5204: `version` of the package.json of this install (../../package.json), null when it cannot be read. */
@@ -743,6 +746,11 @@ export function unitState({ unitFile = join(homedir(), ".config", "systemd", "us
 /** Start the installed unit (best effort: the connect retry reports a failure). */
 export function startUnit({ run = execFileSync } = {}) {
   try { run("systemctl", ["--user", "start", "--no-block", UNIT], { timeout: 5000, stdio: "ignore" }); } catch { /* reported by the connect retry */ }
+}
+
+/** Restart the installed unit (best effort); `start` is a no-op on an active unit with no daemon (#5966). */
+export function restartUnit({ run = execFileSync } = {}) {
+  try { run("systemctl", ["--user", "restart", "--no-block", UNIT], { timeout: 5000, stdio: "ignore" }); } catch { /* the next watchdog run alerts again */ }
 }
 
 /**
