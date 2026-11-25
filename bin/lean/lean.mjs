@@ -125,6 +125,7 @@ import { reconcileCheckpoints } from "./checkpoint-reconcile.mjs";
 import { guardStagedDeletions, deletionEvidence, maxForeignDeletions } from "./delguard.mjs";
 import { createLedger, flattenPhases } from "./phaseledger.mjs";
 import { DEFAULT_CATALOG_SOURCES, deriveCatalog, mergeRecipes, rewriteMissed, isDriftFailure, rewriteSubprojectVenv } from "./validate-catalog.mjs";
+import { holderGone } from "./liveness.mjs";
 import { planStale, stackedBaseBlock, validStackedOn, cascadeDecision, invalidatedChecks } from "./stacking.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
 
@@ -495,6 +496,8 @@ export async function runCore(o) {
     if (!h || !Number.isSafeInteger(pid) || pid <= 0 || sanitizeLeaseHost(h) !== sanitizeLeaseHost(myHost)) return false;
     try { (o.killFn ?? process.kill.bind(process))(pid, 0); return false; } catch (e) { return e?.code === "ESRCH"; }
   };
+  // #5991: a lease of a batch that no longer owns the issue (a sandbox holder is pid 1 on another host) is taken over at once
+  const gone = (l) => holderDead(l) || holderGone(l, { liveBatches: typeof o.liveBatches === "function" ? (() => { try { const ids = o.liveBatches(issue); return Array.isArray(ids) ? [...ids, o.batchId] : null; } catch { return null; } })() : null });
   const leaseTtlMs = o.leaseTtlMs ?? 25 * 60000; // below the projector's 30 min honour cap
   let leaseState = null, leaseTimer = null;
   const writeLease = (lease, extra = {}) => io.projector.writeState(issue, { ...leaseState, ...extra, lease });
@@ -1548,7 +1551,7 @@ export async function runCore(o) {
   if (io.projector) {
     let st = null;
     try { st = await io.projector.readState(issue); } catch { /* unreadable: proceed */ }
-    if (st?.lease && st.lease.until > now() && st.lease.by !== agentId && holderDead(st.lease)) {
+    if (st?.lease && st.lease.until > now() && st.lease.by !== agentId && gone(st.lease)) {
       ev({ event: "LEASE_TAKEOVER", from: st.lease.by, host: st.lease.host ?? null, pid: st.lease.pid ?? null });
       onProgress({ event: "lease_takeover", detail: `taking over the lease of dead holder ${st.lease.by} (pid ${st.lease.pid ?? "?"} gone)` });
     } else if (st?.lease && st.lease.until > now() && st.lease.by !== agentId) {

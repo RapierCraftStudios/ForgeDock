@@ -3692,6 +3692,15 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 - Deferred to the operator/installer layer (no unit file or installer in this repo): `WatchdogSec` heartbeat on the unit, and the installer restarting the unit on `npm i -g` / plugin update.
 - Post-deploy check `schedd-handover-no-gap`.
 
+## Entry 2026-11-25 — standing orders: `orchestrate --select <query>` (#5978)
+
+- `--select` is kept in the plan argv. Every `RECONCILE_MS` the runner (hosted by `schedd`, no watcher process) calls `reconcile.mjs`: matching open issues join through the `--add` seam (same DAG, priority, lane rules), closed or moved ones leave. Batches without a selector are unchanged.
+- Re-admission (`readmitDue`): `deferred` backs off exponentially (cap 2 h); `held`/`engine-error` re-admit on a change of the engine or `FORGE_LANE_IMAGE` version or after a 6 h cooldown; conformance gets one more attempt after the base sha moves, then parks in a "needs decision" digest. `humanCode` (credentials, spend, customer, promotion, product decision) is the only permanent stop.
+- An engine-filed `env.*` issue joins the order; its closure re-admits the waiters (existing path).
+- `clear-breaker.mjs` `decideAutoReset`: a selector batch's breaker closes after a cooldown when the signature is environmental and the pool is healthy, with a FORGE:DECISION. `decideClear` is unchanged.
+- A staging lane closes the issue on merge into the lane branch and comments the `FORGE_POSTDEPLOY_ROLLUP` issue.
+- `batch.mjs` `coverage()` classifies each open match (running, queued, backing-off, waiting on deps, human-blocked, unscheduled); `orchestrate --status <id>` prints it, healthy is 0 unscheduled.
+
 ## Entry 2026-11-25 — scheddFromCli waits for selfStop to settle before exiting (#5984)
 
 - `closed` resolves as soon as `close()` finishes, before `selfStop()` has spawned and probed the successor. `selfStop` now keeps its whole async body (close, spawn, wait for listening, retry, rehost) as one promise, and the `startDaemon` handle gains an additive `settled()` (`selfStopping ?? closed`, so idle and lost-lock closes settle via `closed`).
@@ -3704,3 +3713,10 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 - Refusal reason: `bin/pool/agent.mjs` host-busy 503 now carries `code: pool.host_load` with live figures and `/agents` exposes `load_per_core`/`mem_available_gb`. `sandbox-remote.mjs` keeps them as `e.poolCode`/`e.live` and `capacity()` returns the two figures; the `sandbox.capacity` deferral row from `execution.mjs` gains `reason` (`host_load|host_mem|projected_peak|disk`) and `live`.
 - `capwait.mjs`: `refused(issue, reason)` records the reason; `blocked()` holds until the named condition clears (`conditionCleared`: load < 1.0, or free mem > floor), falling back to the slot count when no figure is known. `UNCAPPED_DEFERRALS` is unchanged. A refused lane is also held at most 5 min by the controller.
 - `sched.mjs` `concurrencyLines` prints `concurrency: running/K/ceiling (limiting factor)` from the last controller event in `sched show` (wired in `engine-cli.mjs`).
+
+## Entry 2026-11-25 — Owner-based liveness under the clocks (#5991)
+
+- `bin/lean/liveness.mjs` holds three pure helpers. `holderGone(lease, {liveBatches})` says a lease whose batch no longer owns the issue is takeover-able at once; `lean.mjs` consults it (`o.liveBatches`) beside `holderDead`. A live batch's lease stays `lease-held`, and an unknown liveness (`null`, e.g. inside a sandbox with no batch dir) keeps the 25 min TTL.
+- `classifyTransportLoss` shortens `sandbox.unreachable` to `AGENT_UP_WINDOW_MS` (90 s) only when the pool agent answers (`agentOnline(handle)`, exposed by `sandbox-remote.mjs` from `/agents`); agent down, router error or no probe keeps the 300 s window. The typed deferral and the kept sandbox are unchanged.
+- Budget rows are keyed `sandboxBudgetKey(batchId, sandboxId)` with no `startedAt`; `record` upserts the single row with the larger minutes/cost, so replayed attempts of one sandbox no longer add rows. Host-day dedupe and `KEEP_DAYS` pruning are unchanged.
+- R5/R6 (cache-volume probe and quarantine) deferred to pool work.

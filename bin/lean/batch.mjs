@@ -20,6 +20,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { homedir, hostname } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
+import { humanCode } from "./reconcile.mjs";
 import { sanitizeOverride, validateExecutionPatch } from "./live-execution.mjs";
 
 export const RAM_FS = new Set(["tmpfs", "ramfs"]);
@@ -184,6 +185,31 @@ export const dispatchOwner = (root, repo, issue, exceptId, opts = {}) => {
   const live = batchesOwning(root, repo, issue, { ...opts, exceptId }).filter((o) => !o.cancelled);
   return (live.find((o) => o.running) ?? live.find((o) => o.id < exceptId))?.id ?? null;
 };
+
+/**
+ * #5978: coverage of a selector batch: every open issue the selector matches is exactly one of running, queued, backing-off (a
+ * deferral or re-admission wait), waiting on deps, human-blocked (the only reason to stay unscheduled), or `unscheduled`
+ * (the unhealthy state: matches but nothing will run it). Shared by `forgedock orchestrate --status`.
+ * @param {{state:object, open:Array<{number:number,labels?:string[]}>, now?:number}} p
+ */
+export function coverage({ state, open, now = Date.now() }) {
+  const st = state ?? {}, pending = new Set(st.pending ?? []), res = st.results ?? {}, readmit = st.readmit ?? {};
+  const out = { running: [], queued: [], backingOff: [], waitingDeps: [], humanBlocked: [], unscheduled: [] };
+  for (const { number: n, labels = [] } of open ?? []) {
+    const row = res[n], deps = (st.deps?.[n] ?? []).filter((d) => res[d]?.outcome !== "merged" && res[d]?.outcome !== "invalid");
+    if (st.running && Object.hasOwn(st.running, String(n))) out.running.push(n);
+    else if (row && humanCode(row, labels)) out.humanBlocked.push(n);
+    else if (!row && labels.some((l) => humanCode(null, [l]))) out.humanBlocked.push(n);
+    else if (pending.has(n) && (st.notBefore?.[n] ?? 0) > now) out.backingOff.push(n);
+    else if (pending.has(n) && deps.length) out.waitingDeps.push(n);
+    else if (pending.has(n)) out.queued.push(n);
+    else if (row && ["deferred", "held", "engine-error"].includes(row.outcome) && readmit[n]) out.backingOff.push(n);
+    else if (row && (row.outcome === "pr-ready" || row.outcome === "ci-pending")) out.queued.push(n); // a PR is on its way to merge
+    else if (row && /^(skipped|held)$/.test(row.outcome) && deps.length) out.waitingDeps.push(n);
+    else out.unscheduled.push(n);
+  }
+  return out;
+}
 
 /** Handle on one batch directory. */
 export function openBatch(root, id) {

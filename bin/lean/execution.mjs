@@ -70,6 +70,7 @@ import { classifyStep, heavyConfig, memAvailableMb } from "./heavy.mjs";
 import { detectPins } from "./toolchain.mjs";
 import { parseContractComment, noComments } from "./render.mjs";
 import { parseRelayCommands } from "./relay.mjs";
+import { classifyTransportLoss, AGENT_UP_WINDOW_MS } from "./liveness.mjs";
 import { detectUsageLimit, parseSessionLimitResetEpochMs } from "../runner.mjs";
 
 export const EXECUTION_MODES = Object.freeze(["local", "remote", "hybrid"]);
@@ -207,8 +208,10 @@ export function openExecutionBudget({ budget = {}, file = executionBudgetFile(),
       const r = read();
       if (!r.ok) return false;
       const d = utcDay(now()), today = { ...(r.days[d] ?? {}) };
-      if (today[key]) return false;
-      today[key] = { minutes: nonNeg(u?.minutes) ?? 0, cost_usd: nonNeg(u?.cost_usd) ?? 0, at: now() };
+      const min = nonNeg(u?.minutes) ?? 0, usd = nonNeg(u?.cost_usd) ?? 0;
+      // #5991: one row per key; a replay of the same sandbox keeps the larger usage instead of adding a row
+      if (today[key] && !(min > (nonNeg(today[key].minutes) ?? 0) || usd > (nonNeg(today[key].cost_usd) ?? 0))) return false;
+      today[key] = { minutes: Math.max(min, nonNeg(today[key]?.minutes) ?? 0), cost_usd: Math.max(usd, nonNeg(today[key]?.cost_usd) ?? 0), at: now() };
       const days = { [d]: today };
       for (const [k, v] of Object.entries(r.days)) if (k !== d && Date.parse(k) > now() - KEEP_DAYS * 86400000) days[k] = v;
       writeAtomic(file, JSON.stringify({ v: 1, days }, null, 2) + "\n");
@@ -699,7 +702,7 @@ const HALTED = { terminalReason: "deferred", detail: "batch halted (schedd hando
  * (`backendId`; the sandbox's own id kept as `laneBackendId`), so orchestrate can place lanes away from a limited pool.
  */
 export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env, secrets = [], pollMs = 5000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
-  costPerMinute = 0, now = () => Date.now(), unreachableWindowMs = 300000, logTail = null, holdId = null }) {
+  costPerMinute = 0, now = () => Date.now(), unreachableWindowMs = 300000, logTail = null, holdId = null, agentOnline = null }) {
   const cpm = nonNeg(Number(costPerMinute)) ?? 0;
   // #4255: the sandbox's usage: the provider's `usage()`, else the billable minutes it put on the handle (#4254), else wall
   // clock since the handle's startedAt; cost is the provider's, else minutes x cost_per_minute.
@@ -734,8 +737,12 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
       try { const v = await fn(); st.waited = 0; st.tries = 0; return v; } catch (e) {
         if (!isTransportError(e)) throw e;
         // release review BUG-6: a 401 that outlasts the window is an auth failure (capped sandbox.auth), not an uncapped unreachable pool
-        if (st.waited >= unreachableWindowMs) throw Object.assign(new Error(`unreachable for ${Math.round(st.waited / 1000)}s: ${errText(e)}`), { unreachable: true, ...(e?.status === 401 ? { auth: true, hop: e.hop } : {}) });
-        const d = Math.min(pollMs * 2 ** Math.min(st.tries++, 10), 30000, Math.max(1, unreachableWindowMs - st.waited));
+        // #5991: once the wait reaches the agent-up window, ask the pool agent; an answering agent means this sandbox is gone
+        let up = null;
+        if (typeof agentOnline === "function" && st.waited >= AGENT_UP_WINDOW_MS && st.waited < unreachableWindowMs) { try { up = (await agentOnline(st.h)) === true; } catch { up = false; } }
+        if (classifyTransportLoss({ agentOnline: up, waitedMs: st.waited, windowMs: unreachableWindowMs }) === "unreachable") throw Object.assign(new Error(`unreachable for ${Math.round(st.waited / 1000)}s: ${errText(e)}`), { unreachable: true, ...(e?.status === 401 ? { auth: true, hop: e.hop } : {}) });
+        const d = Math.min(pollMs * 2 ** Math.min(st.tries++, 10), 30000, Math.max(1, unreachableWindowMs - st.waited),
+          typeof agentOnline === "function" && st.waited < AGENT_UP_WINDOW_MS ? AGENT_UP_WINDOW_MS - st.waited : Infinity); // land on the probe point
         st.waited += d;
         await sleep(d);
       }
@@ -749,7 +756,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
   const settleClone = (r, id) => (r?.terminalReason === "engine-error" && r.code === undefined && isEgressTimeout(r.detail) ? egressDeferred(id, errLine(r.detail))
     : r?.terminalReason === "engine-error" && r.code === undefined && isCloneFailure(r.detail) ? cloneDeferred(id, errLine(r.detail)) : r);
   // #5669: a halted batch (schedd handover) stops polling; the sandbox is neither torn down nor released, so the next daemon adopts it.
-  const wait = async (h, g = guard({ waited: 0, tries: 0 }), sig = null) => {
+  const wait = async (h, g = guard({ waited: 0, tries: 0, h }), sig = null) => {
     for (;;) {
       if (sig?.aborted) return null;
       const r = await g(() => provider.fetchResult(h));
@@ -841,7 +848,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
       const led = ledgerFor(n);
       led?.register("sandbox", h.id, { provider: provider.name, handle: { provider: h.provider, id: h.id, issue: h.issue, ...(Number.isFinite(h.startedAt) ? { startedAt: h.startedAt } : {}) } }); // now owned by this dispatcher
       let r;
-      const g = guard({ waited: 0, tries: 0 });
+      const g = guard({ waited: 0, tries: 0, h });
       try {
         const ended = await g(() => provider.fetchResult(h));
         if (!ended && (await g(() => provider.status(h))) !== "running") r = null; // relaunched

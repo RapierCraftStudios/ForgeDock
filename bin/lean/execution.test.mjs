@@ -7,6 +7,7 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { renderContract } from "./render.mjs";
+import { sandboxBudgetKey } from "./liveness.mjs";
 import { parseExecution, hostFallbackAllowed, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, isEgressTimeout, SANDBOX_EGRESS_TIMEOUT_CODE, containerProvider, providerByName, openExecutionBudget, poolCredential, remoteTransportFor, resolveDefaultExecution, repoIsPublic } from "./execution.mjs";
 import * as executionModule from "./execution.mjs";
 import { remoteProvider } from "./sandbox-remote.mjs";
@@ -124,6 +125,32 @@ describe("providerLanes: an unreachable provider is retried, then deferred witho
     assert.deepEqual([r.terminalReason, r.code], ["deferred", "sandbox.unreachable"]);
     assert.equal(prov.calls.some((c) => c[0] === "teardown"), false);
     assert.deepEqual(ledgerFor(7).entries("sandbox").map((e) => e.value), ["fake-7"]);
+  });
+
+  it("#5991 transport failure with the agent answering ends sandbox.unreachable within 90 s; agent down keeps the window", async () => {
+    const run = async (agentOnline) => {
+      const prov = flaky(1e9); prov.start = async () => ({ provider: "fake", id: "fake-7", issue: 7 }); let total = 0;
+      const r = await providerLanes({ provider: prov, laneArgs: () => [], ledgerFor: ledgerIn(tmpDir("exec-up-")), pollMs: 5000, unreachableWindowMs: 300000, agentOnline, sleep: async (ms) => { total += ms; } }).runOne(7, "staging");
+      return { r, total };
+    };
+    const up = await run(async () => true);
+    assert.deepEqual([up.r.terminalReason, up.r.code], ["deferred", "sandbox.unreachable"]);
+    assert.ok(up.total <= 90000, `waited ${up.total}`);
+    for (const a of [async () => false, async () => { throw new Error("router down"); }, null]) {
+      const down = await run(a);
+      assert.equal(down.r.code, "sandbox.unreachable");
+      assert.ok(down.total >= 300000, `waited ${down.total}`);
+    }
+  });
+
+  it("#5991 24 replayed attempts of one sandbox leave one budget row within 5% of the real minutes", () => {
+    const file = join(tmpDir("exec-budget-"), "execution-budget.json");
+    const b = openExecutionBudget({ file, now: () => 0 });
+    for (let i = 1; i <= 24; i++) b.record(sandboxBudgetKey("b1", "fdrsbx-9"), { minutes: i * 5, cost_usd: 0 });
+    const rows = Object.values(JSON.parse(readFileSync(file, "utf8")).days).flatMap((d) => Object.keys(d));
+    assert.deepEqual(rows, ["b1#fdrsbx-9"]);
+    assert.ok(Math.abs(b.dayTotals().minutes - 120) / 120 <= 0.05);
+    assert.equal(b.record(sandboxBudgetKey("b1", "fdrsbx-9"), { minutes: 10 }), false); // a smaller replay changes nothing
   });
 
   it("#5053 a 401 on status/result of a launched sandbox is retried, then ends sandbox.auth (capped), never engine-error", async () => {
