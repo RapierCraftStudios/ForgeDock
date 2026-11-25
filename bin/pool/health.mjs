@@ -67,6 +67,24 @@ export function hostDiskFree({ path = null, osrelease = readRelease, statfs = st
   } catch { return null; }
 }
 
+/**
+ * #5967: Windows host free physical memory and the vmmem working sets (other WSL/Hyper-V VMs), via powershell.exe over the interop
+ * socket. `{ free_gb, vmmem: [{name, gb}] }` (1 decimal), or null off WSL or on any error (absent means unknown: no gate). All I/O injectable.
+ */
+const PS_MEM = "$f=(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory; $v=@(Get-Process vmmem* -ErrorAction SilentlyContinue | ForEach-Object { @{ name=$_.ProcessName; bytes=$_.WorkingSet64 } }); @{ free_kb=$f; vmmem=$v } | ConvertTo-Json -Compress -Depth 3";
+export function hostMemFree({ osrelease = readRelease, run = winRun, env = process.env } = {}) {
+  try {
+    if (!/microsoft/i.test(String(osrelease() ?? ""))) return null;
+    const out = run("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", PS_MEM], env);
+    if (!out) return null;
+    const j = JSON.parse(String(out).trim());
+    const kb = Number(j?.free_kb);
+    if (!Number.isFinite(kb) || kb < 0) return null;
+    const vm = j.vmmem == null ? [] : Array.isArray(j.vmmem) ? j.vmmem : [j.vmmem];
+    return { free_gb: Math.round(kb / 104857.6) / 10, vmmem: vm.filter((p) => Number.isFinite(Number(p?.bytes))).map((p) => ({ name: String(p.name ?? "vmmem"), gb: Math.round(Number(p.bytes) / 107374182.4) / 10 })) };
+  } catch { return null; }
+}
+
 /** #5923: WSL mirrored networking gives the guest a narrow source-port slice; docker MASQUERADE must stay inside it or replies drop. */
 const DEFAULT_RANGE = [32768, 60999];
 const NAT_BRIDGE_FMT = '{{.Name}}|{{index .Options "com.docker.network.bridge.name"}}|{{range .IPAM.Config}}{{.Subnet}} {{end}}';

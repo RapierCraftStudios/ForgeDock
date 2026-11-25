@@ -23,6 +23,13 @@
     "timeout": 120,
     "for": "7d"
   },
+  "schedd-handover-no-gap": {
+    "run": "npx --no-install forgedock schedd status 2>&1 | grep -qv 'not running' && test \"$(npx --no-install forgedock schedd status 2>&1 | grep -c 'is not hosted')\" -eq 0",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "7d",
+    "why": "#5966: no hosted batch goes more than 5 min without a dispatcher across one release install"
+  },
   "adversarial-bench-run": {
     "run": "ls docs/eval/published/adversarial-*.md >/dev/null 2>&1 && grep -qi \"corpus revision\" docs/eval/published/adversarial-*.md",
     "pass": "exit 0",
@@ -187,6 +194,12 @@
   },
   "base-red-no-issues-1d": {
     "run": "test \"$(gh issue list --state all --search \"FORGE:BASE_RED in:body created:>$(date -u -d '1 day ago' +%Y-%m-%d)\" --json number --jq length)\" -eq 0",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "7d"
+  },
+  "legion-vm-oom": {
+    "run": "test \"$(gh api \"repos/{owner}/{repo}/issues/comments?since=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)&per_page=100\" --paginate --jq '[.[]|select(.body|startswith(\"<!-- FORGE:TRAJECTORY -->\"))|select(.body|contains(\"sandbox.lost\"))]|length' | awk '{s+=$1} END{print s+0}')\" -eq 0",
     "pass": "exit 0",
     "timeout": 120,
     "for": "7d"

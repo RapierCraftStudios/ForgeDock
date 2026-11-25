@@ -338,7 +338,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), blockedRefreshMs = 60000, onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000, getClearBreaker = null, consumeClearBreaker = null, ackClearBreaker = null,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
-  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
+  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getPause = null, expirePause = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
   getChildren = null, autoChildren = null, baseWait = null, rotator = null, stacking = "off", readPrReady = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null, envHold = null, envIssue = null, logicalDeps = null,
   train = null, trainEveryMs = DEFAULT_TRAIN_EVERY_MS }) {
@@ -407,6 +407,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   let pfAll = false, pfRemote = false, pfNoted = new Set(); // #4866: lane preflight holds
   let opHeld = new Set(); // #4592: operator-held issues this pass (the batch `hold` file is the authority)
   const opHeldHit = new Set(); // held issues that were pending this pass
+  let opPause = null, pauseHit = false; // #5975: the batch-level pause (the `pause` file is the authority); pauseHit: an issue was pending behind it this pass
   // #4376: operator cancel (the batch `cancel` file through `getCancelled`); persisted, but the file stays the authority.
   let cancelled = getCancelled ? (saved?.cancelled ?? null) : null;
   const budget = maintenance && Number(maintenance.share) > 0 ? { share: Number(maintenance.share), whenIdle: !!maintenance.whenIdle } : null;
@@ -1311,7 +1312,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         if (!["merged", "invalid", "deferred"].includes(gone?.outcome)) gone = null; // #4920: deferred = another lane owns the issue (lease or open PR on GitHub)
       }
       // #5526: a hold placed since the pass read is honoured at launch: the issue goes back to pending, no lane
-      if (!cancelled && !halted) { refreshHeld(); if (opHeld.has(n)) { running.delete(n); runRecs.delete(n); releaseSlot(n); endRemote(n); requeue(n, 0); save(); return; } }
+      if (!cancelled && !halted) { refreshHeld(); refreshPause(); if (opHeld.has(n) || opPause) { running.delete(n); runRecs.delete(n); releaseSlot(n); endRemote(n); requeue(n, 0); save(); return; } }
       if (halted) return; // #4454: stopped before launch; no pid, so a resume queues it again
       let r;
       if (cancelled) r = { terminalReason: "deferred", code: "run.interrupted", cost_usd: 0, detail: "cancelled before launch" }; // #4376
@@ -1396,7 +1397,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
 
   // #5469: a final held row names the owner and since when the hold recorded them (`forgedock orchestrate --hold ... --for`)
   const heldByOperator = (n) => { let e = null; try { e = getHoldInfo?.()?.[n] ?? null; } catch { e = null; } return e ? `held by operator (${e.owner}, since ${e.since})` : "held by operator"; };
-  const heldDetail = (n) => cancelled ? "cancelled by operator" : opHeld.has(n) ? heldByOperator(n) : baseHeld.has(n) ? baseHeld.get(n) : tripped?.detail ?? (integHeld.has(n) ? `integration: ${integHeld.get(n)}` : (driftHeld.has(n) ? `drift: ${driftHeld.get(n)} flagged` : budgetStop ? `execution budget: ${budgetStop}` : budgetHeld ? "maintenance share" : "not run"));
+  const heldDetail = (n) => cancelled ? "cancelled by operator" : opHeld.has(n) ? heldByOperator(n) : opPause ? pauseText() : baseHeld.has(n) ? baseHeld.get(n) : tripped?.detail ?? (integHeld.has(n) ? `integration: ${integHeld.get(n)}` : (driftHeld.has(n) ? `drift: ${driftHeld.get(n)} flagged` : budgetStop ? `execution budget: ${budgetStop}` : budgetHeld ? "maintenance share" : "not run"));
   // #4315: a recovery queued but never launched (the batch stopped: breaker, budget, hold; or a resume that did not relaunch a
   // lost run) left the issue without needs-human, since a non-final attempt does not relabel. Relabel it once, with the full reason.
   // #4318: also on a throw out of the loop and on a signal (`onExit`); `cause` overrides the held reason. Runs once per process.
@@ -1548,6 +1549,29 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (s.accepted || (s.at !== null && t - s.at < stopRetryMs)) return;
     s.at = t;
     try { Promise.resolve(stopLane(n, rec)).then((ok) => { if (ok !== false) s.accepted = true; }, () => {}); } catch { /* best effort */ }
+  }
+  // #5975: the batch pause. `paused (reason, until …)`, the one text every surface shows.
+  function pauseText(p = opPause) { return `paused (${p?.reason ?? "no reason given"}, until ${p?.expiresAt ?? "unpause"})`; }
+  function refreshPause() {
+    if (!getPause) return;
+    if (expirePause) { // like #5469 holds: a pause past its expiry is lifted here, with a row and a decision
+      let e = null; try { e = expirePause() ?? null; } catch { e = null; }
+      if (e) {
+        decided({ issue: null, what: `pause expired (paused by ${e.owner} since ${e.since}${e.reason ? `: ${e.reason}` : ""}); admission resumed`, why: "pause expiry (--pause --for)", alternative: "pause it again" });
+        update({ issue: null, outcome: "pause-expired", detail: `${e.owner}, since ${e.since}` });
+        if (e.ownerGone) update({ issue: null, outcome: "hold-alert", detail: `the pause owner session (${e.owner}) is gone; the pause expired and admission resumed` });
+      }
+    }
+    let got = null; try { got = getPause() ?? null; } catch { got = opPause; }
+    const next = got && typeof got === "object" ? got : null;
+    if (next && !opPause) {
+      decided({ issue: null, what: `batch ${pauseText(next)} (forgedock orchestrate --pause); running lanes continue`, why: "operator request", alternative: "cancel the batch" });
+      update({ issue: null, outcome: "pause", detail: pauseText(next) });
+    } else if (!next && opPause) {
+      decided({ issue: null, what: "batch unpaused (forgedock orchestrate --unpause); admission resumed", why: "operator request", alternative: "resume the batch" });
+      update({ issue: null, outcome: "unpause", detail: "admission resumed" });
+    }
+    opPause = next;
   }
   // #4592: re-read the hold set; one decision and one row when it changes.
   const holdExpiring = (list) => { let info = null; try { info = getHoldInfo?.() ?? null; } catch { info = null; } return !!expireHolds && list.some((n) => Number.isFinite(Date.parse(info?.[n]?.expiresAt))); }; // #5469
@@ -1858,9 +1882,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       driftHeld.clear();
       integHeld.clear();
       opHeldHit.clear();
+      pauseHit = false;
       blockedHit.clear();
       baseHit.clear();
       refreshHeld();
+      refreshPause();
       await refreshBlocked();
       await refreshBaseWaits();
       checkGates();
@@ -1880,6 +1906,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       await gateEnvSigs(); // #5755
       const isReady = (n) => {
         if (pfAll || (pfRemote && isRemote(n))) return false;
+        if (opPause) { pauseHit = true; return false; } // #5975: every admission path (dependency merge, env/engine re-admit, requeue, add, recovery) ends here
         if (opHeld.has(n)) { opHeldHit.add(n); return false; }
         if (blocked.has(n)) { blockedHit.add(n); return false; } // #4773
         if (baseHeld.has(n)) { baseHit.add(n); return false; } // #5031
@@ -2017,6 +2044,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (holdUntil) waits.push(holdUntil);
       let wake = waits.length ? Math.max(0, Math.min(...waits) - t) : null;
       if (holdUntil && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #4446: a cleared hold (forgedock limits clear) admits on the next poll
+      if (getPause && pending.length && (opPause || running.size)) wake = Math.min(wake ?? pollMs, pollMs); // #5975: an --unpause or expiry
       if ((getParallel || getHeld) && pending.length) wake = Math.min(wake ?? pollMs, pollMs);
       if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
       if (pending.some((n) => remoteCapped.has(n))) wake = Math.min(wake ?? pollMs, pollMs); // #5138: a live --set-max-remote raise
@@ -2043,6 +2071,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       else if (pending.length && baseHit.size) await nap(wake ?? pollMs); // #5031: only issues waiting for a base commit: poll for it
       else if (pending.length && waits.length) await nap(Math.min(wake, getCancelled ? pollMs : Infinity)); // wake is poll-capped by a hold or a live K; #4454: nap wakes on a stop
       else if (pending.length && budgetHeld) { if (await drainAdds()) continue; break; } // maintenance the budget does not admit now: held for a later batch
+      else if (pending.length && opPause && pauseHit && Number.isFinite(Date.parse(opPause.expiresAt)) && !cancelled) await nap(wake ?? pollMs); // #5975: a timed pause keeps the batch open until it expires, not finalised silently
+      else if (pending.length && opPause && pauseHit) { if (await drainAdds()) continue; break; } // #5975: paused with no expiry: pending for a --resume after --unpause
       else if (pending.length && opHeldHit.size && !pending.some((n) => !opHeldHit.has(n) && isReady(n)) && holdExpiring([...opHeldHit]) && !cancelled) await nap(wake ?? pollMs); // #5469: a hold with an expiry keeps the batch open until it expires (re-admit or alert), not finalised silently
       else if (pending.length && opHeldHit.size && !pending.some((n) => !opHeldHit.has(n) && isReady(n))) { if (await drainAdds()) continue; break; } // #4592: held by the operator: pending for a --resume
       else if (pending.length && (driftHeld.size || integHeld.size)) { if (await drainAdds()) continue; break; } // held by a drift flag (block_dispatch) or a red integration streak (#4667): pending for a later batch

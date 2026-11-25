@@ -793,6 +793,90 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await d2?.close?.(); }
   });
 
+  it("#5966: a handover under an active unit exits non-zero after close, and the hard bound fires when a batch stop hangs", async () => {
+    for (const hang of [false, true]) {
+      const dir = tmpDir("schedd-exit-"), root = join(dir, "batches"), lines = [], exits = [];
+      let version = "1.51.0";
+      const d = await startDaemon({ dir, root, log: (m) => lines.push(m), resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => "active",
+        exit: (c) => exits.push(c), stopMs: hang ? 60_000 : 1000, hardExitMs: 200,
+        runBatch: ({ sink, signal }) => { sink.batch({ id: "x", dir }); return new Promise((_, rej) => { if (!hang) signal.addEventListener("abort", () => rej(Object.assign(new Error("stopped"), { code: "batch.stopped" }))); }); } });
+      request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: ["x"], cwd: dir, env: {} }).catch(() => {});
+      await until(() => lines.some((l) => l.includes("listening")));
+      version = "1.52.0";
+      await until(() => exits.length > 0);
+      assert.deepEqual(exits, [1], `hang=${hang}`);
+      assert.equal(d.stopCode(), 1);
+      if (hang) assert.ok(lines.some((l) => l.includes("did not finish within")), lines.join("\n"));
+      await d.close();
+    }
+  });
+
+  it("#5966 R1: without a unit, a handover whose successor never listens keeps hosting (re-hosted here); if that fails it exits non-zero", async () => {
+    const dir = tmpDir("schedd-nosucc-"), root = join(dir, "batches"), lines = [], exits = [];
+    let version = "1.51.0", spawns = 0;
+    const d = await startDaemon({ dir, root, log: (m) => lines.push(m), resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => null,
+      exit: (c) => exits.push(c), respawn: () => { spawns++; }, probe: async () => false, successorMs: 50, successorPollMs: 10, runBatch: async () => ({}) });
+    version = "1.52.0";
+    await until(() => d.rehosted());
+    const d2 = d.rehosted();
+    try {
+      assert.equal(d2.running, true, "a daemon hosts again and holds the lock");
+      assert.equal(readFileSync(scheddPaths(dir).lock, "utf8").trim(), String(process.pid));
+      assert.deepEqual(exits, [], "no exit while hosting continues");
+      assert.equal(spawns, 2, "the successor was started twice");
+      assert.ok(lines.some((l) => l.includes("hosting the batches again")));
+    } finally { await d2.close(); }
+    // re-host impossible -> exit non-zero
+    const dir2 = tmpDir("schedd-nosucc2-"), exits2 = [];
+    let v2 = "1.51.0";
+    await startDaemon({ dir: dir2, root: join(dir2, "batches"), log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => v2, unit: () => null,
+      exit: (c) => exits2.push(c), respawn: () => {}, probe: async () => false, successorMs: 30, successorPollMs: 10, rehost: async () => null, runBatch: async () => ({}) });
+    v2 = "1.52.0";
+    await until(() => exits2.length > 0);
+    assert.deepEqual(exits2, [1]);
+  });
+
+  it("#5984 handover: settled() outlives closed until the successor is spawned and probed (CLI exits only after it)", async () => {
+    const dir = tmpDir("schedd-settled-"), order = [];
+    let version = "1.51.0";
+    const d = await startDaemon({ dir, root: join(dir, "batches"), log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => null,
+      exit: (c) => order.push(`exit${c}`), respawn: () => order.push("respawn"), probe: async () => { order.push("probe"); return true; }, successorMs: 200, successorPollMs: 10, runBatch: async () => ({}) });
+    version = "1.52.0";
+    await d.closed;
+    order.push("closed-seen"); // what scheddFromCli used to exit on
+    await d.settled();
+    order.push("settled");
+    assert.ok(order.indexOf("respawn") < order.indexOf("settled") && order.indexOf("probe") < order.indexOf("settled"), order.join(","));
+    assert.equal(d.stopCode(), 1);
+  });
+
+  it("#5984 rehost: settled() of the stopped daemon resolves once the rehosted daemon is up; lost-lock/idle close settles via closed", async () => {
+    const dir = tmpDir("schedd-settled2-");
+    let version = "1.51.0";
+    const d = await startDaemon({ dir, root: join(dir, "batches"), log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => null,
+      exit: () => {}, respawn: () => {}, probe: async () => false, successorMs: 30, successorPollMs: 10, runBatch: async () => ({}) });
+    version = "1.52.0";
+    await d.closed; await d.settled();
+    const d2 = d.rehosted();
+    assert.equal(d2?.running, true, "rehosted before settled resolves");
+    await d2.close();
+    const dir3 = tmpDir("schedd-settled3-");
+    const d3 = await startDaemon({ dir: dir3, root: join(dir3, "batches"), log: () => {}, resumeOnStart: false, runBatch: async () => ({}) });
+    await d3.close();
+    await d3.settled();
+    assert.equal(d3.stopCode(), null);
+  });
+
+  it("#5966: a stall-recovery restart also exits (shared self-stop path)", async () => {
+    const dir = tmpDir("schedd-stallexit-"), root = join(dir, "batches"), exits = [];
+    let version = "1.51.0";
+    const d = await startDaemon({ dir, root, log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => "active", exit: (c) => exits.push(c), runBatch: async () => ({}) });
+    version = "1.52.0";
+    await until(() => exits.length > 0);
+    assert.deepEqual(exits, [1]);
+    await d.closed;
+  });
+
   it("#5204: readInstalledVersion reads this install's package.json version, null when unreadable", () => {
     assert.equal(readInstalledVersion(), JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version);
     const dir = tmpDir("schedd-ver-");

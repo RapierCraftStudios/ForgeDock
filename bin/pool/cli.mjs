@@ -69,6 +69,16 @@ export function statusTable(agents) {
 }
 
 /** The `forgedock pool` verbs (and the `computeshare` script). Throws on usage or router errors; `deps` injects the HTTP client and config. */
+/** #5901: one line per agent cache volume with each repo's depcache size, from the router's /agents view. */
+export function depcacheLines(agents) {
+  const out = [];
+  for (const a of agents ?? []) for (const [vol, v] of Object.entries(a.cache_volumes ?? {})) {
+    const repos = Object.entries(v.depcache_gb ?? {}).map(([k, gb]) => `${k} ${gb} GB`).join(", ");
+    if (repos) out.push(`${a.name} ${vol}: depcache ${repos}`);
+  }
+  return out;
+}
+
 export async function runPoolCli(argv, deps = {}) {
   const [cmd, ...rest] = argv;
   const call = deps.call ?? httpCall;
@@ -117,6 +127,7 @@ export async function runPoolCli(argv, deps = {}) {
       if (rest.includes("--json")) console.log(JSON.stringify(r.data, null, 2));
       else if (!r.ok) throw new Error(`router refused: HTTP ${r.status} ${JSON.stringify(r.data)}`);
       else console.log(statusTable(r.data?.agents ?? []));
+      if (!rest.includes("--json") && r.ok) for (const l of depcacheLines(r.data?.agents)) console.log(l); // #5901
       // #5735: lane sandboxes used/ceiling per agent, and the lane total across all batches
       for (const a of Array.isArray(r.data?.agents) ? r.data.agents : []) if (a?.lanes) console.log(`${a.name}: lanes ${a.lanes.used}/${a.lanes.ceiling ?? "-"}`);
       if (Number.isInteger(r.data?.remote_lanes)) console.log(`remote lanes across batches: ${r.data.remote_lanes}`);
@@ -124,6 +135,7 @@ export async function runPoolCli(argv, deps = {}) {
         if (a.transport) console.log(`${a.name}: transport ${a.transport}`); // #5882
         const n = a.net; // #5923
         if (n?.mirrored) console.log(`${a.name}: net mirrored, port range ${n.port_range ?? "?"}, NAT pin ${n.nat_pin ? "present" : "MISSING"}${n.degraded ? " DEGRADED" : ""}`);
+        if (Number.isFinite(a.host_mem_free_gb)) console.error(`${a.name}: host_mem_free_gb ${a.host_mem_free_gb}${Array.isArray(a.vmmem) && a.vmmem.length ? `, other VMs: ${a.vmmem.map((v) => `${v.name} ${v.gb} GB`).join(", ")}` : ""}${a.host_mem_low ? " WARNING: host memory below the floor, new sandboxes are refused" : ""}`); // #5967
         if (!Number.isFinite(a.host_disk_free_gb)) continue;
         console.error(`${a.name}: host_disk_free_gb ${a.host_disk_free_gb}${Number.isFinite(a.host_disk_growth_gb_per_h) ? `, growth ${a.host_disk_growth_gb_per_h} GB/h` : ""}${a.disk_warning ? ` WARNING: ${a.disk_warning}` : ""}`);
       }

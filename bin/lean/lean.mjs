@@ -41,6 +41,7 @@ import { ceilingFor, modelInfo, restartDecision, DEFAULT_CEILING, WINDOW_SHARE, 
 import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
 import { batchImageCache, envNamesOf, provisionSandboxes } from "./testsandbox.mjs";
 import { repoKey, estimateCostUsd } from "../runner.mjs";
+import { depcacheNamespace } from "./depcache.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
 import { toolStats } from "./toolstats.mjs";
 import { readTestMap, readTestMapAtRef, selectCommands, mergeChecks, factsPath, TEST_MAP_FILE } from "./testmap.mjs";
@@ -1819,7 +1820,7 @@ export async function runCore(o) {
     if (io.deps?.prepare) {
       const tD = now();
       let res;
-      try { res = await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined }); } catch (e) { res = [{ status: "failed", eco: null, key: null, ms: 0, reason: String(e?.message ?? e).slice(0, 300) }]; }
+      try { res = await io.deps.prepare({ wt, repoKey: depcacheNamespace({ repo, fallback: repoKey(cwd) }), env: toolchain?.env ?? undefined }); } catch (e) { res = [{ status: "failed", eco: null, key: null, ms: 0, reason: String(e?.message ?? e).slice(0, 300) }]; }
       depResults = Array.isArray(res) ? res : []; // #5447: classified against the changed files at the gate
       setupStep("deps", tD);
       for (const r of Array.isArray(res) ? res : []) {
@@ -2642,10 +2643,10 @@ export async function runCore(o) {
         const projDeps = declaredEnv(frozen).filter((t) => deps5683.owner(t) !== null); // #5683: a sub-project's declared dependency is prepared and resolved through its bin dirs, never a host tool
         const probeEnv = async () => { const miss = []; for (const t of declaredEnv(frozen)) { if (deps5683.owner(t) !== null) continue; const r = io.runCommand ? await io.runCommand({ command: t === "pytest" ? "python3 -m pytest --version" : `command -v ${t} >/dev/null || { test -d node_modules/${t} && ! test -e node_modules/.bin/${t}; } || ls -d .venv/lib/python*/site-packages/${t} >/dev/null 2>&1`, cwd: wt, timeoutMs: 30000, env: projEnv() }).catch(() => ({ rc: 1 })) : { rc: 0 }; if ((r?.rc ?? 0) !== 0) miss.push(t); } return miss; };
         let envMiss = await probeEnv();
-        if (projDeps.length && io.deps?.prepare) { try { await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined }); ev({ event: "TESTPLAN_ENV_PROJECT_DEPS", names: projDeps }); } catch { /* the install gate reports failures */ } }
+        if (projDeps.length && io.deps?.prepare) { try { await io.deps.prepare({ wt, repoKey: depcacheNamespace({ repo, fallback: repoKey(cwd) }), env: toolchain?.env ?? undefined }); ev({ event: "TESTPLAN_ENV_PROJECT_DEPS", names: projDeps }); } catch { /* the install gate reports failures */ } }
         if (envMiss.length) {
           try {
-            if (io.deps?.prepare) await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined });
+            if (io.deps?.prepare) await io.deps.prepare({ wt, repoKey: depcacheNamespace({ repo, fallback: repoKey(cwd) }), env: toolchain?.env ?? undefined });
             if (envMiss.includes("pytest") && io.runCommand) await io.runCommand({ command: "python3 -m pip install --user --quiet pytest", cwd: wt, timeoutMs: 180000, env: laneEnv() });
             envMiss = await probeEnv();
             ev({ event: "TESTPLAN_ENV_PROVISIONED", remaining: envMiss });
@@ -2671,10 +2672,10 @@ export async function runCore(o) {
         const remoteDeps = await depOwnerOf(); // #5683: a tool that is a tracked manifest dependency is prepared in the sandbox, never a lane_tools recipe or a host tool
         const ownedDep = (t) => t === "forgedock" || remoteDeps.owner(t) !== null, notOwned = (m) => ({ ...m, tools: m.tools.filter((t) => !ownedDep(t)) });
         let tm0 = toolMisses(planMisses ?? await preflightValidates(frozen).catch(() => [])), tm = notOwned(tm0);
-        if (tm0.tools.length && !tm.tools.length) { try { if (io.deps?.prepare) await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined }); ev({ event: "REMOTE_PROJECT_DEPS", tools: tm0.tools }); } catch { /* the install gate reports failures */ } }
+        if (tm0.tools.length && !tm.tools.length) { try { if (io.deps?.prepare) await io.deps.prepare({ wt, repoKey: depcacheNamespace({ repo, fallback: repoKey(cwd) }), env: toolchain?.env ?? undefined }); ev({ event: "REMOTE_PROJECT_DEPS", tools: tm0.tools }); } catch { /* the install gate reports failures */ } }
         if (tm.tools.length) { // #5423: provision the sandbox once (nested lockfiles, pytest) and re-probe before giving the lane up
           try {
-            if (io.deps?.prepare) await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined });
+            if (io.deps?.prepare) await io.deps.prepare({ wt, repoKey: depcacheNamespace({ repo, fallback: repoKey(cwd) }), env: toolchain?.env ?? undefined });
             if (tm.tools.includes("pytest") && io.runCommand) await io.runCommand({ command: "python3 -m pip install --user --quiet pytest", cwd: wt, timeoutMs: 180000, env: laneEnv() });
             tm = notOwned(toolMisses(await preflightValidates(frozen).catch(() => [])));
             ev({ event: "REMOTE_PROVISIONED", remaining: tm.tools });
@@ -3602,7 +3603,7 @@ export async function runCore(o) {
       if (unrun.length && !gateProvisioned && (io.deps?.prepare || (wantsPytest && io.runCommand))) {
         gateProvisioned = true;
         try {
-          if (io.deps?.prepare) { const rp = await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined }); depResults = Array.isArray(rp) ? rp : []; }
+          if (io.deps?.prepare) { const rp = await io.deps.prepare({ wt, repoKey: depcacheNamespace({ repo, fallback: repoKey(cwd) }), env: toolchain?.env ?? undefined }); depResults = Array.isArray(rp) ? rp : []; }
           if (wantsPytest && io.runCommand) await io.runCommand({ command: "python3 -m pip install --user --quiet pytest", cwd: wt, timeoutMs: 180000, env: laneEnv() });
         } catch { /* the rerun below reports what is still missing */ }
         ev({ event: "GATE_PROVISIONED", kinds: [...new Set(unrun.map((f) => f.kind))] });

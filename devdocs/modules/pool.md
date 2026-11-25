@@ -16,6 +16,7 @@ Rolling per-module knowledge log. Hard cap: 150 lines.
 - `bin/pool/mirror-seed.mjs` applies the bundle in a helper container on the cache volume: copy of `/cache/git/<slug>.git` (or a fresh bare repo) -> `git fetch <bundle>` -> `fsck --connectivity-only` -> rename, under a per-slug flock; a `cs-seeded` marker is written. Any failure removes the tmp copy and leaves the mirror untouched.
 - Router: `GET /sandboxes/:id/mirrors` and `POST /sandboxes/:id/seed` relay to the agent chosen for that sandbox id (remembered so `launch` prefers it), over direct and poll transports; chunks over 768 KB (base64) are 413. Older router/agent: 404/405 means the dispatcher falls back.
 - `pool/image/entrypoint.sh`: a seeded mirror is cloned `--shared` with no GitHub fetch when it already has the lane ref (else a best-effort fetch, 3 tries); origin is reset to GitHub, so pushes stay there. Unseeded mirrors keep the old clone/fetch path.
+- Seed upload limits (#5970): `<state>/seed/*.part` idle over 1 h are swept (at start and on each chunk); one upload is capped at 2 GiB and all `.part` files at 4 GiB (413).
 - `execution.repo_source: dispatcher | github | auto` (default auto): github never seeds; dispatcher fails the launch when seeding fails; auto falls back to the GitHub path.
 
 ## Entry 2026-11-21 — Per-host lane ceiling (#5735)
@@ -100,7 +101,9 @@ The router ships agents only `AGENT_BUNDLE_PATHS` (`package.json`, `bin/pool`, `
 ## Entry 2026-11-22 — cache volume hygiene (#5757)
 
 - `bin/pool/cache-sweep.mjs`: pure `planCacheCap` (oldest-first, live work dirs never chosen) and `planIdleEviction` (last use known, idle, unreferenced, not never-evict); `sweepVolume` runs in a lane-image container (`docker.sweepCache`, 10 min timeout, source passed via env) and ages out uv/npm/pip/poetry, forge-depcache, env entries, prunes pnpm, `git gc --auto`.
+  - #5901: depcache is swept per snapshot (`forge-depcache/<repo>/<eco>-<key>`): age-out and LRU trim (`planDepcacheCap`, `depcache_max_gb`, default 40) go by the snapshot's `last-used` stamp, locked snapshots are kept, and the sweep result carries `depcache_bytes` per repo (surfaced in `/capacity` and `pool status`).
 - `agent.mjs` `cacheSweep` runs from `reap()` every `cache_sweep_interval_s`; failures land in `/capacity` `cache_sweep_error` (also work-dir sweep/destroy failures), sizes in `cache_volumes`. Volumes are created with label `computeshare.cache=1` (`docker.createVolume`); `gc.mjs` reports them, never reclaims (`forgedock.owner=1` stays the only reclaim label). Entrypoint writes `/cache/.last-used`.
+- #5901: the per-repo depcache cap also runs at the start of each new launch (throttled to once a minute), so it is trimmed before the lane writes a new snapshot.
 
 ## Entry 2026-11-24 — mirror integrity, net.transient, live --clear-breaker (#5947)
 
@@ -116,3 +119,14 @@ The router ships agents only `AGENT_BUNDLE_PATHS` (`package.json`, `bin/pool`, `
 - `GET /agents?account=` filters agents (and their sandboxes); `account`/`policy` appear only on records that have them, so legacy output is byte-identical. `launch`/`claim` honour `spec.account` (only that account's agents); no account means any agent, as before.
 - `PUT /agents/:name/policy` validates an allowlist (`cpus`, `mem_gb`, `idle_only`, `paused`, `floors.host_disk_gb`), stores it on the record and pushes to the agent's `POST /admin/policy`; an unreachable box keeps `policy_pending` and `tick()` re-pushes. The agent persists the keys beside its config; the router's `paused` is `policyPaused`, separate from `owner_paused`, so the router can never clear the owner's pause.
 - CLI: `pool link <user_code> [--account A]`, `pool policy <agent> [--cpus --mem --idle-only --pause]`, `pool status --account A` (ACCOUNT column only when an agent has one). Installer: `install-agent-linux.sh --device`. Tests: `bin/tests/pool-device.test.mjs`.
+
+## Entry 2026-11-24 — WSL host-memory floor (#5967)
+
+- `health.mjs` `hostMemFree` (WSL only; powershell.exe over the interop socket: `FreePhysicalMemory` KB to GB plus `vmmem*` working sets) returns `{free_gb, vmmem:[{name,gb}]}`, null off WSL or on any error. The agent caches it 30 s and adds `host_mem_free_gb`, `host_mem_low`, `host_mem_floor_gb`, `vmmem`, `mem_paused` to `capacity()`; null means no field and no gate.
+- `launch` answers 503 `pool.host_mem` (reason `host_mem`) under `host_mem_floor_gb` (4), after the disk gate, before any docker run; `Retry-After` is `host_mem_retry_after_s` (60). The router skips `host_mem_low` agents and defers with the same code (lane `SANDBOX_CAPACITY`). `reap()` pauses the newest running sandbox below floor/2 (`memPaused`, lease kept) and resumes at floor + `host_mem_resume_margin_gb` (1).
+- `pool status` prints `<agent>: host_mem_free_gb N, other VMs: ...` and a WARNING when low (stderr, like the disk line). Tests: `bin/tests/pool-host-mem-gate.test.mjs`.
+- The VM-restart class is the existing `sandbox.lost` (#5859, breaker-exempt); no separate `pool.vm_restart` code. `orchestrate-envhold.test.mjs` covers N lanes lost together.
+
+## Entry 2026-11-24 — package cache layout pinned to entrypoint (#5969)
+
+- `pool/image/entrypoint.sh` points `UV_CACHE_DIR`, `npm_config_cache`, `POETRY_CACHE_DIR` and `PIP_CACHE_DIR` at `/cache/forge-depcache/stores/*`, the same layout as `depcache.mjs` `env()`. `cache-sweep.mjs` `PACKAGE_STORES` still includes `LEGACY_STORES` (`uv`, `npm`, `pip`, `poetry`) so old volumes and old images stay swept, capped and pruned. `pool-cache.test.mjs` pins every `/cache/...` path exported by the entrypoint to a `PACKAGE_STORES` entry.

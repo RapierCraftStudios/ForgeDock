@@ -4,10 +4,10 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, writeFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readdirSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "./_tmp.mjs";
 import { createAgent } from "../pool/agent.mjs";
@@ -163,4 +163,18 @@ test("repo_source: parse, github skips seeding, dispatcher fails hard, auto fall
   const h = await auto.p.start({ issue: 1 }); assert.equal(auto.launched.length, 1); assert.equal(h.seed.fallback, true);
   const older = mk("auto", old);
   assert.equal((await older.p.start({ issue: 1 })).seed.fallback, true); assert.equal(older.launched.length, 1);
+});
+
+test("abandoned .part uploads are swept and uploads are size-capped (#5970)", () => {
+  const dir = tmpDir("seed-cap-");
+  const old = "a".repeat(64), fresh = "b".repeat(64), up = "c".repeat(64);
+  writeFileSync(join(dir, `${old}.part`), "x"); writeFileSync(join(dir, `${fresh}.part`), "x");
+  utimesSync(join(dir, `${old}.part`), new Date(0), new Date(0));
+  const seed = makeMirrorSeed({ seedDir: dir, runnerFor: () => async () => "", uploadMax: 10, totalMax: 12 });
+  assert.deepEqual(readdirSync(dir), [`${fresh}.part`]); // stale swept at creation, fresh kept
+  const chunk = (upload, offset, n) => { const buf = Buffer.alloc(n, 1); return seed.chunk({ slug: SLUG, upload, offset, data_b64: buf.toString("base64"), sha256: createHash("sha256").update(buf).digest("hex") }); };
+  assert.throws(() => chunk(up, 0, 11), { status: 413 }); // per-upload cap
+  assert.equal(chunk(up, 0, 10).offset, 10);
+  assert.throws(() => chunk("d".repeat(64), 0, 2), { status: 413 }); // total cap (1 + 10 + 2 > 12)
+  assert.ok(!existsSync(join(dir, `${"d".repeat(64)}.part`)));
 });

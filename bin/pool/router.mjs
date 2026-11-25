@@ -242,6 +242,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     }
     return out;
   }
+  /** #5967: host free memory and the other-VM (vmmem) working sets per agent. */
+  const memReport = (c) => Number.isFinite(c.host_mem_free_gb) ? { host_mem_free_gb: c.host_mem_free_gb, ...(Array.isArray(c.vmmem) && c.vmmem.length ? { vmmem: c.vmmem } : {}), ...(c.host_mem_low === true ? { host_mem_low: true } : {}) } : {};
   async function capacities() {
     const out = [];
     for (const [name, a] of Object.entries(agents())) {
@@ -256,7 +258,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   /** Agent liveness for the scheduler (#4547): an agent is online when it answers and is not paused. */
   async function status() {
     const caps = await capacities();
-    const agentsView = caps.map((c) => ({ name: c.name, ok: c.ok, paused: Boolean(c.paused), transport: c.transport ?? "direct", ...diskReport(c) }));
+    const agentsView = caps.map((c) => ({ name: c.name, ok: c.ok, paused: Boolean(c.paused), transport: c.transport ?? "direct", ...diskReport(c), ...memReport(c) }));
     return { online: agentsView.filter((a) => a.ok && !a.paused).length, total: agentsView.length, agents: agentsView };
   }
 
@@ -368,7 +370,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     const sized = (await capacities()).filter((c) => c.ok && !c.paused && inAccount(c, spec) && fitsPriority(c, spec, size));
     const diskLow = sized.filter((c) => c.host_disk_low === true).map((c) => c.name); // #5733: never POST to a host whose drive is short
     const capped = sized.filter((c) => c.disk_capped === true && c.host_disk_low !== true).map((c) => c.name); // #5884: lane disk at its hard cap
-    const fits = sized.filter((c) => c.host_disk_low !== true && c.disk_capped !== true).sort((a, b) => headroom(b, spec) - headroom(a, spec) || b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
+    const memLow = sized.filter((c) => c.host_mem_low === true && c.host_disk_low !== true && c.disk_capped !== true).map((c) => c.name); // #5967: host memory under the floor
+    const fits = sized.filter((c) => c.host_disk_low !== true && c.disk_capped !== true && c.host_mem_low !== true).sort((a, b) => headroom(b, spec) - headroom(a, spec) || b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
     const laneId = isLane(spec.id), laneCapped = []; // #5735: agents skipped because their lane ceiling is reached
     let busy = null; // the last agent 503 (e.g. lane_tools image building): its body and Retry-After are passed back
     const seeded = seedPick.get(spec.id)?.agent; // #5949: the agent holding this lane's seeded mirror goes first
@@ -387,6 +390,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     if (busy) return { status: 503, body: { ...agentBody(busy.r, busy.name), agent: busy.name }, retryAfter: busy.r.retryAfter ?? cfg.retry_after_s ?? 60 };
     if (diskLow.length) return { status: 503, body: { error: "no host has free disk", code: "pool.disk_low", agents: diskLow }, retryAfter: cfg.disk_low_retry_after_s ?? 300 }; // a capacity deferral, not a failure
     if (capped.length) return { status: 503, body: { error: "no host has lane disk below its cap", code: "pool.disk_cap", agents: capped }, retryAfter: cfg.disk_low_retry_after_s ?? 300 };
+    if (memLow.length) return { status: 503, body: { error: "no host has free memory", code: "pool.host_mem", reason: "host_mem", agents: memLow }, retryAfter: cfg.host_mem_retry_after_s ?? 60 }; // a capacity deferral, not a failure
     return { status: 503, body: { error: "no host has a free reservation", lane: size }, retryAfter: cfg.retry_after_s ?? 60 };
   }
 
