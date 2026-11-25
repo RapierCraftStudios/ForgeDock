@@ -406,3 +406,19 @@ describe("#5938 stall verdict is re-evaluated: full K, recovery lanes, pool capa
     assert.match(batchVerdict("b1", s, { action: "alert", cause: "no gh" }), /stalled -> no action, needs you \(no gh;/);
   });
 });
+
+describe("#5987 efficiency status line", () => {
+  it("batch status shows the efficiency line with and without breaches; none without a ledger", async () => {
+    const { writeEfficiency } = await import("./efficiency.mjs");
+    const root = tmpDir("bh-eff-");
+    mkdirSync(join(root, "b1"));
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: ["1"], created: new Date().toISOString() });
+    assert.ok(!statusLines(root, { batch: "b1" }).some((l) => /efficiency:/.test(l)));
+    const eff = { v: 1, concurrency: { running: 3, ceiling: 12, achieved: 3 }, limiters: ["sandbox.capacity", "pool.host_load"], breaches: [] };
+    writeEfficiency(b.dir, eff);
+    assert.ok(statusLines(root, { batch: "b1" }).includes("  efficiency: 3/12 lanes (25%) - limiter sandbox.capacity pool.host_load"));
+    writeEfficiency(b.dir, { ...eff, breaches: [{ issue: 6001 }, { issue: 6001 }] });
+    assert.ok(statusLines(root, { batch: "b1" }).includes("  efficiency: 3/12 lanes (25%) - limiter sandbox.capacity pool.host_load; 2 SLO breaches -> FD#6001"));
+  });
+});

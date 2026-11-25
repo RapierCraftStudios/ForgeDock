@@ -179,7 +179,7 @@ const KEEP_DAYS = 7;
 
 /**
  * The execution budget (#4255). `record(key, {minutes, cost_usd})` adds one lane attempt to today's host total; the key
- * (`<batch>#<sandbox id>#<startedAt>`) makes a repeated record a no-op. `admit({minutes, cost_usd, running})` gets the
+ * (`<batch>#<sandbox id>`) holds one entry per sandbox with its latest cumulative usage (#5987); an identical repeat is a no-op. `admit({minutes, cost_usd, running})` gets the
  * batch's settled + running usage (`running` the running part alone) and refuses once a batch cap, or a day cap with
  * today's host total plus this batch's running usage, is reached. A corrupt or unreadable day file refuses while a day
  * cap is set (a hard cap fails closed) and is ignored otherwise; it is never overwritten.
