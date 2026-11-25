@@ -322,3 +322,18 @@ describe("#5859 agent restart: correlated sandbox loss is sandbox.lost, not engi
     assert.ok(r.updates.some((u) => u.outcome === "breaker"));
   });
 });
+
+describe("#5988: breaker scoped by signature and agent", () => {
+  it("12 sandbox.exited engine-errors on one agent quarantine only that agent; other agents keep admitting", async () => {
+    const issues = [...Array.from({ length: 12 }, (_, i) => i + 1), 50], quarantined = [], reseeds = [];
+    const sick = (n) => ({ terminalReason: "engine-error", code: "sandbox.exited", detail: `sandbox.exited before a result (run ${n})`, agent: "vm-a" });
+    const script = Object.fromEntries(issues.slice(0, 12).map((n) => [n, [sick(n)]]));
+    const r = await harness({ script, issues, parallel: 1, envHold: undefined,
+      extra: { envHold: null, breaker: { errors: 3, window_min: 10 }, quarantineAgent: (q) => quarantined.push(q), reseedCache: (q) => reseeds.push(q) } });
+    assert.deepEqual(quarantined.map((q) => q.agent), ["vm-a"], "that agent only, once");
+    assert.equal(reseeds.length, 1, "the cache is reseeded once");
+    assert.ok(!r.updates.some((u) => u.outcome === "breaker"), "the batch breaker never trips");
+    assert.equal(r.byIssue[50].outcome, "merged", "unaffected work keeps admitting");
+    assert.ok(r.updates.some((u) => u.outcome === "agent-quarantine"));
+  });
+});

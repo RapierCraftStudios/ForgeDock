@@ -213,3 +213,12 @@ export function quotaRequeue({ rotator, r, prior = null, delayMs, exclude = null
     return { delayMs, rotated: false };
   } catch { return null; }
 }
+
+/**
+ * #5988: the account to try after `failed` (account numbers: the ones whose login just failed) hit a `backend.auth` failure,
+ * tried first on resume. Never `failed` itself; null when no rotator or no other account is usable.
+ */
+export function nextAccountAfterAuthFailure(rotator, failed = []) {
+  if (!rotator || typeof rotator.pick !== "function") return null;
+  try { const p = rotator.pick({ exclude: new Set([...failed].map(Number).filter((n) => Number.isInteger(n) && n > 0)) }); return Number.isInteger(p?.account) ? p.account : null; } catch { return null; }
+}

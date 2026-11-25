@@ -23,7 +23,7 @@ import { localLaneCap, ADMISSION_DEFAULTS } from "./lean/admission.mjs";
 import { memAvailableMb } from "./lean/heavy.mjs";
 import { liveOverload, formatOverload, formatHostLoad } from "./lean/hostload.mjs";
 import { join, resolve as resolvePath } from "node:path";
-import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost, ENGINE_VERSION } from "./engine.mjs";
+import { holdResumePlan, holdTtlRefusal, runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost, ENGINE_VERSION } from "./engine.mjs";
 import { sandboxBudgetKey } from "./lean/liveness.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { decomposedSubissues, isDecomposedRecord, isTrustedActor, parseDependsOn } from "./engine/phases.mjs";
@@ -1619,6 +1619,8 @@ async function pauseBatch({ op, id, root, viaDaemon = null, meta = null, print =
 async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = null, meta = null, print = (l) => console.log(l) }) {
   const issues = tokens.filter((t) => /^#?\d+$/.test(String(t))).map((t) => parseInt(String(t).replace("#", ""), 10));
   if (!id || String(id).startsWith("--") || !issues.length) throw new Error(ORCH_USAGE);
+  const refusal = op === "hold" ? holdTtlRefusal(issues, meta?.forMs) : null; // #5988
+  if (refusal) throw new Error(refusal);
   let res = viaDaemon ? await viaDaemon(op, issues, meta) : null;
   if (!res) {
     const b = (await import("./lean/batch.mjs")).openBatch(root, id);
@@ -1639,6 +1641,7 @@ async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = nu
   const list = (res.changed ?? []).map((n) => `#${n}`).join(" ") || "(none)";
   print(op === "hold" ? `batch ${id}: held ${list}${meta?.forMs ? ` for ${meta.forLabel}` : ""}; forgedock orchestrate --release ${id} <issue...> (or --resume ${id} <issue...>) re-admits them`
     : `batch ${id}: released ${list}`);
+  if (op === "hold" && issues.length > 1) print(holdResumePlan(res.changed?.length ? res.changed : issues, meta?.forLabel)); // #5988
   return { ok: true, batch: id, changed: res.changed ?? [] };
 }
 
