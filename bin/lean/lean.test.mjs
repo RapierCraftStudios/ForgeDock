@@ -3026,6 +3026,8 @@ describe("structure delta and decision provenance at merge (forge#4165)", () => 
     assert.equal(r.terminalReason, "merged");
     const term = w.telemetry.find((x) => x.event === "RUN_TERMINAL");
     assert.deepEqual([term.pr, term.milestone, term.conformance_mode, term.shadow_would], [r.pr, "Remote MCP Server", "shadow", "conforms"]);
+    assert.equal(term.fixed_overhead_ms, Math.max(0, term.wall_ms - term.model_ms));
+    assert.equal(term.model_share, term.wall_ms > 0 ? Math.round((term.model_ms / term.wall_ms) * 1000) / 1000 : 0);
     const m = mapRecord(term, 5);
     assert.equal(m.pr, r.pr);
     assert.deepEqual([m.payload.milestone, m.payload.conformance_mode, m.payload.shadow_would], ["Remote MCP Server", "shadow", "conforms"]);

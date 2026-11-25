@@ -3694,6 +3694,11 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 - Deferred to the operator/installer layer (no unit file or installer in this repo): `WatchdogSec` heartbeat on the unit, and the installer restarting the unit on `npm i -g` / plugin update.
 - Post-deploy check `schedd-handover-no-gap`.
 
+## Lane overhead share (#5989)
+- `overheadStats(phases, wallMs, modelMs)` in `phaseledger.mjs` returns `{ fixed_overhead_ms, model_share }`: `max(0, wall - model)` and `model / wall` to 3 decimals (0 when wall <= 0). `phases` is unused; queue_wait is already outside `wall_ms`.
+- `RUN_TERMINAL` (run log and `FORGE:TELEMETRY`) carries both fields. Observational only: no gate, conformance or merge decision reads them, and `wall_ms`, `model_ms` and the `flattenPhases` keys are unchanged.
+- Deferred follow-ups: env snapshot as default, recovery reuse, parallel precheck/plan, path-scoped guard.
+
 ## Entry 2026-11-25 — standing orders: `orchestrate --select <query>` (#5978)
 
 - `--select` is kept in the plan argv. Every `RECONCILE_MS` the runner (hosted by `schedd`, no watcher process) calls `reconcile.mjs`: matching open issues join through the `--add` seam (same DAG, priority, lane rules), closed or moved ones leave. Batches without a selector are unchanged.
