@@ -73,14 +73,15 @@ describe("#5987 SLOs", () => {
     assert.deepEqual(r.slo.sigs, {});
   });
 
-  // R8: replay of the slow batches (11-20..11-24) files exactly one issue per breached signature; a healthy batch files none
+  // R8: replay of the slow batches (11-20..11-24), rows in the shape orchestrate.mjs update() writes; no recorded batch is checked in files exactly one issue per breached signature; a healthy batch files none
   const replay = async (rows, running) => {
     const NOW = Date.parse("2026-11-24T12:00:00Z"), calls = [], cfg = { ...DEFAULT_SLO, fileIssues: true };
     const prev = { v: 1, samples: Array.from({ length: 40 }, (_, i) => ({ t: NOW - (40 - i) * 60000, running, ceiling: 12, ready: 5 })) };
     let stored = prev;
     const batch = { id: "b", dir: "d", readLog: () => rows, store: { peek: () => null } };
     const gh = async (a) => { calls.push(a); return a[1] === "list" ? "[]" : a[1] === "create" ? `https://github.com/x/y/issues/${100 + calls.length}\n` : ""; };
-    const run = () => ledgerPass({ batch, sample: null, cfg, gh, now: NOW, repo: "o/r", compute: computeEfficiency, readEff: () => stored, writeEff: (_d, e) => { stored = e; } });
+    const operator = Array.from({ length: 5 }, (_, i) => ({ at: NOW - (100 - i) * 60000, kind: i % 2 ? "requeue" : "hold" }));
+    const run = () => ledgerPass({ batch, sample: null, operator, cfg, gh, now: NOW, repo: "o/r", compute: computeEfficiency, readEff: () => stored, writeEff: (_d, e) => { stored = e; } });
     const first = await run(), second = await run();
     return { first, second, creates: calls.filter((c) => c[1] === "create") };
   };
@@ -89,7 +90,7 @@ describe("#5987 SLOs", () => {
     const slow = [
       ...[1, 2, 3, 4].map((i) => at(300 - i, { issue: 7, outcome: "engine-error", reason: "sandbox.capacity", minutes: 30 })),
       at(200, { issue: 7, outcome: "merged", minutes: 20 }), at(190, { issue: 8, outcome: "ci-failed", minutes: 10 }), at(180, { issue: 8, outcome: "merged", minutes: 10 }),
-      ...Array.from({ length: 7 }, (_, i) => at(100 - i, { ev: "requeue", issue: 9 })),
+      at(110, { issue: null, outcome: "added", detail: "9" }), at(105, { issue: 9, outcome: "deferred", code: "run.interrupted", detail: "interrupted: upgrade; requeued" }),
     ];
     const r = await replay(slow, 3);
     const sigs = r.first.breaches.map((b) => b.sig);

@@ -6,11 +6,13 @@
  * this says it is slow: achieved vs ceiling concurrency, idle slot-minutes by cause, attempts per merge, engine comments per
  * issue, repeated failure signatures, operator interventions, phase p50/p90 vs a baseline, merged/hour, wasted lane-hours, $ per merge.
  *
- * Row fields read (all optional; a row without them is ignored): `at`, `issue`, `ev` (dispatch|comment|hold|requeue|decision|set|restart|refused),
- * `outcome` (a terminal lane row; `merged` is a good end), `signature`/`reason`/`error`, `minutes`, `cost_usd`, `phases:{id:{ms}}`,
- * `comments`, `code`. Samples `{t, running, ceiling, ready, cause?}` are pushed by the daemon each pass and persisted in the file.
+ * Row fields read are the ones the orchestrator's `update(row)` writes to log.jsonl (all optional): `at`, `issue`, `outcome` (a terminal
+ * lane row; `merged` is a good end; `added`, `breaker`, `deferred` are engine/operator notes), `code`, `detail`, `minutes`, `cost_usd`,
+ * `phases:{id:{ms}}`. "Engine comments per issue" = the status updates (rows with a `detail`) the engine emitted for the issue.
+ * Operator interventions = `--add` rows, `run.interrupted` rows (schedd restart), FORGE:DECISION text in a `detail`, plus `operator`
+ * events the caller reads from the batch files (`requeue`, `hold-info`, `parallel`, see `operatorEvents`). Samples `{t, running, ceiling, ready, cause?}` are pushed by the daemon each pass and persisted in the file.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { writeAtomic } from "./batch.mjs";
 
@@ -18,7 +20,9 @@ export const EFFICIENCY_FILE = "efficiency.json";
 export const EFFICIENCY_VERSION = 1;
 export const IDLE_CAUSES = ["capacity", "lease-held", "base.red", "hold", "breaker", "auth-pause", "no-ready"];
 const MIN = 60_000, HOUR = 3_600_000, DAY = 86_400_000;
-const INTERVENTION_EV = new Set(["decision", "set", "requeue", "hold", "restart"]);
+/** Rows that are progress notes, not the end of a run; never counted as a failed attempt. */
+const NOTE_OUTCOME = new Set(["recovering", "added", "breaker", "planned", "plan-failed", "pool-offline", "host-overloaded", "sched", "integration", "drift", "budget"]);
+const OPERATOR_ROW = (r) => r.outcome === "added" || r.code === "run.interrupted" || /FORGE:DECISION/.test(String(r.detail ?? ""));
 const num = (v) => (Number.isFinite(Number(v)) && v !== null && v !== "" ? Number(v) : null);
 const round = (v, d = 2) => (v === null || !Number.isFinite(v) ? null : Math.round(v * 10 ** d) / 10 ** d);
 const atMs = (r) => { const t = Date.parse(r?.at ?? ""); return Number.isFinite(t) ? t : null; };
@@ -55,12 +59,12 @@ export function concurrencyOver(samples, since, now) {
  * `baseline`: `{phase: {p90}}` over the previous 14 days (default: this log's rows from the 14 days before the last 24 h), `concurrencyMin`: threshold used
  * for `lowSinceMin`. Pure; never throws on malformed rows.
  */
-export function computeEfficiency({ rows = [], state = null, prev = null, sample = null, now = Date.now(), batchId = null, repo = null, baseline = null, concurrencyMin = 0.6, windowMin = 15 } = {}) {
+export function computeEfficiency({ rows = [], state = null, prev = null, sample = null, now = Date.now(), batchId = null, repo = null, operator = [], baseline = null, concurrencyMin = 0.6, windowMin = 15 } = {}) {
   const list = (Array.isArray(rows) ? rows : []).filter((r) => r && typeof r === "object");
   const samples = [...(Array.isArray(prev?.samples) ? prev.samples : []), ...(sample ? [{ ...sample, t: sample.t ?? now }] : [])]
     .filter((s) => Number.isFinite(s?.t) && s.t > now - DAY).slice(-1500);
   const day = list.filter((r) => (atMs(r) ?? now) > now - DAY);
-  const terminal = day.filter((r) => r.outcome && r.issue != null);
+  const terminal = day.filter((r) => r.outcome && r.issue != null && !NOTE_OUTCOME.has(r.outcome));
   const merged = new Set(terminal.filter((r) => r.outcome === "merged").map((r) => r.issue));
   for (const [n, v] of Object.entries(state?.results ?? {})) if (v?.outcome === "merged") merged.add(Number(n));
   const mergedNow = new Set([...merged].filter((n) => terminal.some((r) => r.issue === n && r.outcome === "merged")));
@@ -84,11 +88,12 @@ export function computeEfficiency({ rows = [], state = null, prev = null, sample
   // attempts, comments, signatures, interventions
   const attempts = terminal.filter((r) => mergedNow.has(r.issue)).length;
   const comments = {};
-  for (const r of day) if (r.issue != null) { if (r.ev === "comment") comments[r.issue] = (comments[r.issue] ?? 0) + 1; const c = num(r.comments); if (c !== null) comments[r.issue] = Math.max(comments[r.issue] ?? 0, c); }
+  for (const r of day) if (r.issue != null) { if (typeof r.detail === "string" && r.detail) comments[r.issue] = (comments[r.issue] ?? 0) + 1; }
   const sigs = {};
-  for (const r of terminal) if (r.outcome !== "merged") { const sig = String(r.signature ?? `${r.outcome}:${r.reason ?? r.error ?? ""}`).slice(0, 160); (sigs[sig] ??= new Set()).add(r.issue); (sigs[sig].n = (sigs[sig].n ?? 0) + 1); }
+  for (const r of terminal) if (r.outcome !== "merged") { const sig = String(r.signature ?? `${r.outcome}:${r.code ?? r.reason ?? r.error ?? ""}`).slice(0, 160); (sigs[sig] ??= new Set()).add(r.issue); (sigs[sig].n = (sigs[sig].n ?? 0) + 1); }
   const repeats = Object.entries(sigs).map(([signature, s]) => ({ signature, count: s.n, issues: [...s].sort((a, b) => a - b) })).sort((a, b) => b.count - a.count);
-  const interventions = day.filter((r) => INTERVENTION_EV.has(r.ev) || /FORGE:DECISION/.test(String(r.text ?? ""))).length;
+  const opAt = (e) => (typeof e?.at === "number" ? e.at : Date.parse(e?.at ?? ""));
+  const interventions = day.filter(OPERATOR_ROW).length + (Array.isArray(operator) ? operator : []).filter((e) => opAt(e) > now - DAY && opAt(e) <= now).length;
   const capacityRefusals = list.filter((r) => (atMs(r) ?? 0) > now - HOUR && /capacity/.test(String(r.code ?? ""))).length;
 
   // phases vs baseline
@@ -118,6 +123,29 @@ export function computeEfficiency({ rows = [], state = null, prev = null, sample
     usdPerMerge: mergedNow.size ? round(usd / mergedNow.size) : null,
     samples, slo: prev?.slo ?? { sigs: {} }, breaches: prev?.breaches ?? [],
   };
+}
+
+/** Idle cause of the pool right now, from the batch's recent log rows (last 10 min); undefined when none applies (capacity/no-ready are inferred from `ready`). */
+export function idleCause(rows, now = Date.now()) {
+  const recent = (Array.isArray(rows) ? rows : []).filter((r) => r && (atMs(r) ?? 0) > now - 10 * MIN).reverse();
+  const brk = recent.find((r) => r.outcome === "breaker");
+  if (brk && !/cleared/.test(String(brk.detail ?? ""))) return "breaker";
+  for (const r of recent) {
+    const d = String(r.detail ?? "");
+    if (/base\.red|base is red/.test(`${r.code ?? ""} ${d}`)) return "base.red";
+    if (r.outcome === "deferred" && /live lane in batch/.test(d)) return "lease-held";
+    if (/capacity/.test(String(r.code ?? ""))) return "capacity";
+  }
+  return undefined;
+}
+
+/** Operator actions recorded in a batch dir's files: `requeue` entries, `hold-info` (non-engine owners), the `parallel` file (`--set-parallel`). `[{at, kind}]`. */
+export function operatorEvents(dir) {
+  const out = [], j = (n) => { try { return JSON.parse(readFileSync(join(dir, n), "utf8")); } catch { return null; } };
+  for (const e of Array.isArray(j("requeue")) ? j("requeue") : []) if (typeof e?.at === "string") out.push({ at: Date.parse(e.at), kind: "requeue" });
+  for (const e of Object.values(j("hold-info") ?? {})) if (e && e.owner !== "engine" && typeof e.since === "string") out.push({ at: Date.parse(e.since), kind: "hold" });
+  try { out.push({ at: statSync(join(dir, "parallel")).mtimeMs, kind: "set" }); } catch { /* none */ }
+  return out.filter((e) => Number.isFinite(e.at));
 }
 
 export const readEfficiency = (dir) => { try { const v = JSON.parse(readFileSync(join(dir, EFFICIENCY_FILE), "utf8")); return v && v.v === EFFICIENCY_VERSION ? v : null; } catch { return null; } };

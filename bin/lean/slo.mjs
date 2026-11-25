@@ -88,10 +88,10 @@ export async function fileSloIssues({ eff, breaches, gh, cfg = DEFAULT_SLO, now 
 }
 
 /** One advisory ledger pass for a batch: compute, evaluate, file (when enabled), persist. Never throws. */
-export async function ledgerPass({ batch, sample, cfg, gh, now = Date.now(), repo = null, compute, readEff, writeEff, reportPath = null }) {
+export async function ledgerPass({ batch, sample, cfg, gh, now = Date.now(), repo = null, compute, readEff, writeEff, reportPath = null, operator = [] }) {
   try {
     const rows = batch.readLog(), prev = readEff(batch.dir);
-    let eff = compute({ rows, state: batch.store.peek(), prev, sample, now, batchId: batch.id, repo, concurrencyMin: cfg.concurrencyMin });
+    let eff = compute({ rows, state: batch.store.peek(), prev, sample, now, batchId: batch.id, repo, operator, concurrencyMin: cfg.concurrencyMin });
     const breaches = evaluateSlo(eff, cfg, { repo: repo ?? "unknown" });
     const { slo, actions } = await fileSloIssues({ eff, breaches, gh, cfg, now, reportPath });
     eff = { ...eff, slo, breaches: breaches.map((b) => ({ code: b.code, sig: b.sig, detail: b.detail, issue: slo.sigs[b.sig]?.issue ?? null })) };
