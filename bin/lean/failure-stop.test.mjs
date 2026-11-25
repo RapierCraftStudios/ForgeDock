@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { failureSignature, countIdentical, shouldPark, summaryComment } from "./failure-stop.mjs";
+import { repeatSignature, countIdentical, shouldPark, summaryComment } from "./failure-stop.mjs";
 import { OUTCOME_CODES, RECOVERABLE_CODES, classifyNeedsHuman, parkedLabel } from "../engine/outcome-codes.mjs";
 
 const D1 = "R3 unimplemented at 1e0c3e45 (cost $1.2345, 12 turns) 2026-11-25T10:00:00Z";
@@ -11,12 +11,12 @@ const nh = (sig) => ({ body: `<!-- FORGE:NEEDS_HUMAN -->\n## Needs human\nx\n\ns
 
 describe("identical-failure stop (#5979)", () => {
   it("the signature is stable across shas, costs and timestamps and differs across codes and details", () => {
-    assert.equal(failureSignature("conformance.omission", D1), failureSignature("conformance.omission", D2));
-    assert.notEqual(failureSignature("conformance.omission", D1), failureSignature("ci.red", D1));
-    assert.notEqual(failureSignature("ci.red", "lint failed"), failureSignature("ci.red", "tests failed"));
+    assert.equal(repeatSignature("conformance.omission", D1), repeatSignature("conformance.omission", D2));
+    assert.notEqual(repeatSignature("conformance.omission", D1), repeatSignature("ci.red", D1));
+    assert.notEqual(repeatSignature("ci.red", "lint failed"), repeatSignature("ci.red", "tests failed"));
   });
   it("the 2nd identical failure parks, the 1st does not", () => {
-    const sig = failureSignature("ci.red", "boom");
+    const sig = repeatSignature("ci.red", "boom");
     assert.equal(shouldPark(countIdentical([], sig) + 1), false);
     assert.equal(shouldPark(countIdentical([nh(sig)], sig) + 1), true);
     assert.equal(shouldPark(countIdentical([nh("ffffffffffff")], sig) + 1), false);

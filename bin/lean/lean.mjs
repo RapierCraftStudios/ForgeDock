@@ -30,7 +30,7 @@ import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admi
 import { namedPaths, isTrustedIssueComment, prodFailureSignal } from "./prefilter.mjs";
 import { writeStatus, postUpsert, isStatusPost, isUpsertPost, hasSection, clearPipelineLabels, IN_PLACE_MARKERS, commentId } from "./statuscomment.mjs";
 import { decidePost } from "./commentstate.mjs"; // #5979
-import { failureSignature, countIdentical, shouldPark, summaryComment } from "./failure-stop.mjs"; // #5979
+import { repeatSignature, countIdentical, shouldPark, summaryComment } from "./failure-stop.mjs"; // #5979
 import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs";
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
@@ -775,7 +775,7 @@ export async function runCore(o) {
     // either launches the next attempt or relabels in settle.
     if (recoverUnlabelled && recover.final && (reason === "ci-pending" || reason === "budget-exceeded")) { // #4505: budget-exceeded too
       try {
-        await post("FORGE:NEEDS_HUMAN", `## Needs human\n${laneRecoveryEvidence(reason, code, detail)}\n\nsig=${failureSignature(code, detail)}\n\n_${usageLine()}_`);
+        await post("FORGE:NEEDS_HUMAN", `## Needs human\n${laneRecoveryEvidence(reason, code, detail)}\n\nsig=${repeatSignature(code, detail)}\n\n_${usageLine()}_`);
         await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
       } catch { /* best effort */ }
     }
@@ -853,7 +853,7 @@ export async function runCore(o) {
         link = reg.existing ? `Same owner ask as #${reg.existing} (one ask, linked): answering it unblocks this issue too.` : reg.entry ?? "";
       }
       // #5979: the second identical failure (same code and normalised detail as an earlier NEEDS_HUMAN/PARKED of this issue) parks with one summary, no recovery
-      const sig = failureSignature(code, why);
+      const sig = repeatSignature(code, why);
       const stoppable = code !== OUTCOME_CODES.BUILDER_BLOCKED && code !== OUTCOME_CODES.FAILURE_REPEATED && !ENV_ENGINE_OWNED_CODES.includes(code);
       const identical = stoppable ? countIdentical(allComments(), sig, (c) => c?.__mine === true || isTrustedIssueComment(c)) + 1 : 1;
       if (shouldPark(identical)) {

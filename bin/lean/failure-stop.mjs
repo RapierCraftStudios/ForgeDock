@@ -22,7 +22,7 @@ export function normalizeDetail(detail) {
 }
 
 /** 12 hex characters of sha1(code + normalised detail). */
-export function failureSignature(code, detail) {
+export function repeatSignature(code, detail) {
   return createHash("sha1").update(`${code ?? ""}\n${normalizeDetail(detail)}`).digest("hex").slice(0, 12);
 }
 
