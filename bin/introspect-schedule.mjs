@@ -18,24 +18,24 @@ const pexec = promisify(execFile);
 const CRON_TAG = "# forgedock-introspect";
 const ARGS = "stats --conformance-outcomes --file-issues";
 
-export const unitName = (cwd) => `forgedock-introspect-${createHash("sha1").update(resolve(cwd)).digest("hex").slice(0, 8)}`;
+export const introspectUnitName = (cwd) => `forgedock-introspect-${createHash("sha1").update(resolve(cwd)).digest("hex").slice(0, 8)}`;
 const q = (s) => `"${String(s).replace(/(["\\$`])/g, "\\$1")}"`;
 const forgedockBin = () => join(dirname(fileURLToPath(import.meta.url)), "forgedock.mjs");
 
-export function renderSystemd({ cwd, node = process.execPath, bin = forgedockBin() }) {
+export function renderIntrospectSystemd({ cwd, node = process.execPath, bin = forgedockBin() }) {
   return {
     service: `[Unit]\nDescription=ForgeDock introspect, files findings (${resolve(cwd)})\n\n[Service]\nType=oneshot\nWorkingDirectory=${resolve(cwd)}\nExecStart=${q(node)} ${q(bin)} ${ARGS}\n`,
     timer: `[Unit]\nDescription=ForgeDock introspect daily\n\n[Timer]\nOnCalendar=daily\nRandomizedDelaySec=30min\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n`,
   };
 }
 
-export function renderCron({ cwd, node = process.execPath, bin = forgedockBin() }) {
+export function renderIntrospectCron({ cwd, node = process.execPath, bin = forgedockBin() }) {
   return `17 4 * * * cd ${q(resolve(cwd))} && ${q(node)} ${q(bin)} ${ARGS} >/dev/null 2>&1 ${CRON_TAG} ${resolve(cwd)}`;
 }
 
 /** Install (or remove) the daily run. @returns {status: installed|removed|off|failed, kind, detail} */
 export async function installIntrospectSchedule({ enabled = true, cwd = process.cwd(), home = homedir(), platform = process.platform, fs = nodeFs, exec = async (cmd, args, input) => { const p = pexec(cmd, args, { timeout: 30000 }); if (input != null) p.child.stdin.end(input); return (await p).stdout; }, node, bin } = {}) {
-  const name = unitName(cwd), dir = join(home, ".config", "systemd", "user");
+  const name = introspectUnitName(cwd), dir = join(home, ".config", "systemd", "user");
   const opts = { cwd, ...(node ? { node } : {}), ...(bin ? { bin } : {}) };
   try {
     if (platform === "linux") {
@@ -48,7 +48,7 @@ export async function installIntrospectSchedule({ enabled = true, cwd = process.
           for (const f of [`${name}.timer`, `${name}.service`]) fs.rmSync(join(dir, f), { force: true });
           return { status: "removed", kind: "systemd", detail: `removed ${name}.timer` };
         }
-        const { service, timer } = renderSystemd(opts);
+        const { service, timer } = renderIntrospectSystemd(opts);
         fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(join(dir, `${name}.service`), service);
         fs.writeFileSync(join(dir, `${name}.timer`), timer);
@@ -62,7 +62,7 @@ export async function installIntrospectSchedule({ enabled = true, cwd = process.
     const mine = (l) => l.trimEnd().endsWith(`${CRON_TAG} ${resolve(cwd)}`);
     const all = cur.split("\n").filter((l) => l.trim()), rest = all.filter((l) => !mine(l));
     if (!enabled && rest.length === all.length) return { status: "off", kind: "cron", detail: "not enabled" };
-    await exec("crontab", ["-"], [...rest, ...(enabled ? [renderCron(opts)] : [])].join("\n") + "\n");
+    await exec("crontab", ["-"], [...rest, ...(enabled ? [renderIntrospectCron(opts)] : [])].join("\n") + "\n");
     return enabled ? { status: "installed", kind: "cron", detail: "crontab entry daily" } : { status: "removed", kind: "cron", detail: "removed crontab entry" };
   } catch (e) {
     return { status: "failed", kind: "unknown", detail: String(e?.message ?? e).slice(0, 200) };

@@ -5,14 +5,14 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "./tests/_tmp.mjs";
-import { installIntrospectSchedule, renderCron, renderSystemd, unitName } from "./introspect-schedule.mjs";
+import { installIntrospectSchedule, renderIntrospectCron, renderIntrospectSystemd, introspectUnitName } from "./introspect-schedule.mjs";
 
 describe("#5987 introspect schedule", () => {
   it("renders a daily systemd unit and a tagged cron line that run stats --file-issues", () => {
-    const s = renderSystemd({ cwd: "/work/r", node: "/n", bin: "/b/forgedock.mjs" });
+    const s = renderIntrospectSystemd({ cwd: "/work/r", node: "/n", bin: "/b/forgedock.mjs" });
     assert.match(s.service, /ExecStart="\/n" "\/b\/forgedock.mjs" stats --conformance-outcomes --file-issues/);
     assert.match(s.timer, /OnCalendar=daily/);
-    assert.match(renderCron({ cwd: "/work/r", node: "/n", bin: "/b/f.mjs" }), /^17 4 \* \* \* cd "\/work\/r" .*--file-issues .*# forgedock-introspect \/work\/r$/);
+    assert.match(renderIntrospectCron({ cwd: "/work/r", node: "/n", bin: "/b/f.mjs" }), /^17 4 \* \* \* cd "\/work\/r" .*--file-issues .*# forgedock-introspect \/work\/r$/);
   });
 
   it("systemd: installs once (rewrite, no duplicate), removes when disabled", async () => {
@@ -21,7 +21,7 @@ describe("#5987 introspect schedule", () => {
     const o = { cwd: "/work/r", home, platform: "linux", exec, node: "/n", bin: "/b" };
     assert.equal((await installIntrospectSchedule(o)).status, "installed");
     assert.equal((await installIntrospectSchedule(o)).status, "installed");
-    const name = unitName("/work/r"), dir = join(home, ".config", "systemd", "user");
+    const name = introspectUnitName("/work/r"), dir = join(home, ".config", "systemd", "user");
     assert.deepEqual(fs.readdirSync(dir).sort(), [`${name}.service`, `${name}.timer`]);
     assert.equal((await installIntrospectSchedule({ ...o, enabled: false })).status, "removed");
     assert.equal(fs.existsSync(join(dir, `${name}.timer`)), false);
