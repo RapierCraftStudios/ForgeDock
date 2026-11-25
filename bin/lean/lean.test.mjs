@@ -4721,6 +4721,17 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     assert.equal(cred, 0); assert.equal(r.rotations, undefined); assert.equal(r.limited, undefined);
   });
 
+  it("#5991 a lease of a batch that is no longer live is taken over; a live batch's lease is still held", async () => {
+    const lease = { by: "core_sbx_1_ab", until: 1e12, host: "sandbox-host", pid: 1, batch: "old-batch" };
+    const gone = world(); projector(gone, lease);
+    assert.equal((await run(gone, { hostName: "h1", batchId: "new-batch", liveBatches: () => ["other"] })).terminalReason, "merged");
+    const live = world(); projector(live, lease);
+    const r = await run(live, { hostName: "h1", batchId: "new-batch", liveBatches: () => ["old-batch"] });
+    assert.deepEqual([r.terminalReason, r.code], ["deferred", "lease-held"]);
+    const unknown = world(); projector(unknown, lease);
+    assert.equal((await run(unknown, { hostName: "h1", batchId: "new-batch", liveBatches: () => null })).code, "lease-held");
+  });
+
   it("#4101 a non-limit runner error is still engine-error", async () => {
     const w = world(); failFirstBuilder(w, new Error("boom"));
     assert.equal((await run(w)).terminalReason, "engine-error");
@@ -10130,5 +10141,18 @@ describe("#5820 required CI checks run in the lane before the PR opens", () => {
     await run(w, { dir, precheck: { ci: { mode: "off", include: [], exclude: [], maxJobs: 8 } } });
     assert.equal(w.ran.filter(isCi).length, 0);
     assert.equal(readLog(dir, 7).filter((e) => /^CI_PRECHECK/.test(e.event)).length, 0);
+  });
+});
+
+describe("#5992 verify.guard_bypass: a lane clear of the red guard's files proceeds", () => {
+  it("bypasses only when opted in and the lane diff misses the guarded files", async () => {
+    for (const opt of [false, true]) {
+      const w = world(), git = w.io.git;
+      w.io.runCommand = async () => ({ rc: 1, output: "bare 429 at app/routers/listing_feeds.py" });
+      w.io.git = async (a, o) => a[0] === "log" && a.includes("--format=%H%x1f%s%x1f%b") ? `${"a".repeat(40)}\x1ffeat: feeds (#39805)\x1f` : a[0] === "diff" && a.includes("--name-only") ? "docs/readme.md\n" : git(a, o);
+      const r = await run(w, { verify: { invariants: ["bash scripts/guard.sh"], ...(opt ? { guardBypass: true } : {}) } });
+      if (opt) assert.notEqual(r.code, "base.red", "bypassed");
+      else assert.equal(r.code, "base.red", "default stays deferred (#5239)");
+    }
   });
 });

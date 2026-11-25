@@ -3053,6 +3053,8 @@ when none is left; `--force "<reason>"` starts them anyway. Cost: 0 LLM calls.
 ## Base red (#5239)
 
 `bin/lean/basered.mjs` handles a `verify.invariants` guard that still fails. `lean.mjs` `guardRed` runs it once on a detached worktree of the base (`runOnBase`, same pattern as `guardgate.mjs`), `classifyBaseRed` splits base-red from lane-own, `attribute` names the newest base commit touching the files the failure names (`git log -1`) and its issue (`issueOf`), and `reportBaseRed` comments on or reopens that issue (or files one). A base-red guard ends the lane `deferred` with `base.red` (retry 900 s), spending no builder round; a lane-own failure blocks with `ci.red` (`guardFailing`, switch `verify.guard_block`, default on). `postMergeGate` also runs the invariants on the base-synced merged tree and returns the `stuck` ones. Without `invariants` nothing changes.
+
+#5992: `base.red` is the base's wait, not the issue's: it is in `UNCAPPED_DEFERRALS` (never counts toward `max_deferrals`). `basered.mjs` `probeBase` runs the guard once per (repo, base sha) and caches the verdict for `BASE_PROBE_TTL_MS` (10 min; a moved sha misses); `guardRed` records its red verdict there (`recordBaseVerdict`). The dispatcher (`engine-cli.mjs`, only with `verify.invariants`) passes `baseProbe` to `orchestrate`, which each pass holds every admission except the attributed fixer issue while the base is red (one `base.red` preflight row) and releases on a sha change or a green probe.
 Base-red hardening (#5945): `runOnBase` returns `{command, rc, output}` (about 4 KB tail) and sets `BASE_SHA` and `LANE_CHECK_BASE` to the merge-base sha, so diff-scoped guards see an empty diff on the base. `classifyBaseRed` gains an `env` bucket (base output matching ModuleNotFoundError, ImportError, `fail closed`, unknown/bad revision, not a valid ref); `guardRed` records those as `env.base_probe` with the output tail, files nothing and leaves the failure the lane's. An optional injected `io.verifyBaseOnHost({command, base})` that returns rc 0 on the bare base tip also turns a sandbox red into env. `fileBaseRed` dedupes on a `FORGE:BASE_RED_KEY base@sha12` body marker (attributed sha, else base tip): an open match gets a comment, a closed one is reopened only if closed after the attributed commit date, and at most one new issue per base+sha per 24 h. The issue body carries the base output tail. `reportTrainBaseRed` keys on `baseSha`.
 
 ## Entry 2026-11-08 — Checklist close gate and inert-rollout note (#5240)
@@ -3692,6 +3694,15 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 - Deferred to the operator/installer layer (no unit file or installer in this repo): `WatchdogSec` heartbeat on the unit, and the installer restarting the unit on `npm i -g` / plugin update.
 - Post-deploy check `schedd-handover-no-gap`.
 
+## Entry 2026-11-25 — standing orders: `orchestrate --select <query>` (#5978)
+
+- `--select` is kept in the plan argv. Every `RECONCILE_MS` the runner (hosted by `schedd`, no watcher process) calls `reconcile.mjs`: matching open issues join through the `--add` seam (same DAG, priority, lane rules), closed or moved ones leave. Batches without a selector are unchanged.
+- Re-admission (`readmitDue`): `deferred` backs off exponentially (cap 2 h); `held`/`engine-error` re-admit on a change of the engine or `FORGE_LANE_IMAGE` version or after a 6 h cooldown; conformance gets one more attempt after the base sha moves, then parks in a "needs decision" digest. `humanCode` (credentials, spend, customer, promotion, product decision) is the only permanent stop.
+- An engine-filed `env.*` issue joins the order; its closure re-admits the waiters (existing path).
+- `clear-breaker.mjs` `decideAutoReset`: a selector batch's breaker closes after a cooldown when the signature is environmental and the pool is healthy, with a FORGE:DECISION. `decideClear` is unchanged.
+- A staging lane closes the issue on merge into the lane branch and comments the `FORGE_POSTDEPLOY_ROLLUP` issue.
+- `batch.mjs` `coverage()` classifies each open match (running, queued, backing-off, waiting on deps, human-blocked, unscheduled); `orchestrate --status <id>` prints it, healthy is 0 unscheduled.
+
 ## Entry 2026-11-25 — scheddFromCli waits for selfStop to settle before exiting (#5984)
 
 - `closed` resolves as soon as `close()` finishes, before `selfStop()` has spawned and probed the successor. `selfStop` now keeps its whole async body (close, spawn, wait for listening, retry, rehost) as one promise, and the `startDaemon` handle gains an additive `settled()` (`selfStopping ?? closed`, so idle and lost-lock closes settle via `closed`).
@@ -3715,3 +3726,10 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 | `idle_share_max` per cause (not no-ready) | 0.2 | idle-<cause> |
 
 Filing: `file_issues` is **default off** (breaches are still written to efficiency.json). When on, each signature `slo:<code>:<repo>` gets one `engine-gap` issue in `orchestrate.slo.repo` (default RapierCraftStudios/ForgeDock), found by a `forge-slo` marker so a restart adopts rather than duplicates; a re-breach appends a counter comment at most once per 6 h; 24 h green closes it. `bin/introspect-schedule.mjs` installs the daily introspect timer (only while `file_issues` is on). The execution budget (`execution-budget.json`) now keeps one entry per `<batch>#<sandbox id>` holding its latest cumulative usage.
+
+## Entry 2026-11-25 — Owner-based liveness under the clocks (#5991)
+
+- `bin/lean/liveness.mjs` holds three pure helpers. `holderGone(lease, {liveBatches})` says a lease whose batch no longer owns the issue is takeover-able at once; `lean.mjs` consults it (`o.liveBatches`) beside `holderDead`. A live batch's lease stays `lease-held`, and an unknown liveness (`null`, e.g. inside a sandbox with no batch dir) keeps the 25 min TTL.
+- `classifyTransportLoss` shortens `sandbox.unreachable` to `AGENT_UP_WINDOW_MS` (90 s) only when the pool agent answers (`agentOnline(handle)`, exposed by `sandbox-remote.mjs` from `/agents`); agent down, router error or no probe keeps the 300 s window. The typed deferral and the kept sandbox are unchanged.
+- Budget rows are keyed `sandboxBudgetKey(batchId, sandboxId)` with no `startedAt`; `record` upserts the single row with the larger minutes/cost, so replayed attempts of one sandbox no longer add rows. Host-day dedupe and `KEEP_DAYS` pruning are unchanged.
+- R5/R6 (cache-volume probe and quarantine) deferred to pool work.
