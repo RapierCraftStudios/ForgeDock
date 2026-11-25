@@ -3700,3 +3700,8 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 - `clear-breaker.mjs` `decideAutoReset`: a selector batch's breaker closes after a cooldown when the signature is environmental and the pool is healthy, with a FORGE:DECISION. `decideClear` is unchanged.
 - A staging lane closes the issue on merge into the lane branch and comments the `FORGE_POSTDEPLOY_ROLLUP` issue.
 - `batch.mjs` `coverage()` classifies each open match (running, queued, backing-off, waiting on deps, human-blocked, unscheduled); `orchestrate --status <id>` prints it, healthy is 0 unscheduled.
+
+## Entry 2026-11-25 — scheddFromCli waits for selfStop to settle before exiting (#5984)
+
+- `closed` resolves as soon as `close()` finishes, before `selfStop()` has spawned and probed the successor. `selfStop` now keeps its whole async body (close, spawn, wait for listening, retry, rehost) as one promise, and the `startDaemon` handle gains an additive `settled()` (`selfStopping ?? closed`, so idle and lost-lock closes settle via `closed`).
+- `scheddFromCli` awaits `d.settled?.()` after `d.closed`, and in the rehosted follow loop awaits each `cur.closed` then `cur.settled?.()` before reading `stopCode` and exiting. A unitless handover no longer exits(1) with no daemon. Under a unit the exit path is unchanged.

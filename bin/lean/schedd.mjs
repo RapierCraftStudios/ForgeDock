@@ -546,7 +546,8 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       await new Promise((r) => setTimeout(r, successorPollMs));
     }
   };
-  const selfStop = async () => {
+  let selfStopping = null;
+  const selfStop = () => (selfStopping ??= (async () => {
     stopCode = 1;
     const underUnit = ["active", "activating"].includes(unit());
     let hard;
@@ -570,7 +571,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     } catch (e) { log(`schedd: stop failed: ${e?.message ?? e}`); }
     clearTimeout(hard);
     if (exit) exit(1);
-  };
+  })());
   idleTimer = setInterval(() => {
     if (!hosted.size && !conns.size && Date.now() - lastActive >= idleMs) { log("schedd: idle, exiting"); close(); }
   }, Math.min(idleMs, 30_000));
@@ -701,7 +702,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       started.catch((e) => log(`schedd: resume ${id} failed: ${e?.message ?? e}`)).finally(() => starting.delete(id));
     }
   }
-  return { running: true, pid, sock: p.sock, close: () => (rehosted ? rehosted.close() : close()), closed, stopCode: () => stopCode, rehosted: () => rehosted };
+  return { running: true, pid, sock: p.sock, close: () => (rehosted ? rehosted.close() : close()), closed, stopCode: () => stopCode, rehosted: () => rehosted, settled: () => selfStopping ?? closed };
 }
 
 /** #5204: `version` of the package.json of this install (../../package.json), null when it cannot be read. */
