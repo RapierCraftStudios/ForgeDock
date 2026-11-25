@@ -99,3 +99,28 @@ export async function ledgerPass({ batch, sample, cfg, gh, now = Date.now(), rep
     return { eff, breaches, actions };
   } catch { return null; }
 }
+
+/**
+ * Introspect findings (#5987): file the `forgedock stats --conformance-outcomes` report as one rolling `engine-gap` issue per
+ * signature `introspect:<scope>`. Deduped against an open issue carrying the signature and against the prior report (`prior`
+ * = last filed `{hash, issue}`): an unchanged report files nothing. Returns `{action, issue?, hash}`; never throws.
+ */
+export async function fileIntrospect({ report, scope, gh, cfg = DEFAULT_SLO, prior = null, reportPath = null }) {
+  const text = String(report ?? "").trim(), sig = `introspect:${scope}`;
+  if (!text || typeof gh !== "function") return { action: "none", hash: null };
+  const { createHash } = await import("node:crypto");
+  const hash = createHash("sha1").update(text).digest("hex").slice(0, 12);
+  if (prior?.hash === hash) return { action: "unchanged", hash, issue: prior.issue ?? null };
+  const body = `<!-- forge-slo: ${sig} -->\n**fd-introspect** (${scope})${reportPath ? `\n\nreport: ${reportPath}` : ""}\n\n\`\`\`\n${text.slice(0, 6000)}\n\`\`\``;
+  try {
+    let found = null;
+    try { found = JSON.parse(String(await gh(["issue", "list", "--repo", cfg.repo, "--label", cfg.label, "--state", "open", "--search", `"${sig}" in:body`, "--json", "number,body"])) || "[]").find((i) => String(i.body ?? "").includes(sig)); } catch { found = null; }
+    if (found || prior?.issue) {
+      const n = found?.number ?? prior.issue;
+      await gh(["issue", "comment", String(n), "--repo", cfg.repo, "--body", body]);
+      return { action: "comment", issue: n, hash };
+    }
+    const out = String(await gh(["issue", "create", "--repo", cfg.repo, "--label", cfg.label, "--title", `engine-gap: fd-introspect findings (${scope})`, "--body", body]));
+    return { action: "create", issue: Number(out.match(/(\d+)\s*$/)?.[1]) || null, hash };
+  } catch { return { action: "failed", hash }; }
+}
