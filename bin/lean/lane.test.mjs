@@ -159,4 +159,15 @@ describe("(#5084) listMilestones", () => {
   it("(#5084) listMilestones propagates a gh error", async () => {
     await assert.rejects(listMilestones({ gh: async () => { throw new Error("HTTP 502"); }, repo: "o/r" }), /HTTP 502/);
   });
+
+  it("#5990: a network error on the milestone read is gh.unavailable (transient), another read error stays lane.unresolved", async () => {
+    const net = await resolveLane({ issue: 5, repo: "o/r", io: { ...io(), gh: async () => { throw new Error("dial tcp: lookup api.github.com: no such host"); } }, cwd: "/repo" });
+    assert.equal(net.ok, false); assert.equal(net.code, "gh.unavailable"); assert.equal(net.transient, true);
+    const other = await resolveLane({ issue: 5, repo: "o/r", io: { ...io(), gh: async () => { throw new Error("HTTP 404: Not Found"); } }, cwd: "/repo" });
+    assert.equal(other.code, "lane.unresolved"); assert.equal(other.transient, true);
+    const viaReader = await resolveLane({ issue: 5, repo: "o/r", io: io(), cwd: "/repo", reader: { milestone: async () => { throw new Error("ETIMEDOUT"); } } });
+    assert.equal(viaReader.code, "gh.unavailable");
+    const ok = await resolveLane({ issue: 5, repo: "o/r", io: io({ milestone: "X" , onOrigin: ["staging","main"] }), cwd: "/repo", reader: { milestone: async () => null } });
+    assert.equal(ok.ok, true);
+  });
 });

@@ -187,7 +187,7 @@ export const HOST_BUSY_RETRY_S = 60;
 // #4528: a busy host or a full sandbox pool is a wait, not a failure: requeued after its retry-in, never capped.
 // A lane that could not be resolved because gh/git failed (network blip) is the same kind of wait (#4791).
 // #4788: an unreachable pool is a wait too (the lane already retried for unreachable_window_min); a stall is reported by poolStall.
-const UNCAPPED_DEFERRALS = new Set(["host.busy", "sandbox.capacity", "sandbox.unreachable", "sandbox.repo_missing", "lane.unresolved", "base.red"]); // #5992: a red base is the base's wait, never the issue's
+const UNCAPPED_DEFERRALS = new Set(["host.busy", "sandbox.capacity", "sandbox.unreachable", "sandbox.repo_missing", "lane.unresolved", "gh.unavailable", "base.red"]); // #5992: a red base is the base's wait, never the issue's
 export const POOL_OFFLINE_ALERT_MIN = 10;
 // #5112: `sandbox.capacity` deferrals of one issue after which `execution.fallback_local` runs it on the host (headroom permitting).
 export const CAPACITY_FALLBACK_AFTER = 3;
@@ -1318,12 +1318,16 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     postRuns.add(p);
   };
   const track = (n, p) => { running.set(n, p.catch((e) => settle(n, { terminalReason: "engine-error", detail: e?.message ?? String(e) }, runRecs.get(n), null))); };
+  const ghWait = new Set(); // #5990: issues whose lane read waited on an unreachable GitHub (their resolved re-read is not a lane.unresolved row)
   const laneRetries = new Map(); // #4791: transient lane-resolution failures per issue; never counted in `deferrals`
   // A transient refusal (gh/git failed) re-resolves; the settled `deferred` frees the slot and requeues with backoff.
   const retryLane = (n, rec) => track(n, (async () => {
     let l; try { l = await resolveLane(n); } catch (e) { l = { ok: false, code: "lane.unresolved", detail: e?.message ?? String(e), transient: true }; }
     lanes.set(n, l);
-    if (l.ok || !l.transient) { laneRetries.delete(n); return { terminalReason: "deferred", code: "lane.unresolved", retryInSeconds: 1, cost_usd: 0, detail: l.ok ? "lane resolved" : `${l.code}: ${l.detail}` }; }
+    // #5990: GitHub unreachable: wait the uncapped 60 s, no lane failure, no backoff growth; the admission stays queued
+    if (!l.ok && l.code === "gh.unavailable") ghWait.add(n);
+    if (!l.ok && l.code === "gh.unavailable") return { terminalReason: "deferred", code: "gh.unavailable", retryInSeconds: 60, cost_usd: 0, detail: l.detail };
+    if (l.ok || !l.transient) { laneRetries.delete(n); return { terminalReason: "deferred", code: ghWait.delete(n) ? "gh.unavailable" : "lane.unresolved", retryInSeconds: 1, cost_usd: 0, detail: l.ok ? "lane resolved" : `${l.code}: ${l.detail}` }; }
     const k = laneRetries.get(n) ?? 0; laneRetries.set(n, k + 1);
     return { terminalReason: "deferred", code: "lane.unresolved", retryInSeconds: Math.min(DEFER_BACKOFF_S * 2 ** k, DEFER_BACKOFF_MAX_S), cost_usd: 0, detail: l.detail };
   })().then((x) => settle(n, x, rec, null)));

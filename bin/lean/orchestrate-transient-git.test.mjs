@@ -50,4 +50,19 @@ describe("#5947 git transport failures", () => {
     assert.ok(acks.length >= 1 && acks[0].cleared === true, "the live runner acked a real clear");
     assert.equal(r.store.peek().breaker ?? null, null);
   });
+
+  it("#5990: GitHub unreachable for 15 min yields gh.unavailable deferrals, no lane.unresolved and no lost admission", async () => {
+    const t0 = 1_000_000; let t = t0;
+    const store = memStore(), updates = [], ran = [];
+    const resolveLane = async () => t - t0 < 15 * 60_000
+      ? { ok: false, code: "gh.unavailable", detail: "cannot reach GitHub", transient: true }
+      : { ok: true, lane: "staging", expected: "staging", milestone: null, overridden: false, defaults: ["main"] };
+    const rows = await orchestrate({ issues: [1, 2], parallel: 2, readBody: async () => "", now: () => t, store, pollMs: 1000, resolveLane,
+      sleep: async (ms) => { t += Math.max(1, Number(ms) || 0); },
+      runOne: async (n) => { ran.push(n); t += 1000; return MERGED; }, onUpdate: (r) => updates.push(r) });
+    assert.equal(updates.some((u) => u.code === "lane.unresolved"), false);
+    assert.ok(updates.some((u) => u.code === "gh.unavailable"));
+    assert.deepEqual(rows.map((x) => x.outcome).sort(), ["merged", "merged"]);
+    assert.deepEqual(ran.sort(), [1, 2]);
+  });
 });

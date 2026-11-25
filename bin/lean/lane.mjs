@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseForgeYaml } from "../forge-utils.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
+import { isNetworkError } from "./gh-reader.mjs";
 
 /** The documented forge.yaml conventions (forge.yaml.example, scripts/classify-lane.sh); always verified on origin. */
 export const DEFAULT_STAGING_BRANCH = "staging";
@@ -72,7 +73,7 @@ const once = (cache, key, load, keep = () => true) => {
  * @returns {Promise<{ok:true, lane:string, expected:string, milestone:?string, overridden:boolean, defaults:string[]}
  *   | {ok:false, code:string, detail:string}>}
  */
-export async function resolveLane({ issue, repo, io, cwd, branches = {}, requested = null, override = false, cache = null, milestone: known }) {
+export async function resolveLane({ issue, repo, io, cwd, branches = {}, requested = null, override = false, cache = null, milestone: known, reader = null }) {
   const refuse = (code, detail) => ({ ok: false, code, detail });
   const transient = (detail) => ({ ...refuse(OUTCOME_CODES.LANE_UNRESOLVED, detail), transient: true }); // #4791: a gh/git command failed; retry
   const staging = branches.staging || DEFAULT_STAGING_BRANCH;
@@ -81,8 +82,13 @@ export async function resolveLane({ issue, repo, io, cwd, branches = {}, request
   let milestone = null, defaults;
   try {
     if (known !== undefined) milestone = known || null;
+    else if (reader) milestone = (await reader.milestone(issue)) || null; // #5990: cached, batched; serves the last good value offline
     else milestone = JSON.parse(String(await io.gh(["issue", "view", String(issue), "-R", repo, "--json", "milestone"])))?.milestone?.title || null;
-  } catch (e) { return transient(`cannot read the milestone of #${issue}: ${String(e?.message ?? e).slice(0, 200)}`); }
+  } catch (e) {
+    // #5990: GitHub unreachable is the network's wait, not a lane problem: gh.unavailable (uncapped, 60 s), never lane.unresolved
+    if (isNetworkError(e)) return { ...refuse(OUTCOME_CODES.GH_UNAVAILABLE, `cannot reach GitHub for the milestone of #${issue}: ${String(e?.message ?? e).slice(0, 200)}`), transient: true };
+    return transient(`cannot read the milestone of #${issue}: ${String(e?.message ?? e).slice(0, 200)}`);
+  }
   try {
     defaults = cache ? await once(cache, "default-branches", () => defaultBranches({ repo, io, branches })) : await defaultBranches({ repo, io, branches });
   } catch (e) {
