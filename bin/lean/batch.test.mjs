@@ -2146,6 +2146,34 @@ describe("#5975: batch pause", () => {
   });
 });
 
+describe("#5992: base.red is a batch hold, not a per-issue capped deferral", () => {
+  it("base.red is uncapped; other codes still cap", () => {
+    assert.deepEqual(deferPolicy({ code: "base.red", retryInSeconds: 900 }, { now: 0, deferrals: 99, maxDeferrals: 3 }), { delayMs: 900000, host: true });
+    assert.deepEqual(deferPolicy({ code: "merge.transient", retryInSeconds: 60 }, { now: 0, deferrals: 3, maxDeferrals: 3 }), { capped: true });
+  });
+
+  it("10 lanes + red base: 1 probe run, only the fixer launches, no 'gave up'; a sha move resumes admission in one pass", async () => {
+    const { c, now, sleep } = fakeClock();
+    const issues = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    const launches = [], updates = [];
+    let sha = "a".repeat(40), probes = 0;
+    const baseProbe = async () => { probes++; return sha === "a".repeat(40) ? { red: true, sha, commands: ["guard"], att: { sha: "f".repeat(40), issue: 10 } } : { red: false, sha }; };
+    let passes = 0;
+    const rows = await orchestrate({ issues, parallel: 10, maxDeferrals: 3, now, readBody: async () => "", baseProbe, pollMs: 10,
+      onUpdate: (u) => updates.push(u),
+      sleep: async (ms) => { await sleep(ms); if (++passes === 3) sha = "b".repeat(40); },
+      runOne: async (n) => { launches.push([n, sha === "a".repeat(40) ? "red" : "green"]); return { terminalReason: "merged", pr: 100 + n }; } });
+    const redLaunches = launches.filter((l) => l[1] === "red").map((l) => l[0]);
+    assert.deepEqual(redLaunches, [10], "only the attributed fixer is admitted while the base is red");
+    assert.equal(launches.length, 10, "every lane runs once after the base moves");
+    assert.ok(rows.every((r) => r.outcome === "merged"));
+    assert.ok(!rows.some((r) => /gave up/.test(r.detail ?? "")));
+    assert.equal(updates.filter((u) => u.code === "base.red").length, 1, "one batch-level hold row");
+    assert.ok(updates.some((u) => /base\.red cleared/.test(u.detail ?? "")));
+    assert.ok(c.t >= 1_000_000);
+  });
+});
+
 // #5978: the selector is kept in the batch plan argv/state; coverage classifies every matching open issue.
 import { coverage as coverage5978 } from "./batch.mjs";
 describe("coverage (#5978)", () => {

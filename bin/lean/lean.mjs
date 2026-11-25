@@ -67,7 +67,7 @@ import { reserveForBuild, revalidate } from "./seqreserve.mjs";
 import { patchEcho, mutationsOf, runReproMutations, classifyRepro } from "./reproquality.mjs";
 import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, amendmentCorrectionPrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, docsPlanNote, pagePlanNote, contextPackNote, buildOpeningNote, sequenceBuildRule, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, routeDigestPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
-import { classifyBaseRed, attribute as attributeBaseRed, runOnBase, reportBaseRed } from "./basered.mjs"; // #5239
+import { classifyBaseRed, attribute as attributeBaseRed, runOnBase, reportBaseRed, recordBaseVerdict, bypassesGuard } from "./basered.mjs"; // #5239
 import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
 import { parseProdParity, prodParityFailures as prodParityOf } from "./prodparity.mjs";
 import { routePathsFromFiles, routeReachabilityFailures } from "./routecheck.mjs";
@@ -2855,7 +2855,7 @@ export async function runCore(o) {
         const names = failed.map((f) => `\`${f.command}\` (exit ${f.rc})`).join(", ");
         if (isSplit) return await needsHuman(`Declared check command(s) fail on the refactor:split move (no builder edits a split); nothing merged: ${names}`, OUTCOME_CODES.CI_RED);
         checkCommandsFailing = true;
-        { const red = await guardRed(failed); if (red) return red; } // #5239: a guard that also fails on the base defers the lane
+        { const red = await guardRed(failed, { bypass: vcfg.guardBypass === true }); if (red === "bypass") { checkCommandsFailing = false; break; } if (red) return red; } // #5239: a guard that also fails on the base defers the lane; #5992: unless the lane is clear of the guarded surface
         if (round >= vcfg.maxRounds || !sessionId) { if (vcfg.precheckBlock || guardFailing(failed)) return await needsHuman(`Declared check command(s) still failing before the PR (verify.precheck_block); nothing merged: ${names}`, OUTCOME_CODES.CI_RED); T.anomalies.push(`Declared check command(s) still failing before the PR: ${names}`); break; }
         T.decisions.push(`Declared check command(s) failed: ${names}; builder resumed (round ${round + 1}/${vcfg.maxRounds})`);
         const before = String(await git(["rev-parse", "HEAD"])).trim();
@@ -3117,7 +3117,7 @@ export async function runCore(o) {
     function guardOn() { return vcfg.guardBlock !== false && (vcfg.invariants ?? []).length > 0; }
     function guardFailing(failed) { return guardOn() && failed.some((f) => vcfg.invariants.includes(f.command)); }
     /** #5239: guard commands failing here are run once on the base; failing there too, the lane is deferred (base.red) and the introducing issue is told. null: the failure is the lane's. */
-    async function guardRed(failed) {
+    async function guardRed(failed, { bypass = false } = {}) {
       const g = failed.filter((f) => guardFailing([f]));
       if (!g.length || isSplit || !io.runCommand) return null;
       const baseRuns = await heavyStep("precheck", () => runOnBase({ commands: g.map((f) => f.command), git, runCommand: io.runCommand, mergeBase: base, cwd: wt, env: laneEnv(), timeoutMs: vcfg.precheckTimeoutSeconds * 1000 }));
@@ -3135,12 +3135,22 @@ export async function runCore(o) {
       }
       if (!baseRed.length) return null;
       const att = await attributeBaseRed({ failed: baseRed, git, base });
+      if (bypass) { // #5992: a lane clear of the guarded surface goes on; the guard is re-run on the merged tree at merge (the base-sync post-merge gate)
+        let laneFiles = [];
+        try { laneFiles = String(await git(["diff", "--name-only", `${base}...HEAD`])).split("\n"); } catch { /* no diff: no bypass */ }
+        if (bypassesGuard({ laneFiles, att })) {
+          T.decisions.push(`Guard command(s) ${baseRed.map((f) => `\`${f.command}\``).join(", ")} are red on ${base} (last change ${att.sha.slice(0, 12)}${att.issue ? `, #${att.issue}` : ""}) but this lane touches none of the files they name; proceeding, the guard is re-run at merge`);
+          ev({ event: "BASE_RED_BYPASS", commands: baseRed.map((f) => f.command), sha: att.sha, issue: att.issue ?? null });
+          return "bypass";
+        }
+      }
       let baseSha = "", commitDate = "";
       try { baseSha = String(await git(["rev-parse", base])).trim(); } catch { /* key falls back to the attributed sha */ }
       try { if (att?.sha) commitDate = String(await git(["show", "-s", "--format=%cI", att.sha])).trim(); } catch { /* no reopen */ }
       const cmds = baseRed.map((f) => f.command), outputs = Object.fromEntries(cmds.map((c) => [c, tailOf(c)]));
       const n = await reportBaseRed({ ghc: ghw, repo, base, att, laneIssue: issue, commands: cmds, outputs, baseSha, commitDate });
       T.decisions.push(`Guard command(s) ${cmds.map((c) => `\`${c}\``).join(", ")} also fail on ${base}${att ? ` (last change ${att.sha.slice(0, 12)}${att.issue ? `, #${att.issue}` : ""})` : ""}; lane deferred behind ${n ? `#${n}` : "the base fix"}`);
+      recordBaseVerdict({ repo, base, sha: baseSha, red: true, att, commands: cmds, outputs }); // #5992: later lanes and the dispatcher's probe reuse this verdict
       ev({ event: "BASE_RED", commands: cmds, output: cmds.map((c) => tailOf(c).slice(-500)), sha: att?.sha ?? null, issue: att?.issue ?? null, tracked: n });
       return await finish("deferred", `base ${base} is red on guard command(s) ${cmds.join(", ")}; deferred behind ${n ? `#${n}` : "the base fix"}`, { code: OUTCOME_CODES.BASE_RED, retryInSeconds: 900 }, OUTCOME_CODES.BASE_RED);
     }
