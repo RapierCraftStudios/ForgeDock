@@ -4721,6 +4721,17 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     assert.equal(cred, 0); assert.equal(r.rotations, undefined); assert.equal(r.limited, undefined);
   });
 
+  it("#5991 a lease of a batch that is no longer live is taken over; a live batch's lease is still held", async () => {
+    const lease = { by: "core_sbx_1_ab", until: 1e12, host: "sandbox-host", pid: 1, batch: "old-batch" };
+    const gone = world(); projector(gone, lease);
+    assert.equal((await run(gone, { hostName: "h1", batchId: "new-batch", liveBatches: () => ["other"] })).terminalReason, "merged");
+    const live = world(); projector(live, lease);
+    const r = await run(live, { hostName: "h1", batchId: "new-batch", liveBatches: () => ["old-batch"] });
+    assert.deepEqual([r.terminalReason, r.code], ["deferred", "lease-held"]);
+    const unknown = world(); projector(unknown, lease);
+    assert.equal((await run(unknown, { hostName: "h1", batchId: "new-batch", liveBatches: () => null })).code, "lease-held");
+  });
+
   it("#4101 a non-limit runner error is still engine-error", async () => {
     const w = world(); failFirstBuilder(w, new Error("boom"));
     assert.equal((await run(w)).terminalReason, "engine-error");
