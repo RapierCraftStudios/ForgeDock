@@ -2046,7 +2046,7 @@ export const ADVISORY_CODES = Object.freeze([OUTCOME_CODES.CONFORMANCE_SCOPE_CRE
 export const ADVISORY_KINDS = Object.freeze([
   "scope_creep", "check_unknown", "design_missing", "design_missing_repeated", "docs_missing", "docs_link_broken",
   "ci_budget_unannotated", "hotspot_growth", "counter_growth",
-  "amendment_invalid", "substitute_unverified",
+  "amendment_invalid",
   "page_metadata_missing", "page_sitemap_missing", "page_canonical_missing", "page_structured_data_missing",
 ]);
 /**
