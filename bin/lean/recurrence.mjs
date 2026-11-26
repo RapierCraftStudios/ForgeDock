@@ -105,10 +105,21 @@ export function detectRecurrence({ rows = [], mergedPrFiles = {}, body = "", nam
  * The engine-side gather: subjectHistory rows plus one file-list read per merged row (capped). `io`: {gh, git}. Never
  * throws: a failed source contributes nothing and lands in `errors`.
  */
-export async function recurrenceFacts({ io, repo, issue, title = "", body = "", base = null, namedPaths = [], threshold, exclude = [] }) {
+export async function recurrenceFacts({ io, repo, issue, title = "", body = "", base = null, namedPaths = [], threshold, exclude = [], createdAt = null }) {
   const errors = [];
   let rows = [];
   try { const h = await subjectHistory({ io, repo, issue, title, body, base, exclude }); rows = h.rows ?? []; errors.push(...(h.errors ?? [])); } catch (e) { errors.push(`recurrence: ${String(e?.message ?? e).slice(0, 80)}`); }
+  // #6016: a release PR (head release/*) touches every shipped file, and a PR merged after the issue was filed cannot be an
+  // earlier fix that did not hold: neither is evidence. A row whose metadata cannot be read stays (explicit Recurs links too).
+  const created = Date.parse(createdAt ?? "");
+  const notEvidence = new Set();
+  for (const r of rows.filter((x) => x?.kind === "PR" && x?.status === "merged").slice(0, MAX_RECURRENCE_ROWS)) {
+    try {
+      const m = JSON.parse(String(await io.gh(["api", `repos/${repo}/pulls/${Number(r.number)}`, "--jq", "{head: .head.ref, merged: .merged_at}"])));
+      if (isReleaseHead(m?.head) || (Number.isFinite(created) && Date.parse(m?.merged ?? "") > created)) notEvidence.add(Number(r.number));
+    } catch { /* unreadable: keep the row */ }
+  }
+  rows = rows.filter((r) => !notEvidence.has(Number(r?.number)));
   const wanted = [...new Set([...rows.filter((r) => r?.kind === "PR" && r?.status === "merged").map((r) => Number(r.number)), ...recursLinks(body)])].slice(0, MAX_RECURRENCE_ROWS);
   const mergedPrFiles = {};
   if (namedPaths.length) {
@@ -121,6 +132,9 @@ export async function recurrenceFacts({ io, repo, issue, title = "", body = "", 
   }
   return { ...detectRecurrence({ rows, mergedPrFiles, body, namedPaths, threshold }), errors };
 }
+
+/** #6016: a staging->default release PR head (`release/...`). */
+export const isReleaseHead = (ref) => /^release\//.test(String(ref ?? ""));
 
 /** The design lane's plan instruction (#5751): why the earlier fixes failed, delete or replace, a measurable outcome. */
 export function designLaneNote(detection) {

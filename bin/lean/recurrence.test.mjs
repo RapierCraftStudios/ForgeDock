@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseRecurrenceConfig, detectRecurrence, recursLinks, pathsOverlap, recurrenceFacts, designLaneNote, designContractFailures } from "./recurrence.mjs";
+import { parseRecurrenceConfig, detectRecurrence, recursLinks, pathsOverlap, recurrenceFacts, designLaneNote, designContractFailures, isReleaseHead } from "./recurrence.mjs";
 
 const row = (number, o = {}) => ({ number, kind: "PR", status: "merged", title: `fix leak ${number}`, matched: ["reservation", "leak"], ...o });
 const NAMED = ["src/billing/reserve.js"];
@@ -73,6 +73,27 @@ describe("recurrence detection (#5751)", () => {
     assert.equal(d.recurs, true);
     assert.deepEqual(d.evidence.map((e) => e.number), [11, 10]);
     assert.ok(calls.some((c) => c.includes("pulls/10/files")) && calls.some((c) => c.includes("pulls/11/files")));
+  });
+});
+
+describe("recurrence evidence excludes release PRs and later merges (#6016)", () => {
+  const gh = (meta) => async (a) => {
+    const j = a.join(" ");
+    if (j.includes("search/issues")) return [10, 11, 12].map((n) => JSON.stringify({ number: n, title: `pr ${n}`, pr: true, merged: true })).join("\n");
+    const f = /pulls\/(\d+)\/files/.exec(j); if (f) return "src/billing/reserve.js\n";
+    const m = /pulls\/(\d+)$/.exec(a[1] ?? ""); if (m) return JSON.stringify(meta[m[1]]);
+    throw new Error("unexpected " + j);
+  };
+  it("a release PR and a PR merged after the issue was filed are not earlier fixes", async () => {
+    const meta = { 10: { head: "release/20261123-1", merged: "2026-11-01T00:00:00Z" }, 11: { head: "feat/x", merged: "2026-11-20T00:00:00Z" }, 12: { head: "feat/y", merged: "2026-11-02T00:00:00Z" } };
+    const d = await recurrenceFacts({ io: { gh: gh(meta) }, repo: "o/r", issue: 7, title: "reservation leak", body: "See src/billing/reserve.js", namedPaths: NAMED, threshold: 2, createdAt: "2026-11-10T00:00:00Z" });
+    assert.deepEqual(d.evidence.map((e) => e.number), [12]);
+    assert.equal(d.recurs, false);
+  });
+  it("isReleaseHead matches only release/ heads", () => {
+    assert.equal(isReleaseHead("release/1"), true);
+    assert.equal(isReleaseHead("feat/release/1"), false);
+    assert.equal(isReleaseHead(null), false);
   });
 });
 

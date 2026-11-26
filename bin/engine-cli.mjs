@@ -499,10 +499,11 @@ export function readVerify(cwd = process.cwd()) {
     return coerceCiVerify(parseVerify({ ...sec, ...(invariants ? { invariants } : {}), ...(flaky ? { flaky } : {}), ...(guard_command ? { guard_command } : {}), ...(baselines ? { baselines } : {}), ...(sandboxes ? { sandboxes } : {}) }), { cwd }); // #5278: local-first never pushes for paid CI before review
   } catch { return undefined; }
 }
-/** #4542: forge.yaml `execution.host_capabilities` (+ patterns) for a lane's remote-block mapping; undefined when none are declared. */
+/** #4542: forge.yaml `execution.host_capabilities` (+ patterns) for a lane's remote-block mapping, plus `offload_wrappers`; undefined when none are declared. */
 export function readHostCaps(cwd = process.cwd()) {
   const e = readExecution(cwd);
-  return e?.hostCapabilities?.length ? { hostCapabilities: e.hostCapabilities, ...(e.hostCapabilityPatterns ? { hostCapabilityPatterns: e.hostCapabilityPatterns } : {}) } : undefined;
+  if (!e?.hostCapabilities?.length && !e?.offloadWrappers?.length) return undefined;
+  return { hostCapabilities: e.hostCapabilities ?? [], ...(e.hostCapabilityPatterns ? { hostCapabilityPatterns: e.hostCapabilityPatterns } : {}), ...(e.offloadWrappers ? { offloadWrappers: e.offloadWrappers } : {}) };
 }
 /** #4778: the capabilities the dispatching host relays to this sandbox lane (`CS_RELAY_CAPS`, set by the remote provider); `{}` when none. */
 export function readRelayCaps(env = process.env) {
