@@ -99,6 +99,15 @@ describe("recurrence evidence excludes release PRs and later merges (#6016)", ()
     const d = await recurrenceFacts({ io: { gh: gh(meta) }, repo: "o/r", issue: 7, title: "reservation leak", body: "See src/billing/reserve.js", namedPaths: NAMED, threshold: 2, createdAt: "2026-11-10T00:00:00Z" });
     assert.deepEqual(d.evidence.map((e) => e.number), [10]);
   });
+  it("a release-head PR that also closes the issue stays excluded", async () => {
+    const meta = {
+      10: { head: "release/20261123-1", merged: "2026-11-20T00:00:00Z", body: "Fixes #7" },
+      11: { head: "feat/y", merged: "2026-11-02T00:00:00Z", body: "" },
+      12: { head: "feat/z", merged: "2026-11-02T00:00:00Z", body: "" },
+    };
+    const d = await recurrenceFacts({ io: { gh: gh(meta) }, repo: "o/r", issue: 7, title: "reservation leak", body: "See src/billing/reserve.js", namedPaths: NAMED, threshold: 2, createdAt: "2026-11-10T00:00:00Z" });
+    assert.deepEqual(d.evidence.map((e) => e.number).sort(), [11, 12]);
+  });
   it("isReleaseHead matches only release/ heads", () => {
     assert.equal(isReleaseHead("release/1"), true);
     assert.equal(isReleaseHead("feat/release/1"), false);
