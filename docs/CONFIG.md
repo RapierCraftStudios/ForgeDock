@@ -488,6 +488,22 @@ orchestration:
 
 ---
 
+## `orchestrate.lane_audit` (OPTIONAL)
+
+Engine-gap filing of the lane audit (#6078). When a lane ends needs-human or engine-error on an active pipeline/env/pool signature, the audit can file an issue in the engine repo.
+
+```yaml
+orchestrate:
+  lane_audit:
+    file_gaps: false              # default false; only the string true enables
+    repo: RapierCraftStudios/ForgeDock   # optional: engine repo to file in
+    label: engine-gap             # optional
+```
+
+One issue per signature: it is found by the `<!-- forge-gap: SIGNATURE -->` marker among open issues with the label; a further lane with the same signature updates its occurrence count and affected-lane list (`#N`, a lane is counted once). Nothing is filed for `fixed_in_later` signatures or genuine/spec classes. Redaction: the body holds only the signature, class, owner, action, engine version, count and lane issue numbers; any text in it has the lane's repo name, `owner/name` patterns and absolute paths replaced by `<repo>`/`<path>`. Filing failures are ignored and never change how the lane ends.
+
+---
+
 ## `orchestrate.health` and `notify` (OPTIONAL)
 
 Early batch health (#5167). `forgedock orchestrate` checks each batch at T+15 and T+60 minutes after it was created (`plan.json` `created`), and once more when the batch ends. When the batch starts, it prints the schedule: `health checks: T+15 14:05Z, T+60 14:50Z, and at batch end; forgedock status --batch <id>`. The first unhealthy check raises one `BATCH UNHEALTHY <id>` alert, which lists the top causes and the exact recovery commands (`--requeue`, a relaunch, `--resume`, `--cancel`). `health.json` in the batch dir records the checkpoints already done and the alert, so a daemon restart arms only the remaining checks and a batch never alerts twice. Checks and alerts never fail, delay or change the batch.
