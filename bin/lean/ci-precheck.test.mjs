@@ -94,6 +94,30 @@ describe("#5820 selection", () => {
   });
 });
 
+describe("#6049 release-branch required checks", () => {
+  const plan = { ...PLAN, jobs: [...PLAN.jobs, job("fmt", "Format check", ["black --check ."]), job("wiring", "Suite wiring", ["bash scripts/check-test-wiring.sh"])] };
+  it("a release-only required formatter and a wiring job are selected with a release-branch why", () => {
+    const s = selectCiPrecheck({ plan, required: ["Lint"], releaseRequired: ["Format check", "Suite wiring"] });
+    assert.deepEqual(s.run.map((r) => [r.job, r.why]), [["gha:ci:lint", 'required check "Lint"'], ["gha:ci:fmt", 'required check "Format check" on release branch'], ["gha:ci:wiring", 'required check "Suite wiring" on release branch']]);
+    assert.deepEqual(s.parity, []);
+  });
+  it("a required release context with no job (or a heavy one) is a parity gap", () => {
+    const s = selectCiPrecheck({ plan, required: ["Lint"], releaseRequired: ["Format check", "Release signing", "E2E"] });
+    assert.deepEqual(s.parity.map((g) => g.context), ["Release signing", "E2E"]);
+    assert.match(s.parity[0].reason, /no CI job/);
+    assert.match(s.parity[1].reason, /heavy \(e2e\)/);
+  });
+  it("no gaps and an unchanged selection when releaseRequired is empty; ci_precheck exclude still applies", () => {
+    const a = selectCiPrecheck({ plan, required: ["Lint"] }), b = selectCiPrecheck({ plan, required: ["Lint"], releaseRequired: [] });
+    assert.deepEqual(b.run.map((r) => r.job), a.run.map((r) => r.job)); assert.deepEqual(b.parity, []);
+    const x = selectCiPrecheck({ plan, required: ["Lint"], releaseRequired: ["Format check"], cfg: parseCiPrecheckConfig({ ci_precheck_exclude: "gha:ci:fmt" }) });
+    assert.deepEqual(x.parity.map((g) => g.context), ["Format check"]);
+  });
+  it("classifier negatives: a deploy or docs job is not treated as wiring or formatting", () => {
+    assert.equal(classifyJob(job("deploy", "Deploy docs", ["bash deploy.sh"])).kind, "other");
+  });
+});
+
 describe("#5820 derive + outcome", () => {
   it("writes one plan file per job and returns bounded ci-local commands", async () => {
     const written = new Map();

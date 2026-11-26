@@ -221,6 +221,24 @@ export async function recordTrain(ctx, rec, now = Date.now()) {
   return updateActive(ctx, ["train"], (active) => ({ patch: { train: { ...(active.train ?? {}), [rec.release ?? "-"]: { ...rec, lane: "train", rollout_invalidated: true, at } } }, control: { at, verb: "train", lane: "train", release: rec.release ?? null, state: rec.state ?? null, units: rec.units?.length ?? 0, rollout_invalidated: true } }));
 }
 
+const CAUSES = ["regression", "flake", "runner"];
+/** #6013: append one snapshot round `{n, pr, head, outcome, cause, startedAt, endedAt}` to `state.rounds` (n is assigned, cause normalised). */
+export function recordReleaseRound(state, r) {
+  state.rounds ??= [];
+  const round = { n: state.rounds.length + 1, pr: r.pr ?? null, head: r.head ?? null, outcome: r.outcome ?? null, cause: CAUSES.includes(r.cause) ? r.cause : null, startedAt: r.startedAt ?? null, endedAt: r.endedAt ?? null };
+  state.rounds.push(round);
+  return round;
+}
+
+/** `{rounds, snapshots, wallMin, causes}` derived from `state.rounds`; wall time is first start -> last end. */
+export function roundStats(rounds = []) {
+  const list = Array.isArray(rounds) ? rounds : [];
+  const t = list.flatMap((r) => [Date.parse(r.startedAt), Date.parse(r.endedAt)]).filter(Number.isFinite);
+  const causes = { regression: 0, flake: 0, runner: 0 };
+  for (const r of list) if (r.cause in causes) causes[r.cause]++;
+  return { rounds: list, snapshots: list.length, wallMin: t.length ? Math.round((Math.max(...t) - Math.min(...t)) / 600) / 100 : 0, causes };
+}
+
 /**
  * #5718: release state for `forgedock stats --release-ledger`. One record per managed release started at or after `sinceMs`:
  * `{id, pr, startedAt, status, live, deployAttempts}` (read-only; a release without a readable state is skipped). The id
@@ -237,7 +255,7 @@ export async function releaseRecords(ctx, { sinceMs = 0 } = {}) {
     const pr = s.steps?.["release-pr"]?.result?.pr ?? s.pr ?? null;
     const phase = String(s.deploy?.phase ?? "");
     out.push({ id, pr: pr == null ? null : Number(pr), startedAt: s.startedAt ?? null, status: s.status ?? null,
-      live: ["live", "done"].includes(String(s.status ?? "").toLowerCase()) || phase.startsWith("LIVE"), deployAttempts: Number(s.deploy?.attempts) || 0 });
+      live: ["live", "done"].includes(String(s.status ?? "").toLowerCase()) || phase.startsWith("LIVE"), deployAttempts: Number(s.deploy?.attempts) || 0, ...(Array.isArray(s.rounds) ? roundStats(redactDeep(s.rounds)) : {}) });
   }
   return out;
 }

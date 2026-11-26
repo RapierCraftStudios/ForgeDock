@@ -69,38 +69,6 @@ export function linkResolves(link, cfg, files) {
   return (files ?? []).some((f) => re.test(f) && anyGlob(globs, f));
 }
 
-/**
- * Blocking failures (conformance.unimplemented): `docs_missing` (a touched surface with no docs change and no result.docs justification),
- * `docs_link_broken` (a `/docs/...` link the diff adds that does not resolve). `run` is ({command}) => {rc, output}; `tracked` the repo's files.
- */
-export async function docsFailures({ cfg, files = [], diff = "", result = null, run = null, tracked = null }) {
-  if (!cfg) return [];
-  const C = OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, out = [];
-  const surfaces = userFacingSurfaces(files, cfg);
-  const docGlobs = [...(cfg.paths.length ? cfg.paths : DEFAULT_PATHS), ...cfg.registries];
-  const changedDocs = files.map(norm).filter((f) => anyGlob(docGlobs, f));
-  const given = Array.isArray(result?.docs) ? result.docs : [];
-  for (const [kind, fs] of Object.entries(surfaces)) {
-    if (changedDocs.length || given.some((d) => String(d?.surface ?? "").trim().toLowerCase() === kind && String(d?.justification ?? "").trim())) continue;
-    out.push({ code: C, kind: "docs_missing", detail: `${fs.slice(0, 3).join(", ")} changes the user-facing ${kind} surface (forge.yaml docs.required_for) but no docs file changed: add the page(s) under ${(cfg.paths.length ? cfg.paths : DEFAULT_PATHS).join(", ")}${cfg.registries.length ? ` and register them (${cfg.registries.join(", ")})` : ""}, or record docs: [{"surface":"${kind}","justification":"<why none>"}] in the result file` });
-  }
-  const links = docsLinks(diff, cfg.link_prefixes);
-  if (!links.length) return out;
-  if (cfg.link_check && run) {
-    let r;
-    try { r = await run({ command: `${cfg.link_check} ${links.map(sq).join(" ")}` }); r = r?.r ?? r; } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
-    if (r?.rc !== 0) {
-      const tail = String(r?.output ?? "").trim().split("\n").slice(-12).join("\n").slice(0, 1500);
-      out.push({ code: C, kind: "docs_link_broken", detail: `forge.yaml docs.link_check (\`${cfg.link_check}\`) exited ${r?.rc ?? "?"} for the docs link(s) ${links.join(", ")} this diff adds: create the page or fix the link${tail ? `:\n${tail}` : ""}` });
-    }
-  } else if (!cfg.link_check && tracked) {
-    const known = [...new Set([...tracked, ...files].map(norm))];
-    const bad = links.filter((l) => !linkResolves(l, cfg, known));
-    if (bad.length) out.push({ code: C, kind: "docs_link_broken", detail: `the diff links to ${bad.join(", ")} but no docs file under ${(cfg.paths.length ? cfg.paths : DEFAULT_PATHS).join(", ")} serves it (forge.yaml docs): create the page or fix the link` });
-  }
-  return out;
-}
-
 const names = (c) => (c.labels ?? []).map((l) => String(l?.name ?? l).toLowerCase());
 /** Milestone children `{number, state, labels}` -> {ok, reasons}. User-facing = labelled `user-facing` or a configured kind; the docs child is labelled `docs`. */
 export function milestoneDocsGate({ children = [], cfg }) {

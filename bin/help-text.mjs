@@ -86,6 +86,7 @@ export const FULL_COMMAND_GROUPS = [
     ["npx forgedock guards list [--path p] [--json] | backfill --since <date> [--dry-run]", "Fix guards: list the records (test files + protected hunks of merged fixes) covering a path, or build them for already-merged runs"],
     ["npx forgedock limits show | clear <id>|--all", "Show or clear per-account usage-limit holds shared by orchestrate batches"],
     ["npx forgedock decisions list [--stale] [--refresh]", "List anchored decisions (FORGE:DECISION); --stale shows those with an anchor missing on the base"],
+    ["npx forgedock audits [--repo R] [--version X | --since-version X] [--signature S] [--class C] [--active] [--json]", "Query lane audits (FORGE:LANE_AUDIT) by engine version, signature and class; --active lists current-version findings per signature with counts and lanes"],
     ["npx forgedock watch [--repo owner/repo]", "Live per-agent orchestration view (Ctrl+C to exit)"],
     ["npx forgedock report [--days 30] [--md] [--json]", "30-day pipeline impact receipts for your repo"],
     ["npx forgedock stats [--since <ver|date>] [--repo owner/repo] [--json] [--refresh]", "Version-over-version cost/time/flow/review/gate report from GitHub telemetry (no model)"],

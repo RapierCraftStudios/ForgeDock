@@ -18,6 +18,7 @@ import { hostDiskFree, hostMemFree, ensureNatPin, netState } from "./health.mjs"
 import { laneDiskUsedGb, planDiskCap, fstrimDue, runFstrim } from "./disk.mjs";
 import { makeMirrorSeed, dockerRunner } from "./mirror-seed.mjs";
 import { planIdleEviction, CACHE_LABEL, agentLabel } from "./cache-sweep.mjs";
+import { cpuQuotaEnv } from "./docker.mjs";
 
 const LABEL = "computeshare=1";
 /** #5695: ephemeral CI runner containers; a different label than LABEL so the orphan reaper never removes them. */
@@ -292,7 +293,55 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const PRIORITIES = ["reserved", "normal", "borrow"];
   const reservations = () => (Array.isArray(cfg.reservations) ? cfg.reservations.filter((r) => r && typeof r.name === "string" && r.cpus > 0 && r.mem_gb > 0) : []);
   const prioOf = (r) => r.priority ?? "normal";
-  const projectedUse = () => activeRecs().reduce((a, r) => { const e = estimateFor(r.repo ?? null, { cpus: r.cpus, mem: r.mem_gb }); return { cpus: a.cpus + Math.max(r.cpus, e.cpus), mem: a.mem + Math.max(r.mem_gb, e.mem) }; }, { cpus: 0, mem: 0 });
+  const peakUse = () => activeRecs().reduce((a, r) => { const e = estimateFor(r.repo ?? null, { cpus: r.cpus, mem: r.mem_gb }); return { cpus: a.cpus + Math.max(r.cpus, e.cpus), mem: a.mem + Math.max(r.mem_gb, e.mem) }; }, { cpus: 0, mem: 0 });
+  // #6047: heavy tokens (cfg.elastic_lanes, default off). A lane is admitted on its base reservation; each heavy step leases a token
+  // (weight = max(default, p90 history - base)) from this host's pool. Tokens live in store.data.heavy and expire with their lease,
+  // when the sandbox exits or when it is destroyed.
+  const elastic = () => cfg.elastic_lanes === true;
+  const heavyTtlMs = () => (cfg.heavy_ttl_s ?? 300) * 1000;
+  const heavyDefault = () => ({ cpus: cfg.heavy_weight?.cpus ?? 1, mem: cfg.heavy_weight?.mem_gb ?? 2 });
+  const heavyTokens = () => (store.data.heavy ??= {});
+  function heavyHeld() {
+    let dropped = false;
+    for (const [k, t] of Object.entries(heavyTokens())) { const r = sb()[t.sandbox]; if (t.expires <= now() || !r || r.state === "exited") { delete heavyTokens()[k]; dropped = true; } }
+    if (dropped) store.save();
+    return Object.values(heavyTokens()).reduce((a, t) => ({ cpus: a.cpus + t.cpus, mem: a.mem + t.mem, n: a.n + 1 }), { cpus: 0, mem: 0, n: 0 });
+  }
+  const baseUse = () => activeRecs().reduce((a, r) => ({ cpus: a.cpus + r.cpus, mem: a.mem + r.mem_gb }), { cpus: 0, mem: 0 });
+  /** Elastic: base reservations plus held tokens; flat: each lane's projected peak (#5858). */
+  const projectedUse = () => { if (!elastic()) return peakUse(); const b = baseUse(), h = heavyHeld(); return { cpus: b.cpus + h.cpus, mem: b.mem + h.mem }; };
+  /** Lane ceiling derived from the token pool when elastic: a multiple of the default-weight heavy steps the host holds. */
+  function derivedCeiling() {
+    const e = effectiveCapacity(), w = heavyDefault();
+    return Math.max(1, Math.floor(Math.min((e.cpus - coTenant.cpus) / w.cpus, (e.mem - coTenant.mem_gb) / w.mem) * (cfg.elastic_lane_factor ?? 3)));
+  }
+  function heavyAcquire(r) {
+    const held = heavyHeld(), mine = Object.entries(heavyTokens()).find(([, t]) => t.sandbox === r.id);
+    const ttl = Math.round(heavyTtlMs() / 1000);
+    if (mine) { mine[1].refs = (mine[1].refs ?? 1) + 1; mine[1].expires = now() + heavyTtlMs(); store.save(); return { status: 200, body: { granted: true, token: mine[0], ttl_s: ttl } }; }
+    const est = estimateFor(r.repo ?? null, { cpus: r.cpus, mem: r.mem_gb }), d = heavyDefault();
+    const w = { cpus: Math.max(d.cpus, est.cpus - r.cpus), mem: Math.max(d.mem, est.mem - r.mem_gb) };
+    const e = effectiveCapacity(), b = baseUse(), live_ = live(cfg), ram = Number.isFinite(live_?.mem_available_gb) ? live_.mem_available_gb : Infinity;
+    const fits = b.cpus + held.cpus + w.cpus <= e.cpus - coTenant.cpus + 1e-9 && b.mem + held.mem + w.mem <= e.mem - coTenant.mem_gb + 1e-9 && w.mem <= ram + 1e-9;
+    if (held.n > 0 && !fits) return { status: 200, body: { granted: false, retry_after_s: 15, held: held.n } }; // the first holder always runs: a step larger than the host must not starve
+    const token = randomBytes(12).toString("hex");
+    heavyTokens()[token] = { sandbox: r.id, cpus: w.cpus, mem: w.mem, at: now(), refs: 1, expires: now() + heavyTtlMs() };
+    store.save();
+    return { status: 200, body: { granted: true, token, ttl_s: ttl, weight: { cpus: w.cpus, mem_gb: w.mem } } };
+  }
+  function heavyTouch(r, action, token) {
+    heavyHeld();
+    const t = heavyTokens()[token];
+    if (!t || t.sandbox !== r.id) return { status: 200, body: { ok: action === "release", granted: false } };
+    if (action === "release") { if ((t.refs = (t.refs ?? 1) - 1) <= 0) delete heavyTokens()[token]; } else t.expires = now() + heavyTtlMs();
+    store.save();
+    return { status: 200, body: { ok: true, granted: action === "renew" } };
+  }
+  function heavyView() {
+    if (!elastic()) return {};
+    const h = heavyHeld(), e = effectiveCapacity(), b = baseUse();
+    return { elastic_lanes: true, heavy_tokens: h.n, heavy_held: { cpus: r2(h.cpus), mem_gb: r2(h.mem) }, cpus_free_elastic: r2(e.cpus - b.cpus - h.cpus - coTenant.cpus), mem_free_gb_elastic: r2(e.mem - b.mem - h.mem - coTenant.mem_gb), lanes_ceiling_derived: derivedCeiling() };
+  }
   const sumRecs = (rs) => rs.reduce((a, s) => ({ cpus: a.cpus + s.cpus, mem: a.mem + s.mem_gb }), { cpus: 0, mem: 0 });
   const weighted = () => reservations().length > 0 || Boolean(cfg.idle_only);
   const SHARES = () => ({ reserved: 4096, normal: 1024, borrow: 128, throttled: 2, ...(cfg.cpu_shares ?? {}) });
@@ -374,7 +423,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   let policyPaused = Boolean(cfg.policy_paused);
   function applyPolicy(body) {
     const p = body && typeof body === "object" ? body : {}, int = (v, lo, hi) => (Number.isInteger(v) && v >= lo && v <= hi);
-    if ((p.cpus !== undefined && !int(p.cpus, 1, 256)) || (p.mem_gb !== undefined && !int(p.mem_gb, 1, 1024)) || (p.idle_only !== undefined && typeof p.idle_only !== "boolean") || (p.paused !== undefined && typeof p.paused !== "boolean")
+    if ((p.cpus !== undefined && !int(p.cpus, 1, 256)) || (p.mem_gb !== undefined && !int(p.mem_gb, 1, 1024)) || (p.idle_only !== undefined && typeof p.idle_only !== "boolean") || (p.paused !== undefined && typeof p.paused !== "boolean") || (p.elastic_lanes !== undefined && typeof p.elastic_lanes !== "boolean")
       || (p.floors !== undefined && !(p.floors && typeof p.floors === "object" && Object.keys(p.floors).every((k) => k === "host_disk_gb" && Number.isFinite(p.floors[k]) && p.floors[k] >= 0)))) return { status: 400, body: { error: "invalid policy" } };
     const set = {};
     if (p.cpus !== undefined) set.allow_cpus = p.cpus;
@@ -382,6 +431,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     if (p.idle_only !== undefined) set.idle_only = p.idle_only;
     if (p.floors?.host_disk_gb !== undefined) set.host_disk_floor_gb = p.floors.host_disk_gb;
     if (p.paused !== undefined) set.policy_paused = p.paused;
+    if (p.elastic_lanes !== undefined) set.elastic_lanes = p.elastic_lanes;
     if (cfg.config_path) {
       try { const c = JSON.parse(readFileSync(cfg.config_path, "utf8")); writeFileSync(cfg.config_path, JSON.stringify({ ...c, ...set }, null, 2), { mode: 0o600 }); }
       catch (e) { log.warn?.(`policy not persisted: ${e.message}`); }
@@ -403,7 +453,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const active = Object.values(sb()).filter((s) => s.state !== "exited").length;
     const e = effectiveCapacity();
     const h = live(cfg);
-    return { host: cfg.name ?? hostname(), usage_summary: usageSummary(Object.values(sb()).filter((r) => r.state !== "exited").map(usageView)), ...running, vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.log && upgrade.state === "failed" ? { upgrade_log: upgrade.log } : {}), ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10, ...(i.depcache_bytes ? { depcache_gb: Object.fromEntries(Object.entries(i.depcache_bytes).map(([k, b]) => [k, Math.round(b / 107374182.4) / 10])) } : {}) }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...throttleView(h), ...diskView(), ...laneDiskView(), ...hostDiskView(active), ...hostMemView(), runners: Object.entries(runners()).map(([name, r]) => ({ name, label: r.label })), net: (() => { const rx = netRx(now()); const n = readNet(); return rx ? { ...(n ?? {}), ...rx } : n; })(), paused: Boolean(cfg.paused || ownerPaused || policyPaused), owner_paused: ownerPaused, ...(Number.isFinite(h?.load_per_core) ? { load_per_core: h.load_per_core } : {}), ...(Number.isFinite(h?.mem_available_gb) ? { mem_available_gb: h.mem_available_gb } : {}), live: h, usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
+    return { host: cfg.name ?? hostname(), usage_summary: usageSummary(Object.values(sb()).filter((r) => r.state !== "exited").map(usageView)), ...running, vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.log && upgrade.state === "failed" ? { upgrade_log: upgrade.log } : {}), ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10, ...(i.depcache_bytes ? { depcache_gb: Object.fromEntries(Object.entries(i.depcache_bytes).map(([k, b]) => [k, Math.round(b / 107374182.4) / 10])) } : {}) }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...throttleView(h), ...diskView(), ...laneDiskView(), ...hostDiskView(active), ...hostMemView(), ...heavyView(), runners: Object.entries(runners()).map(([name, r]) => ({ name, label: r.label })), net: (() => { const rx = netRx(now()); const n = readNet(); return rx ? { ...(n ?? {}), ...rx } : n; })(), paused: Boolean(cfg.paused || ownerPaused || policyPaused), owner_paused: ownerPaused, ...(Number.isFinite(h?.load_per_core) ? { load_per_core: h.load_per_core } : {}), ...(Number.isFinite(h?.mem_available_gb) ? { mem_available_gb: h.mem_available_gb } : {}), live: h, usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
   }
 
   /** The image a spec's lanes run (the per-repo lane_tools tag when tools are listed), without building it. */
@@ -462,7 +512,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   } });
   const seedFail = (e) => { if (e.status) throw Object.assign(new Error(e.message), { status: e.status, body: { error: e.message, ...(e.extra ?? {}) } }); throw e; };
 
-  async function launch({ spec, cpus, mem_gb, limit = null }) {
+  async function launch({ spec, cpus, mem_gb, limit = null, max_lanes = null }) {
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id) || !Array.isArray(spec.command) || !spec.command.length) throw Object.assign(new Error("spec.id ([A-Za-z0-9._-], max 128) and spec.command are required"), { status: 400 });
     let existing = own(spec.id);
     if (existing?.drained && existing.state === "exited") { await destroy(existing.id, "drained: relaunch"); existing = null; } // #5856: the router/dispatcher rescheduled a drained lane under the same id
@@ -484,10 +534,11 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     // Burst model: reservations are small, so also refuse when the VM is genuinely short of memory or overloaded right now.
     // A reserved launch skips the load gate: it must never be refused because lanes are busy (they are throttled/drained below).
     if (prio !== "reserved") { // #5858: ramp-aware: the admitted lanes' projected peaks plus this one must fit, however low the load is right now
-      const e = effectiveCapacity(), pu = projectedUse(), est = estimateFor(slugOf(spec), { cpus, mem: mem_gb }), nm = Math.max(mem_gb, est.mem), nc = Math.max(cpus, est.cpus);
+      const e = effectiveCapacity(), pu = projectedUse(), est = elastic() ? { cpus, mem: mem_gb } : estimateFor(slugOf(spec), { cpus, mem: mem_gb }), nm = Math.max(mem_gb, est.mem), nc = Math.max(cpus, est.cpus);
       const availMem = e.mem - coTenant.mem_gb, availCpus = e.cpus - coTenant.cpus;
       if (pu.mem + nm > availMem + 1e-9 || pu.cpus + nc > availCpus + 1e-9) return { status: 503, body: { error: `projected peak ${r1(pu.mem + nm)} GB / ${r1(pu.cpus + nc)} cpus exceeds capacity ${r1(availMem)} GB / ${r1(availCpus)} cpus`, code: "pool.projected_peak", capacity: c }, retryAfter: 60 };
     }
+    if (elastic() && prio !== "reserved" && !Number.isInteger(max_lanes) && activeRecs().length >= derivedCeiling()) return { status: 503, body: { error: `derived lane ceiling ${derivedCeiling()} reached`, code: "pool.host_lane_ceiling", capacity: c }, retryAfter: 60 };
     if (!h.ok && prio !== "reserved") return { status: 503, body: { error: `host busy: ${h.reason}`, code: "pool.host_load", live: h }, retryAfter: 60 };
     const gate = hostDiskView(c.active, spec.repo?.slug ?? null);
     if (gate.host_disk_low) { // #5733: before any mkdir or docker run; the lane defers on the 503 (SANDBOX_CAPACITY)
@@ -520,7 +571,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const envFile = join(dir, "env");
     const credToken = randomBytes(24).toString("hex");
     const withDocker = Boolean(spec.docker);
-    const env = { ...(spec.env ?? {}), ...(withDocker ? { DOCKER_HOST: "tcp://127.0.0.1:2375" } : {}), CS_CRED_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/creds`, CS_RELAY_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/relay`, CS_CRED_TOKEN: credToken, CS_SANDBOX_ID: spec.id, CS_REPO_SLUG: spec.repo?.slug ?? "", CS_REPO_URL: spec.repo?.url ?? "", CS_REPO_REF: spec.repo?.ref ?? "", CS_RESULT_FILE: spec.result_file ?? "", CS_WORK_DIR: workDirOf(name),
+    const env = { ...(spec.env ?? {}), ...(withDocker ? { DOCKER_HOST: "tcp://127.0.0.1:2375" } : {}), ...(elastic() ? { CS_HEAVY_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/heavy` } : {}), CS_CRED_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/creds`, CS_RELAY_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/relay`, CS_CRED_TOKEN: credToken, CS_SANDBOX_ID: spec.id, ...cpuQuotaEnv(limit?.lane_cpus ?? cpus), CS_REPO_SLUG: spec.repo?.slug ?? "", CS_REPO_URL: spec.repo?.url ?? "", CS_REPO_REF: spec.repo?.ref ?? "", CS_RESULT_FILE: spec.result_file ?? "", CS_WORK_DIR: workDirOf(name),
       ...(spec.env_snapshots?.enabled ? { FORGE_ENV_IMAGE: envImageOf(spec) } : {}) }; // the image is part of the snapshot key
     writeFileSync(envFile, Object.entries(env).map(([k, v]) => envLine(k, v)).join("\n") + "\n", { mode: 0o600 });
     const rec = { id: spec.id, name, dir, issue: spec.issue ?? null, slug: spec.repo?.slug ?? null, repo: slugOf(spec), batch: spec.batch ?? null, cpus, mem_gb, result_file: spec.result_file ?? null, state: "starting", startedAt: now(), finishedAt: null, lease: now(), credToken, docker: withDocker, ...(weighted() || spec.priority ? { priority: prio, ...(reservation ? { reservation } : {}) } : {}) };
@@ -904,7 +955,10 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       if (want.image !== running.image || want.version !== running.version) {
         const nextImage = cfg.image && cfg.image !== "computeshare-lane:1" ? cfg.image : laneImageTag(want.version);
         log.info?.(`rebuilding ${nextImage} (${running.version}/${running.image} -> ${want.version}/${want.image})`);
-        await buildWithRetry(() => docker.build(join(next, "pool", "image"), nextImage, laneBuildArgs(want.version)), { log }); // #5919
+        // 2026-11-26: a host pre-seeded with the image (docker load from another host) skips the build: on a slow or memory-tight
+        // host the build itself is the risk (an upgrade build coincided with a host crash)
+        if (await docker.hasImage?.(nextImage)) log.info?.(`${nextImage} already present; no build`);
+        else await buildWithRetry(() => docker.build(join(next, "pool", "image"), nextImage, laneBuildArgs(want.version)), { log }); // #5919
       }
       await pruneLaneImages([laneImageTag(want.version)]);
       await prepullImages();
@@ -1003,7 +1057,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
 
   const routes = [
     [route("GET", "/health"), async () => ({ status: 200, body: { ok: true, ...capacity() } })],
-    [route("GET", "/mirrors"), async (_p, _b, url) => ({ status: 200, body: await mirrors.tips({ slug: url.searchParams.get("slug"), cache_key: url.searchParams.get("cache_key"), upload: url.searchParams.get("upload") }).catch(seedFail) })], // #5949
+    [route("GET", "/mirrors"), async (_p, _b, url) => ({ status: 200, body: await mirrors.tips({ slug: url.searchParams.get("slug"), cache_key: url.searchParams.get("cache_key"), upload: url.searchParams.get("upload"), uploader: url.searchParams.get("uploader") }).catch(seedFail) })], // #5949
     [route("POST", "/mirrors/seed"), async (_p, body) => { try { return { status: 200, body: body?.finish ? await mirrors.finish(body) : mirrors.chunk(body) }; } catch (e) { return { status: e.status ?? 500, body: { error: e.message, ...(e.extra ?? {}) } }; } }],
     [route("GET", "/capacity"), async () => ({ status: 200, body: capacity() })],
     [route("POST", "/sandboxes"), async (_p, body) => { const r = await launch(body ?? {}); if (Number.isInteger(body?.spec?.warm)) warm.replenish().catch((e) => log.warn?.(`warm replenish: ${e.message}`)); return r; }],
@@ -1046,6 +1100,13 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       if (cred) { const r = await sandboxCred(decodeURIComponent(cred[1]), cred[2], req); return send(res, r.status, r.body, r.retryAfter ? { "retry-after": String(r.retryAfter) } : {}); }
       const limited = req.method === "POST" && /^\/sandboxes\/([^/]+)\/creds\/claude\/limited$/.exec(url.pathname); // #5205
       if (limited) { const r = await sandboxCredLimited(decodeURIComponent(limited[1]), req, await readJson(req)); return send(res, r.status, r.body); }
+      const heavy = req.method === "POST" && /^\/sandboxes\/([^/]+)\/heavy\/(acquire|release|renew)$/.exec(url.pathname); // #6047
+      if (heavy) {
+        const id = decodeURIComponent(heavy[1]);
+        if (!sandboxAuthed(id, req)) return send(res, SANDBOX_UNAUTHORIZED.status, SANDBOX_UNAUTHORIZED.body);
+        const body = await readJson(req, 4096), r0 = own(id), r = heavy[2] === "acquire" ? heavyAcquire(r0) : heavyTouch(r0, heavy[2], body?.token);
+        return send(res, r.status, r.body);
+      }
       const relay = (req.method === "POST" && /^\/sandboxes\/([^/]+)\/relay$/.exec(url.pathname)) || (req.method === "GET" && /^\/sandboxes\/([^/]+)\/relay\/([^/]+)$/.exec(url.pathname));
       if (relay) { const r = await sandboxRelay(decodeURIComponent(relay[1]), relay[2] ? decodeURIComponent(relay[2]) : null, req); return send(res, r.status, r.body ?? {}); }
       if (url.pathname !== "/health" && !bearerOk(req, cfg.token)) return send(res, 401, { error: "unauthorized", hop: "agent", reason: "agent auth: router token rejected by agent" });

@@ -35,39 +35,3 @@ export async function acquireHotArea({ gitCommonDir, areas = [], owner, waitMs =
   }
   return { ok: true, release, areas: [...new Set(areas)].sort() };
 }
-
-/**
- * Each counter's match count at `ref` (git grep -c -E; no checkout). `git(args)` returns stdout and throws on a non-zero
- * exit: git grep exits 1 on no match, so a throw counts as 0.
- * @returns {Promise<Record<string, number>>}
- */
-export async function countCounters({ git, ref = "HEAD", counters = [] }) {
-  const out = {};
-  for (const c of counters ?? []) {
-    let n = 0;
-    try {
-      const txt = String(await git(["grep", "-c", "-E", "-e", c.pattern, ref, "--", ...(c.paths?.length ? c.paths : ["."])]));
-      for (const line of txt.split("\n")) { const m = /:(\d+)\s*$/.exec(line); if (m) n += Number(m[1]); }
-    } catch { n = 0; }
-    out[c.name] = n;
-  }
-  return out;
-}
-
-const okRe = (name) => new RegExp(`counter-ok:\\s*${String(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+\\S`, "i");
-/** True when the contract decisions (or a result decision amendment) carry `counter-ok: <name> <reason>`. */
-export function counterExempt(name, contract, result = null) {
-  const re = okRe(name);
-  const texts = [...(contract?.decisions ?? []).flatMap((d) => [d?.choice, d?.justification, d?.why]),
-    ...(Array.isArray(result?.amendments) ? result.amendments : []).filter((a) => a?.kind === "decision").flatMap((a) => [a?.decision?.choice, a?.why])];
-  return texts.some((t) => typeof t === "string" && re.test(t));
-}
-
-/** Failures for every counter that grew from `before` to `after` without an explicit decision. */
-export function counterGrowth({ before = null, after = null, contract = null, result = null } = {}) {
-  if (!before || !after) return [];
-  return Object.keys(after)
-    .filter((name) => Number.isFinite(before[name]) && Number(after[name]) > Number(before[name]) && !counterExempt(name, contract, result))
-    .map((name) => ({ code: C.MAINTENANCE_COUNTER_GROWTH, kind: "counter_growth",
-      detail: `counter ${name} grew from ${before[name]} to ${after[name]} without a contract decision "counter-ok: ${name} <reason>"` }));
-}

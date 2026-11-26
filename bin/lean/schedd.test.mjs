@@ -582,7 +582,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await d.close(); }
   });
 
-  it("#5806: a hosted runner wedged in setup restarts the daemon once (decision logged); the same stall again alerts and never loops", async () => {
+  it("#5806: a hosted runner wedged in setup restarts the daemon (decision logged); the same stall again is healed again after the backoff, no alert (#6082)", async () => {
     const dir = tmpDir("schedd-stall-setup-"), root = join(dir, "batches"), id = "b20261121-000000-5806";
     const b = openBatch(root, id);
     b.writePlan({ daemon: true, repo: "o/r", created: new Date().toISOString() });
@@ -598,10 +598,9 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
       assert.ok(lines.some((l) => /FORGE:DECISION batch .+ stall-recovery: restart the hosting schedd/.test(l)), lines.join("\n"));
       assert.equal(JSON.parse(readFileSync(join(b.dir, "health.json"), "utf8")).stallRecovery.action, "restart-daemon");
       utimesSync(join(b.dir, "state.json"), old, old);
-      await until(() => readFileSync(join(b.dir, "health.json"), "utf8").includes("stalled again after auto-recovery"), 8000);
-      await new Promise((r) => setTimeout(r, 300));
-      assert.equal(restarts.length, 1, "recovered once, then alerted");
-      assert.match(readFileSync(join(b.dir, "batch.log"), "utf8"), /BATCH UNHEALTHY .*\(stuck in setup, 0\/2 issues read\).*probed: stalled again after auto-recovery/);
+      await until(() => restarts.length >= 2, 8000);
+      assert.equal(JSON.parse(readFileSync(join(b.dir, "health.json"), "utf8")).stallRecovery.count >= 2, true, "a second recovery is recorded");
+      assert.doesNotMatch(readFileSync(join(b.dir, "batch.log"), "utf8"), /BATCH UNHEALTHY/, "no operator alert while self-heal has attempts left");
     } finally { await d.close(); }
   });
 
@@ -657,6 +656,24 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
       await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: ["1"], cwd: dir, env: {} });
       await new Promise((r) => setTimeout(r, 2000));
       assert.equal(calls.length, 1, "a tripped breaker holds the batch for an operator --resume");
+    } finally { await d.close(); }
+  });
+
+  it("#6042: a batch whose breaker is environmental is re-hosted by the timer", async () => {
+    const dir = tmpDir("schedd-rehost-env-"), root = join(dir, "batches"), id = "b20261031-000000-6042";
+    const calls = [];
+    const runBatch = async ({ argv, sink }) => {
+      calls.push(argv);
+      const b = openBatch(root, id);
+      if (argv[0] !== "--resume") { b.writePlan({ daemon: true, repo: "o/r" }); b.store.save({ v: 1, order: [1], results: {}, running: {}, pending: [1], notBefore: { 1: Date.now() + 300 }, breaker: { at: Date.now(), errors: 3, environmental: true } }); }
+      sink.batch({ id, dir: b.dir });
+      return {};
+    };
+    const d = await startDaemon({ dir, root, runBatch, log: () => {}, resumeOnStart: false });
+    try {
+      await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: ["1"], cwd: dir, env: {} });
+      await until(() => calls.length >= 2, 8000);
+      assert.equal(calls[1][0], "--resume");
     } finally { await d.close(); }
   });
 

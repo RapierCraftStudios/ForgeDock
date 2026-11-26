@@ -10,6 +10,27 @@ export const ADMISSION_DEFAULTS = Object.freeze({ enabled: true, min_free_mem_mb
 // #5845: lanes admitted within `ramp_s` have not grown yet; `host.rampingMb/rampingLanes/laneFootprintMb` (effects.mjs) expose them. null `max_new_per_ramp` = no rate limit.
 export const ADMISSION_RETRY_SECONDS = 60;
 
+/**
+ * #6047: usable cores = min(VM cores, the container's cgroup CPU quota). `read(path)` returns file text or throws; v2 `cpu.max`
+ * ("<quota> <period>" or "max <period>"), v1 `cpu.cfs_quota_us` (-1 = unlimited) / `cpu.cfs_period_us`. `CS_CPU_QUOTA` (set by
+ * the pool when the cgroup files are hidden from the lane) is the fallback. Unlimited or unreadable gives the VM cores.
+ */
+export function quotaCores({ cores, read, env = {} } = {}) {
+  const vm = Number.isFinite(cores) && cores > 0 ? cores : 1;
+  const num = (f) => { try { const v = Number(String(read?.(f) ?? "").trim()); return Number.isFinite(v) ? v : null; } catch { return null; } };
+  let q = null;
+  try {
+    const [quota, period] = String(read?.("/sys/fs/cgroup/cpu.max") ?? "").trim().split(/\s+/);
+    if (quota && quota !== "max" && Number(quota) > 0 && Number(period) > 0) q = Number(quota) / Number(period);
+  } catch { /* not cgroup v2 */ }
+  if (q === null) {
+    const quota = num("/sys/fs/cgroup/cpu/cpu.cfs_quota_us"), period = num("/sys/fs/cgroup/cpu/cpu.cfs_period_us");
+    if (quota > 0 && period > 0) q = quota / period;
+  }
+  if (q === null) { const e = Number(env?.CS_CPU_QUOTA); if (Number.isFinite(e) && e > 0) q = e; }
+  return q === null ? vm : Math.max(1, Math.min(vm, Math.floor(q)));
+}
+
 /** Workers one verification step may use (#4182): max(1, floor(cores / lanes)); bad inputs count as 1. Heavy shims pass live heavy holders (#4169). */
 export function hostParallelism({ cores, lanes } = {}) {
   const c = Number.isFinite(cores) && cores > 0 ? cores : 1, l = Number.isFinite(lanes) && lanes > 0 ? lanes : 1;
