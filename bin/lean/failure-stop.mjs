@@ -21,9 +21,9 @@ export function normalizeDetail(detail) {
     .toLowerCase();
 }
 
-/** 12 hex characters of sha1(code + normalised detail). */
+/** 12 hex characters of sha256(code + normalised detail): a repeat fingerprint, not a security hash (sha256 keeps CodeQL js/weak-cryptographic-algorithm quiet). */
 export function repeatSignature(code, detail) {
-  return createHash("sha1").update(`${code ?? ""}\n${normalizeDetail(detail)}`).digest("hex").slice(0, 12);
+  return createHash("sha256").update(`${code ?? ""}\n${normalizeDetail(detail)}`).digest("hex").slice(0, 12);
 }
 
 /** Earlier trusted NEEDS_HUMAN/PARKED comments carrying `sig=<hash>`. A PARKED summary counts as the failure it parked on. */
