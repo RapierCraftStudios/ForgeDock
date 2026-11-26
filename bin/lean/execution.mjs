@@ -822,6 +822,9 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
       return ok;
     },
     runOne: async (n, lane, ctx = {}) => {
+      // #6124: this dispatcher owns the lane now: a suspend marker left by an earlier keep-for-adopt would make the fresh lane
+      // refuse its own push ("kept for adopt") on every relaunch, so it is cleared before the lane starts.
+      try { await resumeKept?.(n); } catch { /* best effort: the lane fails open on an unreadable state */ }
       const led = ledgerFor(n);
       const base = { provider: provider.name, id: provider.idFor(n), issue: n, startedAt: now() };
       // A sandbox an earlier attempt left behind (same id) goes first, or the new one could not start.

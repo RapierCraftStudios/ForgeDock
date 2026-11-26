@@ -1465,3 +1465,24 @@ describe("public-repo default placement (#5748)", () => {
     assert.equal(await repoIsPublic({ repo: null, gh: async () => "{}" }), false);
   });
 });
+
+describe("providerLanes: a fresh dispatch clears a stale suspend marker (#6124)", () => {
+  it("runOne calls resumeKept before launching, so the new lane does not refuse its own push", async () => {
+    const order = [];
+    const prov = fakeProvider({ finish: () => ({ terminalReason: "merged", pr: 9 }) });
+    const origStart = prov.start;
+    prov.start = async (...a) => { order.push("start"); return origStart(...a); };
+    const lanes = providerLanes({ provider: prov, laneArgs: () => [], ledgerFor: ledgerIn(tmpDir("exec-6124-")), pollMs: 1, now: () => 1000, resumeKept: async (n) => { order.push(`resume:${n}`); } });
+    const r = await lanes.runOne(7, "staging");
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(order.slice(0, 2), ["resume:7", "start"]);
+    await r.postRun?.();
+  });
+  it("a failing resumeKept does not stop the lane", async () => {
+    const prov = fakeProvider({ finish: () => ({ terminalReason: "merged", pr: 9 }) });
+    const lanes = providerLanes({ provider: prov, laneArgs: () => [], ledgerFor: ledgerIn(tmpDir("exec-6124b-")), pollMs: 1, now: () => 1000, resumeKept: async () => { throw new Error("gh down"); } });
+    const r = await lanes.runOne(7, "staging");
+    assert.equal(r.terminalReason, "merged");
+    await r.postRun?.();
+  });
+});
