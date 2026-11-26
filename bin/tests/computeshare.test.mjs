@@ -55,6 +55,7 @@ test("agent launch is idempotent and secrets never reach docker argv", async () 
   assert.equal(docker.runs.length, 1);
   assert.ok(!docker.runs[0].join(" ").includes("secret-value"));
   assert.ok(docker.runs[0].includes("--cpus") && docker.runs[0].includes("3072m"));
+  assert.ok(docker.runs[0].includes("--init"), "lane containers run an init as PID 1 so dead children are reaped (zombies reached the pid limit)");
 });
 
 test("agent refuses past its reservation with 503", async () => {
