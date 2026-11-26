@@ -198,6 +198,7 @@ function world(o = {}) {
       return "";
     },
     runner: async (c) => {
+      if (c.role === "lane-audit") return { text: "" }; // #6079: the post-terminal audit classification is not a lane session
       w.calls.push(["runner", c.role, c.resume ?? null, c.model ?? null, c.prompt, c.readOnly ?? false, c.system]);
       w.seq.push(c.role + (c.resume ? "-resume" : ""));
       w.envs.push(c.env ?? null);

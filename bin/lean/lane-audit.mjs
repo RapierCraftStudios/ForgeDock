@@ -96,7 +96,7 @@ export async function runLaneAudit(o = {}) {
     let c = classifyAudit(ev, table);
     let gapFinding = null, llmFinding = null;
     if (c && c.active && ACTIVE_CLASSES.includes(c.class)) gapFinding = await gap(ev, c);
-    if (!c) { llmFinding = await llm(ev); c = llmFinding && typeof llmFinding === "object" ? { signature: llmFinding.signature ?? "llm", class: llmFinding.class ?? "unclassified", owner: llmFinding.owner ?? null, action: llmFinding.action ?? null, introduced_in: null, fixed_in: null, fixed_in_later: false, active: true } : null; }
+    if (!c) { llmFinding = await llm(ev); c = llmFinding && typeof llmFinding === "object" ? { signature: llmFinding.signature ?? "llm", class: llmFinding.class ?? "unclassified", owner: llmFinding.owner ?? null, action: llmFinding.action ?? null, matcher: llmFinding.matcher ?? null, proposed_by: "llm", ...(llmFinding.model ? { model: llmFinding.model } : {}), introduced_in: null, fixed_in: null, fixed_in_later: false, active: true } : null; }
     if (!c) c = { signature: "unclassified", class: "unclassified", owner: null, action: null, introduced_in: null, fixed_in: null, fixed_in_later: false, active: true };
     const key = auditKey(ev.issue, ev.stamp?.attempt, c.signature);
     const seen = (o.comments ?? []).some((cm) => (typeof cm === "string" || trusted(cm)) && parseAudit(typeof cm === "string" ? cm : cm?.body)?.key === key);

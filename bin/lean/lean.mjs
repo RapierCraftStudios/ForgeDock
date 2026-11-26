@@ -128,6 +128,7 @@ import { createLedger, flattenPhases, overheadStats } from "./phaseledger.mjs";
 import { DEFAULT_CATALOG_SOURCES, deriveCatalog, mergeRecipes, rewriteMissed, isDriftFailure, rewriteSubprojectVenv, deriveTestEnvMap, rewriteToCiEnv } from "./validate-catalog.mjs";
 import { holderGone } from "./liveness.mjs";
 import { runLaneAudit, buildStamp, forgeYamlHash } from "./lane-audit.mjs"; // #6076
+import { classifyWithLlm } from "./lane-audit-llm.mjs"; // #6079
 import { makeGapAuditor, parseGapConfig } from "./lane-audit-gap.mjs"; // #6078
 import { parseForgeYaml } from "../forge-utils.mjs";
 import { planStale, stackedBaseBlock, validStackedOn, cascadeDecision, invalidatedChecks } from "./stacking.mjs";
@@ -798,7 +799,7 @@ export async function runCore(o) {
     if (reason === "needs-human" || reason === "engine-error" || (recoverUnlabelled && recover.final && (reason === "ci-pending" || reason === "budget-exceeded"))) { // #6076: one version-stamped FORGE:LANE_AUDIT at the unhappy terminals; never changes how the lane ends
       try {
         let gapCfg; try { gapCfg = parseGapConfig(parseForgeYaml(readFileSync(join(o.cwd ?? wt, "forge.yaml"), "utf8"))); } catch { gapCfg = parseGapConfig({}); }
-        await runLaneAudit({ gap: makeGapAuditor({ gh: ghc, cfg: gapCfg, repo }), issue, reason, code, detail, comments: allComments(), trusted: (c) => c?.__mine === true || isTrustedIssueComment(c), phases: phaseLedger.snapshot(), post: (m, b) => post(m, b),
+        await runLaneAudit({ gap: makeGapAuditor({ gh: ghc, cfg: gapCfg, repo }), issue, reason, code, detail, comments: allComments(), trusted: (c) => c?.__mine === true || isTrustedIssueComment(c), phases: phaseLedger.snapshot(), post: (m, b) => post(m, b), llm: (ev) => classifyWithLlm(ev, { runner: io.runner, cwd: o.cwd ?? wt }),
           stamp: buildStamp({ engineVersion: ENGINE_VERSION, forgeYamlHash: forgeYamlHash(o.cwd ?? wt), batchId: o.batchId ?? null, attempt: recover?.attempt ?? o.attempt ?? 1 }) });
       } catch { /* the audit is best effort */ }
     }
