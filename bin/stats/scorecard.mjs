@@ -7,6 +7,9 @@
  * is null when either side is null. Verdict rule and tolerances match bin/stats/release.mjs (#4628).
  */
 import { DEFAULT_MIN_N, UNKNOWN, compareVersions, percentile } from "./aggregate.mjs";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { batchRoot, listBatches } from "../lean/batch.mjs";
 import { defaultGh, fetchGithubRecords, isValidRepo, toModel } from "./github-source.mjs";
 
 export const SCORECARD_MARKER = "<!-- FORGE:SCORECARD v1 -->";
@@ -124,11 +127,21 @@ export function parseScorecardArgs(argv) {
   return o;
 }
 
+/** Batch logs of `repo` on disk: one row per batch, interventions = operator requeues applied (state.json `requeueApplied`). */
+export function batchRowsFromDisk(repo, root = batchRoot()) {
+  const read = (f) => { try { return JSON.parse(readFileSync(f, "utf8")); } catch { return null; } };
+  return listBatches(root).flatMap((id) => {
+    const plan = read(join(root, id, "plan.json")), st = existsSync(join(root, id, "state.json")) ? read(join(root, id, "state.json")) : null;
+    if (!plan || plan.repo !== repo || !st) return [];
+    return [{ batch: id, interventions: Array.isArray(st.requeueApplied) ? st.requeueApplied.length : 0 }];
+  });
+}
+
 /** Fetch the register and build the scorecard. `deps.gh`/`deps.fetch` are injectable. */
 export async function gatherScorecard({ repo, release, minN = DEFAULT_MIN_N }, deps = {}) {
   const result = await (deps.fetch ?? fetchGithubRecords)({ repo, gh: deps.gh ?? defaultGh, useCache: deps.useCache ?? true });
   const { runs } = toModel(repo, result);
-  return buildScorecard({ records: runs, batchRows: deps.batchRows ?? [], laneAudits: deps.laneAudits ?? [], release, minN });
+  return buildScorecard({ records: runs, batchRows: deps.batchRows ?? (() => { try { return batchRowsFromDisk(repo); } catch { return []; } })(), laneAudits: deps.laneAudits ?? [], release, minN });
 }
 
 export async function runScorecard(argv, deps = {}) {

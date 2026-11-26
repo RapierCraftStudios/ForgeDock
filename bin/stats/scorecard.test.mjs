@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildScorecard, renderScorecard, scorecardComment, parseScorecardArgs, runScorecard, gatherScorecard, SCORECARD_MARKER } from "./scorecard.mjs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpDir } from "../tests/_tmp.mjs";
+import { batchRowsFromDisk, buildScorecard, renderScorecard, scorecardComment, parseScorecardArgs, runScorecard, gatherScorecard, SCORECARD_MARKER } from "./scorecard.mjs";
 
 const run = (version, i, o = {}) => ({ version, issue: i, finished: true, reason: "merged", remediated: false, wallMs: 600000, verified: true,
   phases: { implement: { usd: 2, ms: 300000 } }, builderAttempts: [{ attempt: 1 }], ...o });
@@ -58,5 +61,13 @@ describe("scorecard", () => {
     const fetch = async ({ repo }) => ({ records: [], items: [], repo });
     const sc = await gatherScorecard({ repo: "o/r", release: "v1" }, { fetch, gh: async () => { throw new Error("no network"); } });
     assert.equal(sc.values.n, 0);
+  });
+  it("reads batch logs from disk: interventions are applied requeues of that repo's batches", () => {
+    const root = tmpDir("sc-");
+    const mk = (id, repo, st) => { mkdirSync(join(root, id), { recursive: true }); writeFileSync(join(root, id, "plan.json"), JSON.stringify({ repo })); writeFileSync(join(root, id, "state.json"), JSON.stringify(st)); };
+    mk("b-1", "o/r", { requeueApplied: ["a", "b"] });
+    mk("b-2", "o/r", {});
+    mk("b-3", "x/y", { requeueApplied: ["a"] });
+    assert.deepEqual(batchRowsFromDisk("o/r", root), [{ batch: "b-1", interventions: 2 }, { batch: "b-2", interventions: 0 }]);
   });
 });

@@ -348,5 +348,5 @@ wait minutes per merged lane, minutes (wall p50) and $ per merge, revert rate, r
 remediation), share of requirements covered by tests (merged runs whose requirements were all verified) and stuck issues
 (runs with more than one builder attempt).
 
-LANE_AUDIT annotations, batch rows and revert flags are optional inputs: they are not on every base, so without them
+Batch rows are read from the local batch logs (`~/.forge/batches/*/state.json`, interventions = applied requeues of the repo's batches). The scorecard is published in the release PR body (the release notes). LANE_AUDIT annotations and revert flags are optional inputs (failure-census has no reader yet): they are not on every base, so without them
 the dependent metrics report `n/a` rather than a guess.
