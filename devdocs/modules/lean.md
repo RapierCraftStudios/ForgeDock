@@ -3794,3 +3794,11 @@ Filing: `file_issues` is **opt-in, default off** (only an explicit `file_issues:
 - It posts one `FORGE:LANE_AUDIT` comment: a JSON audit `{key, issue, terminal, signature, class, owner, action, active, fixed_in_later, status: proposed|confirmed, stamp}`. `stamp` = engine version, build sha, agent version, image tag, forge.yaml hash, batch id, attempt. Idempotent: keyed on issue + attempt + signature, so a rerun posts nothing.
 - `bin/lean/lane-audit-signatures.mjs` is the data table `{id, class (genuine|pipeline|spec|env|pool), owner, action, match(evidence), introduced_in, fixed_in}`, seeded from #6072. A match whose `fixed_in` is later than the lane's engine version is `fixed_in_later`: not active, and the gap seam is not called. No LLM is involved in classification.
 - Seams: `lane-audit-gap.mjs` (`auditGap`, called for active pipeline/env/pool findings; filled by #6078) and `lane-audit-llm.mjs` (`classifyWithLlm`, called for unmatched evidence; filled by #6079). Both are no-ops returning null.
+
+## Entry 2026-11-26 — remote heavy backend, quota-aware workers (#6047)
+`heavy.mjs` `runWrapped` uses `acquireRemote` when `CS_HEAVY_BASE` is set (the pool agent's per-sandbox token route; only set when the
+agent runs with `elastic_lanes`): acquire polls while denied, a timer renews the lease, release is best effort, and an unreachable or
+erroring agent (or a wait past `max_wait_s`) fails open. Without it the local `heavy.json` semaphore is used as before. The shims wrap
+installs, validate commands and prechecks, so those lane steps take a token with no lane-level wiring. `quotaCores` (`admission.mjs`) reads
+cgroup v2 `cpu.max` / v1 `cfs_quota_us`/`cfs_period_us` (fallback `CS_CPU_QUOTA` from the pool) and returns min(VM cores, quota);
+`verifyParallelism` and the heavy shim use it for `FORGE_HOST_PARALLELISM`.

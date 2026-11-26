@@ -125,3 +125,20 @@ test("the load refusal carries code pool.host_load and the agent view exposes lo
   assert.equal(c.load_per_core, 2.4);
   assert.equal(c.mem_available_gb, 9);
 });
+
+// #6047: elastic accounting admits on base reservations plus held heavy tokens, not each lane's projected peak.
+test("elastic_lanes admits where the worst-case projection refuses, and refuses once held tokens fill capacity", async () => {
+  const history = Array.from({ length: 5 }, (_, i) => ({ id: `h${i}`, repo: "o/r", cpu_avg: 0.5, cpu_peak: 1, mem_peak_gb: 4 }));
+  const cfg = { allow_mem_gb: 5 };
+  const flat = fixture({ cfg, history });
+  assert.equal((await admitted(flat.agent, 3)).ok, 1, "flat: 4 GB peak each, so one lane fits in 5 GB");
+  const el = fixture({ cfg: { ...cfg, elastic_lanes: true }, history });
+  assert.equal((await admitted(el.agent, 3)).ok, 3, "elastic: base 0.4 GB each");
+  const rec = (id) => el.agent.store.data.sandboxes[id];
+  const now = 1_000_000;
+  el.agent.store.data.heavy = { x: { sandbox: "l0", cpus: 1, mem: 2.2, at: now, expires: now + 60000 }, y: { sandbox: "l1", cpus: 1, mem: 2.2, at: now, expires: now + 60000 } };
+  assert.ok(rec("l0") && rec("l1"));
+  const r = await el.agent.launch({ spec: spec("l9"), cpus: 1, mem_gb: 0.4 });
+  assert.equal(r.status, 503);
+  assert.equal(r.body.code, "pool.projected_peak");
+});
