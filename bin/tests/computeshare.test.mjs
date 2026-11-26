@@ -88,11 +88,12 @@ test("exited container frees its reservation", async () => {
 
 function routerFixture(agentsCaps, repoExtra = {}) {
   let t = 5_000_000;
-  const calls = [];
+  const calls = [], bodies = [];
   const fetchFn = async (url, init) => {
     const u = new URL(url);
     const name = u.hostname;
     calls.push(`${init.method} ${name}${u.pathname}`);
+    if (typeof init.body === "string") bodies.push({ path: u.pathname, body: JSON.parse(init.body) });
     const cap = agentsCaps[name];
     let status = 200, body = {}, extra = {};
     if (u.pathname === "/capacity") body = cap;
@@ -106,7 +107,7 @@ function routerFixture(agentsCaps, repoExtra = {}) {
   writeFileSync(join(dir, "cfg", "forge.yaml"), "project: {}\n");
   const router = createRouter({ state_dir: dir, lane: { cpus: 2, mem_gb: 3 }, enroll_token: "enroll", forgedock_token: "fd", abandon_after_s: 1800, repos: { "o/r": { forge_yaml: join(dir, "cfg", "forge.yaml"), ...repoExtra } } }, { fetchFn, now: () => t, log: quiet });
   for (const name of Object.keys(agentsCaps)) router.store.data.agents[name] = { url: `http://${name}:7711`, token: "t" };
-  return { router, calls, advance: (ms) => { t += ms; } };
+  return { router, calls, bodies, advance: (ms) => { t += ms; } };
 }
 
 test("router places on the host with the most free CPU and injects forge.yaml", async () => {
@@ -1116,6 +1117,14 @@ test("#6063 router repos.<slug>.priority overrides the lane spec's class; invali
   assert.equal((await unset.router.launch(spec("rp2", { priority: "borrow" }))).body.agent, "b");
   const bad = routerFixture(caps(), { priority: "urgent" });
   assert.equal((await bad.router.launch(spec("rp3", { priority: "borrow" }))).body.agent, "b");
+});
+
+test("#6063 claim() posts the spec with the repo priority class", async () => {
+  const { router, bodies } = routerFixture({ a: { cpus_free: 8, mem_free_gb: 16 } }, { priority: "reserved", reservation: "marcode" });
+  await router.claim(spec("rc1", { priority: "borrow" }));
+  const posted = bodies.find((b) => b.path === "/warm/claim").body.spec;
+  assert.equal(posted.priority, "reserved");
+  assert.equal(posted.reservation, "marcode");
 });
 
 test("#5856 lanes launch with priority borrow", async () => {

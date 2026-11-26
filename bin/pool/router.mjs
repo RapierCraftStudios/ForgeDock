@@ -406,7 +406,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   }
 
   /** #4912: hand the lane to an agent's ready warm sandbox; 404 when no agent has one (the caller then launches cold). */
-  async function claim(spec) {
+  async function claim(spec0) {
+    const spec = spec0 && typeof spec0 === "object" ? withRepoPriority(spec0) : spec0; // #6063
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id)) return { status: 400, body: { error: "spec.id required ([A-Za-z0-9._-], max 128)" } };
     if (own(sbx(), spec.id)) return launch(spec); // already placed: the same idempotent path
     const size = sizeFor(spec);
