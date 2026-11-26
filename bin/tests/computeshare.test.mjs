@@ -86,7 +86,7 @@ test("exited container frees its reservation", async () => {
   assert.equal(agent.capacity().cpus_free, 4);
 });
 
-function routerFixture(agentsCaps) {
+function routerFixture(agentsCaps, repoExtra = {}) {
   let t = 5_000_000;
   const calls = [];
   const fetchFn = async (url, init) => {
@@ -104,7 +104,7 @@ function routerFixture(agentsCaps) {
   const dir = tmpDir("cs-router-");
   mkdirSync(join(dir, "cfg"));
   writeFileSync(join(dir, "cfg", "forge.yaml"), "project: {}\n");
-  const router = createRouter({ state_dir: dir, lane: { cpus: 2, mem_gb: 3 }, enroll_token: "enroll", forgedock_token: "fd", abandon_after_s: 1800, repos: { "o/r": { forge_yaml: join(dir, "cfg", "forge.yaml") } } }, { fetchFn, now: () => t, log: quiet });
+  const router = createRouter({ state_dir: dir, lane: { cpus: 2, mem_gb: 3 }, enroll_token: "enroll", forgedock_token: "fd", abandon_after_s: 1800, repos: { "o/r": { forge_yaml: join(dir, "cfg", "forge.yaml"), ...repoExtra } } }, { fetchFn, now: () => t, log: quiet });
   for (const name of Object.keys(agentsCaps)) router.store.data.agents[name] = { url: `http://${name}:7711`, token: "t" };
   return { router, calls, advance: (ms) => { t += ms; } };
 }
@@ -1103,6 +1103,19 @@ test("#5856 router places borrow on the host with free non-reserved capacity and
   assert.equal((await router.launch(spec("pb1", { priority: "borrow" }))).body.agent, "b");
   assert.equal((await router.launch(spec("pr1", { priority: "reserved", reservation: "marcode" }))).body.agent, "a");
   assert.equal((await router.launch(spec("pn1", { priority: "normal" }))).body.agent, "b");
+});
+
+test("#6063 router repos.<slug>.priority overrides the lane spec's class; invalid values are ignored", async () => {
+  const caps = () => ({
+    a: { cpus_free: 8, mem_free_gb: 16, cpus_free_unreserved: 0, mem_free_unreserved_gb: 0, reservations: [{ name: "marcode", cpus: 8, mem_gb: 16, cpus_free: 8, mem_free_gb: 16 }] },
+    b: { cpus_free: 6, mem_free_gb: 12, cpus_free_unreserved: 6, mem_free_unreserved_gb: 12 },
+  });
+  const reserved = routerFixture(caps(), { priority: "reserved", reservation: "marcode" });
+  assert.equal((await reserved.router.launch(spec("rp1", { priority: "borrow" }))).body.agent, "a");
+  const unset = routerFixture(caps());
+  assert.equal((await unset.router.launch(spec("rp2", { priority: "borrow" }))).body.agent, "b");
+  const bad = routerFixture(caps(), { priority: "urgent" });
+  assert.equal((await bad.router.launch(spec("rp3", { priority: "borrow" }))).body.agent, "b");
 });
 
 test("#5856 lanes launch with priority borrow", async () => {

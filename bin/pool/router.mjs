@@ -360,7 +360,14 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   }
   /** #5886: a spec naming an account is placed only on that account's agents; without one, any enrolled agent (as before). */
   const inAccount = (c, spec) => typeof spec?.account !== "string" || own(agents(), c.name)?.account === spec.account;
-  async function launch(spec) {
+  /** #6063: router.json repos.<slug>.priority (reserved|normal|borrow) and .reservation override the lane spec's class; invalid = ignored. */
+  const withRepoPriority = (spec) => {
+    const rc = repoCfg(spec);
+    if (!["reserved", "normal", "borrow"].includes(rc.priority)) return spec;
+    return { ...spec, priority: rc.priority, ...(typeof rc.reservation === "string" ? { reservation: rc.reservation } : {}) };
+  };
+  async function launch(spec0) {
+    const spec = spec0 && typeof spec0 === "object" ? withRepoPriority(spec0) : spec0;
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id)) return { status: 400, body: { error: "spec.id required ([A-Za-z0-9._-], max 128)" } };
     const known = own(sbx(), spec.id);
     if (known && own(agents(), known.agent)) {
