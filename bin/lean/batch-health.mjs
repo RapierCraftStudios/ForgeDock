@@ -376,7 +376,7 @@ export function decideStallAction(stall, { recovery = null, probe = null, hosted
 export function recordStallRecovery(batch, stall, { action, sig = stall.ready.join(","), now = Date.now() } = {}) {
   const prev = readHealth(batch.dir) ?? {}, at = new Date(now).toISOString();
   const what = action === "restart-daemon" ? "restart the hosting schedd (its runner is alive but not progressing)" : "resume the batch (no runner hosts it)";
-  const text = `FORGE:DECISION batch ${batch.id} stall-recovery: ${what}; why: ${stall.detail}; alternative: alert only (a repeat of this stall alerts instead)`;
+  const text = `FORGE:DECISION batch ${batch.id} stall-recovery: ${what}; why: ${stall.detail}; alternative: alert only (a repeat of this stall is recovered again after a backoff, #6082)`;
   try { writeHealth(batch.dir, { ...prev, stallRecovery: { sig, at, action, cause: stallCause(stall), gates: stall.gates ?? [], count: (Number(prev.stallRecovery?.count) || 0) + 1, detail: stall.detail } }); } catch { /* advisory */ }
   appendBatchLog(batch.dir, `${at} ${text}`);
   return text;
