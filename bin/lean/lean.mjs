@@ -35,6 +35,7 @@ import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
+import { loadImageManifest, manifestProvides } from "../pool/image-manifest.mjs";
 import { hasRecipe, installLaneTools, genericInstallCommands, RECIPES } from "../pool/lane-tools.mjs";
 import { testRunnerProblems, hostOnlyProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, manifestDepOwner, collectOnlyCommand, collectImportMiss, contractCommands } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
@@ -2238,6 +2239,7 @@ export async function runCore(o) {
       if (d.converted.length) T.decisions.push(`Post-deploy with no registered check deferred to the orchestrator: ${d.converted.join(", ")}`);
       return d.contract;
     }
+    const imageManifest = loadImageManifest();
     async function preflightValidates(contract) {
       if ((!io.probeCommand && !io.preflightRun) || !contract || typeof contract !== "object") return [];
       const files = String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean);
@@ -2246,7 +2248,7 @@ export async function runCore(o) {
       const local = projectBinDirs(wt, files);
       if (local.length) env.PATH = withLocalBins(env.PATH ?? process.env.PATH ?? "", local);
       if (io.probeCommand) {
-        const { probes, dropped } = preflightProbes(contract, { repoHas: repoTracks(files) });
+        const { probes, dropped } = preflightProbes(contract, { repoHas: repoTracks(files), provided: (t) => manifestProvides(imageManifest, t) });
         if (dropped) T.anomalies.push(`Validate preflight probed ${probes.length} tool(s); ${dropped} more not probed`);
         for (const p of probes) {
           if (p.needs && missing.has(p.needs)) continue;
@@ -2783,7 +2785,10 @@ export async function runCore(o) {
           } catch { /* keep the original miss */ }
         }
         if (tm.tools.length) { // #5652: a recipe-backed tool is installed in this sandbox and re-probed before any host re-placement
-          const withRecipe = tm.tools.filter(hasRecipe), noRecipe = tm.tools.filter((t) => !hasRecipe(t));
+          const inImage = tm.tools.filter((t) => manifestProvides(imageManifest, t)); // #6037: the image ships it; a miss is an image defect, never a recipe or generic install
+          if (inImage.length) ev({ event: "REMOTE_TOOL_IMAGE_DEFECT", tools: inImage });
+          const installable = tm.tools.filter((t) => !inImage.includes(t));
+          const withRecipe = installable.filter(hasRecipe), noRecipe = installable.filter((t) => !hasRecipe(t));
           if (withRecipe.length && io.runCommand) {
             const ins = await installLaneTools(withRecipe, { run: (a) => io.runCommand({ command: a.command, cwd: wt, timeoutMs: a.timeoutMs, env: laneEnv() }), root: process.getuid?.() === 0 });
             ev({ event: "REMOTE_TOOLS_INSTALLED", tools: withRecipe, ok: ins.ok });

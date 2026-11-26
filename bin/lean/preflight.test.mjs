@@ -281,3 +281,13 @@ describe("#5753 collect-only import preflight and tracked-dir env names", () => 
     assert.deepEqual(declaredEnv(c), ["shared", "pytest"], "without tracked paths the name is unchanged");
   });
 });
+
+describe("#6037 provided() skips image-manifest command probes", () => {
+  it("skips provided tools, still probes others and modules", () => {
+    const c = C("shellcheck x.sh && yq . a.yml && ripgrep foo && python3 -c 'import yaml'");
+    const provided = (n) => ["shellcheck", "yq", "python3"].includes(n);
+    assert.deepEqual(needs(c, { provided }), [["command", "ripgrep", null, "V1"], ["python-module", "yaml", "python3", "V1"]]);
+    assert.deepEqual(needs(c), needs(c, {}));
+    assert.ok(needs(c).some((p) => p[1] === "shellcheck"));
+  });
+});

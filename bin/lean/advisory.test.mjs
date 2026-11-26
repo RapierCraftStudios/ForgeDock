@@ -54,8 +54,8 @@ describe("generic sandbox install (unclog)", () => {
     const y = genericInstallCommands({ kind: "python-module", tool: "yaml" })[0];
     assert.match(y, /\|\| \(apt-get update -qq && apt-get install -y --no-install-recommends python3-yaml && rm -rf \/var\/lib\/apt\/lists\/\*\)$/, "apt fallback grouped so it runs only when pip fails");
     assert.match(genericInstallCommands({ kind: "node-module", tool: "@adobe/css-tools" })[0], /^npm install --no-save .* @adobe\/css-tools$/);
-    assert.match(genericInstallCommands({ kind: "command", tool: "shellcheck" })[0], /apt-get install -y --no-install-recommends shellcheck/);
-    assert.match(genericInstallCommands({ kind: "command", tool: "shellcheck" }, { root: false })[0], /^sudo sh -c /);
+    assert.match(genericInstallCommands({ kind: "command", tool: "ripgrep" })[0], /apt-get install -y --no-install-recommends ripgrep/);
+    assert.match(genericInstallCommands({ kind: "command", tool: "ripgrep" }, { root: false })[0], /^sudo sh -c /);
   });
   it("refuses unsafe names and kinds nothing can install", () => {
     for (const m of [{ kind: "command", tool: "a;rm -rf /" }, { kind: "command", tool: "$(x)" }, { kind: "command", tool: "../x" }, { kind: "command", tool: "bin/x" }, { kind: "environment", tool: "db" }, { kind: "forgedock-path", tool: "forgedock" }, {}])
