@@ -10,7 +10,7 @@
 import { spawnSync } from "node:child_process";
 import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT } from "../engine/outcome-codes.mjs";
 import { noComments } from "./context.mjs";
-import { equivalentRuns, isDriftFailure } from "./validate-catalog.mjs";
+import { isDriftFailure } from "./validate-catalog.mjs";
 import { seqNumber } from "./sequence.mjs";
 import { activationFailures } from "./activation.mjs";
 import * as nodeFs from "node:fs";
@@ -48,8 +48,6 @@ import { CHECK_ID_RE, e2eCheckFor } from "./postdeploy-check.mjs";
 import { normaliseDecision, deadAnchors, anchorMatches, parseRequirementDecision } from "./decisions.mjs";
 import { globToRegex } from "../../scripts/ci-local/lib.mjs";
 import { contractBriefProblems } from "./pagegate.mjs"; // #5428
-import { counterGrowth } from "./hotarea.mjs"; // #5751
-import { designContractFailures } from "./recurrence.mjs"; // #5751
 import { AMEND_KINDS } from "./amendment-schema.mjs"; // #5979
 const C = OUTCOME_CODES;
 
@@ -232,22 +230,6 @@ export function authorizationOf(contract, f) {
   // #5365: a file a parity test reads alongside a changed deliverable is in scope with it
   if (COUPLED_PATHS.some((c) => c.also.some((g) => pathCovers(g, f)) && (contract.deliverables ?? []).some((x) => pathCovers(x.path, c.when) || pathCovers(c.when, x.path)))) return "coupled";
   return null;
-}
-// A doc a freshness rule can demand: a prose file under a docs directory. Build and dependency files (`requirements.txt`,
-// `CMakeLists.txt`) and agent-instruction or workflow-spec files outside a docs directory (`CLAUDE.md`, `commands/*.md`) never
-// match, so the exemption cannot carry them past scope_creep.
-const DOC_FILE_RE = /(?:^|\/)(?:docs?|devdocs|documentation)\/(?:[^/]+\/)*[^/]+\.(?:md|mdx|rst|adoc)$/i;
-/**
- * The docs-freshness rule demands a doc edit the frozen contract cannot name: add-deliverable amendments (why "docs freshness
- * rule") for doc files (`DOC_FILE_RE`) that `after` has and `before` lacked and no deliverable, test or incidental rule authorizes.
- * Only when the freshness check failed before the round (`wasFailing`) and passes after it (`nowOk`); code files stay scope creep.
- */
-export function impliedDocDeliverables({ before = [], after = [], contract, wasFailing = false, nowOk = false }) {
-  if (!wasFailing || !nowOk) return [];
-  const had = new Set(before.map(cleanPath));
-  return [...new Set(after.map(cleanPath))]
-    .filter((f) => !had.has(f) && DOC_FILE_RE.test(f) && !authorizationOf(contract ?? {}, f))
-    .map((path) => ({ kind: "add-deliverable", path, why: "docs freshness rule" }));
 }
 const blank = (s) => !String(s ?? "").trim() || /^none$/i.test(String(s).trim());
 
@@ -575,7 +557,7 @@ export function testPlanProblems(c, { required = false } = {}) {
 
 /** #5448: a requirement that starts as an imperative build verb is development work, not a prod-only measurement. */
 const DEV_WORK_RE = /^\W*(?:\w+\s+){0,2}?(?:find|fix|implement|develop|build|write|patch|add|change)\b/i;
-export function validateContract(c, issueText, { repro = false, pages = null, testPlan = false, readFile = null, checkIds = null, baseFiles = null, reproRecipe = false } = {}) {
+export function validateContract(c, issueText, { repro = false, pages = null, testPlan = false, readFile = null, baseFiles = null, reproRecipe = false } = {}) {
   const problems = [];
   if (!c || typeof c !== "object" || Array.isArray(c)) return { ok: false, problems: ["contract.json is missing or not a JSON object"] };
   const reqs = Array.isArray(c.requirements) ? c.requirements : [];
@@ -589,11 +571,6 @@ export function validateContract(c, issueText, { repro = false, pages = null, te
     if (!inIssue(r?.quote, issueText)) problems.push(quoteMiss(id, r?.quote, issueText));
     if (TRACKED.includes(r?.disposition) && blank(r?.why)) problems.push(`${id}: ${r.disposition} needs a why`);
     if (r?.disposition === "post-deploy" && !CHECK_ID_RE.test(String(r?.check ?? ""))) problems.push(`${id}: post-deploy needs a check id (\`check\`, e.g. "login-smoke") naming an entry of .forge/post-deploy-checks.json on the default branch`);
-    if (r?.disposition === "post-deploy" && !r?.e2e_tracked && !r?.engine_check && CHECK_ID_RE.test(String(r?.check ?? "")) && checkIds) { // first-pass: an unregistered check id fails at freeze, not after the build (precheck check_unknown); checkIds = the base's check ids, as precheck reads them
-      const known = [...checkIds];
-      const delivers = (Array.isArray(c.deliverables) ? c.deliverables : []).some((d) => String(d?.path ?? "").replace(/^\.\//, "") === ".forge/post-deploy-checks.json");
-      if (!known.includes(r.check) && !delivers) problems.push(`${id}: post-deploy check '${r.check}' is not registered in .forge/post-deploy-checks.json; either add a deliverable {"path":".forge/post-deploy-checks.json","change":"register check ${r.check} (run, pass, timeout)"} or use an existing id${known.length ? ` (${known.slice(0, 8).join(", ")}${known.length > 8 ? ", ..." : ""})` : ""}`);
-    }
     if (r?.disposition === "post-deploy" && blank(r?.local_infeasible_why)) problems.push(`${id}: post-deploy needs local_infeasible_why: why a fixture or recorded response cannot check this locally (#5448)`);
     if (r?.disposition === "post-deploy" && (inLaneDeferral(r) || (bucketKind(r?.bucket) !== "owner" && bucketKind(r?.bucket) !== "host" && DEV_WORK_RE.test(String(r?.quote ?? ""))))) problems.push(`${id}: development work (finding or fixing the signal) is delivered in-lane, never deferred as prod-only; deliver it and keep only the measurement post-deploy (#5448)`);
     if (r?.disposition === "not-applicable" && blank(r?.evidence)) problems.push(`${id}: not-applicable needs file:line evidence`);
@@ -665,7 +642,7 @@ const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g,
 
 const UNRELATED_CI_KIND = "unrelated-ci-failure";
 const GUARD_ID_RE = /^#?\d+$/;
-const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer", deferred: "defer", deferral: "defer", "scope-deferral": "defer", "verification-substitution": "substitute-validate", "out-of-band-verification": "out-of-band" };
+const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer", deferred: "defer", deferral: "defer", "scope-deferral": "defer", "out-of-band-verification": "out-of-band" };
 // #5036: annotation-only kinds change no requirement: recorded for the reviewer, never a problem (like UNRELATED_CI_KIND)
 const INFO_KINDS = ["scope-note", "scope", "scope-clarification", "interpretation", "environment", "validation-unavailable"];
 // #5036: deferral-shaped kinds (scope narrowing/reduction, defer-*, deferred-*) are `defer` once they name a requirement
@@ -705,37 +682,10 @@ function splitRequirementRefs(ref) {
   return ids.length > 1 ? ids : [ref];
 }
 
-/** The rejection reason, naming the valid kinds or the missing field so the builder's correction round can fix it. */
-function amendmentProblem(a, tag) {
-  const kind = a?.kind;
-  const need = kind === "add-deliverable" ? "needs a path" : kind === "add-requirement" ? "needs requirement {id, quote}"
-    : kind === "supersedes" ? "needs guard: \"#N\" (the guarded issue) or mechanism: \"<name>\" (#5752: retires the guards whose tests the lane deletes); a validate row id such as G2 is not a guard: use substitute-validate {validate, command, why}" : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)"
-      : kind === "substitute-validate" ? "needs validate: \"V#\" and command" : kind === "out-of-band" ? "needs requirement: \"R#\" and evidence (the job or workflow that measures it)"
-      : kind === "decision" ? "needs decision {choice, anchors: [paths or globs], symbols?, supersedes?: decision id}" : null;
-  const why = need ? `amendment kind '${kind}' ${need}` : `unknown kind '${kind ?? ""}'; valid kinds are ${AMEND_KINDS.join(", ")}`;
-  return `unknown or incomplete amendment: ${why}: ${tag}`;
-}
-
+/** A short reason an amendment was not applied (#6083: the engine only skips it; the reason is never a gate). */
+const amendmentProblem = (a, tag) => `amendment not applied (${a?.kind ? `kind '${a.kind}'` : "no kind"}): ${tag}`;
 /** #5979: a supersedes whose guard is a frozen validate-row id (G2, V1), not a #N guard issue. */
 const isValidateRowGuard = (a, ids) => !blank(a.guard) && !GUARD_ID_RE.test(String(a.guard).trim()) && (ids ?? []).includes(String(a.guard).trim());
-const validateRowProblem = (id, tag) => `supersedes guard '${String(id).trim()}' is a validate row of the contract, not a guard issue; use {"kind":"substitute-validate","validate":"${String(id).trim()}","command":"<runnable equivalent>","why":"..."}: ${tag}`;
-
-/** #5089: shape-only check of the builder's amendments (unknown kind, missing path or requirement), run before the gate so one in-lane correction can fix them. Returns the rejection strings; [] when valid. */
-export function amendmentKindProblems(amendments, validateIds = []) {
-  const out = [];
-  for (const raw of Array.isArray(amendments) ? amendments : []) {
-    const a = normalizeAmendment(raw);
-    if (a?.kind === UNRELATED_CI_KIND || INFO_KINDS.includes(a?.kind)) continue;
-    const tag = JSON.stringify(raw ?? null).slice(0, 400);
-    const known = AMEND_KINDS.includes(a?.kind);
-    const missing = a?.kind === "add-deliverable" ? blank(a.path)
-      : TRACKED.includes(a?.kind) || a?.kind === "amend-requirement" ? blank(a.requirement) : false;
-    const validateRow = known && a.kind === "supersedes" && isValidateRowGuard(a, validateIds);
-    if (!known || missing) out.push(amendmentProblem(a, tag));
-    else if (validateRow) out.push(validateRowProblem(a.guard, tag));
-  }
-  return out;
-}
 
 /**
  * Apply result.json amendments to the frozen contract. Kinds: add-deliverable {path}, add-requirement {requirement},
@@ -749,7 +699,7 @@ export function amendmentKindProblems(amendments, validateIds = []) {
 export function applyAmendments(frozen, amendments, issueText = null, { generatedPaths = [], baseFiles = null, addedPaths = [], defaultWhy = null } = {}) {
   const c = structuredClone(frozen);
   c.deliverables = c.deliverables ?? [];
-  for (const v of c.validate ?? []) if (v && typeof v === "object") delete v.substituted; // SEC-21: only a substitute-validate amendment sets it, never the frozen contract
+  for (const v of c.validate ?? []) if (v && typeof v === "object") delete v.substituted; // a frozen contract never carries a substitute (#6083: substitute-validate is gone)
   const applied = [], toTrack = [], problems = [], decisions = [];
   const genRes = (Array.isArray(generatedPaths) ? generatedPaths : []).filter((g) => typeof g === "string" && g).map(shellGlobRe);
   const rows = [];
@@ -785,16 +735,6 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       // package.json declares the edge (forge#4159); before, it was reported as applied but changed nothing.
       if (have) { have.change = have.change ? `${have.change}; ${a.why}` : a.why; have.amended = true; }
       else c.deliverables.push({ id: a.id ?? `A${c.deliverables.length + 1}`, path: a.path, change: a.why, amended: true });
-    } else if (a.kind === "substitute-validate" && !blank(a.validate)) {
-      // #4857: a runnable equivalent of an unrunnable frozen validate command; same id, same checks as a planned command
-      const v = (c.validate ?? []).find((x) => x.id === a.validate);
-      if (!v) { problems.push(`substitute-validate names unknown validate ${a.validate}`); continue; }
-      const bad = blank(a.command) ? "no command" : substituteShellProblem(a.command) ? "not valid shell (bash -n)" : noopCommand(a.command) ? "runs no check (true, :, exit 0, echo)" : movingBaseDiff(a.command) ? "diffs against a moving base tip" : tmpdirInputs(a.command).length ? "reads a $TMPDIR file it did not create" : null;
-      if (bad) { problems.push(`substitute-validate ${a.validate}: ${bad}`); continue; }
-      // SEC-11: a second substitute of the same id keeps the frozen command as `from`, so the engine always reruns the original
-      v.substituted = { from: v.substituted?.from ?? v.command, why: String(a.why).trim() }; v.command = String(a.command).trim();
-      applied.push({ kind: a.kind, target: a.validate, why: String(a.why).trim() });
-      continue;
     } else if (a.kind === "out-of-band" && !blank(a.requirement) && !blank(a.evidence ?? a.job)) {
       // #5036: the existing out_of_band path for a deliver requirement; evidence names the job that measures it
       const r = c.requirements.find((x) => x.id === a.requirement);
@@ -829,7 +769,7 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       applied.push({ kind: a.kind, target: `mechanism ${mechanism}`, why: String(a.why).trim() });
       continue;
     } else if (a.kind === "supersedes" && isValidateRowGuard(a, [...(c.validate ?? []), ...(c.regression ?? [])].map((v) => v?.id))) {
-      problems.push(validateRowProblem(a.guard, tag)); continue;
+      continue; // a validate-row id is not a guard issue: not applied (#6083)
     } else if (a.kind === "supersedes" && GUARD_ID_RE.test(String(a.guard ?? "").trim())) {
       // #4693: retires one guard's guard_broken for this lane; the reviewer judges it, the engine tells the guarded issue after merge
       const guard = `#${String(a.guard).trim().replace(/^#/, "")}`;
@@ -914,12 +854,6 @@ export function shellSyntaxError(command) {
   if (r.error || r.status === 0 || r.status == null) return null;
   return String(r.stderr || "syntax error").trim().split("\n")[0].replace(/^bash: (?:line \d+: )?/, "").slice(0, 160);
 }
-/** #5020: like shellSyntaxError, but fails closed: when bash cannot run the check the command is not shown to parse. */
-export function substituteShellProblem(command) {
-  const r = spawnSync("bash", ["-n", "-c", String(command ?? "")], { encoding: "utf8", timeout: 5000 });
-  if (r.error || r.status == null) return "bash -n could not run, so the command is unverified";
-  return r.status === 0 ? null : shellSyntaxError(command) ?? "syntax error";
-}
 export const ORCHESTRATOR_BUCKET = "owner:orchestrator";
 /**
  * #5020: a post-deploy requirement that names no check id (a manual or production-credential action) becomes a `defer` with an
@@ -982,63 +916,6 @@ export function assertionFailure(output) {
 /** #5020: the env.* verdict for a repro command that failed on head because a tool is missing (e.g. an uninstalled Poetry env); null when the failure is the test's own. */
 export function reproEnvMiss(run, opts) {
   return run && run.rc !== 0 && run.rc !== 124 ? missingTool(run, opts) : null;
-}
-const NOOP_SEGMENT_RE = /^(?:true|false|:|exit(?:\s+\d+)?|echo(?:\s.*)?|printf(?:\s.*)?|sleep(?:\s+[\d.]+)?|test\s+-?\w+|\[\s+-?\w+\s+\]|fi|done|node\s+-e\s+['"]?[\d;\s]*['"]?|python3?\s+-c\s+['"]?(?:pass|0|None)?['"]?)$/;
-const KEYWORD_RE = /^(if|then|else|elif|do|while|until)(?:\s+|$)/;
-const CONST_FALSE_RE = /^(?:false|\[\s+0\s+=\s+1\s+\]|\[\s+1\s+=\s+0\s+\]|test\s+0\s+=\s+1|test\s+-n\s+(?:""|'')|\[\s+-n\s+(?:""|'')\s+\])$/;
-/**
- * #4979 SPEC-2: a command every segment of which is a no-op (true, :, exit N, echo, printf, sleep, a constant test,
- * shell keywords, `node -e 0`, `python -c pass`) checks nothing. A best-effort denylist: the engine's rerun of the
- * frozen command (`substituteVerdict`) is the real gate.
- */
-export function noopCommand(command) {
-  // SEC-22: a leading shell keyword is stripped and the rest judged, so `if [ -f x ]; then pytest; fi` is a real check
-  const segs = String(command ?? "").split(/&&|\|\||;|\||\n/).map((s) => s.trim()).filter(Boolean);
-  const live = [];
-  let dead = false; // #4995: inside the body of an if/elif/while whose condition is a constant false
-  for (const raw of segs) {
-    let s = raw, cond = false, m;
-    while ((m = KEYWORD_RE.exec(s))) {
-      s = s.slice(m[0].length);
-      if (m[1] === "else" || m[1] === "elif") dead = false;
-      cond = m[1] === "if" || m[1] === "elif" || m[1] === "while";
-    }
-    if (s === "fi" || s === "done") dead = false;
-    if (cond) { if (CONST_FALSE_RE.test(s)) dead = true; else if (!dead && s) live.push(s); continue; }
-    if (!dead && s) live.push(s);
-  }
-  return segs.length > 0 && live.every((s) => NOOP_SEGMENT_RE.test(s));
-}
-/**
- * #4979 SPEC-2: a substitute-validate stands only when the frozen command it replaced cannot run (died before any test,
- * a runner usage error, a missing host tool, exit 127) or passes anyway. A frozen command that runs and fails is a real
- * failure the substitute may not hide. `run` is the engine's rerun of the frozen command; null when none was made.
- */
-export function substituteVerdict(run, { repoHas = () => false, command = "" } = {}) {
-  if (!run) return "unverified";
-  if (run.rc === 0 || run.rc === 127 || unrunnableValidate(run, command) || cliUsageError(run) || missingTool(run, { repoHas, command })) return "ok";
-  return run.rc === 124 ? "timeout" : "runs";
-}
-/**
- * #4990 SEC-13: the paths of `removed` (deleted, or the old side of a rename, in the diff) that a frozen command names:
- * a whitespace token equal to the path, or a directory token above it. A builder that removes the target of its frozen
- * validate makes the engine's rerun read "unrunnable", so the substitute is judged on the diff instead.
- */
-const TEST_FILE_RE = /\.(?:test|spec)\.[a-z0-9]+$|^test_[^/]+\.[a-z0-9]+$|_test\.[a-z0-9]+$|Tests?\.(?:java|kt|kts|cs|php|scala|swift)$|_spec\.rb$|^tests\.rs$|^conftest\.py$|\.bats$/;
-/** #5003: a runnable test FILE (by basename), unlike `isTestPath`, which also matches fixtures under tests/. */
-const isTestFile = (p) => TEST_FILE_RE.test(String(p).split("/").pop());
-/**
- * #4990 SEC-13: the paths of `removed` (deleted, or the old side of a rename, in the diff) that a frozen command names.
- * #5003: a token is stripped of quotes, a `--flag=` prefix and a pytest `::node` suffix; a glob is expanded against
- * `baseFiles`; an exact path matches itself; a directory or bare-word token matches only a removed test file under it.
- */
-export function removedNamedPaths(command, removed = [], baseFiles = []) {
-  const toks = String(command ?? "").split(/\s+/).map((t) => t.replace(/^['"`(]+|['"`);]+$/g, "").replace(/^-[^=\/]*=/, "").replace(/::.*$/, "").replace(/^['"`]+|['"`]+$/g, "").replace(/^\.\//, "").replace(/\/+$/, "")).filter((t) => t && t !== ".");
-  const files = new Set(baseFiles);
-  return removed.filter((p) => toks.some((t) => {
-    if (/[*?]/.test(t)) return globRe(t).test(p) && (files.size === 0 || files.has(p));
-    return p === t || (p.startsWith(`${t}/`) && isTestFile(p));
-  }));
 }
 /** #4990: paths the lane's diff deletes or renames away from (the old side). #5003: `-z` (unquoted), null on a git error (fail closed). */
 export async function removedPathsOf(git, base) {
@@ -1190,12 +1067,8 @@ const wantsE2e = (r) => /\[type:(?:e2e|manual)\]/i.test(tagText(r?.quote));
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, baselineFailures = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, docsFailures = null, pageFailures = null, docsPaths = null, prodParityFailures = null, seamFailures = null, newOffKeys = null, substitutedRuns = null, removedPaths = [], baseFiles = [], uiBrowser = null, ciBudgetFailures = null, counters = null, recurrence = null, outcomeEvidenceFailures = null }) {
-  const failures = [], superseded = [], ciCovered = [], equivalent = [];
-  // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
-  if (checkIds) for (const r of contract.requirements ?? []) {
-    if (r.disposition === "post-deploy" && !(r.check && checkIds.has(r.check))) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "check_unknown", detail: `${r.id} post-deploy check ${r.check ? `'${r.check}'` : "id"} is neither on the default branch nor added by this PR (.forge/post-deploy-checks.json)` });
-  }
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, repro = null, validateRuns = null, repoHas = () => false, frozen = null, baselineFailures = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, pageFailures = null, docsPaths = null, prodParityFailures = null, seamFailures = null, newOffKeys = null, removedPaths = [], uiBrowser = null, outcomeEvidenceFailures = null }) {
+  const failures = [], superseded = [], ciCovered = [];
   // #5754: a deliver [type:e2e]/[type:manual] row whose observable exists only in production (live stack, deploy, prod window) cannot be produced by the placement: fail fast with a typed code instead of spending builder resumes
   for (const r of contract.requirements ?? []) {
     if (r.disposition === "deliver" && wantsE2e(r) && !isOutOfBand(r) && r.verify !== "in_lane" && prodOnlyE2e(r.quote)) failures.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_placement", detail: `${r.id} is a [type:e2e]/[type:manual] criterion observable only in production or on the live stack, which this lane cannot produce; mark ${r.id} post-deploy so it is transferred to the epic's acceptance instead of spending builder resumes (#5754)` });
@@ -1210,21 +1083,6 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   if (creep.length) failures.push({ code: C.CONFORMANCE_SCOPE_CREEP, kind: "scope_creep", detail: `changed outside the contract's deliverables: ${creep.join(", ")}` });
   const runs = Array.isArray(result?.validation) ? result.validation : [];
   for (const v of contract.validate ?? []) {
-    // #4979 SPEC-2: a substitute counts only when the frozen command it replaced cannot run (or passes); checked first, never CI-covered
-    if (v.substituted) {
-      const shellBad = substituteShellProblem(v.command); // #5020: re-checked before the substitute is used
-      if (shellBad) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} substitute \`${v.command}\` is not valid shell (bash -n: ${shellBad})` }); continue; }
-      if (removedPaths === null) { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "substitute_unverified", detail: `validate ${v.id} substituted \`${v.command}\` for the frozen \`${v.substituted.from}\`, but the engine could not read the diff's removed paths to show the frozen command's target survives` }); continue; }
-      const gone = removedNamedPaths(v.substituted.from, removedPaths, baseFiles);
-      if (gone.length) { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "substitute_removed_path", detail: `validate ${v.id} substituted \`${v.command}\` for the frozen \`${v.substituted.from}\`, but the diff removes ${gone.map((x) => `\`${x}\``).join(", ")} that the frozen command names: a substitute may not replace a check by deleting its target` }); continue; }
-      const verdict = substituteVerdict(substitutedRuns?.[v.id], { repoHas, command: v.substituted.from });
-      const from = `validate ${v.id} substituted \`${v.command}\` for the frozen \`${v.substituted.from}\``;
-      if (verdict === "unverified") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "substitute_unverified", detail: `${from}, but the engine has no rerun of the frozen command to show it cannot run` }); continue; }
-      // #5653: the frozen command runs, and the substitute ran the same test ids with the same exit: recorded, not failed
-      if (verdict === "runs" && equivalentRuns(substitutedRuns[v.id], substitutedRuns[v.id].sub)) equivalent.push({ id: v.id, from: v.substituted.from, to: v.command });
-      else if (verdict === "runs") { failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", output: rawTail(substitutedRuns[v.id].output), detail: `${from}, but the frozen command runs and fails (exit ${substitutedRuns[v.id].rc}): a substitute-validate replaces only a command that cannot run, never a failing check${outputTail(substitutedRuns[v.id].output)}` }); continue; }
-      if (verdict === "timeout" && !ciVerified) { failures.push({ code: ENV_VALIDATE_TIMEOUT, kind: "validate_timeout", detail: `${from}, and the frozen command timed out (exit 124) on the engine's rerun, so its substitution cannot be judged: infrastructure (host load)` }); continue; }
-    }
     const r = runs.find((x) => x?.id === v.id);
     // #4167: a head the engine verified on CI covers validate ids the builder left to CI (no result, or ci:true without an exit)
     const leftToCi = !r || (r.ci === true && r.exit === undefined);
@@ -1236,7 +1094,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       const rerun = validateRuns?.[v.id];
       if (rerun?.rc === 0) continue;
       if (rerun && cliUsageError(rerun)) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} (\`${v.command}\`) is a CLI usage error of the runner, a defect of the frozen command rather than of the change` }); continue; }
-      if (rerun && unrunnableValidate(rerun, v.command)) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} (\`${v.command}\`) died before any test ran (no tests selected, no project at its cwd or invalid shell), a defect of the frozen command rather than of the change; substitute a runnable equivalent with a substitute-validate amendment` }); continue; }
+      if (rerun && unrunnableValidate(rerun, v.command)) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} (\`${v.command}\`) died before any test ran (no tests selected, no project at its cwd or invalid shell), a defect of the frozen command rather than of the change` }); continue; }
       // #4906: the rerun timed out (even after the longer retry): host load, not a verdict on the change. A CI-verified head covers it; else an environment error.
       if (rerun?.rc === 124) {
         if (ciVerified) { ciCovered.push(v.id); continue; }
@@ -1265,9 +1123,6 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
     }
   }
   for (const f of baselineFailures ?? []) failures.push({ code: C.CONFORMANCE_REGRESSION, ...f }); // #5448
-  failures.push(...hotspotGrowth({ contract, result, hotspots, changedFiles }));
-  failures.push(...counterGrowth({ before: counters?.before, after: counters?.after, contract, result })); // #5751: forge.yaml recurrence.counters, measured at base and lane head
-  failures.push(...designContractFailures(contract, recurrence)); // #5751: a recurring issue's design lane contract
   if (repro) failures.push(...reproFailures(contract, repro), ...reproQualityFailures(repro));
   failures.push(...sourceDeliverableFailures(contract, changedFiles, ignore));
   // #4693: a broken guard fails unless the contract carries a supersedes amendment for it
@@ -1278,14 +1133,12 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   for (const f of coupledFailures ?? []) failures.push(f); // #5079
   for (const f of relaxationFailures ?? []) failures.push(f); // #5237
   failures.push(...(routeFailures ?? [])); // #5087: topology.route_reachability, blocking when declared
-  failures.push(...(docsFailures ?? [])); // #5419: forge.yaml docs
   failures.push(...(outcomeEvidenceFailures ?? [])); // #5752: forge.yaml outcome_evidence
-  failures.push(...(ciBudgetFailures ?? [])); // #5760: CI additions need a FORGE:CI_BUDGET annotation or the shared job, scoped hygiene, max counts
   failures.push(...(pageFailures ?? [])); // #5428: forge.yaml pages
   failures.push(...(prodParityFailures ?? [])); // #5284: topology.prod_parity
   failures.push(...interfaceDecisionFailures(contract, result, changedFiles)); // #5338
   failures.push(...(seamFailures ?? [])); // #5338: a declared interface's provider and consumer no longer agree
-  return { ok: failures.length === 0, failures, superseded, ciCovered, equivalent };
+  return { ok: failures.length === 0, failures, superseded, ciCovered, equivalent: [] };
 }
 
 /**
@@ -1366,26 +1219,6 @@ export function alreadyFixedOnBase(failures = [], changedFiles = [], ignore = []
   // Release review of #5103 (MAT-1): any non-test, non-doc change (css, json, yaml, sql, tf, ...) is work the lane did, never "already fixed".
   if (files.some((f) => !isTestPath(f) && !DOC_ONLY_RE.test(f))) return false;
   return failures.some((f) => f.kind === "repro_base_green") && failures.every((f) => f.kind === "repro_base_green" || f.kind === "source_deliverable_untouched");
-}
-
-const EXEMPT_RE = /hotspot-exempt:\s*\S/i;
-/**
- * forge#4195: a changed file already over `file_lines` (not generated, vendored or glob-excluded; forge#4519: a
- * `generated` row, from linguist-generated, maintenance.generated_paths or a generated header, never counts) that grew by more
- * than `growth_lines` since the base, with no `hotspot-exempt: <reason>` in a covering deliverable's change or an
- * add-deliverable amendment's why. `hotspots` is scripts/hotspots.sh --base output; null or disabled checks nothing.
- */
-export function hotspotGrowth({ contract, result, hotspots, changedFiles = [] }) {
-  if (!hotspots || hotspots.enabled === false || !Array.isArray(hotspots.files)) return [];
-  const limit = Number(hotspots.growth_lines) || 0, max = Number(hotspots.file_lines) || 0;
-  const changed = new Set(changedFiles.map(cleanPath));
-  const amends = Array.isArray(result?.amendments) ? result.amendments : [];
-  const exempt = (f) => (contract?.deliverables ?? []).some((d) => pathCovers(d.path, f) && EXEMPT_RE.test(String(d.change ?? "")))
-    || amends.some((a) => a?.kind === "add-deliverable" && pathCovers(a.path, f) && EXEMPT_RE.test(String(a.why ?? "")));
-  return hotspots.files
-    .filter((h) => h?.over && !h.excluded && !h.generated && Number(h.growth) > limit && changed.has(cleanPath(h.path)) && !exempt(h.path))
-    .map((h) => ({ code: C.MAINTENANCE_HOTSPOT_GROWTH, kind: "hotspot_growth",
-      detail: `${h.path} grew by ${h.growth} lines (now ${h.lines}, limit +${limit} over ${max}) without hotspot-exempt` }));
 }
 
 /** The reviewer's JSON object (a json fence first, then the outermost braces), or null. */
@@ -1725,7 +1558,7 @@ export function decide(raw, ctx) {
       // #4404: the measured result lives in the named job; only the instrumentation is judged here
       if (row.instrumented !== true) f.push({ code: C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.id} verified out of band${r.evidence ? ` by ${r.evidence}` : ""}: instrumentation missing${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
     } else if (r.disposition === "deliver" && row.status !== "implemented") {
-      f.push({ code: ["deferred", "post-deploy"].includes(row.status) ? C.CONFORMANCE_UNTRACKED_DEFERRAL : C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.amendment?.text ? `${r.id} amendment not accepted (amended to "${String(r.amendment.text).slice(0, 200)}"): ` : r.derived_outcome ? `${r.id} derived outcome not met ("${String(r.derived_outcome).slice(0, 200)}"): ` : `${r.id} `}${row.status}${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
+      f.push({ code: ["deferred", "post-deploy"].includes(row.status) ? C.CONFORMANCE_UNTRACKED_DEFERRAL : C.CONFORMANCE_UNIMPLEMENTED, kind: "review_unimplemented", detail: `${r.amendment?.text ? `${r.id} amendment not accepted (amended to "${String(r.amendment.text).slice(0, 200)}"): ` : r.derived_outcome ? `${r.id} derived outcome not met ("${String(r.derived_outcome).slice(0, 200)}"): ` : `${r.id} `}${row.status}${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
     } else if (r.disposition === "deliver" && wantsE2e(r) && !e2eVerified(row, ctx.contract, ctx.e2e)) {
       const faked = (ctx.e2e?.faked ?? []).length ? `; faked or mocked components in ${ctx.e2e.faked.slice(0, 3).join(", ")}` : "";
       f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_row", detail: `${r.id} is a [type:e2e]/[type:manual] criterion but ${row.validated_by || "its validated_by"} is not a real end-to-end check (the repo's e2e set, Playwright/browser/live stack${faked}); run one, or mark ${r.id} post-deploy so it is transferred to the epic's acceptance${ctx.e2e?.sandboxes?.length ? `; it can run pre-merge: declare env: [${ctx.e2e.sandboxes.slice(0, 3).join(", ")}] on its validate to use the test sandbox (#5450), do not defer it` : ""}` });
@@ -2052,26 +1885,37 @@ export function normalizeKindModes(raw) {
  * @param {{shadow?: boolean, kinds?: Record<string,string>|null, allow?: string[]}} [o]
  */
 /**
- * Advisory gates (2026-11-26 unclog): rules about the shape of the work (file scope, registries, docs placement,
- * recurrence design, amendment syntax, growth counters) are reported, never blocking. Measured on 102 open FD/AlterLab
- * issues: these rows caused ~30% of needs-human parks, repeated identically across reruns, and forced every lane to edit
- * the same shared files (45 of 67 conflicted base-syncs). A lane still blocks on what shows the change is wrong: failing
- * validate/CI/guard/repro runs, regressions and unimplemented requirements.
+ * Advisory gates (#6083, owner-approved cut of 2026-11-26): everything that is about the shape of the work, the environment,
+ * or a reviewer opinion without a failing assertion is recorded on the trajectory and the PR and never parks a lane. Measured
+ * on 400 issues per repo (inventory on #6083): these rows caused 35-65% of needs-human parks and ~$500 of resume cost, and
+ * the data shows no real defect they caught. What still blocks: a frozen requirement without a passing linked test
+ * (test_missing/test_weak), validate_failed, bug repro red-green, source_deliverable_untouched, conformance.regression,
+ * conformance.omission, ci.red, DCO, builder.blocked/no_commit, base-conflict handling.
+ * forge.yaml engine.conformance_kinds `<code>=enforce` re-promotes a code listed here.
  */
-export const ADVISORY_CODES = Object.freeze([OUTCOME_CODES.CONFORMANCE_SCOPE_CREEP, OUTCOME_CODES.RECURRENCE_DESIGN_MISSING, OUTCOME_CODES.MAINTENANCE_HOTSPOT_GROWTH, OUTCOME_CODES.MAINTENANCE_COUNTER_GROWTH]);
-export const ADVISORY_KINDS = Object.freeze([
-  "scope_creep", "check_unknown", "design_missing", "design_missing_repeated", "docs_missing", "docs_link_broken",
-  "ci_budget_unannotated", "hotspot_growth", "counter_growth",
-  "amendment_invalid",
-  "page_metadata_missing", "page_sitemap_missing", "page_canonical_missing", "page_structured_data_missing",
+export const ADVISORY_CODES = Object.freeze([
+  OUTCOME_CODES.CONFORMANCE_SCOPE_CREEP, OUTCOME_CODES.CONFORMANCE_E2E_UNVERIFIED, OUTCOME_CODES.CONFORMANCE_UNTRACKED_DEFERRAL,
+  OUTCOME_CODES.CONFORMANCE_UNJUSTIFIED_DEFERRAL, OUTCOME_CODES.CONFORMANCE_PRESERVE_VIOLATED, OUTCOME_CODES.CONFORMANCE_GUARD_BROKEN,
+  OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.CONTRACT_INVALID_COMMAND,
 ]);
+export const ADVISORY_KINDS = Object.freeze([
+  "review_unimplemented",
+  "validate_missing", "validate_command_invalid", "validate_timeout", "validate_env", "validate_drift",
+  "repro_env", "repro_mutation_survivor", "mutation_survived", "dep_install",
+  "e2e_row", "e2e_placement", "ui_browser_unverified",
+  "route_unreachable", "relaxation_untested", "coupled_file_missing", "activation_missing", "mode_unreachable",
+  "decision_unsuperseded", "interface_seam",
+]);
+/** Kind families (page_*, design_*, outcome_evidence_*, prod_parity_*) that are advisory as a whole. */
+export const ADVISORY_KIND_PREFIXES = Object.freeze(["page_", "design_", "outcome_evidence_", "prod_parity_"]);
+const isAdvisory = (f) => ADVISORY_KINDS.includes(f?.kind) || ADVISORY_CODES.includes(f?.code) || ADVISORY_KIND_PREFIXES.some((p) => String(f?.kind ?? "").startsWith(p));
 /**
  * Split failures into {block, advisory}; advisory rows are reported on the issue and never park a lane. `enforce`: codes
  * a repo explicitly set to "enforce" (forge.yaml engine.conformance_kinds), which stay blocking.
  */
 export function splitAdvisory(failures, { enforce = [] } = {}) {
   const block = [], advisory = [];
-  for (const f of failures ?? []) (!enforce.includes(f?.code) && (ADVISORY_KINDS.includes(f?.kind) || ADVISORY_CODES.includes(f?.code)) ? advisory : block).push(f);
+  for (const f of failures ?? []) (!enforce.includes(f?.code) && !enforce.includes(f?.kind) && isAdvisory(f) ? advisory : block).push(f);
   return { block, advisory };
 }
 

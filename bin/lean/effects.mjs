@@ -730,22 +730,6 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
         return { base: m[1], head: m[2], ...(m[3] ? { pristine: m[3] } : {}), ...(headOutput != null ? { headOutput } : {}), ...(baseOutput != null ? { baseOutput } : {}) }; // #5544: pristine only when the base's own test version failed
       } catch { return null; } finally { if (outDir) rmSync(outDir, { recursive: true, force: true }); }
     },
-    /**
-     * The target repo's own docs-move-with-code rule, when it has one (scripts/check-devdocs-freshness.sh, forge#4185),
-     * over base...HEAD in cwd. null when the repo has no such script or it cannot run (exit 2+, timeout): never blocks.
-     * Otherwise {ok, output} with the script's stdout+stderr (exit 0 = ok, exit 1 = stale docs).
-     */
-    async docsFreshness({ cwd, base }) {
-      const s = join(cwd, "scripts", "check-devdocs-freshness.sh");
-      if (!existsSync(s)) return null;
-      try {
-        const r = await pexec("bash", [s, base], { cwd, timeout: 60000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, PR_BODY: "" } });
-        return { ok: true, output: String(r.stdout ?? "") };
-      } catch (e) {
-        if (e?.code !== 1) return null;
-        return { ok: false, output: `${e.stdout ?? ""}${e.stderr ?? ""}`.slice(0, 6000) };
-      }
-    },
     /** #5825: is the lane folder a worktree of this repo (toplevel + common dir), and moving aside a folder that is not. */
     confine: { verify: ({ wt, cwd }) => verifyLaneWorktree({ git: run("git"), exists: async (p) => existsSync(p), wt, cwd }), quarantine: async ({ wt }) => quarantineDir(wt) },
     /** #4162: processes left running inside a lane worktree (Linux /proc). */

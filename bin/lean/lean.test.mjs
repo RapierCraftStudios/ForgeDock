@@ -240,6 +240,10 @@ function world(o = {}) {
   };
   return w;
 }
+// #6083: the codes the gate cut made advisory. Tests of the resume and needs-human mechanics exercise a blocking code, so they
+// re-promote these with engine.conformance_kinds enforce (ENF); the advisory default itself is pinned by the "gate cut (#6083)" tests.
+const LEGACY_ENFORCE = Object.fromEntries(["conformance.unimplemented", "conformance.e2e_unverified", "conformance.untracked_deferral", "conformance.unjustified_deferral", "conformance.guard_broken", "conformance.preserve_violated", "env.tool_missing", "env.repro_unrunnable", "env.validate_timeout", "contract.invalid_command"].map((c) => [c, "enforce"]));
+const ENF = { conformanceKinds: LEGACY_ENFORCE };
 const run = (w, extra = {}) => runCore({ issue: 7, repo: "o/r", lane: "staging", cwd: "/repo", worktreeRoot: "/wt", dir: tmpDir("core-"), conformance: "enforce",
   io: w.io, emitTelemetry: async (r) => w.telemetry.push(r), random: () => 0.5, ...extra });
 /** #5728: run `fn` with a fixed, idle load average: precheck.mjs sizes its timeout retry from the real host load, so a loaded host defers the check to CI. */
@@ -393,25 +397,11 @@ describe("core work-on", () => {
     assert.match(t, /\| Plan \| not reached \|/);
   });
 
-  it("an unknown amendment kind gets one in-lane correction before the gate and does not use the conformance resume (#5089)", async () => {
-    const w = world({ amendments: [{ kind: "deliverable_change", requirement: "R1", why: "no Linux build" }], resumeAmendments: [], reviews: [ok()] });
-    const r = await run(w);
-    assert.equal(r.terminalReason, "merged");
-    assert.ok(builders(w).some((c) => /amendments in .*result\.json are not valid/.test(c[4] ?? "")), "the correction prompt ran");
-    assert.match(traj(w)[0], /Amendment kinds invalid \(1\); builder asked to correct/);
-  });
 
-  it("an unknown amendment kind the builder does not fix gets the one correction, then is advisory: not applied, never parks (#5089, unclog)", async () => {
-    const bad = [{ kind: "deliverable_change", requirement: "R1", why: "w" }];
-    const w = world({ amendments: bad, resumeAmendments: bad, reviews: [ok()] });
-    const r = await run(w);
-    assert.equal(r.terminalReason, "merged");
-    assert.equal(builders(w).filter((c) => /amendments in .*result\.json are not valid/.test(c[4] ?? "")).length, 1);
-  });
 
   it("nonconforming review -> builder resumed in its session with the failed rows -> re-review conforms -> merge; the note is re-posted", async () => {
     const w = world({ reviews: [bad("src/foo.js:9 still wrong"), ok()] });
-    const r = await run(w);
+    const r = await run(w, ENF);
     assert.equal(r.terminalReason, "merged");
     const b = builders(w);
     assert.equal(b.length, 3);
@@ -430,7 +420,7 @@ describe("core work-on", () => {
 
   it("nonconforming twice -> needs-human with the specific code, no PR, issue left open", async () => {
     const w = world({ reviews: [bad(), bad("still bad")] });
-    const r = await run(w, { reviewMaxResumes: 1 });
+    const r = await run(w, { ...ENF, reviewMaxResumes: 1 });
     assert.equal(r.terminalReason, "needs-human");
     assert.equal(r.code, "conformance.unimplemented");
     assert.equal(w.closed.length, 0);
@@ -481,16 +471,15 @@ describe("core work-on", () => {
 
   it("a CONFORMS verdict whose rows fail is not conforming (the engine computes the verdict)", async () => {
     const w = world({ reviews: [bad("half done", "CONFORMS"), ok()] });
-    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal((await run(w, ENF)).terminalReason, "merged");
     assert.equal(builders(w).length, 3);
-    assert.match(traj(w)[0], /reviewer verdict contradicted its rows/);
   });
 
   it("a reviewer that judges a deferral unjustified gets the builder resumed to implement it; nothing is filed for it", async () => {
     const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "later", bucket: "owner:rotate the key" }] };
     const rej = conf({ requirements: [{ id: "R1", status: "implemented", evidence: "src/foo.js:3", validated_by: "V1" }, { id: "R2", status: "deferred", deferral_ok: false, note: "one line in bar.js; do it now" }] }, k);
     const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [rej, rej] });
-    const r = await run(w);
+    const r = await run(w, ENF);
     assert.equal(r.code, "conformance.unjustified_deferral"); assert.equal(w.followups.length, 0); assert.equal(w.merges.length, 0);
     assert.match(builders(w)[2][4], /conformance\.unjustified_deferral: R2 defer is not justified: one line in bar\.js; do it now; implement it/);
   });
@@ -751,14 +740,6 @@ describe("core work-on", () => {
     assert.equal(r.terminalReason, "decomposed");
     assert.deepEqual({ independent: r.decomposition.independent, oversize: r.decomposition.oversize }, { independent: false, oversize: true });
     assert.ok(w.comments.some((c) => /FORGE:DECOMPOSED/.test(c) && /size: 40 files, 4000 lines .* oversize yes/.test(c)));
-  });
-
-  it("#4857 a product-decision block over an unrunnable validate is untyped (one correction resume), a real one stays human", () => {
-    const u = classifyBlock({ summary: "V2 cannot run: poetry found no pyproject at the repo root", block: { kind: "human", why: "product-decision" } }, 1);
-    assert.equal(u.kind, "untyped");
-    assert.match(u.problem, /substitute-validate/);
-    assert.equal(classifyBlock({ summary: "needs a pricing decision", block: { kind: "human", why: "product-decision" } }, 1).kind, "human");
-    assert.equal(classifyBlock({ summary: "V1 needs the prod key", block: { kind: "human", why: "credentials" } }, 1).kind, "human");
   });
 
   it("#5342 classifyBlock: design-invalidated needs a decision and a why; the other kinds are unchanged", () => {
@@ -1395,7 +1376,7 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
 
   it("a claimed 'follow-up' with no typed deferral is needs-human conformance.untracked_deferral; nothing is filed or merged", async () => {
     const w = world({ contract: two(), changed: files2, claims: [{ id: "R1", status: "implemented" }, { id: "R2", status: "deferred", note: "follow-up" }] });
-    const r = await run(w);
+    const r = await run(w, ENF);
     assert.equal(r.code, "conformance.untracked_deferral"); assert.equal(reviewers(w).length, 0); assert.equal(w.followups.length, 0);
     assert.match(nhBody(w), /R2 was contracted as deliver but reported "deferred" without a typed amendment/);
     blockedNothingMerged(w);
@@ -1405,7 +1386,7 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     const w = world({ contract: two(), changed: files2, claims: [{ id: "R1", status: "implemented" }, { id: "R2", status: "deferred" }],
       resumeAmendments: [{ kind: "defer", requirement: "R2", why: "callers live in another module's release train" }],
       reviews: [conf({}, two("defer", { tracked: "#900" }), files2)] });
-    const r = await run(w);
+    const r = await run(w, ENF);
     assert.equal(r.terminalReason, "merged");
     assert.equal(w.followups.length, 1);
     assert.deepEqual(w.followups[0].items.map((i) => i.key), ["R2: Existing callers of foo keep working."]);
@@ -1724,14 +1705,6 @@ describe("devdocs freshness gate (the repo's own scripts/check-devdocs-freshness
   };
   const STALE = { ok: false, output: "STALE: bin/lean/lean.mjs changed but no dossier matching it was touched (devdocs/modules/lean.md)" };
 
-  it("a stale dossier gets one builder resume with the script's output, then merges once it passes", async () => {
-    const w = dworld([STALE, { ok: true, output: "OK" }]);
-    assert.equal((await run(w)).terminalReason, "merged");
-    assert.equal(builders(w).length, 3, "plan + implement + one docs resume");
-    assert.match(builders(w)[2][4], /docs freshness check[\s\S]*devdocs\/modules\/lean\.md/);
-    assert.equal(w.docsCalls[0].base, "origin/staging");
-    assert.match(traj(w).at(-1), /Docs freshness check failed; builder resumed once/);
-  });
 
   it("a doc the docs round edits outside the deliverables is an implied deliverable; an unrelated extra file is advisory scope creep (unclog), both merge", async () => {
     for (const [extra, code] of [[[], null], [["src/billing.js"], null]]) {
@@ -1743,12 +1716,6 @@ describe("devdocs freshness gate (the repo's own scripts/check-devdocs-freshness
     }
   });
 
-  it("still stale after the resume: needs-human docs.stale, before any PR or reviewer run", async () => {
-    const w = dworld([STALE]);
-    const r = await run(w);
-    assert.equal(r.code, "docs.stale"); assert.equal(w.prs.length, 0); assert.equal(reviewers(w).length, 0);
-    assert.equal(builders(w).length, 3);
-  });
 
   it("no script in the repo, or it cannot run (null): no resume, the run is unchanged", async () => {
     const w = dworld([null]);
@@ -1756,22 +1723,6 @@ describe("devdocs freshness gate (the repo's own scripts/check-devdocs-freshness
     assert.equal(builders(w).length, 2);
   });
 
-  it("the effect: absent script -> null; exit 0 -> ok; exit 1 -> stale with output; exit 2 -> null", async () => {
-    const io = makeLeanIo({ repo: "o/r" });
-    const dir = tmpDir("docs-fresh-");
-    assert.equal(await io.docsFreshness({ cwd: dir, base: "origin/x" }), null);
-    mkdirSync(join(dir, "scripts"), { recursive: true });
-    const put = (body) => writeFileSync(join(dir, "scripts", "check-devdocs-freshness.sh"), `#!/usr/bin/env bash\n${body}\n`);
-    put('echo "OK: $1"; exit 0');
-    assert.deepEqual(await io.docsFreshness({ cwd: dir, base: "origin/x" }), { ok: true, output: "OK: origin/x\n" });
-    put('echo "STALE: lean.md"; exit 1');
-    const st = await io.docsFreshness({ cwd: dir, base: "origin/x" });
-    assert.equal(st.ok, false); assert.match(st.output, /STALE: lean\.md/);
-    put("echo usage >&2; exit 2");
-    assert.equal(await io.docsFreshness({ cwd: dir, base: "origin/x" }), null);
-    put('[ -z "$PR_BODY" ] && exit 0 || exit 1');
-    assert.equal((await io.docsFreshness({ cwd: dir, base: "origin/x" })).ok, true, "PR_BODY is empty: no exemption is read from the environment");
-  });
 });
 
 describe("review row skeleton and targeted retry (#4160)", () => {
@@ -2012,10 +1963,10 @@ describe("conformance shadow mode (the default)", () => {
 
   it("shadow still blocks what the previous reviewer blocked on: a requirement not implemented gets one resume, then needs-human", async () => {
     const w = world({ reviews: [bad("still null-derefs"), bad("still null-derefs")] });
-    const r = await runShadow(w);
+    const r = await runShadow(w, ENF);
     assert.equal(r.code, "conformance.unimplemented"); assert.equal(builders(w).length, 3); assert.equal(w.merges.length, 0);
     const w2 = world({ reviews: [conf({ regressions: [{ at: "src/bar.js:4", failure: "caller passes undefined" }] }), ok()] });
-    assert.equal((await runShadow(w2)).terminalReason, "merged"); assert.equal(builders(w2).length, 3, "a regression is resumed in shadow too");
+    assert.equal((await runShadow(w2, ENF)).terminalReason, "merged"); assert.equal(builders(w2).length, 3, "a regression is resumed in shadow too");
   });
 
   it("shadow blocks a failed validate command (#4160): one resume, then needs-human, and no reviewer tokens are spent", async () => {
@@ -2033,12 +1984,12 @@ describe("conformance shadow mode (the default)", () => {
     const w = world({ validation: v }); let provisioned = 0, installed = false;
     w.io.deps = { prepare: async () => { provisioned++; installed = true; return []; } };
     w.io.runCommand = async () => (installed ? { rc: 0, output: "" } : { rc: 1, output: "ModuleNotFoundError: No module named 'pytest'" });
-    const ok = await run(w, { conformance: "enforce" });
+    const ok = await run(w, { ...ENF, conformance: "enforce" });
     assert.notEqual(ok.code, OUTCOME_CODES.ENV_TOOL_MISSING); assert.equal(provisioned >= 1, true);
     const w2 = world({ validation: v }); let again = 0;
     w2.io.deps = { prepare: async () => { again++; return []; } };
     w2.io.runCommand = async () => ({ rc: 1, output: "ModuleNotFoundError: No module named 'yaml'" });
-    const r = await run(w2, { conformance: "enforce" });
+    const r = await run(w2, { ...ENF, conformance: "enforce" });
     assert.equal(r.code, OUTCOME_CODES.ENV_TOOL_MISSING); assert.equal(w2.merges.length, 0); assert.equal(again, 2, "the toolchain prepare plus exactly one provisioning retry");
   });
 
@@ -2059,13 +2010,13 @@ describe("conformance shadow mode (the default)", () => {
     const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }];
     const w = world({ validation: v }); let calls = 0;
     w.io.deps = { prepare: async () => { calls++; return [{ status: "failed", eco: "npm", dir: ".", key: null, ms: 1, reason: "install failed: ERESOLVE" }]; } };
-    const r = await run(w, { conformance: "enforce" });
+    const r = await run(w, { ...ENF, conformance: "enforce" });
     assert.equal(r.code, OUTCOME_CODES.ENV_TOOL_MISSING); assert.equal(w.merges.length, 0);
     assert.equal(calls, 2, "the toolchain prepare plus exactly one provisioning retry");
     assert.match(nhBody(w), /dependency install failed \(npm: install failed: ERESOLVE\) for a package the changed file/);
     const w2 = world({ validation: v });
     w2.io.deps = { prepare: async () => [{ status: "failed", eco: "poetry", dir: "services/other", key: null, ms: 1, reason: "install failed" }] };
-    const r2 = await run(w2, { conformance: "enforce" });
+    const r2 = await run(w2, { ...ENF, conformance: "enforce" });
     assert.notEqual(r2.code, OUTCOME_CODES.ENV_TOOL_MISSING);
   });
 
@@ -2074,7 +2025,7 @@ describe("conformance shadow mode (the default)", () => {
     for (const conformance of ["shadow", "enforce"]) {
       const w = world({ validation: v }), ran = [];
       w.io.runCommand = async (a) => { ran.push(a); return { rc: 1, output: "ModuleNotFoundError: No module named 'yaml'" }; };
-      const r = await run(w, { conformance });
+      const r = await run(w, { ...ENF, conformance });
       assert.equal(r.code, OUTCOME_CODES.ENV_TOOL_MISSING, conformance); assert.equal(w.merges.length, 0);
       assert.equal(builders(w).length, 2, "plan + implement only"); assert.equal(reviewers(w).length, 0);
       assert.match(nhBody(w), /Environment error \(not a conformance failure\): the host is missing yaml/);
@@ -2098,11 +2049,10 @@ describe("conformance shadow mode (the default)", () => {
     const ok = world({ validation: v }); ok.io.runCommand = async () => ({ rc: 0, output: "" });
     assert.equal((await run(ok, { conformance: "enforce", placement: { where: "local", reason: "x" }, recover: { code: ENV_VALIDATE_PLACEMENT, attempt: 1, final: true } })).terminalReason, "merged");
   });
-  const remoteV = { conformance: "enforce", placement: { where: "remote", reason: "mode remote" } };
+  const remoteV = { ...ENF, conformance: "enforce", placement: { where: "remote", reason: "mode remote" } };
   const v5730 = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
   it("5730: remote validate_failed with stale-artifact output resumes the builder", async () => {
-    const stale = "listings/official/maps/maps-places/agent.md: missing or out of date (run --render-agent-md --render-page)";
-    for (const output of [stale, "not ok 1 - foo\n  AssertionError: expected 3, got 4"]) {
+    for (const output of ["not ok 1 - foo\n  AssertionError: expected 3, got 4"]) { // #6083: a stale generated artifact (validate_drift) is advisory
       const w = world({ validation: v5730 }); w.io.runCommand = async () => ({ rc: 1, output });
       const r = await run(w, remoteV);
       assert.notEqual(r.code, ENV_VALIDATE_PLACEMENT, output); assert.ok(builders(w).length >= 3, "the builder resumes");
@@ -2126,30 +2076,12 @@ describe("conformance shadow mode (the default)", () => {
     for (const conformance of ["shadow", "enforce"]) {
       const w = world({ validation: v });
       w.io.runCommand = async () => ({ rc: 124, output: "(timed out after 1s)" });
-      const r = await run(w, { conformance });
+      const r = await run(w, { ...ENF, conformance });
       assert.equal(r.code, ENV_VALIDATE_TIMEOUT, conformance); assert.equal(r.terminalReason, "needs-human");
       assert.equal(classifyNeedsHuman(r), "recoverable"); assert.equal(w.merges.length, 0);
       assert.equal(builders(w).length, 2, "plan + implement only"); assert.equal(reviewers(w).length, 0);
       assert.match(nhBody(w), /timed out \(exit 124\) even after one longer retry/);
     }
-  });
-  it("#4979 the engine reruns a substituted validate's frozen command: a runnable failing one blocks, an unrunnable one lets the substitute stand", async () => {
-    const amendments = [{ kind: "substitute-validate", validate: "V1", command: "node --test test/foo2.test.js", why: "the frozen path does not exist" }];
-    const validation = [{ id: "V1", command: "node --test test/foo2.test.js", exit: 0 }];
-    const lane = (frozenOut) => {
-      const w = world({ validation, amendments, resumeValidation: validation, resumeAmendments: amendments }), ran = [];
-      w.io.runCommand = async (a) => { ran.push(a); return a.command === "node --test test/foo.test.js" ? frozenOut : { rc: 0, output: "" }; };
-      return { w, ran };
-    };
-    const dir = tmpDir("subst-");
-    const bad = lane({ rc: 1, output: "not ok 1 - foo handles null\nAssertionError: expected 1" });
-    const rb = await run(bad.w, { conformance: "enforce", dir });
-    assert.equal(rb.terminalReason, "needs-human"); assert.equal(bad.w.merges.length, 0);
-    assert.match(nhBody(bad.w), /frozen command runs and fails \(exit 1\)/);
-    assert.ok(bad.ran.some((a) => a.command === "node --test test/foo.test.js" && posix(a.cwd) === WT && a.env), "the frozen command is rerun in the worktree with the lane env");
-    assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "SUBSTITUTE_RERUN").map((e) => e.runs), [[{ id: "V1", rc: 1 }], [{ id: "V1", rc: 1 }]]);
-    const good = lane({ rc: 1, output: "no tests ran: no test files matched test/foo.test.js" });
-    assert.equal((await run(good.w, { conformance: "enforce" })).terminalReason, "merged");
   });
   it("#4323 a rerun that fails for a repo reason stays conformance.unimplemented; one that passes merges", async () => {
     const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
@@ -2182,7 +2114,7 @@ describe("conformance shadow mode (the default)", () => {
     const GC = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "G1", command: "node --test test/bar.test.js", regression: true }] };
     const w = world({ contract: GC, validation: [{ id: "V1", command: CONTRACT.validate[0].command, exit: 0 }] });
     delete w.io.runCommand;
-    const r = await runShadow(w);
+    const r = await runShadow(w, ENF);
     assert.notEqual(r.terminalReason, "merged"); assert.ok(builders(w).length >= 3, "validate_missing resumes the builder");
   });
   it("#5728 a fix resume that hits the context ceiling restarts with the failure list, not the full build prompt", async () => {
@@ -2423,26 +2355,26 @@ describe("conformance shadow mode (the default)", () => {
 
   it("#4160 shadow blocks a validate step with no recorded result and an invalid amendment like a reviewer-found unimplemented requirement", async () => {
     const w = world({ validation: [] });
-    const r = await runShadow(w);
+    const r = await runShadow(w, ENF);
     assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0);
     assert.equal(builders(w).length, 3, "one builder resume"); assert.equal(reviewers(w).length, 0, "no reviewer tokens on a precheck block");
     assert.match(builders(w)[2][4], /validate V1 .*has no recorded result/);
     const fixed = world({ validation: [], resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] });
-    assert.equal((await runShadow(fixed)).terminalReason, "merged", "recorded by the resume, then merges");
+    assert.equal((await runShadow(fixed, ENF)).terminalReason, "merged", "recorded by the resume, then merges");
     const a = world({ amendments: [{ kind: "add-deliverable", path: "src/x.js" }] });
     const ra = await runShadow(a);
-    assert.equal(ra.terminalReason, "merged", "unclog: an invalid amendment is advisory, not applied"); assert.match(traj(a).join("\n"), /Advisory \(not blocking\)[^\n]*amendment without why/);
+    assert.equal(ra.terminalReason, "merged", "#6083: an invalid amendment is simply not applied, no gate"); assert.doesNotMatch(traj(a).join("\n"), /amendment without why/);
   });
   it("#4737 decision records are persisted after the merge, never at gate time", async () => {
     const dir = tmpDir("dec-"); const prev = process.env.FORGEDOCK_DECISIONS_DIR; process.env.FORGEDOCK_DECISIONS_DIR = dir;
     try {
       const amendments = [{ kind: "decision", why: "w", decision: { choice: "use X", anchors: ["src/db.ts"], why: "w" } }];
       const bad = world({ validation: [], amendments });
-      assert.equal((await runShadow(bad)).code, "conformance.unimplemented");
+      assert.equal((await runShadow(bad, ENF)).code, "conformance.unimplemented");
       assert.ok(!bad.comments.some((c) => c.includes("FORGE:DECISION")), "a lane that never merges records nothing");
       assert.equal(readdirSync(dir).length, 0, "no index written");
       const ok = world({ amendments });
-      assert.equal((await runShadow(ok)).terminalReason, "merged");
+      assert.equal((await runShadow(ok, ENF)).terminalReason, "merged");
       assert.ok(ok.comments.some((c) => c.includes("FORGE:DECISION")), "recorded after the merge");
       assert.equal(readdirSync(dir).length, 1);
     } finally { if (prev === undefined) delete process.env.FORGEDOCK_DECISIONS_DIR; else process.env.FORGEDOCK_DECISIONS_DIR = prev; }
@@ -2520,7 +2452,7 @@ describe("conformance shadow mode (the default)", () => {
   it("#5207 shadow: an in-lane engineering deferral (bucket new-issue) resumes the builder once and is never filed", async () => {
     const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "new-issue" }] };
     const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k), conf({}, k)] });
-    const r = await runShadow(w);
+    const r = await runShadow(w, ENF);
     assert.equal(r.code, "conformance.unjustified_deferral"); assert.equal(w.followups.length, 0); assert.equal(w.merges.length, 0);
     assert.match(builders(w)[2][4], /R2 is in-lane engineering work \(bucket new-issue\): deliver it/);
   });
@@ -2750,19 +2682,6 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 2075, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 2075 tokens`); // 2075: #5979 (substitute-validate and out-of-band from the shared amendment schema); 2025: #5752 (mechanism supersedes, negative examples, outcome evidence) // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule) // 1925: #5760 (CI budget rule)
   });
 
-  it("#4519 generated_paths: both prompts name the globs (even with the gate off), and an amendment adding one is advisory: not applied (unclog)", async () => {
-    const G = ["web/public/openapi*.json"];
-    for (const f of [facts([], { generated_paths: G }), facts([HOT], { enabled: false, generated_paths: G })]) {
-      assert.match(hotspotPlanNote(f), /Generated paths \(forge\.yaml maintenance\.generated_paths, owned by the repo's generator\): web\/public\/openapi\*\.json\. Never list or amend them in/);
-      assert.match(hotspotBuildRule(f), /Generated paths .*web\/public\/openapi\*\.json/);
-    }
-    assert.equal(hotspotPlanNote(facts([], { generated_paths: [] })), "", "no generated_paths: unchanged");
-    const w = hworld(facts([], { generated_paths: G }), [facts([])], { amendments: [{ kind: "add-deliverable", path: "web/public/openapi.json", why: "sync the spec" }] });
-    const r = await run(w);
-    assert.equal(r.terminalReason, "merged");
-    assert.match(builders(w)[0][4], /Generated paths .*openapi/);
-    assert.match(traj(w).join("\n"), /Advisory \(not blocking\)[^\n]*add-deliverable web\/public\/openapi\.json: generated path/);
-  });
 
   it("the plan prompt carries the facts, the implement prompt the configured rule; growth within the limit merges; no extra runner calls", async () => {
     const w = hworld(facts([HOT, COLD], { file_lines: 2000, growth_lines: 150 }), [facts([SMALL])]);
@@ -2777,15 +2696,6 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(plain.calls.filter((c) => c[0] === "runner").length, w.calls.filter((c) => c[0] === "runner").length, "no extra LLM calls");
   });
 
-  it("unexempted growth of an over-threshold file is advisory (unclog) in enforce and in shadow: recorded, no resume, it merges", async () => {
-    for (const conformance of ["enforce", "shadow"]) {
-      const w = hworld(facts([HOT]), [facts([GROWN])]);
-      const r = await run(w, { conformance });
-      assert.equal(r.terminalReason, "merged", conformance);
-      assert.equal(builders(w).length, 2, `${conformance}: plan + implement, no resume`);
-      assert.match(traj(w).join("\n"), /Advisory \(not blocking\): maintenance\.hotspot_growth[^\n]*src\/foo\.js grew by 200 lines/);
-    }
-  });
 
   it("growth moved out on the resume merges; an exemption in the contract or a failed/missing script never blocks", async () => {
     const w = hworld(facts([HOT]), [facts([GROWN]), facts([SMALL])]);
@@ -2907,7 +2817,7 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
   it("#5732 a head that failed on an absent interpreter is env.repro_unrunnable with its output, no builder resume", async () => {
     const w = rworld([{ base: "SKIPPED", head: "FAILED" }]);
     w.io.runCommand = async () => ({ rc: 1, output: "Creating virtualenv\npoetry env use: python3.11 not found" });
-    const r = await run(w, { conformance: "enforce" });
+    const r = await run(w, { ...ENF, conformance: "enforce" });
     assert.equal(r.code, "env.repro_unrunnable"); assert.equal(w.merges.length, 0);
     assert.equal(builders(w).length, 2, "plan + implement only");
     assert.match(nh(w), /output tail/); assert.match(nh(w), /python3\.11 not found/);
@@ -2956,7 +2866,7 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     for (const conformance of ["enforce", "shadow"]) {
       for (const rg of [{ base: "SKIPPED", head: "UNRUNNABLE" }, null]) {
         const w = rworld([rg]);
-        const r = await run(w, { conformance });
+        const r = await run(w, { ...ENF, conformance });
         assert.equal(r.code, "env.repro_unrunnable", `${conformance} ${JSON.stringify(rg)}`); assert.equal(r.terminalReason, "needs-human");
         assert.equal(classifyNeedsHuman(r), "recoverable");
         assert.equal(w.merges.length, 0); assert.equal(builders(w).length, 2, "plan + implement, no resume"); assert.equal(reviewers(w).length, 0);
@@ -3226,17 +3136,17 @@ describe("comment templates", () => {
 
   it("#5644 review findings get up to 3 builder resume rounds: replay of a fixable finding that clears in round 3 merges", async () => {
     const w = world({ reviews: [bad("round 1"), bad("round 2"), conf()] });
-    const r = await run(w);
+    const r = await run(w, ENF);
     assert.equal(r.terminalReason, "merged"); assert.equal(builders(w).length, 4, "build plus two resume rounds");
   });
 
   it("#5644 rounds are spent: a changing but never fixed finding ends needs-human after reviewMaxResumes rounds; an unchanged one stops early", async () => {
     const w = world({ reviews: [bad("a"), bad("b"), bad("c"), bad("d")] });
-    const r = await run(w);
+    const r = await run(w, ENF);
     assert.equal(r.terminalReason, "needs-human"); assert.equal(builders(w).length, 5);
     assert.match(traj(w)[0], /after 3 builder resumes/);
     const w2 = world({ reviews: [bad("a"), bad("b"), bad("c")] });
-    assert.equal((await run(w2, { reviewMaxResumes: 1 })).terminalReason, "needs-human"); assert.equal(builders(w2).length, 3);
+    assert.equal((await run(w2, { ...ENF, reviewMaxResumes: 1 })).terminalReason, "needs-human"); assert.equal(builders(w2).length, 3);
   });
 
   it("#5644 builderFixable: regression, deferral, scope are fixable; environment and empty sets are not", () => {
@@ -3247,7 +3157,7 @@ describe("comment templates", () => {
 
   it("a merged run's trajectory and a needs-human run's trajectory carry the right rows", async () => {
     const w = world({ reviews: [bad(), bad("still bad")] });
-    await run(w, { reviewMaxResumes: 1 });
+    await run(w, { ...ENF, reviewMaxResumes: 1 });
     const t = traj(w)[0];
     assert.match(t, /\| Validate \| CONFIRMED \|/);
     assert.match(t, /\| Plan \| contract [0-9a-f]{12} \| 1 requirement\(s\) \|/);
@@ -4324,7 +4234,7 @@ describe("base-sync (#4100)", () => {
 
   it("conflict resolution that the re-review FAILs gets one retry then merges on PASS", async () => {
     const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], reviews: [ok(), bad("src/foo.js:4 lost base change"), ok()] });
-    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal((await run(w, ENF)).terminalReason, "merged");
     assert.equal(reviewers(w).length, 3);
     assert.equal(builders(w).length, 4);
   });
@@ -4893,7 +4803,7 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     };
     for (const [reason, prep] of Object.entries(cases)) {
       const w = world(); mk(w); prep(w);
-      const r = await run(w);
+      const r = await run(w, ENF);
       assert.equal(r.terminalReason, reason);
       assert.equal(w.pruned, true);
       assert.equal(w.tmpMade.length, 1);
@@ -5660,14 +5570,6 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.ok(!w.comments.some((c) => c.includes("FORGE:CONTRACT") && c.includes("poetry run pytest")));
   });
 
-  it("#5653 the plan prompt tells the builder to prefer CI commands, record equivalent substitutes and never narrow time or production criteria", async () => {
-    const { unrunnableValidateNote } = await import("./prompts.mjs");
-    const n = unrunnableValidateNote();
-    assert.match(n, /CI-derived command catalogue/);
-    assert.match(n, /same test ids with the same result is recorded/);
-    assert.match(n, /never narrow it/);
-  });
-
   // ---- #4112 ----
   const fakeCli = async (name, body) => {
     const { writeFileSync, chmodSync } = await import("node:fs");
@@ -5950,11 +5852,11 @@ describe("batch robustness (#4112-#4115)", () => {
   });
   it("#5752 a declared outcome-evidence area touched without a before/after result row blocks with a clear reason", async () => {
     const w = world({ prList: [] });
-    await run(w, { outcomeEvidenceConfig: { paths: { core: ["src/**"] }, corpus: { core: ["corpus/**"] } } });
+    await run(w, { ...ENF, outcomeEvidenceConfig: { paths: { core: ["src/**"] }, corpus: { core: ["corpus/**"] } } });
     assert.ok(builders(w).length >= 2, "the missing evidence resumes the builder");
     assert.match(JSON.stringify(w.calls.filter((c) => c[0] === "runner")), /outcome-evidence area 'core'.{0,200}src\/foo\.js.{0,200}no before\/after measurement/);
     const off = world({ prList: [] });
-    await run(off);
+    await run(off, ENF);
     assert.doesNotMatch(JSON.stringify([off.comments, off.calls.filter((c) => c[0] === "runner")]), /outcome_evidence_missing|outcome-evidence area/, "no outcome_evidence config: no new check");
   });
   it("#5752 the builder prompt carries the negative-examples rule and the mechanism supersedes amendment", async () => {
@@ -6368,14 +6270,14 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
 
   it("without the fix, a validate id left to CI is missing under enforce (the regression this guards)", async () => {
     const w = world({ validation: ciValidation });
-    const r = await run(w);
+    const r = await run(w, ENF);
     assert.equal(r.terminalReason, "needs-human"); assert.equal(w.merges.length, 0);
   });
 
   it("#4527 base-sync re-review FAIL: the fix round's head is CI-verified before the retry review, which accepts validates left to CI and notes them", async () => {
     const CONFLICTING = { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }, OKSTATE = { mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" };
     const w = withCi(world({ validation: ciValidation, prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], reviews: [ok(), bad("src/foo.js:4 lost base change"), ok()] }));
-    const r = await run(w, { verify: CI });
+    const r = await run(w, { ...ENF, verify: CI });
     assert.equal(r.terminalReason, "merged", r.reason);
     assert.equal(reviewers(w).length, 3);
     assert.equal(new Set(w.ci.runs.map((x) => x.headSha)).size, w.ci.runs.length, "every reviewed head was verified once");
@@ -7765,12 +7667,12 @@ describe("context pack modes (forge#4275)", () => {
   it("write-back: the terminal FORGE:STATE carries the typed outcome code and failure classes the compiler reads", async () => {
     const w = world({ reviews: [bad(), bad()] });
     w.leaseWrites = []; w.io.projector = { readState: async () => null, writeState: async (_i, st) => { w.leaseWrites.push(st); } };
-    const r = await run(w);
+    const r = await run(w, ENF);
     assert.equal(r.terminalReason, "needs-human");
     const last = w.leaseWrites.at(-1);
     assert.deepEqual([last.terminal, last.terminalReason, last.terminalCode, last.failureClasses], [true, "needs-human", OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, [OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED]]);
     const m = world(); m.leaseWrites = []; m.io.projector = { readState: async () => null, writeState: async (_i, st) => { m.leaseWrites.push(st); } };
-    await run(m);
+    await run(m, ENF);
     assert.deepEqual([m.leaseWrites.at(-1).terminalCode, m.leaseWrites.at(-1).failureClasses], [OUTCOME_CODES.COMPLETED, []]);
   });
 
@@ -8246,15 +8148,15 @@ describe("#4363 fresh fix sessions", () => {
 
   it("a conformance FAIL citing file:line is fresh; one without a file:line resumes; the one review retry is unchanged", async () => {
     const w1 = world({ reviews: [bad("src/foo.js:9 still wrong"), ok()] }); const d1 = tmpDir("core-");
-    assert.equal((await run(w1, { dir: d1 })).terminalReason, "merged");
+    assert.equal((await run(w1, { ...ENF, dir: d1 })).terminalReason, "merged");
     assert.deepEqual(usage(d1).map((e) => e.mode ?? null), [null, null, "fresh"]);
     const vague = conf({ verdict: "NONCONFORMING", requirements: [{ id: "R1", status: "partial", evidence: "the foo module", validated_by: "V1", note: "null still throws" }] });
     const w2 = world({ reviews: [vague, ok()] }); const d2 = tmpDir("core-");
-    assert.equal((await run(w2, { dir: d2 })).terminalReason, "merged");
+    assert.equal((await run(w2, { ...ENF, dir: d2 })).terminalReason, "merged");
     assert.equal(builders(w2)[2][2], "sess-1");
     assert.deepEqual(usage(d2).map((e) => e.mode ?? null), [null, null, "resume"]);
     const w3 = world({ reviews: [bad(), bad(), bad()] });
-    const r3 = await run(w3);
+    const r3 = await run(w3, ENF);
     assert.equal(r3.terminalReason, "needs-human"); assert.equal(reviewers(w3).length, 2, "still one review retry");
   });
 });
@@ -8993,14 +8895,14 @@ describe("#4394 builder model routing", () => {
 
   it("a conformance fix round on the mid tier does not escalate and keeps the fix model", async () => {
     const w = world({ reviews: [bad("src/foo.js:9 still wrong"), ok()] }); const dir = tmpDir("core-");
-    assert.equal((await run(w, { dir, builderModel: "opus-b", fixModel: "haiku-fix" })).terminalReason, "merged");
+    assert.equal((await run(w, { ...ENF, dir, builderModel: "opus-b", fixModel: "haiku-fix" })).terminalReason, "merged");
     assert.equal(builders(w)[2][3], "haiku-fix");
     assert.deepEqual(events(dir, "BUILDER_ESCALATED"), []);
   });
 
   it("builder_routing off: plan, build and the resume keep builderModel; the class is still recorded on the top tier", async () => { // #5810: the pre-route is top too
     const w = world({ reviews: [conf({ verdict: "NONCONFORMING", requirements: [{ id: "R1", status: "partial", evidence: "the foo module", validated_by: "V1", note: "x" }] }), ok()] }); const dir = tmpDir("core-");
-    await run(w, { dir, builderModel: "opus-b", builderRouting: { mode: "off" } });
+    await run(w, { ...ENF, dir, builderModel: "opus-b", builderRouting: { mode: "off" } });
     assert.ok(builders(w).length >= 3);
     assert.ok(builders(w).every((b) => b[3] === "opus-b"));
     const term = events(dir, "RUN_TERMINAL").at(-1);
@@ -9246,28 +9148,6 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
   const events = (dir, name) => readLog(dir, 7).filter((e) => e.event === name);
   const ON = { light: { mode: "on", source: "text" } };
 
-  it("#5751 recurrence: an issue matching two earlier merged fixes on its path skips the light lane, gets the design note and records the reason", async () => {
-    const DESIGN = { why_failed: "#10 and #11 guarded one caller each", disposition: "replace", outcome: { metric: "null-input crashes in foo tests", target: "0" } };
-    const ghApi = (a) => {
-      const j = a.join(" ");
-      if (j.includes("search/issues")) return [10, 11].map((n) => JSON.stringify({ number: n, title: `fix foo null ${n} ERR_NULL_INPUT`, pr: true, merged: true })).join("\n"); // #5979: a symptom match (the issue's backticked signature), not only the path
-      if (/pulls\/1[01]\/files/.test(j)) return "src/foo.js\n";
-      return null;
-    };
-    const w = lworld({ ghApi, body: `${BODY}\n\nThrows \`ERR_NULL_INPUT\`. Recurs #10`, contract: { ...CONTRACT, test_plan: TEST_PLAN, repro_test: RT, design: DESIGN } }), dir = tmpDir("light-");
-    await run(w, { dir, ...ON });
-    const rec = events(dir, "RECURRENCE");
-    assert.equal(rec.length, 1);
-    assert.deepEqual(rec[0].fixes.sort(), [10, 11]);
-    assert.match(rec[0].reason, /^recurrence: 2 earlier merged fix\(es\) on the same symptom and area/);
-    assert.equal(events(dir, "LIGHT_DONE").length, 0, "a recurrence never takes the light lane");
-    const plan = builders(w).find((c) => /PLANNING ONLY/.test(c[4]));
-    assert.ok(plan, "the full lane's plan session ran");
-    assert.match(plan[4], /DESIGN LANE \(#5751\)/);
-    assert.match(plan[4], /#10 fix foo null 10 ERR_NULL_INPUT/);
-    assert.ok(w.comments.some((c) => c.includes("<!-- FORGE:RECURRENCE -->") && /Routed to a design lane: recurrence: 2/.test(c)), "the reason is posted on the issue");
-    assert.ok(!readLog(dir, 7).some((e) => JSON.stringify(e).includes("design_missing")), "a contract with a design block passes the design check");
-  });
 
   it("#5751 recurrence: no matching history keeps the light lane and the plan prompt unchanged", async () => {
     const w = lworld(), dir = tmpDir("light-");
@@ -9617,7 +9497,7 @@ describe("#5237 relaxation gate", () => {
   };
   it("relaxation without a negative test blocks (relaxation_untested) in a risk path", async () => {
     const w = withV(world({ contract: { ...CONTRACT, preserve: [] }, reviews: [conf(), conf(), conf()] })); w.diffText = rescue;
-    const r = await run(w, { dir: tmpDir("relax-"), reviewTrigger: { mode: "shadow", riskPaths: ["src/**"] } });
+    const r = await run(w, { ...ENF, dir: tmpDir("relax-"), reviewTrigger: { mode: "shadow", riskPaths: ["src/**"] } });
     assert.equal(w.merges.length, 0); assert.equal(r.code, "conformance.unimplemented");
   });
   it("a negative test lets it through, and the verifier runs even with review.verifier off, fed the hunk", async () => {
@@ -10028,22 +9908,6 @@ describe("spec-only page gate failures end design.spec_required (#5729)", () => 
   const pagesConfig = { ...parsePagesConfig(undefined, { hasAppPages: true }), require: ["design"] };
   const link = (h, x = "") => `<Link href="${h}"${x}>Book a demo</Link>`;
   const mk = (diff) => { const w = world({ contract: pc, changed: [PAGE, "test/foo.test.js"], reviews: [conf({}, pc, [PAGE, "test/foo.test.js"])] }); w.diffText = `+++ b/${PAGE}\n${diff}`; return w; };
-  it("spec-only precheck failures end design.spec_required with no resume for 5729", async () => {
-    const w = mk(`-${link("/contact")}\n+${link("/contact")}<Badge />\n`), r = await run(w, { pagesConfig });
-    assert.equal(r.terminalReason, "needs-human");
-    assert.equal(r.code, OUTCOME_CODES.DESIGN_SPEC_REQUIRED);
-    assert.ok(w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN") && /recovery lane was spent/.test(c)));
-    assert.ok(!builders(w).some((c) => /resume|conformance\.unimplemented/i.test(c[4] ?? "")), "no builder resume");
-    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: r.code }), "terminal", "no recovery lane");
-  });
-  it("replay of #40917 spends no resume or recovery for 5729", async () => {
-    const w = mk(`-${link("https://calendly.com/x", ' target="_self"')}\n+${link("/contact", ' target="_blank"')}\n`), r = await run(w, { pagesConfig });
-    assert.equal(r.code, OUTCOME_CODES.DESIGN_SPEC_REQUIRED); // only the screenshot row is left, and it is terminal too
-    const note = w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN")) ?? "";
-    assert.ok(!/is a public page but the issue has no approved/.test(note), "no spec row for a copy edit");
-    assert.match(note, /visual check/);
-    assert.ok(!builders(w).some((c) => /conformance\.unimplemented/i.test(c[4] ?? "")), "no builder resume");
-  });
 });
 
 describe("classification record in the plan prompt (#5557)", () => {
@@ -10521,5 +10385,26 @@ describe("#6008 lease/hold/pause guard before push and merge (kept sandbox)", ()
   it("a lane without a batch id (interactive run-issue) is not guarded", async () => {
     const w = guarded(() => ({ v: 1, lease: null }));
     assert.equal((await run(w)).terminalReason, "merged");
+  });
+});
+
+describe("gate cut (#6083): advisory by default, enforce re-promotes", () => {
+  it("a reviewer unimplemented row without a failing assertion is recorded and the lane merges; enforce makes it block", async () => {
+    const w = world({ reviews: [bad("still null-derefs")] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(builders(w).length, 2, "no resume spent");
+    assert.match(traj(w).join("\n"), /Advisory \(not blocking\)[^\n]*conformance\.unimplemented/);
+    const w2 = world({ reviews: [bad("still null-derefs"), bad("still null-derefs")] });
+    assert.equal((await run(w2, ENF)).terminalReason, "needs-human");
+  });
+  it("a validate step with no recorded result is advisory: the lane merges without a resume", async () => {
+    const w = world({ validation: [] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(builders(w).length, 2);
+    assert.match(traj(w).join("\n"), /Advisory \(not blocking\)[^\n]*validate_missing/);
+  });
+  it("a reviewer regression row still blocks", async () => {
+    const w = world({ reviews: [conf({ regressions: [{ at: "src/bar.js:4", failure: "caller passes undefined" }] }), ok()] });
+    assert.equal((await run(w)).terminalReason, "merged"); assert.equal(builders(w).length, 3, "the regression is resumed");
   });
 });
