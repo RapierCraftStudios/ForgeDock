@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, delimiter } from "node:path";
-import { manifestDepOwner, venvPythonRewrite, testRunnerProblems, shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems, runProbeMiss, unsetEnvVars, runPreflight, knownToContract, contractCommands, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, collectOnlyCommand, collectImportMiss, declaredEnv } from "./preflight.mjs";
+import { manifestDepOwner, venvPythonRewrite, testRunnerProblems, shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems, runProbeMiss, unsetEnvVars, runPreflight, knownToContract, contractCommands, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, collectOnlyCommand, collectImportMiss, declaredEnv, hostEnvDefects } from "./preflight.mjs";
 import { runCheckCommand } from "./effects.mjs";
 import { repoTracks } from "./conformance.mjs";
 import { tmpDir } from "../tests/_tmp.mjs";
@@ -262,5 +262,15 @@ describe("#5753 collect-only import preflight and tracked-dir env names", () => 
     const c = { test_plan: [{ requirement: "R1", env: ["shared", "pytest"] }] };
     assert.deepEqual(declaredEnv(c, ["shared/detection/test_x.py", "services/worker/pyproject.toml"]), ["pytest"]);
     assert.deepEqual(declaredEnv(c), ["shared", "pytest"], "without tracked paths the name is unchanged");
+  });
+});
+
+describe("hostEnvDefects (#5917)", () => {
+  it("surfaces a poisoned poetry host config as an env defect, not a miss", () => {
+    const d = tmpDir("preflight-poetry-"); writeFileSync(join(d, "config.toml"), "[virtualenvs]\ncreate = false\n");
+    const r = hostEnvDefects({ env: { POETRY_CONFIG_DIR: d } });
+    assert.equal(r.length, 1);
+    assert.equal(r[0].code, "env.host_poetry_config");
+    assert.deepEqual(hostEnvDefects({ env: { POETRY_CONFIG_DIR: tmpDir("preflight-empty-") } }), []);
   });
 });
