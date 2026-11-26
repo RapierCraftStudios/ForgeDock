@@ -2276,8 +2276,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       // #4685: a breaker tripped only by link failures (a router restart) closes itself after a cooldown
       if (tripped?.transport && now() - tripped.at >= TRANSPORT_COOLDOWN_MS) { tripped = null; errorTimes = []; transportErrors = 0; save(); }
       // #5978: a standing order's breaker closes itself after a cooldown when the failures were environmental and the pool is healthy
-      if (tripped && reconcile && !tripped.transport) {
-        let healthy = true; try { healthy = reconcile.poolHealthy ? reconcile.poolHealthy() !== false : true; } catch { healthy = true; }
+      if (tripped && !tripped.transport) { // #6042: every batch, not only a standing order
+        let healthy = true; try { healthy = reconcile?.poolHealthy ? reconcile.poolHealthy() !== false : true; } catch { healthy = true; }
         const d = decideAutoReset({ tripped, now: now(), cooldownMs: BREAKER_COOLDOWN_MS, environmental: tripped.environmental === true, poolHealthy: healthy });
         if (d.reset) {
           tripped = null; errorTimes = []; transportErrors = 0; save();
@@ -2298,6 +2298,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           if (d.clear && wasTripped) continue; // admission ran before this check: re-run the pass so the cleared batch resumes instead of falling to the "nothing runnable" skip
         }
       }
+      // #6042: a breaker pauses admission; it ends the run only when nothing can clear it (a non-environmental trip with no hosted clear channel)
+      const breakerClearable = Boolean(tripped && pending.length && !cancelled && !budgetStop && !signal?.aborted && (tripped.environmental || tripped.transport || getClearBreaker));
+      if (tripped && !running.size && breakerClearable) { await nap(pollMs); continue; }
       if (tripped && !running.size) { await drainAdds(); break; } // breaker: let running lanes finish, keep the rest pending for a resume
       if (cancelled && !running.size) { await drainAdds(); break; } // #4376: cancel: the rest end held for a resume
       if (budgetStop && !running.size) { await drainAdds(); break; } // execution budget (stop): the same, the rest end held
@@ -2335,7 +2338,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (running.size && envWaiting()) wake = Math.min(wake ?? ehWatchMs, ehWatchMs); // #5805: re-check engine/env holds while lanes run
       if (train?.size()) wake = Math.min(wake ?? trainEveryMs, Math.max(0, trainEveryMs - (now() - lastTrainTick))); // #5836
       if (reconcile && running.size) wake = Math.min(wake ?? reconcile.everyMs ?? RECONCILE_MS, reconcile.everyMs ?? RECONCILE_MS); // #5978
-      if (tripped) wake = getClearBreaker ? Math.min(wake ?? pollMs, pollMs) : null;
+      if (tripped) wake = getClearBreaker || tripped.environmental || tripped.transport ? Math.min(wake ?? pollMs, pollMs) : null;
       if (getCancelled && running.size && (!cancelled || [...running.keys()].some((n) => { const x = stopSent.get(n); return x && !(x.accepted && x.reported); }))) wake = Math.min(wake ?? pollMs, pollMs); // #5241: a cancel keeps polling a lane whose stop is unconfirmed // #4376: notice a cancel while lanes run
       if (running.size) {
         if (wake === null) await race(running.values());
