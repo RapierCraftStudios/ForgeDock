@@ -11,7 +11,7 @@ import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
 import { createCiEvents, MAX_WAIT_S } from "./ci-events.mjs";
 import { createAutoscaler } from "./ci-autoscale.mjs";
 import { jsonStore } from "./store.mjs";
-import { versionOf } from "./version.mjs";
+import { cmpVersion, versionOf } from "./version.mjs";
 
 /**
  * What the router ships to pool agents (self-update and bootstrap). Every module the agent can load statically from
@@ -269,10 +269,19 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     const rc = repoCfg(spec), allow = names(rc.agents);
     return (!allow.length || allow.includes(c.name)) && !names(rc.exclude_agents).includes(c.name);
   };
+  /** Lane-engine version: the agent's /capacity version against the router's own target. Unknown (older agent) never skews or refuses. */
+  const targetVersion = () => { try { return versionOf(cfg.repo_root).version; } catch { return undefined; } };
+  const engineOf = (c) => (typeof c?.version === "string" ? c.version : undefined);
+  const engineBelow = (c, want) => { const d = cmpVersion(engineOf(c), want); return d !== null && d < 0; };
+  const engineRank = (c, target) => (engineBelow(c, target) ? 1 : 0); // 0 = on (or above) the orchestrator's engine, 1 = behind it
+  const byEngine = (target) => (a, b) => engineRank(a, target) - engineRank(b, target);
+  /** R2: with spec.min_lane_engine set, agents below it are dropped; unset keeps lower agents as the fallback. */
+  const minEngine = (spec) => (typeof spec?.min_lane_engine === "string" && spec.min_lane_engine ? spec.min_lane_engine : null);
+  const engineOld = (spec, below) => ({ status: 503, body: { error: `no host runs lane engine ${minEngine(spec)} or newer`, code: "pool.engine_old", min_lane_engine: minEngine(spec), agents: below.map((c) => ({ name: c.name, version: engineOf(c) })) }, retryAfter: cfg.engine_old_retry_after_s ?? cfg.retry_after_s ?? 60 });
   /** Agent liveness for the scheduler (#4547): an agent is online when it answers and is not paused. */
   async function status(repo) {
     const caps = (await capacities()).filter((c) => placeable(c, repo ? { repo: { slug: repo } } : null));
-    const agentsView = caps.map((c) => ({ name: c.name, ok: c.ok, paused: Boolean(c.paused), transport: c.transport ?? "direct", ...diskReport(c), ...memReport(c) }));
+    const agentsView = caps.map((c) => ({ name: c.name, ok: c.ok, paused: Boolean(c.paused), transport: c.transport ?? "direct", ...(engineOf(c) ? { engine_version: engineOf(c), engine_skew: engineBelow(c, targetVersion()) } : {}), ...diskReport(c), ...memReport(c) }));
     return { online: agentsView.filter((a) => a.ok && !a.paused).length, total: agentsView.length, agents: agentsView };
   }
 
@@ -356,7 +365,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     if (hit && own(agents(), hit.agent) && now() - hit.at < 30 * 60000) return hit.agent;
     for (const [k, v] of seedPick) if (now() - v.at >= 30 * 60000) seedPick.delete(k);
     const spec = slug ? { repo: { slug } } : null; // the repo is known from the seed request when it names one
-    const fits = (await capacities()).filter((c) => c.ok && !c.paused && placeable(c, spec) && c.host_disk_low !== true && c.disk_capped !== true).sort((a, b) => b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
+    const tv = targetVersion();
+    const fits = (await capacities()).filter((c) => c.ok && !c.paused && placeable(c, spec) && c.host_disk_low !== true && c.disk_capped !== true).sort((a, b) => byEngine(tv)(a, b) || b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
     if (!fits.length) return null;
     seedPick.set(id, { agent: fits[0].name, at: now() });
     return fits[0].name;
@@ -369,7 +379,14 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     try { const r = await agentCall(a, method, path, body, 120000); return { status: r.status, body: agentBody(r, name) }; }
     catch (e) { return { status: 502, body: { error: `agent ${name} unreachable: ${e.message}` } }; }
   }
-  async function launch(spec) {
+  /** #6063: router.json repos.<slug>.priority (reserved|normal|borrow) and .reservation override the lane spec's class; invalid = ignored. */
+  const withRepoPriority = (spec) => {
+    const rc = repoCfg(spec);
+    if (!["reserved", "normal", "borrow"].includes(rc.priority)) return spec;
+    return { ...spec, priority: rc.priority, ...(typeof rc.reservation === "string" ? { reservation: rc.reservation } : {}) };
+  };
+  async function launch(spec0) {
+    const spec = spec0 && typeof spec0 === "object" ? withRepoPriority(spec0) : spec0;
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id)) return { status: 400, body: { error: "spec.id required ([A-Za-z0-9._-], max 128)" } };
     const known = own(sbx(), spec.id);
     if (known && own(agents(), known.agent)) {
@@ -380,11 +397,14 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       delete sbx()[spec.id]; store.save();
     }
     const size = sizeFor(spec);
-    const sized = (await capacities()).filter((c) => c.ok && !c.paused && placeable(c, spec) && fitsPriority(c, spec, size));
+    const tv = targetVersion(), min = minEngine(spec);
+    const placed = (await capacities()).filter((c) => c.ok && !c.paused && placeable(c, spec) && fitsPriority(c, spec, size));
+    const tooOld = min ? placed.filter((c) => engineBelow(c, min)) : [];
+    const sized = tooOld.length ? placed.filter((c) => !tooOld.includes(c)) : placed;
     const diskLow = sized.filter((c) => c.host_disk_low === true).map((c) => c.name); // #5733: never POST to a host whose drive is short
     const capped = sized.filter((c) => c.disk_capped === true && c.host_disk_low !== true).map((c) => c.name); // #5884: lane disk at its hard cap
     const memLow = sized.filter((c) => c.host_mem_low === true && c.host_disk_low !== true && c.disk_capped !== true).map((c) => c.name); // #5967: host memory under the floor
-    const fits = sized.filter((c) => c.host_disk_low !== true && c.disk_capped !== true && c.host_mem_low !== true).sort((a, b) => headroom(b, spec) - headroom(a, spec) || b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
+    const fits = sized.filter((c) => c.host_disk_low !== true && c.disk_capped !== true && c.host_mem_low !== true).sort((a, b) => byEngine(tv)(a, b) || headroom(b, spec) - headroom(a, spec) || b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
     const laneId = isLane(spec.id), laneCapped = []; // #5735: agents skipped because their lane ceiling is reached
     let busy = null; // the last agent 503 (e.g. lane_tools image building): its body and Retry-After are passed back
     const seeded = seedPick.get(spec.id)?.agent; // #5949: the agent holding this lane's seeded mirror goes first
@@ -396,11 +416,12 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
         const r = await agentCall(own(agents(), c.name), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...size, ...(ceilingOf(c.name) !== null ? { max_lanes: ceilingOf(c.name) } : {}) }, 120000);
         if (r.status === 503) { busy = { r, name: c.name }; continue; } // raced with another launch, or still building; try the next host
         if (r.ok) { sbx()[spec.id] = { agent: c.name, issue: spec.issue ?? null, batch: spec.batch ?? null, createdAt: now(), touched: now() }; store.save(); }
-        return { status: r.status, body: { ...agentBody(r, c.name), agent: c.name } };
+        return { status: r.status, body: { ...agentBody(r, c.name), agent: c.name, ...(engineOf(c) ? { engine_version: engineOf(c) } : {}) } };
       } finally { if (laneId) release(c.name, spec.id); }
     }
     if (laneCapped.length && !busy) return { status: 503, body: { error: "pool.host_lane_ceiling", code: "pool.host_lane_ceiling", agents: laneCapped }, retryAfter: cfg.retry_after_s ?? 60 };
     if (busy) return { status: 503, body: { ...agentBody(busy.r, busy.name), agent: busy.name }, retryAfter: busy.r.retryAfter ?? cfg.retry_after_s ?? 60 };
+    if (tooOld.length && !sized.length) return engineOld(spec, tooOld); // a deferral: the lane waits for an upgraded host
     if (diskLow.length) return { status: 503, body: { error: "no host has free disk", code: "pool.disk_low", agents: diskLow }, retryAfter: cfg.disk_low_retry_after_s ?? 300 }; // a capacity deferral, not a failure
     if (capped.length) return { status: 503, body: { error: "no host has lane disk below its cap", code: "pool.disk_cap", agents: capped }, retryAfter: cfg.disk_low_retry_after_s ?? 300 };
     if (memLow.length) return { status: 503, body: { error: "no host has free memory", code: "pool.host_mem", reason: "host_mem", agents: memLow }, retryAfter: cfg.host_mem_retry_after_s ?? 60 }; // a capacity deferral, not a failure
@@ -408,12 +429,15 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   }
 
   /** #4912: hand the lane to an agent's ready warm sandbox; 404 when no agent has one (the caller then launches cold). */
-  async function claim(spec) {
+  async function claim(spec0) {
+    const spec = spec0 && typeof spec0 === "object" ? withRepoPriority(spec0) : spec0; // #6063
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id)) return { status: 400, body: { error: "spec.id required ([A-Za-z0-9._-], max 128)" } };
     if (own(sbx(), spec.id)) return launch(spec); // already placed: the same idempotent path
     const size = sizeFor(spec);
     const laneId = isLane(spec.id);
-    for (const c of (await capacities()).filter((x) => x.ok && !x.paused && placeable(x, spec))) {
+    const tv = targetVersion(), min = minEngine(spec);
+    const claimable = (await capacities()).filter((x) => x.ok && !x.paused && placeable(x, spec) && !(min && engineBelow(x, min))).sort(byEngine(tv));
+    for (const c of claimable) {
       if (laneId && atCeiling(c.name)) continue; // #5735: the 404 makes the caller cold-launch, which gets the ceiling 503
       if (laneId) reserve(c.name, spec.id);
       try {

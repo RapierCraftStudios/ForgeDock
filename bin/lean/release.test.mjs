@@ -42,6 +42,7 @@ function fakeIo(world = {}) {
       throw new Error(`unexpected gh ${j}`);
     },
   };
+  if (w.scorecard) io.scorecard = w.scorecard;
   return io;
 }
 const ok = async () => ({ ok: true });
@@ -189,6 +190,19 @@ describe("release job (#5211)", () => {
     const b = await promote({ releasePr: [] });
     const create = b.io.calls.find((c) => c[1] === "create");
     assert.ok(create && create.includes("--head") && create.includes("staging") && create.includes("main"));
+  });
+
+  it("#6084: the release PR body carries the scorecard with regressions; a scorecard failure still creates the PR", async () => {
+    const body = (c) => c[c.indexOf("--body") + 1];
+    const sc = { release: "v2", against: "v1", minN: 10, values: { first_pass_rate: 0.5 }, previous: { first_pass_rate: 0.9 }, verdicts: { first_pass_rate: "regressed" }, regressions: ["first_pass_rate"] };
+    const a = await promote({ releasePr: [], scorecard: async () => sc });
+    const withCard = body(a.io.calls.find((c) => c[1] === "create"));
+    assert.match(withCard, /Release scorecard v2/);
+    assert.match(withCard, /Regressions vs v1: first-pass merge rate/);
+    const b = await promote({ releasePr: [], scorecard: async () => { throw new Error("boom"); } });
+    const create = b.io.calls.find((c) => c[1] === "create");
+    assert.ok(create);
+    assert.doesNotMatch(body(create), /scorecard/i);
   });
 
   it("R5: a killed job resumes from the last completed step", async () => {

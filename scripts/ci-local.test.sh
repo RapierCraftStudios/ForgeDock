@@ -1134,5 +1134,16 @@ FIRST=$(printf '%s\n' "$OUT" | grep '^CI_LOCAL_JOB: pass' | head -n 1)
 has "4057: the cheapest known job runs first (small before big)" "$FIRST" "gha:ci:small"
 FORGE_TELEMETRY=off bash -c 'grep -q "wait_ms" "$0"' "$S" && ok || bad "4057: ci-local.sh forwards wait_ms to telemetry"
 
+# 6049: a workflow that only runs on a push to the release branch is a gate with --release-branch, not without it
+r=$(blank rel); mkdir -p "$r/.github/workflows"
+printf 'name: Release\non:\n  push:\n    branches: [main]\njobs:\n  fmt:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo fmt-check\n' > "$r/.github/workflows/release.yml"
+commit_base "$r"; echo x > "$r/a.txt"
+P=$(plan "$r" --base-branch dev --files "a.txt" | jq -c .)
+eq "release-only push workflow is not a lane gate without --release-branch" not-applicable "$(state "$P" gha:release)"
+P=$(plan "$r" --base-branch dev --files "a.txt" --release-branch main | jq -c .)
+eq "release-only push workflow is a gate with --release-branch" runnable "$(state "$P" gha:release:fmt)"
+P=$(plan "$r" --base-branch dev --files "a.txt" --release-branch other | jq -c .)
+eq "a different release branch does not select it" not-applicable "$(state "$P" gha:release)"
+
 echo "ci-local.test.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

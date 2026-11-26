@@ -300,7 +300,7 @@ export async function cancelSuperseded({ io, branch, head, mode = "off", pushedA
   return out;
 }
 
-const VALIDATE_KINDS = ["validate_missing", "validate_failed"], REQUIREMENT_KINDS = ["requirement_unimplemented", "untracked_deferral"];
+const VALIDATE_KINDS = ["validate_missing", "validate_failed"], REQUIREMENT_KINDS = ["requirement_unimplemented", "requirement_no_status", "untracked_deferral"];
 /**
  * #4270: the `forgedock/verify` check-run payload from the results the lane already computed (no gate logic of its own).
  * commands: [{command, rc}] of the last declared-check round, or null (none configured); structure: the structure delta or

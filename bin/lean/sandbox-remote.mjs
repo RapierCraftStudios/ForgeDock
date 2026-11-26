@@ -88,8 +88,9 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
     return e;
   };
   const p = (id) => `/sandboxes/${encodeURIComponent(id)}`;
+  const placedEngine = new Map(); // sandbox id -> lane-engine version of the agent the router placed it on (R3: the ran version is recorded even when the lane reports none)
   return {
-    async launch(spec) { const r = await call("POST", "/sandboxes", spec); if (!r.ok) throw fail("launch", r); return r.data ?? {}; },
+    async launch(spec) { const r = await call("POST", "/sandboxes", spec); if (!r.ok) throw fail("launch", r); if (typeof r.data?.engine_version === "string" && typeof spec?.id === "string") placedEngine.set(spec.id, r.data.engine_version); return r.data ?? {}; },
     /** #4912: hand the lane to a ready warm sandbox. 200/201 = claimed; 204/404/405 (none ready, or a pool without warm sandboxes) = null. */
     async claim(spec) { const r = await call("POST", "/sandboxes/claim", spec); if (r.status === 200 || r.status === 201) return r.data ?? {}; if (r.status === 204 || r.status === 404 || r.status === 405) return null; throw fail("claim", r); },
     async status(id) {
@@ -100,7 +101,7 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
       return s === "running" || s === "pending" || s === "starting" || s === "paused" ? "running" : s === "gone" ? "gone" : "exited";
     },
     async logs(id, cursor = 0) { const r = await call("GET", `${p(id)}/logs?cursor=${encodeURIComponent(cursor)}`); return r.ok ? { text: String(r.data?.text ?? ""), cursor: r.data?.cursor ?? cursor } : { text: "", cursor }; },
-    async result(id) { const r = await call("GET", `${p(id)}/result`); if (r.status === 401) throw Object.assign(fail("result", r), { transient: true }); if (r.ok && r.data?.disk_pressure === true) return { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_DISK_PRESSURE, retryInSeconds: 120, cost_usd: 0, detail: `sandbox ${id} was stopped to save the host drive (disk pressure); worktree and volume kept, requeued to resume` }; /* #5891 */ if (r.ok && r.data?.drained === true) return { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, retryInSeconds: 60, cost_usd: 0, detail: `sandbox ${id} was drained to free capacity for reserved work (${String(r.data.reason ?? "").slice(0, 120)}); rescheduled` }; /* #5856 */ if (r.ok && r.data && typeof r.data === "object") { const v = r.data.engineVersion ?? r.data.engine_version ?? r.data.forge_version ?? /ForgeDock\s*[·-]\s*v?(\d+\.\d+(?:\.\d+)?)/.exec(String(r.data.banner ?? r.data.log ?? ""))?.[1]; return v && !r.data.engineVersion ? { ...r.data, engineVersion: String(v) } : r.data; } return null; }, /* #5931 */
+    async result(id) { const r = await call("GET", `${p(id)}/result`); if (r.status === 401) throw Object.assign(fail("result", r), { transient: true }); if (r.ok && r.data?.disk_pressure === true) return { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_DISK_PRESSURE, retryInSeconds: 120, cost_usd: 0, detail: `sandbox ${id} was stopped to save the host drive (disk pressure); worktree and volume kept, requeued to resume` }; /* #5891 */ if (r.ok && r.data?.drained === true) return { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, retryInSeconds: 60, cost_usd: 0, detail: `sandbox ${id} was drained to free capacity for reserved work (${String(r.data.reason ?? "").slice(0, 120)}); rescheduled` }; /* #5856 */ if (r.ok && r.data && typeof r.data === "object") { const v = r.data.engineVersion ?? r.data.engine_version ?? r.data.forge_version ?? /ForgeDock\s*[·-]\s*v?(\d+\.\d+(?:\.\d+)?)/.exec(String(r.data.banner ?? r.data.log ?? ""))?.[1]; const pv = v ?? placedEngine.get(id); return pv && !r.data.engineVersion ? { ...r.data, engineVersion: String(pv) } : r.data; } return null; }, /* #5931 */
     async usage(id) { const r = await call("GET", `${p(id)}/usage`); return r.ok && Number.isFinite(Number(r.data?.minutes)) ? { minutes: Number(r.data.minutes), ...(typeof r.data.agent === "string" && r.data.agent ? { agent: r.data.agent } : {}) } : null; }, // agent: #4549, optional
     async stop(id) { const r = await call("POST", `${p(id)}/stop`); if (r.ok) return true; if (r.status === 404 || r.status === 405) return false; throw fail("stop", r); },
     async destroy(id) { const r = await call("DELETE", p(id)); if (r.ok || r.status === 404) return true; throw fail("destroy", r); },
@@ -169,7 +170,8 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
       try {
         const r = await call("GET", `/status${q}`);
         reached = true;
-        if (r.ok) { const { free, online, total } = r.data ?? {}; out = { ...(ok(free) ? { free } : {}), ...(ok(online) ? { online } : {}), ...(ok(total) ? { total } : {}) }; }
+        if (r.ok) { const { free, online, total } = r.data ?? {}; const agents = (Array.isArray(r.data?.agents) ? r.data.agents : []).filter((a) => typeof a?.engine_version === "string").map((a) => ({ name: a.name, ok: a.ok === true, paused: a.paused === true, engine_version: a.engine_version })); // R6: per-agent lane engines
+          out = { ...(ok(free) ? { free } : {}), ...(ok(online) ? { online } : {}), ...(ok(total) ? { total } : {}), ...(agents.length ? { agents } : {}) }; }
       } catch (e) { out = {}; lastErr = e; }
       if (out.online === undefined || out.load_per_core === undefined) {
         // #4788: a router without /status liveness: online = agents answering and not paused, as bin/pool/router.mjs status() does.
@@ -281,6 +283,7 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
       const envSnap = settings.forgeYaml ? readEnvSnapshots(settings.forgeYaml) : null; // env.snapshots: off unless enabled
       const spec = {
         id, issue, batch: batch.id, image: settings.image ?? null,
+        ...(typeof settings.minLaneEngine === "string" && settings.minLaneEngine ? { min_lane_engine: settings.minLaneEngine } : {}), // R2: the router drops lower-engine agents (pool.engine_old deferral)
         priority: "borrow", // #5856: lanes run on leftover capacity; a pool with reservations throttles/drains them for reserved work
         repo: { slug: repo, url: repo ? `https://github.com/${repo}.git` : null, ref: li >= 0 ? args[li + 1] ?? null : null },
         ...(settings.laneTools?.length ? { lane_tools: settings.laneTools } : {}), // #5650: per-repo lane image

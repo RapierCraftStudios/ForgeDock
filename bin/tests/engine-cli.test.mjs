@@ -964,6 +964,24 @@ describe("run-issue core path: SIGTERM/SIGINT teardown (#4179)", () => {
     });
   }
 
+  it("#6081: a teardown that never returns does not keep the lane alive after SIGTERM: bounded, reported, exit 143", async () => {
+    const dir = tmpDir("engine-cli-test-");
+    const handlers = {}, exits = [];
+    const rf = join(dir, "lanes", "42.json");
+    const runCore = async (o) => {
+      o.onTeardown(() => new Promise(() => {})); // a builder child that ignores SIGTERM
+      await handlers.SIGTERM();
+      return { terminalReason: "deferred", code: "run.interrupted" };
+    };
+    try {
+      await quiet(() => runFromCli(["42", "--lane", "staging", "--path", "core", "--repo", "acme/target-repo", "--result-file", rf], {
+        io, dir, sleep: async () => {}, leanModule: { runCore }, leanIo: {}, emitTelemetry: async () => {}, env: {}, teardownMs: 20,
+        processOn: (s, f) => { handlers[s] = f; }, processOff: () => {}, exit: (c) => exits.push(c) }));
+      assert.deepEqual(exits, [143]);
+      assert.equal(JSON.parse(readFileSync(rf, "utf8")).code, "run.interrupted");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it("the handlers are removed after a normal return, and no batch id means the adhoc ledger", async () => {
     const dir = tmpDir("engine-cli-test-");
     const handlers = {}, removed = [];
