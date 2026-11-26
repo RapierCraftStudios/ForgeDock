@@ -426,6 +426,19 @@ export function contractCorrectionPrompt(problems) {
   return `Your ${CONTRACT_FILE} is not valid:\n${problems.slice(0, 20).map((p) => `- ${p}`).join("\n")}\n\nFix the contract (planning only, no code, no commit) and stop. Do not push or touch GitHub.`;
 }
 
+/** #5821: contract correction as one Messages API call: the current contract file and the problems in, the corrected JSON out. */
+export const CONTRACT_CORRECTION_SYSTEM = "You correct one frozen-contract JSON file. Reply with the complete corrected JSON object only, in one ```json fence, changing only what the listed problems require.";
+export function contractCorrectionApiPrompt(problems, contractText) {
+  return `Current ${CONTRACT_FILE}:\n\`\`\`json\n${String(contractText ?? "").slice(0, 60000)}\n\`\`\`\n\nIt is not valid:\n${problems.slice(0, 20).map((p) => `- ${p}`).join("\n")}\n\nReturn the full corrected file.`;
+}
+
+/** #5821: enumerating and duplicate-export fixes as one Messages API call: the named files in, exact search/replace edits out (no tools). */
+export const API_EDIT_SYSTEM = "You fix a small defect in the files shown. Reply with one ```json fence holding {\"edits\":[{\"path\":\"<file>\",\"search\":\"<exact unique text in that file>\",\"replace\":\"<new text>\"}]} and nothing else. Edit only the files shown; each search must occur exactly once.";
+export function apiEditPrompt(task, files) {
+  const body = Object.entries(files).map(([path, text]) => `<file path="${path}">\n${String(text).slice(0, 60000)}\n</file>`).join("\n");
+  return `${body}\n\nTask: ${String(task).split(/\n\n(?=Run |Re-run|Rerun)/)[0].slice(0, 6000)}\n\nReturn the edits.`;
+}
+
 /** #5089: the builder's amendments name an unknown kind or miss a field; one correction before the conformance gate. */
 export function amendmentCorrectionPrompt(problems) {
   return `The amendments in ${RESULT_FILE} are not valid:\n${problems.slice(0, 20).map((p) => `- ${p}`).join("\n")}\n\nRewrite them with a valid kind (${AMEND_KINDS.join(", ")}). A validate-row id (G2) is never a supersedes guard: use {"kind":"substitute-validate","validate":"G2","command":"<runnable equivalent>","why":""}. A deliverable that is impossible on this platform is {"kind":"defer","requirement":"R#","why":""}, not a changed deliverable. Edit only ${RESULT_FILE} (commit nothing else) and stop. Do not push or touch GitHub.`;
@@ -598,6 +611,15 @@ export function reproFlagNote(flag) {
   if (flag !== "patch_echo" && flag !== "mutation_survivor") return "";
   const why = flag === "patch_echo" ? "its assertions only compare against literals this diff introduced (no behaviour or output is asserted)" : "it still passes when the fix's changed lines are mutated";
   return `\n<repro_quality>${flag}: the repro_test ${why}. Accept or reject it explicitly in a row (a rejection is a failing row naming the behaviour the test must exercise).</repro_quality>`;
+}
+
+/**
+ * #5821: split a reviewer/verifier prompt into the stable shared prefix (issue, contract, rubric, diff: everything through
+ * the last `</diff>`) and the variable tail (structure, domain checks, relaxations). prefix + tail is the prompt, unchanged.
+ */
+export function splitCacheablePrefix(prompt) {
+  const p = String(prompt ?? ""), m = "</diff>", i = p.lastIndexOf(m);
+  return i < 0 ? { prefix: p, tail: "" } : { prefix: p.slice(0, i + m.length), tail: p.slice(i + m.length) };
 }
 
 export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", ignore = [`${LEAN_DIR}/`], skeleton = null, investigationVerdict = null, domains = [], relaxations = [], reproFlag = null }) {

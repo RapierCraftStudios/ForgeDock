@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest, readFixModel, readBuilderRouting, readVerifier, readCloseParent, readVerify, readLaneInstructions, makeIo, checkFromCli } from "../engine-cli.mjs";
+import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest, readFixModel, readApiRoles, readBuilderRouting, readVerifier, readCloseParent, readVerify, readLaneInstructions, makeIo, checkFromCli } from "../engine-cli.mjs";
 import { execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { serializeState } from "../engine/state.mjs";
@@ -1064,6 +1064,19 @@ describe("readReproTest (#4271)", () => {
     assert.equal(readReproTest(d), "off");
     writeFileSync(join(d, "forge.yaml"), "lean:\n  repro_test: prefer\n");
     assert.equal(readReproTest(d), "prefer");
+  });
+});
+
+describe("readApiRoles (#5821)", () => {
+  it("reads lean.api_roles and lean.api_fallback; no valid role is {}", () => {
+    const d = tmpDir("api-roles-yaml-");
+    assert.deepEqual(readApiRoles(d), {}, "no forge.yaml");
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  api_roles: [reviewer, bogus, enumerating_fix]\n");
+    assert.deepEqual(readApiRoles(d), { apiRoles: ["reviewer", "enumerating_fix"], apiFallback: "cli" });
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  api_roles:\n    - verifier\n  api_fallback: fail\n");
+    assert.deepEqual(readApiRoles(d), { apiRoles: ["verifier"], apiFallback: "fail" });
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  api_fallback: fail\n");
+    assert.deepEqual(readApiRoles(d), {});
   });
 });
 

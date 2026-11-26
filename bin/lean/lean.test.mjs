@@ -23,7 +23,7 @@ import { parseVerify } from "./verify.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, renderAmendments, parseAmendmentsComment, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs";
-import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens as rawTokens, FORGEDOCK_CLI, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, investigationVerdict, decisionNote, hotspotPlanNote, hotspotBuildRule, reproPlanNote } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, REVIEW_DIFF_MAX_BYTES, REVIEW_RUBRIC, approxTokens as rawTokens, FORGEDOCK_CLI, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, investigationVerdict, decisionNote, hotspotPlanNote, hotspotBuildRule, reproPlanNote } from "./prompts.mjs";
 import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, scopeText, DECISION_SOURCES } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog as readRepoLog } from "../engine/runlog.mjs";
@@ -7804,6 +7804,20 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
     assert.doesNotMatch(fix[0].prompt, /## Diff/);
   });
 
+  it("#5821 a configured enumerating_fix role writes the list entry from one API edit, no narrow session; a bad edit falls back to the session", async () => {
+    for (const bad of [false, true]) {
+      const w = hworld({ missing: [MISS, []] }); const seen = [];
+      const path = `${WT}/test/registry.test.js`; w.files[path] = "const L = ['a'];\n";
+      w.io.mechFix = { applyEnumerating: async ({ missing }) => ({ applied: [], remaining: missing }), renameDuplicates: async () => ({ applied: [], remaining: [] }) };
+      const inner = w.io.runner; w.io.runner = async (c) => { seen.push({ role: c.role, profile: c.profile ?? null });
+        if (c.role === "enumerating_fix") return { text: "```json\n" + JSON.stringify({ edits: [{ path: "test/registry.test.js", search: bad ? "nope" : "['a']", replace: "['a','fooNew']" }] }) + "\n```", route: "api", usage: null, costUsd: 0.01, turns: 1, durationMs: 1, model: "m" };
+        return inner(c); };
+      assert.equal((await run(w, { apiRoles: ["enumerating_fix"] })).terminalReason, "merged");
+      assert.equal(seen.filter((x) => x.profile === "narrow").length, bad ? 1 : 0);
+      assert.equal(w.files[path], bad ? "const L = ['a'];\n" : "const L = ['a','fooNew'];\n");
+    }
+  });
+
   it("#5480 enumeratingMechanical false (forge.yaml lean.enumerating.mechanical) skips the engine edit and leaves it to a session", async () => {
     const w = hworld({ missing: [MISS, []] }); w.mech = [];
     w.io.mechFix = { applyEnumerating: async ({ missing }) => { w.mech.push("enum"); return { applied: missing, remaining: [] }; }, renameDuplicates: async () => ({ applied: [], remaining: [] }) };
@@ -10158,6 +10172,74 @@ describe("#5820 required CI checks run in the lane before the PR opens", () => {
     await run(w, { dir, precheck: { ci: { mode: "off", include: [], exclude: [], maxJobs: 8 } } });
     assert.equal(w.ran.filter(isCi).length, 0);
     assert.equal(readLog(dir, 7).filter((e) => /^CI_PRECHECK/.test(e.event)).length, 0);
+  });
+});
+
+describe("#5821 api route eligibility at the reviewer and verifier call sites", () => {
+  const capture = (w) => { const seen = [], orig = w.io.runner; w.io.runner = async (c) => { seen.push({ role: c.role, apiEligible: c.apiEligible ?? false, apiRoles: c.apiRoles ?? null, apiFallback: c.apiFallback ?? null }); return orig(c); }; return seen; };
+  it("default config passes no api config; the reviewer is API-eligible and unchanged text reaches the runner", async () => {
+    const w = world(), seen = capture(w), dir = tmpDir("core-api-");
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const rev = seen.find((c) => c.role === "reviewer");
+    assert.equal(rev.apiEligible, true); assert.equal(rev.apiRoles, null);
+    assert.equal(seen.find((c) => c.role === "builder").apiEligible, false);
+  });
+  it("configured api roles and fallback reach the runner; a reviewer reply from the API route still merges and records the route", async () => {
+    const w = world(), dir = tmpDir("core-api-"), seen = [], orig = w.io.runner;
+    w.io.runner = async (c) => { seen.push(c); const r = await orig(c); return c.role === "reviewer" ? { ...r, route: "api" } : r; };
+    const r = await run(w, { dir, apiRoles: ["reviewer"], apiFallback: "fail" });
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(seen.find((c) => c.role === "reviewer").apiRoles, ["reviewer"]);
+    assert.equal(seen.find((c) => c.role === "reviewer").apiFallback, "fail");
+    assert.ok(readLog(dir, 7).some((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.route === "api"));
+  });
+});
+
+describe("#5821 api eligibility bounds at the reviewer and verifier call sites", () => {
+  const rescue = "diff --git a/src/foo.js b/src/foo.js\n@@ -1,0 +5,1 @@\n+  if (looksThin(page)) return true; // rescue\n";
+  const negTest = "diff --git a/test/foo.test.js b/test/foo.test.js\n@@ -1,0 +1,1 @@\n+  assert.equal(isBenign(cookieChallenge), false);\n";
+  const big = Array.from({ length: 8 }, (_, i) => `diff --git a/corpus/f${i}.txt b/corpus/f${i}.txt\n--- a/corpus/f${i}.txt\n+++ b/corpus/f${i}.txt\n@@ -0,0 +1 @@\n+${"golden - ".repeat(4700)}\n`).join("");
+  const spy = (w) => { const seen = [], orig = w.io.runner; w.io.runner = async (c) => { seen.push({ role: c.role, apiEligible: c.apiEligible ?? false }); return orig(c); }; return seen; };
+  it("an oversize diff keeps the reviewer and the verifier on the CLI", async () => {
+    assert.ok(Buffer.byteLength(big) > REVIEW_DIFF_MAX_BYTES);
+    const w = world(); const g = w.io.git; w.io.git = async (a, o) => (a[0] === "diff" && a[1] === "--stat=200") ? " corpus/f0.txt | 1 +\n 8 files changed" : (a[0] === "diff" && a.length === 2) ? big : g(a, o);
+    const seen = spy(w);
+    await run(w, { dir: tmpDir("core-api-big-"), apiRoles: ["reviewer", "verifier"], verifier: { mode: "enforce" } });
+    const calls = seen.filter((c) => c.role === "reviewer" || c.role === "verifier");
+    assert.ok(calls.some((c) => c.role === "reviewer"));
+    for (const c of calls) assert.equal(c.apiEligible, false, c.role);
+  });
+  it("a relaxed risk path keeps the reviewer and the verifier on the CLI; the same lane without it is eligible", async () => {
+    const mk = (diffText) => { const w = world({ contract: { ...CONTRACT, preserve: [] }, reviews: [conf(), conf()] }); w.diffText = diffText; return w; };
+    const w = mk(rescue + negTest), seen = spy(w);
+    const r = await run(w, { dir: tmpDir("core-api-rx-"), apiRoles: ["reviewer", "verifier"], reviewTrigger: { mode: "shadow", riskPaths: ["src/**"] } });
+    assert.equal(r.terminalReason, "merged");
+    const calls = seen.filter((c) => c.role === "reviewer" || c.role === "verifier");
+    assert.ok(calls.some((c) => c.role === "verifier"), "the verifier ran");
+    for (const c of calls) assert.equal(c.apiEligible, false, c.role);
+  });
+});
+
+describe("#5821 contract correction through the API route", () => {
+  const bad = { ...CONTRACT, requirements: [{ id: "R1", quote: "make foo nicer", disposition: "deliver" }] };
+  const wrap = (w, fail) => { const seen = [], orig = w.io.runner; w.io.runner = async (c) => { seen.push({ role: c.role, apiOnly: c.apiOnly ?? false, resume: c.resume ?? null });
+    if (c.role === "contract_correction") { if (fail) throw new Error("api down"); return { text: `\`\`\`json\n${JSON.stringify(CONTRACT)}\n\`\`\``, route: "api", usage: null, costUsd: 0.01, turns: 1, durationMs: 1, model: "m" }; }
+    return orig(c); }; return seen; };
+  it("a configured contract_correction role fixes the contract with one API call and no resumed builder turn", async () => {
+    const w = world({ contract: bad, fixedContract: CONTRACT }), seen = wrap(w, false), dir = tmpDir("core-api-cc-");
+    const r = await run(w, { dir, apiRoles: ["contract_correction"] });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(seen.find((c) => c.role === "contract_correction").apiOnly, true);
+    const trig = readLog(dir, 7).filter((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.phase === "implement").map((e) => e.trigger);
+    assert.equal(trig.filter((t) => t === "contract_correction").length, 1);
+  });
+  it("an API failure falls back to the resumed builder correction", async () => {
+    const w = world({ contract: bad, fixedContract: CONTRACT }), seen = wrap(w, true), dir = tmpDir("core-api-cc-");
+    const r = await run(w, { dir, apiRoles: ["contract_correction"] });
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(seen.some((c) => c.role === "contract_correction"));
+    assert.ok(seen.some((c) => c.role === "builder" && c.resume), "the builder resumed to correct the contract");
   });
 });
 
