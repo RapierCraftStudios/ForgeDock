@@ -104,7 +104,7 @@ export function scorecardComment(sc) {
   return `${SCORECARD_MARKER}\n${renderScorecard(sc)}\n\n\`\`\`json\n${JSON.stringify(sc)}\n\`\`\`\n`;
 }
 
-export const HELP = `forgedock scorecard --repo <owner/repo> --release <vX> [--json] [--min-n N]
+export const SCORECARD_HELP = `forgedock scorecard --repo <owner/repo> --release <vX> [--json] [--min-n N]
 Per-release scorecard from the GitHub register, compared to the previous release. No LLM calls.
 `;
 
@@ -133,7 +133,7 @@ export async function gatherScorecard({ repo, release, minN = DEFAULT_MIN_N }, d
 
 export async function runScorecard(argv, deps = {}) {
   const o = parseScorecardArgs(argv);
-  if (o.help) { process.stdout.write(HELP); return 0; }
+  if (o.help) { process.stdout.write(SCORECARD_HELP); return 0; }
   const fail = (msg) => { process.stderr.write(`forgedock scorecard: ${msg}\n`); return 2; };
   if (o.error) return fail(o.error);
   if (!o.release) return fail("--release is required");
