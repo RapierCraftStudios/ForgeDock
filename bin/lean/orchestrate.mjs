@@ -299,6 +299,7 @@ export function deferPolicy(r, { now, deferrals = 0, maxDeferrals = DEFAULT_MAX_
 const STOP_RETRY_MS = 15 * 1000;
 const STOP_TIMEOUT_MS = 120 * 1000;
 
+const OVERLOAD_RECOVERY_MAX_MS = 30 * 60 * 1000; // #5749: longest an env.validate_timeout recovery waits for the host to stop being overloaded
 const cancellableSleep = (ms, signal) => new Promise((res) => {
   const t = setTimeout(res, ms);
   signal?.addEventListener("abort", () => { clearTimeout(t); res(); }, { once: true });
@@ -1364,6 +1365,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       // #5652: a remote lane's tool/capability end is not recovered on the host when host fallback is off; the lane message names the fix
       const noHostRecovery = !hostFallbackOn() && row.placement?.where === "remote" && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(row.code);
       if (noHostRecovery) decided({ issue: n, what: `no host re-placement for ${row.code}: host fallback is off (execution.host_fallback / host.role: orchestrator)`, why: firstLine(row.detail), alternative: "re-place the lane on the host" });
+      // #5749: an env.validate_timeout is host load, so its recovery lane is not started while the host is overloaded (it would time out again)
+      if (overload && row.code === ENV_VALIDATE_TIMEOUT && classifyNeedsHuman(facts) === "recoverable" && used < max) {
+        const isOver = () => { try { return overload()?.overloaded === true; } catch { return false; } };
+        const t0 = now();
+        if (isOver()) {
+          decided({ issue: n, what: `recovery for ${row.code} deferred: the host is overloaded`, why: firstLine(row.detail) || row.code, alternative: "start the recovery lane under load and time out again" });
+          while (isOver() && now() - t0 < OVERLOAD_RECOVERY_MAX_MS) await sleep(Math.max(pollMs, 1));
+        }
+      }
       // #5979: failure.repeated is a typed park (not in RECOVERABLE_CODES): never relaunched, reported parked below
       if (!repeatEnv && !noHostRecovery && !sameHostReplay && row.code !== OUTCOME_CODES.FAILURE_REPEATED && classifyNeedsHuman(facts) === "recoverable" && used < max) {
         // #5727: the first remote end on a tool no recipe can install, before any build work, is re-placed on the host without spending an attempt

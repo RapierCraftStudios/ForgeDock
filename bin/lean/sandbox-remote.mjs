@@ -57,7 +57,7 @@ export function isActionsEndpoint(endpoint) {
  * `GET /agents -> {sandboxes}` is the router's live sandbox list (#5422, `inventory()`; malformed or any error throws).
  * Optional relay (#4778): `GET /sandboxes/:id/relay -> {requests: [{rid, argv}]}` lists a sandbox's pending read-only capability
  * requests (404/405 or malformed = none, an older router) and `POST /sandboxes/:id/relay/:rid` `{rc, stdout, stderr}` answers one.
- * Optional `GET /status -> {free: N, online?, total?}` is the pool's free slots (#4540); without `online` the agents of `GET /agents` give it (#4788). Anything else (404, error, malformed) is unknown (null).
+ * Optional `GET /status[?repo=<slug>] -> {free: N, online?, total?}` is the pool's free slots (#4540); `?repo=` (#6041) limits `/status` and `/agents` to the agents the repo may use (router.json `repos.<slug>.agents` / `exclude_agents`); without `online` the agents of `GET /agents` give it (#4788). Anything else (404, error, malformed) is unknown (null).
  */
 export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fetch }) {
   const root = String(endpoint ?? "").replace(/\/+$/, "");
@@ -161,19 +161,20 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
       if (!list) throw fail("agents", r);
       return list.some((a) => a?.ok === true && !a.paused && (!agent || a.name === agent));
     },
-    async capacity() {
+    async capacity({ repo } = {}) {
+      const q = typeof repo === "string" && repo ? `?repo=${encodeURIComponent(repo)}` : ""; // #6041: only the repo's allowed agents count
       // `free` (#4540) and agent liveness `online`/`total` (#4547) are each optional; none valid is unknown.
       const ok = (v) => Number.isInteger(v) && v >= 0;
       let out = {}, reached = false, lastErr = null;
       try {
-        const r = await call("GET", "/status");
+        const r = await call("GET", `/status${q}`);
         reached = true;
         if (r.ok) { const { free, online, total } = r.data ?? {}; out = { ...(ok(free) ? { free } : {}), ...(ok(online) ? { online } : {}), ...(ok(total) ? { total } : {}) }; }
       } catch (e) { out = {}; lastErr = e; }
       if (out.online === undefined || out.load_per_core === undefined) {
         // #4788: a router without /status liveness: online = agents answering and not paused, as bin/pool/router.mjs status() does.
         try {
-          const r = await call("GET", "/agents");
+          const r = await call("GET", `/agents${q}`);
           reached = true;
           const list = r.ok && Array.isArray(r.data?.agents) ? r.data.agents : null;
           if (list && out.online === undefined) out = { ...out, online: list.filter((a) => a?.ok === true && !a.paused).length, total: list.length };
@@ -334,7 +335,7 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
     async capacity() {
       // #5048: no capacity() is unknown (null); a transport error propagates, so the caller can report the pool down
       if (typeof transport.capacity !== "function") return null;
-      return (await transport.capacity()) ?? null;
+      return (await transport.capacity({ repo })) ?? null;
     },
     /** #5985: the pool's usage-history rows; null when the transport has none. */
     async usageHistory() { return typeof transport.usageHistory === "function" ? (await transport.usageHistory()) ?? null : null; },

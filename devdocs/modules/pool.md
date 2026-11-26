@@ -37,6 +37,7 @@ same peak memory, no rise in OOM kills or lane wall time. The lane env also gets
 
 - Decision: `devdocs/decisions/5735-host-lane-ceiling.md`.
 - `bin/pool/router.mjs`: a lane sandbox is one whose id starts with `fdrsbx-`. Ceiling = the agent state entry's `max_lanes`, else router.json `agents.<name>.max_lanes`; no valid value = no ceiling. Used = placed `fdrsbx-` sandboxes on the agent plus in-flight reservations, taken synchronously before the agent POST (launch and warm claim) and released in `finally`.
+- `bin/pool/router.mjs` (#6063): router.json `repos.<owner/repo>.priority` (`reserved|normal|borrow`) and `.reservation` override the lane spec's priority class (the dispatcher sends `borrow` for every repo) in `launch()` and `claim()` placement and in the spec posted to the agent; unset or invalid keeps the spec's class.
 - `launch()` skips agents at the ceiling for a new lane id. When none is left and one was skipped for the ceiling: 503 `{error, code: "pool.host_lane_ceiling", agents: [{name, used, ceiling}]}` with Retry-After (a capacity deferral in the dispatcher). Re-launch of a placed id is not re-checked. `claim()` skips capped agents (404, then a cold launch).
 - `GET /agents`: each agent gains `lanes {used, ceiling|null}`; the body gains `remote_lanes`. `POST /agents/:name/limit {max_lanes: N|null}` (fd token; 404 unknown agent, 400 bad value) sets or clears the ceiling; re-enrollment keeps it.
 - `bin/pool/cli.mjs`: `forgedock pool limit <agent> --lanes N|none`; `status` adds `<agent>: lanes used/ceiling` and `remote lanes across batches: N`. `bin/lean/sandbox-remote.mjs` `agentLanes()` feeds the `--set-max-remote` note.
@@ -154,3 +155,9 @@ The router ships agents only `AGENT_BUNDLE_PATHS` (`package.json`, `bin/pool`, `
 ## Entry 2026-11-24 — package cache layout pinned to entrypoint (#5969)
 
 - `pool/image/entrypoint.sh` points `UV_CACHE_DIR`, `npm_config_cache`, `POETRY_CACHE_DIR` and `PIP_CACHE_DIR` at `/cache/forge-depcache/stores/*`, the same layout as `depcache.mjs` `env()`. `cache-sweep.mjs` `PACKAGE_STORES` still includes `LEGACY_STORES` (`uv`, `npm`, `pip`, `poetry`) so old volumes and old images stay swept, capped and pruned. `pool-cache.test.mjs` pins every `/cache/...` path exported by the entrypoint to a `PACKAGE_STORES` entry.
+
+## Entry 2026-11-26 — per-repo agent affinity (#6041)
+
+- `router.json` `repos.<slug>.agents` (allowlist) and `exclude_agents` pin a repo to hosts. `placeable(c, spec)` in `router.mjs` is the one eligibility rule: account (#5886) AND allowlist AND not excluded. `launch()`, `claim()` and `seedAgent()` all use it, so no placement path bypasses it. A repo whose allowed agents are all busy gets the usual 503 capacity deferral, never another host.
+- `agents` counts only when a non-empty array of strings; empty or any other type is unset (any agent), so unset config behaves exactly as before. `exclude_agents` subtracts from the allowlist. Seed picks use the slug of the `/sandboxes/:id/mirrors` query or `/seed` body.
+- `GET /status?repo=<slug>` and `GET /agents?repo=<slug>` return only the repo's placeable agents (and their sandboxes); `httpTransport.capacity({repo})` sends it, so the dispatcher admits against capacity the repo can use. No `?repo=` = unchanged. Tests: `bin/pool/affinity.test.mjs`.

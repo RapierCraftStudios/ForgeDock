@@ -178,6 +178,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    (`readSelfReview`, `compareSelfReview`) + `lean.mjs` wiring log `SELF_REVIEW` or `SELF_REVIEW_MISSING` after the
    implement session (fixed results only) and, once on the first reviewer judgement (`conforms|nonconforming`),
    `SELF_REVIEW_AGREED|SELF_REVIEW_DISAGREED`. Run log only: never a failure, no runner call, no phase.
+   #5749: freeze-time runnability. `preflight.mjs` `hostOnlyProblems` rejects host-only validate/repro commands (`legion-run`, `ssh <host>`, `/home/<user>/` paths) and unbounded CPU busy loops: one correction round, then `contract.invalid` before any build. `lane-tools.mjs` has a `yaml` recipe (PyYAML); `vite` and `forgedock` get no recipe (manifest/owned deps, #5747/#5727; a forgedock recipe would break the toolNoRecipe re-placement). A failing declared check's `verify.precheck_block` message carries its `quietFailure` output tail. `orchestrate.mjs` does not start an `env.validate_timeout` recovery lane while `overload()` reports the host overloaded (waits at most 30 min, one decided row).
 6a. **Declared check commands** (#4240) — forge.yaml `learned.test_commands`
    (`engine-cli.mjs` `readPrecheckCommands`) run in the worktree after the build
    commit via `io.runCommand` (`bash -c`, `verify.precheck_timeout_seconds`,
@@ -694,6 +695,8 @@ stores; install/repair commands get the lane's toolchain env (#4347: a pm only t
 resolves; no pin, no shim or a failed toolchain step means the host PATH); `forgedock gc --deps` reaps; `FORGE_DEPCACHE=0` opts out. See `decisions/4220-shared-dep-cache.md`.
 
 #5651: for a Python project with a declared range, `pythonFor` returns the in-range interpreter (poetry runs under it as `<py> -m poetry env use|install`, so its resolver never runs on the host default python; poetry missing from that interpreter is `env.tool_missing`; uv uses `uv venv --python`) or, when none is found, `prepare` stops with a failed row coded `env.tool_missing` naming the range, the interpreters probed and how to provide one; the out-of-range default python3 is never used silently. `depInstallFailures` blocks on that code regardless of changed files.
+#5731: `pythonFor` prefers the repo's own pin (`.python-version`, else the first CI `python-version`; `pyHint`) over an in-range default `python3`, also for projects whose pyproject declares no range; a hinted minor missing from PATH and `uv python find` is provisioned with `uv python install`. `prepareOne` retries an install that fails with a build/wheel incompatibility (`PY_BUILD_RE`) once per remaining in-range interpreter (at most 3 tried); the failed reason names the interpreters tried. keyOf is unchanged when no hint exists. A failed python install is reported `env.setup_failed`, naming the interpreters used and the in-range alternatives not tried. A build-incompatibility install failure is cached as a negative result per (lock hash, interpreter) key (`<eco>-<key>.failed.json`, 6h), so a later prepare skips that failing install.
+
 
 `depcache.mjs` `linkOrCopy` (#4909) copies a file when the hardlink fails with EXDEV, so a cache on another filesystem is still a `hit`. `capwait.mjs` holds a lane refused for capacity (`sandbox.capacity`) until the pool reports `free > 0` and banks the wait as `waits.queue`.
 
@@ -3792,6 +3795,13 @@ Filing: `file_issues` is **opt-in, default off** (only an explicit `file_issues:
 
 - The pre-PR CI precheck (`bin/lean/ci-precheck.mjs`) also reads the required checks of the release branch (the first default branch, skipped when it equals the lane base) and passes it to `scripts/ci-local` as `--release-branch`. The github-actions adapter then counts a workflow with `pull_request` to, or `push` on, that branch as a gate, so release-only formatter and suite-wiring jobs are selected with the why `required check "X" on release branch`. Without a release branch the plan is unchanged.
 - `CI_PRECHECK_PARITY` lists the required release checks the lane cannot run (no job maps, or the job is heavy, excluded or unrunnable). The first round files one issue per gap, deduped by the hidden marker `FORGE:PARITY_GAP <context>` (`reportParityGaps` in `bin/lean/basered.mjs`). It never blocks the PR.
+
+## Lane audit at unhappy terminals (#6076)
+
+- `finish()` in `bin/lean/lean.mjs` calls `runLaneAudit` (`bin/lean/lane-audit.mjs`) once at needs-human (including PARKED), engine-error and a final budget/ci-pending terminal, after the terminal post. The call is wrapped in try/catch and `runLaneAudit` never throws, so an audit cannot change the terminal reason or code.
+- It posts one `FORGE:LANE_AUDIT` comment: a JSON audit `{key, issue, terminal, signature, class, owner, action, active, fixed_in_later, status: proposed|confirmed, stamp}`. `stamp` = engine version, build sha, agent version, image tag, forge.yaml hash, batch id, attempt. Idempotent: keyed on issue + attempt + signature, so a rerun posts nothing.
+- `bin/lean/lane-audit-signatures.mjs` is the data table `{id, class (genuine|pipeline|spec|env|pool), owner, action, match(evidence), introduced_in, fixed_in}`, seeded from #6072. A match whose `fixed_in` is later than the lane's engine version is `fixed_in_later`: not active, and the gap seam is not called. No LLM is involved in classification.
+- Seams: `lane-audit-gap.mjs` (`auditGap`, called for active pipeline/env/pool findings; filled by #6078) and `lane-audit-llm.mjs` (`classifyWithLlm`, called for unmatched evidence; filled by #6079). Both are no-ops returning null.
 
 ## Entry 2026-11-26 — remote heavy backend, quota-aware workers (#6047)
 `heavy.mjs` `runWrapped` uses `acquireRemote` when `CS_HEAVY_BASE` is set (the pool agent's per-sandbox token route; only set when the

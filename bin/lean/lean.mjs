@@ -37,7 +37,7 @@ import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mj
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
 import { hasRecipe, installLaneTools, genericInstallCommands, RECIPES } from "../pool/lane-tools.mjs";
-import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, manifestDepOwner, collectOnlyCommand, collectImportMiss, contractCommands } from "./preflight.mjs";
+import { testRunnerProblems, hostOnlyProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, manifestDepOwner, collectOnlyCommand, collectImportMiss, contractCommands } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
 import { ceilingFor, modelInfo, restartDecision, DEFAULT_CEILING, WINDOW_SHARE, RESTART_COST_USD, CACHE_READ_USD, REAL_LIMIT_SHARE, predictRestart, handoffFacts, routeHandoff, buildReadsOf, NARROW_NOTE } from "./ceiling.mjs";
@@ -129,6 +129,7 @@ import { guardStagedDeletions, deletionEvidence, maxForeignDeletions } from "./d
 import { createLedger, flattenPhases, overheadStats } from "./phaseledger.mjs";
 import { DEFAULT_CATALOG_SOURCES, deriveCatalog, mergeRecipes, rewriteMissed, isDriftFailure, rewriteSubprojectVenv, deriveTestEnvMap, rewriteToCiEnv } from "./validate-catalog.mjs";
 import { holderGone } from "./liveness.mjs";
+import { runLaneAudit, buildStamp, forgeYamlHash } from "./lane-audit.mjs"; // #6076
 import { planStale, stackedBaseBlock, validStackedOn, cascadeDecision, invalidatedChecks } from "./stacking.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
 
@@ -789,6 +790,12 @@ export async function runCore(o) {
         await post("FORGE:NEEDS_HUMAN", `## Needs human\n${laneRecoveryEvidence(reason, code, detail)}\n\nsig=${repeatSignature(code, detail)}\n\n_${usageLine()}_`);
         await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
       } catch { /* best effort */ }
+    }
+    if (reason === "needs-human" || reason === "engine-error" || (recoverUnlabelled && recover.final && (reason === "ci-pending" || reason === "budget-exceeded"))) { // #6076: one version-stamped FORGE:LANE_AUDIT at the unhappy terminals; never changes how the lane ends
+      try {
+        await runLaneAudit({ issue, reason, code, detail, comments: allComments(), trusted: (c) => c?.__mine === true || isTrustedIssueComment(c), phases: phaseLedger.snapshot(), post: (m, b) => post(m, b),
+          stamp: buildStamp({ engineVersion: ENGINE_VERSION, forgeYamlHash: forgeYamlHash(o.cwd ?? wt), batchId: o.batchId ?? null, attempt: recover?.attempt ?? o.attempt ?? 1 }) });
+      } catch { /* the audit is best effort */ }
     }
     if (["needs-human", "engine-error", "dependency-open", "dependency-blocked", "dependency-unreadable", "decomposed", "host-task"].includes(reason)) {
       const wf = ["investigating", "building", "in-review"].map((x) => `workflow:${x}`).join(",");
@@ -2668,8 +2675,9 @@ export async function runCore(o) {
           contract = snapContract(contract);
           vc = validateContract(contract, issueText, { repro: reproOn(), pages: pagesConfig, baseFiles: freezeBase, testPlan: reproOn(), readFile: wtRead, checkIds: freezeCheckIds, reproRecipe });
         };
-        if ((!vc.ok || missed.length || testRunnerProblems(contract, testRunners).length) && sessionId) {
-          await correctContract([...vc.problems, ...preflightProblems(missed), ...testRunnerProblems(contract, testRunners)], "resumed once");
+        const hostOnly = () => hostOnlyProblems(contract); // #5749: a host-only wrapper or busy loop in a frozen command is corrected at freeze
+        if ((!vc.ok || missed.length || testRunnerProblems(contract, testRunners).length || hostOnly().length) && sessionId) {
+          await correctContract([...vc.problems, ...preflightProblems(missed), ...testRunnerProblems(contract, testRunners), ...hostOnly()], "resumed once");
           if (missed.length) misses = await preflightValidates(contract);
         }
         // #5623: builder-correctable contract problems get up to contractMaxCorrections rounds (default 3), each with only the
@@ -2692,6 +2700,7 @@ export async function runCore(o) {
         }
         await flushStages(result ?? { status: "fixed" }, ["investigation"]); // always posted: FORGE:INVESTIGATION/VALIDATE are read downstream
         if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after ${rounds} correction(s):\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID, { ...(issueEdited ? { issueEdited: true } : {}), ...(vc.problems.every((x) => /: quote is not verbatim/.test(x)) ? { quoteMismatch: true } : {}) });
+        { const ho = hostOnly(); if (ho.length) return await needsHuman(`The builder's contract still has host-only or busy-loop commands after correction (#5749); nothing was built:\n${ho.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID, { ...(issueEdited ? { issueEdited: true } : {}) }); }
         frozen = historyRows(contract); // #4694 guards
         frozen = withDecisionRows(frozen, readDecisionIndex(repo)); // #4695: anchored decisions on the deliverable paths; one index read
         await takeHotAreas((frozen.deliverables ?? []).map((d) => d?.path)); // #5751: the contract's paths before building
@@ -2960,10 +2969,11 @@ export async function runCore(o) {
         if (!failed.length && timedOut.length && (vcfg.precheckBlock || guardFailing(timedOut))) return await needsHuman(`Environment error (not a check failure): pre-PR check command(s) timed out even after one longer retry, which is host load rather than a failing check; no builder resume was spent, the branch is pushed and nothing merged: ${timedNames}`, ENV_VALIDATE_TIMEOUT);
         if (!failed.length) { checkCommandsFailing = false; if (round) T.decisions.push(`Declared check commands pass after ${round} builder fix round(s)`); await gatePassed("precheck"); break; }
         const names = failed.map((f) => `\`${f.command}\` (exit ${f.rc})`).join(", ");
+        const failTail = (fs) => fs.map((f) => `\n\n\`${f.command}\` output tail:\n${quietFailure(f.output, { maxChars: 2000 })}`).join(""); // #5749: the recovery lane starts from the failing check's output, not only its name
         if (isSplit) return await needsHuman(`Declared check command(s) fail on the refactor:split move (no builder edits a split); nothing merged: ${names}`, OUTCOME_CODES.CI_RED);
         checkCommandsFailing = true;
         { const red = await guardRed(failed, { bypass: vcfg.guardBypass === true }); if (red === "bypass") { checkCommandsFailing = false; break; } if (red) return red; } // #5239: a guard that also fails on the base defers the lane; #5992: unless the lane is clear of the guarded surface
-        if (round >= vcfg.maxRounds || !sessionId) { if (vcfg.precheckBlock || guardFailing(failed)) return await needsHuman(`Declared check command(s) still failing before the PR (verify.precheck_block); nothing merged: ${names}`, OUTCOME_CODES.CI_RED); T.anomalies.push(`Declared check command(s) still failing before the PR: ${names}`); break; }
+        if (round >= vcfg.maxRounds || !sessionId) { if (vcfg.precheckBlock || guardFailing(failed)) return await needsHuman(`Declared check command(s) still failing before the PR (verify.precheck_block); nothing merged: ${names}${failTail(failed)}`, OUTCOME_CODES.CI_RED); T.anomalies.push(`Declared check command(s) still failing before the PR: ${names}`); break; }
         T.decisions.push(`Declared check command(s) failed: ${names}; builder resumed (round ${round + 1}/${vcfg.maxRounds})`);
         const before = String(await git(["rev-parse", "HEAD"])).trim();
         const capped = capLogs(failed.map((f) => ({ ...f, log: f.output }))).map((f) => ({ command: f.command, rc: f.rc, output: f.log }));
@@ -2978,7 +2988,7 @@ export async function runCore(o) {
         await fixRound("precheck", precheckFailurePrompt(quiet, vcfg.mode), [], "precheck", capped.map((f) => `${f.command}\n${f.output ?? ""}`).join("\n"));
         await upsertStage("implementation");
         result = (await readResult()) ?? result;
-        if (String(await git(["rev-parse", "HEAD"])).trim() === before) { if (vcfg.precheckBlock || guardFailing(failed)) return await needsHuman(`Declared check command(s) failing and the builder made no new commit for them (verify.precheck_block); nothing merged: ${names}`, OUTCOME_CODES.CI_RED); T.anomalies.push(`Declared check command(s) failing and the builder made no new commit for them: ${names}`); break; }
+        if (String(await git(["rev-parse", "HEAD"])).trim() === before) { if (vcfg.precheckBlock || guardFailing(failed)) return await needsHuman(`Declared check command(s) failing and the builder made no new commit for them (verify.precheck_block); nothing merged: ${names}${failTail(failed)}`, OUTCOME_CODES.CI_RED); T.anomalies.push(`Declared check command(s) failing and the builder made no new commit for them: ${names}`); break; }
         files = await changedFiles();
       }
     }
