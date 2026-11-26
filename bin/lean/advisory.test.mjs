@@ -51,6 +51,8 @@ describe("generic sandbox install (unclog)", () => {
   it("installs by miss kind, mapping import names to packages", () => {
     assert.match(genericInstallCommands({ kind: "python-module", tool: "yaml" })[0], /pip install --user --quiet PyYAML/);
     assert.match(genericInstallCommands({ kind: "python-module", tool: "requests" })[0], /pip install --user --quiet requests/);
+    const y = genericInstallCommands({ kind: "python-module", tool: "yaml" })[0];
+    assert.match(y, /\|\| \(apt-get update -qq && apt-get install -y --no-install-recommends python3-yaml && rm -rf \/var\/lib\/apt\/lists\/\*\)$/, "apt fallback grouped so it runs only when pip fails");
     assert.match(genericInstallCommands({ kind: "node-module", tool: "@adobe/css-tools" })[0], /^npm install --no-save .* @adobe\/css-tools$/);
     assert.match(genericInstallCommands({ kind: "command", tool: "shellcheck" })[0], /apt-get install -y --no-install-recommends shellcheck/);
     assert.match(genericInstallCommands({ kind: "command", tool: "shellcheck" }, { root: false })[0], /^sudo sh -c /);
