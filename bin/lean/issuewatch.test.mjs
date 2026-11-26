@@ -404,7 +404,7 @@ test("verify: a review comment from an untrusted author does not count", async (
   assert.match(r.posted[0], /no trusted FORGE:REVIEW/);
 });
 
-test("verify: base-red check (red on first parent and merge commit) verifies with base-red evidence", async () => {
+test("verify: base-red check red on first parent and merge commit verifies with base-red evidence", async () => {
   const r = await settleOne({ parents: { bb1: "ee1" }, checks: { bb1: [["lint", "completed", "failure"], ["test", "completed", "success"]], ee1: [["lint", "completed", "failure"]] } });
   assert.deepEqual(r.state.verified, [1]);
   assert.equal(r.reopened || r.escalated, false);
