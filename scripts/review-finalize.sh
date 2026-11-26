@@ -53,7 +53,7 @@
 #                 [--intensity-tier T] [--table-cell-key K] [--trust-shadow-mode B] [--other-blocking true|false] [--out-dir D] [--dry-run]
 #                 (--other-blocking: the reviewer's criterion 1/2/3/5 result; resolved and persisted to OUT_DIR/other-blocking.txt, which merge-gate ORs in)
 #   calibrate:    [--intensity-tier T] [--table-cell-key K] [--trust-shadow-mode B] [--trust-needs-human B] [--dry-run]; the issue is context contract.issue or --issue N
-#   merge-gate:   [--manual-pr [--owner-requested]] (hand-built PR: skips ONLY the phase-trail preflight, recorded as FORGE:PHASE_TRAIL_SKIPPED; refused for a pipeline issue, see manual_pr_eligibility)
+#   merge-gate:   [--manual-pr [--owner-requested]] (hand-built PR: skips ONLY the phase-trail preflight, recorded as FORGE:PHASE_TRAIL_SKIPPED; a pipeline issue is refused unless --owner-requested, see manual_pr_eligibility)
 #                 --verdict "APPROVED|CHANGES REQUESTED" --has-purpose-regression B --calibration-needs-human B --trust-needs-human B
 #                 --base-conflict B --other-blocking B [--calibration-note-file F | --calibration-note T] [--table-cell-key K] [--base B] [--issue N]
 #                 (every B is true|false; an empty or other value aborts the merge: the guard state must be bound)
@@ -1307,13 +1307,13 @@ is_pipeline_issue() {
         --jq '([.labels[].name | startswith("workflow:")] + [.body | contains("<!-- FORGE:STATE")] + [.comments[].body | contains("FORGE:STARTED") or contains("<!-- FORGE:STATE")]) | any' 2>/dev/null) || return 0
     [ "$v" != "false" ]
 }
-# manual_pr_eligibility: --manual-pr never applies to a pipeline lane. An explicit --issue that is a pipeline issue is always refused;
-# a closing reference to one is refused unless the caller passed --owner-requested. Any unreadable lookup refuses.
+# manual_pr_eligibility: --manual-pr never applies to a pipeline lane unless the owner asked for it. An explicit --issue that is a pipeline
+# issue and a closing reference to one are both refused unless the caller passed --owner-requested (#5913); every other gate still runs. Any unreadable lookup refuses.
 manual_pr_eligibility() {
     local refs n
-    if [ -n "${MERGE_ISSUE:-}" ] && is_pipeline_issue "$MERGE_ISSUE"; then
+    if [ -n "${MERGE_ISSUE:-}" ] && [ "$OWNER_REQUESTED" != "true" ] && is_pipeline_issue "$MERGE_ISSUE"; then
         echo "MANUAL PR: #${MERGE_ISSUE} is a pipeline issue — --manual-pr never applies to a /work-on or /orchestrate lane" >&2
-        blocked "manual-pr refused: #${MERGE_ISSUE} is a pipeline issue"
+        blocked "manual-pr refused: #${MERGE_ISSUE} is a pipeline issue (pass --owner-requested only when the owner explicitly asked for this merge)"
     fi
     refs=$(gh pr view "$PR_NUMBER" -R "$REPO" --json closingIssuesReferences --jq '.closingIssuesReferences[].number' 2>/dev/null) || blocked "manual-pr refused: closing references unreadable"
     for n in $refs; do

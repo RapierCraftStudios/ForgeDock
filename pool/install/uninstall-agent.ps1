@@ -13,6 +13,7 @@ Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { $_.Command
 Get-NetFirewallRule -Name 'computeshare-agent' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 if (Get-Command Get-NetFirewallHyperVRule -ErrorAction SilentlyContinue) { Get-NetFirewallHyperVRule -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'computeshare*' -or $_.Name -like '*computeshare*' } | ForEach-Object { Remove-NetFirewallHyperVRule -Name $_.Name -ErrorAction SilentlyContinue } }
 (netsh interface portproxy show v4tov4) -match " $Port " | ForEach-Object { $a = ($_ -split '\s+')[0]; if ($a) { netsh interface portproxy delete v4tov4 listenaddress=$a listenport=$Port | Out-Null } }
+# #5884: the distro (and its sparse vhdx) goes with --unregister; the [experimental] sparseVhd key is reverted by the .wslconfig backup restore below.
 & wsl.exe --unregister $Distro
 $cfg = Join-Path $env:USERPROFILE '.wslconfig'
 if (Test-Path "$cfg.computeshare-backup") { Move-Item "$cfg.computeshare-backup" $cfg -Force; Write-Host 'Restored .wslconfig from backup (takes effect after wsl --shutdown).' }

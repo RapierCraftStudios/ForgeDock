@@ -22,10 +22,14 @@ import { dirname, join } from "node:path";
 import { mergeRemoteLog } from "../engine/runlog.mjs";
 import { safeSegment } from "./ledger.mjs";
 import { scopedEnv } from "./execution.mjs";
+import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { laneEnvFor, readEnvSnapshots } from "../env/env.mjs";
 import { resolveCredential } from "./credentials.mjs";
+import { seedMirror } from "./mirror-bundle.mjs";
 import { relayCommandNames, runRelayed, servicePending } from "./relay.mjs";
 
+/** #5949: one log line for a launch's seed stats: bytes sent, and the time saved against shipping the whole repo at the same rate. */
+const seedLine = (s) => (s.fallback ? `fell back to GitHub (${s.reason})` : s.upToDate ? "mirror already up to date, nothing sent" : `${s.full ? "full" : "incremental"} bundle, ${s.bytes} bytes in ${s.chunks} chunks, ${s.ms} ms${Number.isFinite(s.saved_ms) ? `, about ${Math.round(s.saved_ms / 1000)} s saved` : ""}`);
 const REDACTED = "[redacted]";
 const PREFETCH_MAX_B64 = 96 * 1024; // one env string stays under Linux MAX_ARG_STRLEN (128 KB)
 /** Replace every value of `secrets` (4+ chars, longest first) in `text`. */
@@ -53,7 +57,7 @@ export function isActionsEndpoint(endpoint) {
  * `GET /agents -> {sandboxes}` is the router's live sandbox list (#5422, `inventory()`; malformed or any error throws).
  * Optional relay (#4778): `GET /sandboxes/:id/relay -> {requests: [{rid, argv}]}` lists a sandbox's pending read-only capability
  * requests (404/405 or malformed = none, an older router) and `POST /sandboxes/:id/relay/:rid` `{rc, stdout, stderr}` answers one.
- * Optional `GET /status -> {free: N, online?, total?}` is the pool's free slots (#4540); without `online` the agents of `GET /agents` give it (#4788). Anything else (404, error, malformed) is unknown (null).
+ * Optional `GET /status[?repo=<slug>] -> {free: N, online?, total?}` is the pool's free slots (#4540); `?repo=` (#6041) limits `/status` and `/agents` to the agents the repo may use (router.json `repos.<slug>.agents` / `exclude_agents`); without `online` the agents of `GET /agents` give it (#4788). Anything else (404, error, malformed) is unknown (null).
  */
 export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fetch }) {
   const root = String(endpoint ?? "").replace(/\/+$/, "");
@@ -74,6 +78,8 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
     const e = new Error(`sandbox ${what}: HTTP ${r.status}${who ? ` (${who} auth${reason ? `: ${reason}` : ""})` : ""}`);
     e.status = r.status;
     if (hop) e.hop = hop;
+    if (typeof r.data?.code === "string" && r.data.code.startsWith("pool.")) e.poolCode = r.data.code; // #5985: the pool's refusal code reaches the deferral row
+    if (r.data?.live && typeof r.data.live === "object") e.live = { load_per_core: r.data.live.load_per_core, mem_available_gb: r.data.live.mem_available_gb };
     if (reason) e.reason = reason;
     if ([500, 502, 503, 504].includes(r.status)) e.transient = true; // #4672: a router restart or gateway blip, retried by the lane poll; #5095: 500 too
     if (r.status === 429 || r.status === 503) e.retryable = true;
@@ -91,10 +97,10 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
       if (r.status === 404) return "gone";
       if (!r.ok) throw Object.assign(fail("status", r), r.status === 401 ? { transient: true } : {}); // #5053: the sandbox launched, so a 401 is retried like an unreachable pool
       const s = String(r.data?.state ?? "");
-      return s === "running" || s === "pending" || s === "starting" ? "running" : s === "gone" ? "gone" : "exited";
+      return s === "running" || s === "pending" || s === "starting" || s === "paused" ? "running" : s === "gone" ? "gone" : "exited";
     },
     async logs(id, cursor = 0) { const r = await call("GET", `${p(id)}/logs?cursor=${encodeURIComponent(cursor)}`); return r.ok ? { text: String(r.data?.text ?? ""), cursor: r.data?.cursor ?? cursor } : { text: "", cursor }; },
-    async result(id) { const r = await call("GET", `${p(id)}/result`); if (r.status === 401) throw Object.assign(fail("result", r), { transient: true }); return r.ok && r.data && typeof r.data === "object" ? r.data : null; },
+    async result(id) { const r = await call("GET", `${p(id)}/result`); if (r.status === 401) throw Object.assign(fail("result", r), { transient: true }); if (r.ok && r.data?.disk_pressure === true) return { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_DISK_PRESSURE, retryInSeconds: 120, cost_usd: 0, detail: `sandbox ${id} was stopped to save the host drive (disk pressure); worktree and volume kept, requeued to resume` }; /* #5891 */ if (r.ok && r.data?.drained === true) return { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, retryInSeconds: 60, cost_usd: 0, detail: `sandbox ${id} was drained to free capacity for reserved work (${String(r.data.reason ?? "").slice(0, 120)}); rescheduled` }; /* #5856 */ if (r.ok && r.data && typeof r.data === "object") { const v = r.data.engineVersion ?? r.data.engine_version ?? r.data.forge_version ?? /ForgeDock\s*[·-]\s*v?(\d+\.\d+(?:\.\d+)?)/.exec(String(r.data.banner ?? r.data.log ?? ""))?.[1]; return v && !r.data.engineVersion ? { ...r.data, engineVersion: String(v) } : r.data; } return null; }, /* #5931 */
     async usage(id) { const r = await call("GET", `${p(id)}/usage`); return r.ok && Number.isFinite(Number(r.data?.minutes)) ? { minutes: Number(r.data.minutes), ...(typeof r.data.agent === "string" && r.data.agent ? { agent: r.data.agent } : {}) } : null; }, // agent: #4549, optional
     async stop(id) { const r = await call("POST", `${p(id)}/stop`); if (r.ok) return true; if (r.status === 404 || r.status === 405) return false; throw fail("stop", r); },
     async destroy(id) { const r = await call("DELETE", p(id)); if (r.ok || r.status === 404) return true; throw fail("destroy", r); },
@@ -113,24 +119,71 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
       if (!Array.isArray(r.data?.agents)) throw new Error("agent disk: malformed router answer");
       return r.data.agents.map((a) => ({ name: String(a?.name ?? "?"), disk_free_gb: Number.isFinite(a?.disk_free_gb) ? a.disk_free_gb : null }));
     },
+    /** #5949: the agent mirror's ref tips for a repo ({mirrors: {slug: {ref: sha} | "absent"}, upload_offset?}); 404/405 = an older router/agent (unsupported). */
+    async mirrors(id, q) {
+      const r = await call("GET", `${p(id)}/mirrors?${new URLSearchParams(Object.entries(q).filter(([, v]) => v !== null && v !== undefined).map(([k, v]) => [k, String(v)]))}`);
+      if (r.status === 404 || r.status === 405) throw Object.assign(fail("mirrors", r), { unsupported: true });
+      if (!r.ok) throw fail("mirrors", r);
+      return r.data ?? {};
+    },
+    /** #5949: one bundle chunk or the finish call; a 409 carries the agent's resume offset. */
+    async seed(id, body) {
+      const r = await call("POST", `${p(id)}/seed`, body);
+      if (r.status === 404 || r.status === 405) throw Object.assign(fail("seed", r), { unsupported: true });
+      if (!r.ok) throw Object.assign(fail("seed", r), Number.isInteger(r.data?.offset) ? { offset: r.data.offset } : {});
+      return r.data ?? {};
+    },
+    /** #5735: lane sandboxes per pool agent (`GET /agents` -> `agents[].lanes {used, ceiling}`) and across all batches (`remote_lanes`; else the `fdrsbx-` keys of `sandboxes`). A bad answer throws. */
+    async agentLanes() {
+      const r = await call("GET", "/agents");
+      if (!r.ok) throw fail("agent lanes", r);
+      if (!Array.isArray(r.data?.agents)) throw new Error("agent lanes: malformed router answer");
+      const int = (v) => (Number.isInteger(v) && v >= 0 ? v : null);
+      const agents = r.data.agents.map((a) => ({ name: String(a?.name ?? "?"), used: int(a?.lanes?.used) ?? 0, ceiling: int(a?.lanes?.ceiling) }));
+      const sb = r.data.sandboxes && typeof r.data.sandboxes === "object" ? Object.keys(r.data.sandboxes) : [];
+      return { agents, total: int(r.data.remote_lanes) ?? sb.filter((id) => id.startsWith("fdrsbx-")).length };
+    },
+    /** #5985: finished-lane usage rows (`{repo, cpu_avg, ...}`) of every pool agent (`GET /agents/:name/usage`), for the light/heavy lane class. A bad answer throws. */
+    async usageHistory() {
+      const r = await call("GET", "/agents");
+      if (!r.ok) throw fail("usage history", r);
+      const names = (Array.isArray(r.data?.agents) ? r.data.agents : []).map((a) => a?.name).filter((n) => typeof n === "string");
+      const rows = [];
+      for (const n of names) { try { const u = await call("GET", `/agents/${encodeURIComponent(n)}/usage`); if (u.ok && Array.isArray(u.data?.rows)) rows.push(...u.data.rows); } catch { /* one agent down: its rows are unknown */ } }
+      return rows;
+    },
     async relayPending(id) { const r = await call("GET", `${p(id)}/relay`); return r.ok && Array.isArray(r.data?.requests) ? r.data.requests : []; },
     async relayAnswer(id, rid, out) { const r = await call("POST", `${p(id)}/relay/${encodeURIComponent(rid)}`, out); if (!r.ok) throw fail("relay answer", r); return true; },
-    async capacity() {
+    /** #5991: the pool agent that runs `agent` (any agent when unnamed) answers `GET /agents` and is not paused; errors propagate. */
+    async agentOnline(agent = null) {
+      const r = await call("GET", "/agents");
+      const list = r.ok && Array.isArray(r.data?.agents) ? r.data.agents : null;
+      if (!list) throw fail("agents", r);
+      return list.some((a) => a?.ok === true && !a.paused && (!agent || a.name === agent));
+    },
+    async capacity({ repo } = {}) {
+      const q = typeof repo === "string" && repo ? `?repo=${encodeURIComponent(repo)}` : ""; // #6041: only the repo's allowed agents count
       // `free` (#4540) and agent liveness `online`/`total` (#4547) are each optional; none valid is unknown.
       const ok = (v) => Number.isInteger(v) && v >= 0;
       let out = {}, reached = false, lastErr = null;
       try {
-        const r = await call("GET", "/status");
+        const r = await call("GET", `/status${q}`);
         reached = true;
         if (r.ok) { const { free, online, total } = r.data ?? {}; out = { ...(ok(free) ? { free } : {}), ...(ok(online) ? { online } : {}), ...(ok(total) ? { total } : {}) }; }
       } catch (e) { out = {}; lastErr = e; }
-      if (out.online === undefined) {
+      if (out.online === undefined || out.load_per_core === undefined) {
         // #4788: a router without /status liveness: online = agents answering and not paused, as bin/pool/router.mjs status() does.
         try {
-          const r = await call("GET", "/agents");
+          const r = await call("GET", `/agents${q}`);
           reached = true;
           const list = r.ok && Array.isArray(r.data?.agents) ? r.data.agents : null;
-          if (list) out = { ...out, online: list.filter((a) => a?.ok === true && !a.paused).length, total: list.length };
+          if (list && out.online === undefined) out = { ...out, online: list.filter((a) => a?.ok === true && !a.paused).length, total: list.length };
+          // #5985: live host figures (worst agent); a pool reporting none leaves them unknown
+          const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+          const loads = (list ?? []).map((a) => num(a?.load_per_core ?? a?.live?.load_per_core)).filter((v) => v !== null);
+          const mems = (list ?? []).map((a) => num(a?.mem_available_gb ?? a?.live?.mem_available_gb)).filter((v) => v !== null);
+          if (loads.length) out = { ...out, load_per_core: Math.max(...loads) };
+          if (mems.length) out = { ...out, mem_available_gb: Math.min(...mems) };
         } catch (e) { lastErr = e; /* liveness stays unknown */ }
       }
       // #5048 (release review REG-2): a router that answered neither call is unreachable: throw, so the pool is marked down
@@ -228,6 +281,7 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
       const envSnap = settings.forgeYaml ? readEnvSnapshots(settings.forgeYaml) : null; // env.snapshots: off unless enabled
       const spec = {
         id, issue, batch: batch.id, image: settings.image ?? null,
+        priority: "borrow", // #5856: lanes run on leftover capacity; a pool with reservations throttles/drains them for reserved work
         repo: { slug: repo, url: repo ? `https://github.com/${repo}.git` : null, ref: li >= 0 ? args[li + 1] ?? null : null },
         ...(settings.laneTools?.length ? { lane_tools: settings.laneTools } : {}), // #5650: per-repo lane image
         ...(envSnap?.enabled ? { env_snapshots: { enabled: true, ready: envSnap.ready, keep: envSnap.keep, max_age_days: envSnap.maxAgeDays } } : {}), // the agent builds and stages snapshots outside the lane
@@ -241,8 +295,21 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
       // #4912: a ready warm sandbox first; none, an error or a transport without claim is the cold start.
       let claimed = null;
       if (warm && typeof transport.claim === "function") { try { claimed = await transport.claim(spec); } catch { claimed = null; } }
+      // #5949: seed the pool agent's mirror from this host first (repo_source dispatcher|github|auto); failure falls back to GitHub, or fails under `dispatcher`.
+      let seed = null;
+      const source = ["dispatcher", "github"].includes(settings.repoSource) ? settings.repoSource : "auto";
+      if (!claimed && repo && settings.repoDir && source !== "github" && typeof transport.seed === "function") {
+        try { seed = await seedMirror({ transport, id, slug: repo, cacheKey: spec.cache?.key ?? repo, repoDir: settings.repoDir, now }); }
+        catch (e) {
+          if (source === "dispatcher") throw Object.assign(new Error(`repo seeding failed (repo_source=dispatcher): ${redact(e?.message ?? e, [...known]).slice(0, 200)}`), { code: "pool.seed_failed", transient: e?.transient === true });
+          seed = { sent: false, fallback: true, reason: redact(e?.message ?? e, [...known]).slice(0, 160) };
+        }
+      }
       if (!claimed) await transport.launch(spec);
-      return { provider: name, id, issue, startedAt, minutes: 0 };
+      if (seed) {
+        try { const f = batch.logFile(issue); mkdirSync(dirname(f), { recursive: true }); appendFileSync(f, `[seed] ${seedLine(seed)}\n`); } catch { /* logging only */ }
+      }
+      return { provider: name, id, issue, startedAt, minutes: 0, ...(seed ? { seed } : {}) };
     },
     async status(h) {
       let s;
@@ -260,11 +327,18 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
       if (runLog) mergeRemoteLog(env.FORGE_RUNS_DIR || join(homedir(), ".forge", "runs"), h.issue, runLog, { repo });
       return rest;
     },
+    /** #5991: is the pool agent of this handle answering? Unknown (null) without transport support; transport errors propagate. */
+    async agentOnline(h) {
+      if (typeof transport.agentOnline !== "function") return null;
+      return transport.agentOnline(typeof h?.agent === "string" && h.agent ? h.agent : null);
+    },
     async capacity() {
       // #5048: no capacity() is unknown (null); a transport error propagates, so the caller can report the pool down
       if (typeof transport.capacity !== "function") return null;
-      return (await transport.capacity()) ?? null;
+      return (await transport.capacity({ repo })) ?? null;
     },
+    /** #5985: the pool's usage-history rows; null when the transport has none. */
+    async usageHistory() { return typeof transport.usageHistory === "function" ? (await transport.usageHistory()) ?? null : null; },
     /** #4612: a graceful stop at the lane's checkpoint; false when unsupported or failed. Never destroys the sandbox. */
     async stop(h) {
       if (typeof transport.stop !== "function") { stopWhy.set(h.id, "the transport has no stop"); return false; }

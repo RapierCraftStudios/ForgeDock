@@ -11,7 +11,7 @@
  */
 import { builtinModules } from "node:module";
 import { existsSync } from "node:fs";
-import { join, dirname, delimiter, relative } from "node:path";
+import { join, dirname, delimiter, posix } from "node:path";
 import { missingTool } from "./conformance.mjs";
 
 export const PREFLIGHT_CAP = 20;
@@ -159,12 +159,32 @@ export function testRunnerProblems(contract, runners) {
   return out;
 }
 
+/**
+ * #5749: validate/repro commands that cannot run in a lane sandbox whatever is installed: a host-only wrapper or path
+ * (`legion-run`, `ssh <host>`, `/home/<user>/...`) or an unbounded CPU busy loop (`while :`/`while true` with no sleep or
+ * read, `yes > /dev/null`, `seq $(nproc)` fan-out). One problem per command id. Pure.
+ */
+export function hostOnlyProblems(contract) {
+  const out = [];
+  for (const v of contractCommands(contract)) {
+    const cmd = v.command, why = [];
+    const exes = shellSegments(cmd).map((seg) => { let i = 0; while (i < seg.length && (/^[A-Za-z_]\w*=/.test(seg[i]) || ["!", "time", "exec", "command", "env"].includes(seg[i]))) i++; return seg[i]; });
+    if (cmd.split(/[\s'"`(;&|]+/).includes("legion-run") || exes.includes("legion-run")) why.push("the host-only wrapper `legion-run`");
+    if (exes.includes("ssh")) why.push("`ssh <host>`");
+    if (/(^|[\s='"`:(])\/home\/[\w.-]+\//.test(cmd)) why.push("an absolute `/home/<user>/` path");
+    if (/\bwhile\s+(:|true)\s*;\s*do\s*(:\s*;\s*)?done\b/.test(cmd) || /\byes\b[^|;&]*>\s*\/dev\/null/.test(cmd) || /\bseq\s+\$\(\s*nproc\s*\)/.test(cmd)) why.push("an unbounded CPU busy loop");
+    if (why.length) out.push(`${v.id}: uses ${why.join(" and ")}, which no lane sandbox provides or tolerates, so the command cannot run as written; use a bounded check through the repo's own toolchain, not a host wrapper, host path or CPU stress loop`);
+  }
+  return out;
+}
+
 const FIX_HOW = "run the check through the repo's own toolchain (its virtualenv, lockfile-pinned runner or package scripts) or use a check that does not need it, never a global install";
 /** One contract problem per miss: names the validate ids and the tool (or path, or env var), and how to fix the plan (never a global install). */
 export function preflightProblems(misses) {
   return (misses ?? []).map((m) => {
     const ids = m.ids.join(", ");
     if (m.kind === "env-var") return `${ids}: uses $${m.tool}, which is unset or empty in the lane environment, so the validate command cannot run as written; set it inside the command or ${FIX_HOW}`;
+    if (m.source === "collect") return `${ids}: importing its test modules on the base worktree (pytest --collect-only) failed: needs Python module '${m.tool}'${m.line ? ` (\`${m.line}\`)` : ""}, so the command does not run in the environment that has the test's dependencies; run it the way the repo's CI runs that test path (its working-directory and poetry run / uv run) or ${FIX_HOW}`; // #5753
     if (m.source === "run") return `${ids}: running it on the base worktree stopped before any test ran: needs ${KIND_NAME[m.kind] ?? m.kind} '${m.tool}'${m.line ? ` (\`${m.line}\`)` : ""}, so the validate command cannot run here; ${m.kind === "path" ? "point it at a path the repo or a deliverable has, or " : ""}${FIX_HOW}`;
     return `${ids}: needs ${KIND_NAME[m.kind] ?? m.kind} '${m.tool}'${m.interp ? ` (for ${m.interp})` : ""}, which this host lacks, so the validate command cannot run here; ${FIX_HOW}`;
   });
@@ -326,12 +346,56 @@ export function testRunSummary({ contract, failures = [], repro = null } = {}) {
   return { declared: ids.length, ran: ids.length - skipped.length, redGreen, skipped };
 }
 
-/** #5447: tool names the contract's test plan declares in `env` (per row of the #5445 `test_plan` array, or `test_plan.env`); strings, comma lists or {tool}; [] when absent. Pure. */
-export function declaredEnv(contract) {
+/**
+ * #5447: tool names the contract's test plan declares in `env` (per row of the #5445 `test_plan` array, or `test_plan.env`);
+ * strings, comma lists or {tool}; [] when absent. #5753: a directory the repo tracks (`files`: tracked paths, e.g. `shared`)
+ * is never a host tool. Pure.
+ */
+export function declaredEnv(contract, files = []) {
   const plan = contract?.test_plan;
   const raw = Array.isArray(plan) ? plan.map((r) => r?.env) : [plan?.env];
   const names = raw.flatMap((e) => (Array.isArray(e) ? e : typeof e === "string" ? e.split(",") : [])).map((e) => String(typeof e === "string" ? e : e?.tool ?? "").trim());
-  return [...new Set(names.filter((t) => /^[\w.+-]+$/.test(t) && isExecutableName(t)))];
+  const dirs = trackedDirs(files);
+  return [...new Set(names.filter((t) => /^[\w.+-]+$/.test(t) && isExecutableName(t) && !dirs.has(t)))];
+}
+/** #5753: every directory name a tracked path runs through (`shared/detection/x.py` -> shared, detection). */
+function trackedDirs(files) {
+  const out = new Set();
+  for (const f of Array.isArray(files) ? files : []) for (const seg of String(f).split("/").slice(0, -1)) if (seg) out.add(seg);
+  return out;
+}
+
+const PYTEST_CMD_RE = /^(\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:(?:poetry|uv)\s+(?:-\S+\s+)*run(?:\s+--?[\w-]+(?:[ =][^\s-]\S*)?)*\s+)?(?:\S*\/)?(?:\.venv\/bin\/)?(?:(?:python3?(?:\.\d+)?\s+-m\s+)?pytest))(?=\s|$)/;
+/**
+ * #5753: the contract command with `--collect-only -q` after its first pytest invocation (bare, `.venv/bin/python -m`,
+ * `poetry run`, `uv run`): one cheap run imports the test modules, so an import error shows at freeze, not in the builder.
+ * null when the command runs no pytest. Pure.
+ */
+export function collectOnlyCommand(command) {
+  const parts = String(command ?? "").split(/(&&|\|\||;|\||\n)/);
+  for (let i = 0; i < parts.length; i += 2) {
+    const m = PYTEST_CMD_RE.exec(parts[i]);
+    if (!m) continue;
+    if (/(?:^|\s)--collect-only\b/.test(parts[i])) return null;
+    parts[i] = `${m[1]} --collect-only -q${parts[i].slice(m[1].length)}`;
+    return parts.slice(0, i + 1).join(""); // later segments (`| tail`, `&& echo`) would hide the collect exit
+  }
+  return null;
+}
+const COLLECT_IMPORT_RE = /(?:ModuleNotFoundError|ImportError): No module named '?([\w.]+)'?/;
+/**
+ * #5753: why a collect-only run (collectOnlyCommand) shows the test module cannot import on this host: a module the repo does
+ * not track (`repoHas`) is {tool, kind: "python-module", line}. A passing or empty collection, a timeout, an import of a name
+ * the change adds (`cannot import name`) and a repo-owned module are no miss (RED on base is expected). Pure.
+ */
+export function collectImportMiss(r, { repoHas = () => false } = {}) {
+  const rc = r?.rc, out = String(r?.output ?? "");
+  if (!Number.isInteger(rc) || rc === 0 || rc === 5 || rc === TIMEOUT_RC) return null;
+  const m = COLLECT_IMPORT_RE.exec(out);
+  if (!m) return null;
+  const tool = m[1].split(".")[0];
+  if (!tool || repoHas(tool) || repoHas(m[1])) return null;
+  return { tool, kind: "python-module", line: (out.split("\n").find((l) => l.includes(m[0])) ?? "").trim().slice(0, 160) };
 }
 
 /** #5590: pytest's built-in fixtures, never host executables. */
@@ -390,15 +454,15 @@ export function manifestDepOwner(name, files = [], readFile = () => "") {
     const parts = String(f).split("/"), base = parts[parts.length - 1];
     if (parts.includes("node_modules") || !(base === "package.json" || base === "pyproject.toml" || /^requirements[\w.-]*\.txt$/.test(base))) continue;
     let text = ""; try { text = String(readFile(f) ?? ""); } catch { continue; }
-    if (manifestDeclares(base.startsWith("requirements") ? "requirements.txt" : base, text, name)) return dirname(f);
+    if (manifestDeclares(base.startsWith("requirements") ? "requirements.txt" : base, text, name)) return posix.dirname(f);
   }
   return null;
 }
 
 /** nearest ancestor dir (of `dir`, up to the root ".") holding a tracked Python manifest, or null. */
 function nearestPyProject(dir, files) {
-  const have = new Set(files.filter((f) => PY_MANIFESTS.has(String(f).split("/").pop()) || /(^|\/)requirements[\w.-]*\.txt$/.test(f)).map((f) => dirname(f)));
-  for (let d = dir; ; d = dirname(d)) { if (have.has(d)) return d; if (d === "." || d === "/") return null; }
+  const have = new Set(files.filter((f) => PY_MANIFESTS.has(String(f).split("/").pop()) || /(^|\/)requirements[\w.-]*\.txt$/.test(f)).map((f) => posix.dirname(f)));
+  for (let d = dir; ; d = posix.dirname(d)) { if (have.has(d)) return d; if (d === "." || d === "/") return null; }
 }
 const PYTEST_SEG = /^(\s*(?:[A-Za-z_]\w*=\S*\s+)*)(?:python3?(?:\.\d+)?\s+-m\s+pytest|pytest)\b/;
 /**
@@ -412,17 +476,17 @@ export function venvPythonRewrite(command, files = [], exists = () => false) {
   const out = parts.map((seg, i) => {
     if (i % 2) return seg;
     const cd = /^\s*cd\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*$/.exec(seg);
-    if (cd) { const t = (cd[1] ?? cd[2] ?? cd[3]).replace(/^\.\//, "").replace(/\/+$/, ""); cwd = t.startsWith("/") || t.startsWith("$") || t.startsWith("..") ? "?" : join(cwd === "?" ? "." : cwd, t) || "."; return seg; }
+    if (cd) { const t = (cd[1] ?? cd[2] ?? cd[3]).replace(/^\.\//, "").replace(/\/+$/, ""); cwd = t.startsWith("/") || t.startsWith("$") || t.startsWith("..") ? "?" : posix.join(cwd === "?" ? "." : cwd, t) || "."; return seg; }
     const m = PYTEST_SEG.exec(seg);
     if (!m || cwd === "?") return seg;
     const rest = seg.slice(m[0].length);
     const tp = rest.split(/\s+/).map((x) => x.replace(/::.*$/, "").replace(/^\.\//, "")).find((x) => x && !x.startsWith("-") && /[\w-]\/|\.py$/.test(x) && !x.startsWith("/"));
-    const origin = cwd !== "." ? cwd : tp ? dirname(tp) : ".";
+    const origin = cwd !== "." ? cwd : tp ? posix.dirname(tp) : ".";
     const proj = nearestPyProject(origin, files);
     if (proj === null) return seg;
-    const venv = join(proj, ".venv/bin/python");
+    const venv = posix.join(proj, ".venv/bin/python");
     if (!exists(venv)) return seg;
-    const rel = cwd === "." ? venv : relative(cwd, venv);
+    const rel = cwd === "." ? venv : posix.relative(cwd, venv);
     changed = true;
     return `${m[1]}${rel} -m pytest${rest}`;
   });

@@ -90,6 +90,9 @@ domains:
       - path: decisions/5779-release-fix-step-ci-wait.md
         authority: recommended
         token_cost: 400
+      - path: decisions/5848-release-start-refusal.md
+        authority: recommended
+        token_cost: 250
 
   devdocs:
     description: "Devdocs system, frontmatter schema, selective loading, index format"
@@ -198,6 +201,18 @@ modules:
 
   - name: lean-hotspots
     glob: "scripts/hotspots*"
+    path: modules/lean.md
+    authority: required
+    token_cost: 900
+
+  - name: lean-review-finalize
+    glob: "scripts/review-finalize*"
+    path: modules/lean.md
+    authority: required
+    token_cost: 900
+
+  - name: lean-verify-phase-trail
+    glob: "scripts/verify-phase-trail*"
     path: modules/lean.md
     authority: required
     token_cost: 900

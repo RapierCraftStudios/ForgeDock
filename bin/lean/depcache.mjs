@@ -26,6 +26,15 @@ import { join, dirname, basename, relative, resolve, isAbsolute } from "node:pat
 import { safeSegment } from "./ledger.mjs";
 
 export const depcacheRoot = (env = process.env) => String(env.FORGE_DEPCACHE_ROOT ?? "").trim() || join(homedir(), ".forge", "depcache");
+/**
+ * #5901: the per-repo directory under the cache root. A pool lane's checkout is `/cache/work/<sandbox-id>`, so a key made
+ * from the checkout path is new for every lane and every lane installs its own copy. The repo slug (`owner/repo`) is the
+ * same for all of them; `fallback` (the path-based key) is used only when no repo is known.
+ */
+export const depcacheNamespace = ({ repo, fallback } = {}) => {
+  const slug = String(repo ?? "").trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "_").replace(/^[._]+|[._]+$/g, "");
+  return slug || fallback;
+};
 export const DEPCACHE_INSTALL_TIMEOUT_MS = 15 * 60000;
 export const DEPCACHE_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
 const STORES = "stores";

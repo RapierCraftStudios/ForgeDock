@@ -18,6 +18,7 @@ param(
   [int] $AllowMemGb = 0,     # 0 = half of physical RAM (min 4)
   [string] $Distro = 'computeshare',
   [ValidateSet('auto', 'mirrored', 'nat')] [string] $Networking = 'auto',  # nat: for PCs where mirrored mode fails (e.g. WSL error 0x8007054f)
+  [switch] $KeepaliveAtStartup,  # run the keep-alive at boot (S4U) for accounts that never log on interactively
   [switch] $Force            # kept for compatibility; the install never prompts
 )
 $ErrorActionPreference = 'Stop'
@@ -35,8 +36,13 @@ New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 $ts = (Get-Command tailscale.exe -ErrorAction SilentlyContinue).Source
 if (-not $ts) { $ts = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe' }
 if (-not (Test-Path $ts)) { Fail 'Tailscale is not installed.' }
-$tsIp = (& $ts ip -4 | Select-Object -First 1).Trim()
-if ($tsIp -notmatch '^100\.') { Fail "Could not read this machine's Tailscale IPv4 (got '$tsIp')." }
+# The CLI refuses (401) when Tailscale belongs to another Windows user and prints nothing; fall back to the adapter.
+$tsIp = ''
+try { $tsIp = ("$(& $ts ip -4 2>$null | Select-Object -First 1)").Trim() } catch { $tsIp = '' }
+if ($tsIp -notmatch '^100\.') {
+  $tsIp = ("$(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -like 'Tailscale*' -and $_.IPAddress -like '100.*' } | Select-Object -First 1 -ExpandProperty IPAddress)").Trim()
+}
+if ($tsIp -notmatch '^100\.') { Fail 'Found no Tailscale IPv4 address (the tailscale CLI was denied or empty and no Tailscale adapter has a 100.x address).' }
 Say "Tailscale IP $tsIp"
 
 # --- Resource ceiling --------------------------------------------------------------------------------------------
@@ -131,6 +137,14 @@ foreach ($l in $lines) {
 }
 if ($inWsl2) { foreach ($k in $want.Keys) { if (-not $seen[$k]) { $out.Add("$k=$($want[$k])"); $seen[$k] = $true } } }
 if (-not ($out | Where-Object { $_ -match '^\s*\[wsl2\]\s*$' })) { $out.Add('[wsl2]'); foreach ($k in $want.Keys) { $out.Add("$k=$($want[$k])") } }
+# #5884: sparse VHD (freed blocks shrink the vhdx, so a lane burst cannot pin the Windows drive full). [experimental] is its own section.
+$expIdx = -1; for ($i = 0; $i -lt $out.Count; $i++) { if ($out[$i] -match '^\s*\[experimental\]\s*$') { $expIdx = $i; break } }
+if ($expIdx -lt 0) { $out.Add('[experimental]'); $out.Add('sparseVhd=true') }
+else {
+  $j = $expIdx + 1; $found = $false
+  while ($j -lt $out.Count -and $out[$j] -notmatch '^\s*\[') { if ($out[$j] -match '^\s*sparseVhd\s*=') { $out[$j] = 'sparseVhd=true'; $found = $true }; $j++ }
+  if (-not $found) { $out.Insert($expIdx + 1, 'sparseVhd=true') }
+}
 $changed = (($lines -join "`n") -ne ($out -join "`n"))
 if ($changed) {
   if (Test-Path $wslConfig) { Copy-Item $wslConfig "$wslConfig.computeshare-backup" -Force }
@@ -164,6 +178,9 @@ if ($distros -notcontains $Distro) {
   }
   Remove-Item $tar -Force
 }
+
+# #5884: convert the already imported vhdx to sparse (best effort: older WSL builds lack --manage --set-sparse).
+[void](Invoke-Wsl @('--manage', $Distro, '--set-sparse', 'true') 300 -Optional)
 
 # systemd for docker + the agent; no Windows PATH or Windows binaries inside the lane distro.
 $wslConf = "[boot]\nsystemd=true\n\n[network]\nhostname=$AgentName-cs\n\n[interop]\nappendWindowsPath=false\n"
@@ -211,10 +228,11 @@ $keep = Join-Path $installDir 'keepalive.ps1'
 Copy-Item (Join-Path $PSScriptRoot 'keepalive.ps1') $keep -Force
 $taskArgs = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$keep`" -Distro $Distro -Port $Port -TailscaleIp $tsIp" + $(if ($mirrored) { ' -Mirrored' } else { '' })
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+$trigger = if ($KeepaliveAtStartup) { New-ScheduledTaskTrigger -AtStartup } else { New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME" }
+$logonType = if ($KeepaliveAtStartup) { 'S4U' } else { 'Interactive' }
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
 # Highest: on NAT networking the task maintains a netsh portproxy, which needs an elevated token.
-$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType $logonType -RunLevel Highest
 Register-ScheduledTask -TaskName 'computeshare-keepalive' -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'computeshare agent keep-alive' -Force | Out-Null
 Start-ScheduledTask -TaskName 'computeshare-keepalive'
 

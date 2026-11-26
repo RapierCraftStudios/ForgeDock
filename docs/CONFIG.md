@@ -318,6 +318,23 @@ orchestration:
   # shrink cascade queue growth.
   max_concurrent: 12
 
+  # Stacked lanes, phase 1 (#5831). off (default): a dependent waits for its dependency to
+  # merge before any work. plan: while a dependency is still pending or running, a dependent
+  # is planned in an idle slot (after every ready issue): one plan lane per issue per batch
+  # investigates and freezes the contract, never builds, commits or pushes, and ends `planned`.
+  # Its build lane starts after the dependency merged and reuses that contract unless it is
+  # stale (changed scope or lane, or the dependency's merged diff touches a deliverable path).
+  # full = plan plus stacked builds (#5832): a dependent whose one unmerged in-batch dependency
+  # is PR-ready (review passed, precheck green) builds on that lane head and opens a stacked PR
+  # on the dependency's branch. The merge step (guard merge.stacked_base) refuses while the PR
+  # base is not the lane or the dependency is unmerged; after it merged the PR moves onto the lane.
+  # Cascades (#5833): while it waits, a moved dependency head is rebased onto and re-verified (a conflict
+  # restarts the dependent from its frozen contract), a dependency closed without merging drops the
+  # stacked PR/branch and re-plans the dependent on the lane base, and after the merge only the checks
+  # the dependency's diff touches re-run. Rows carry `cascade`; the batch report counts cascades per dependent.
+  # A plan lane's other ends do not count toward the breaker, relaunch or requeue budgets.
+  stacking: off
+
   # Age (hours since the issue last updated) after which a predecessor still at
   # `workflow:remediating` or `workflow:engine-error` is classified GATED
   # (stalled, needs a human) instead of IN_PROGRESS. Default: 48.
@@ -970,9 +987,9 @@ One row per key path of `POLICY_SCHEMA` (`bin/lean/release-config.mjs`). `<name>
 | `risk.rules[].when.contract` | boolean | none | The change touches a contract. |
 | `risk.rules[].when.rolled_units_gt` | number | none | More than this many units roll. |
 | `risk.rules[].when.diff_lines_gt` | number | none | More than this many changed lines. |
-| `risk.rules[].when.requires` | string | none | Named requirement that must hold. |
 | `risk.rules[].risk` | low\|medium\|high | none | `low`, `medium` or `high`. |
 | `risk.rules[].forces` | string | none | Pipeline the rule forces. |
+| `risk.rules[].requires` | string | none | Named requirement (for example `rollout-declaration`) reported with the risk when the rule matches. |
 | `features` | object | - | Feature wave policy (#5571). |
 | `features.flag_policy` | require\|warn\|off | none | `require` refuses a feature wave that adds no rollout key, `warn` warns, `off` does nothing; `lanes.<name>.flag_policy` wins. |
 | `plan` | object | - | The release plan. |
@@ -1718,7 +1735,7 @@ execution:
 | Key | Type | Required | Description |
 |-----|------|----------|-------------|
 | `mode` | string | No | `local` (default): lanes are detached host processes, as before. `remote`: lanes run in sandboxes of `provider`. `hybrid`: each lane is placed from facts (forge#4256, below). |
-| `max_remote` | integer | No | Remote lanes of the batch that may run at once. They take no slot of the host lane cap (`orchestration.global_parallel`, `forgedock sched cap`); the batch `--parallel` still applies. `0` (default) keeps lanes local. |
+| `max_remote` | integer | No | Remote lanes of the batch that may run at once. They take no slot of the host lane cap (`orchestration.global_parallel`, `forgedock sched cap`); the batch `--parallel` still applies. `0` (default) keeps lanes local. The pool router's per-agent lane ceiling (`forgedock pool limit <agent> --lanes N`) caps lane sandboxes on a host across all batches and defers the rest. |
 | `heavy` | boolean | No | Hybrid placement override (forge#4523). `true`: every lane that passes rules 1-3 is placed remote. `false`: the detected validation weight is ignored (rule 5 still applies). Unset: detect. It changes placement only: no pre-PR commands run, and host admission (`max_load_per_core`) is unchanged. |
 | `provider` | string | No | `container` (reference: an ephemeral local container), `remote` (a runner pool or remote session over HTTP, forge#4254), `pool` (the built-in pool router on this host, forge#4546: `remote` with `endpoint` and `token_env` defaulted from the router config, `COMPUTESHARE_CONFIG` or `~/.config/computeshare/router.json`, and its `forgedock.token`; the repo's `forge.yaml` is sent to every sandbox, so no router `repos` map is needed; missing router config and no `endpoint` fails with `execution.provider.misconfigured`) or `local`. The default is `container` off `local` mode; `remote` and `pool` are used only when named. Unknown names fail the batch start. |
 | `image` | string | No | Container provider image; it must provide `git` and `forgedock`. Started with `--pull never`. |
@@ -1727,6 +1744,7 @@ execution:
 | `token_env` | string | No | Name of the API credential, sent as `Authorization: Bearer`. Read from the env, else the OS keychain (service `forgedock`, account = the name: `secret-tool store --label forgedock service forgedock account NAME` on Linux, `security add-generic-password -s forgedock -a NAME -w` on macOS). Never written to the ledger, the batch state, logs or GitHub. |
 | `cache_store` | string | No | Shared cache store the remote sandbox mounts (sent as `cache.store` with `cache.key` = the repo). |
 | `allow_actions` | boolean | No | `true` accepts a GitHub Actions endpoint. Default `false`. |
+| `public_default` | string | No | `actions`: a **public** repo with no `mode` runs lanes on GitHub-hosted runners (`provider: actions`, forge#5748). Off by default (forge#5900): without it nothing changes on upgrade. Needs owner setup first: `.github/workflows/forgedock-lane.yml`, the `forgedock-lane` environment with its `CLAUDE_CODE_OAUTH_TOKEN` secret, and server-side protection on the default and base lane branches (the lane refuses to run without it, forge#5899). |
 | `budget_minutes`, `budget_usd` | number | No | The `execution.budget` per batch: once the batch's sandbox minutes / estimated USD (settled lanes plus the running ones' elapsed time) reach the cap, no new remote lane is admitted. Missing, non-numeric or negative means no cap. |
 | `day_budget_minutes`, `day_budget_usd` | number | No | The same cap per host UTC day, summed over every batch on the host from the host-day store (`execution-budget.json` in `~/.forge/sched/`, or `FORGEDOCK_EXECUTION_BUDGET_FILE`). A corrupt or unreadable store refuses remote lanes while a day cap is set; remove the file to reset it. |
 | `fallback_local` | boolean | No | `true`: a remote-placed lane runs on the host while the provider reports no agent online (`GET {endpoint}/status -> {"online": N}`, the built-in router answers it with `online`, `total` and per-agent `ok`/`paused`), so a batch completes locally with every pool agent offline or asleep (forge#4547). Default `false`: such lanes defer (`sandbox.capacity`). A missing or failing `/status` is unknown and never triggers it. It also covers a sustained `sandbox.capacity`: an issue the pool refused `capacity_fallback_after` times (default 3) for capacity runs on the host when the host has headroom (the host-busy guard; a busy host or a failing probe keeps it waiting remote) (forge#5112). |
@@ -1741,6 +1759,8 @@ execution:
 | `cost_per_minute` | number | No | USD per sandbox-minute, used when the provider reports no cost of its own (the `container` provider never does). Default `0`. |
 
 **Lifecycle:** each sandbox is listed in the lane ledger (`~/.forge/ledger/<batch>/sandbox-<n>.json`, kind `sandbox`) before it starts and removed from it only after teardown succeeded: on success, failure, a lane that exits without a result, and adopt after `--resume`. A sandbox left by a killed dispatcher is reaped by `forgedock gc --apply` (scope `--sandboxes`). The container provider mounts the checkout's git dir read-only at `/src` (cloned to the container's own `/work`), `~/.forge/verify-cache` read-only at `/cache`, and the batch `lanes/` dir at `/result`.
+
+**Pool agent image hygiene** (forge#5758, keys in the pool agent config, not `forge.yaml`): after a self-update or start builds the lane image, the agent removes superseded `forgedock-lane:<version>` images and their per-repo `-t<hash>` tools variants. `keep_lane_images` (default `2`) is the number of newest versions kept, always including the running one; a tag any container (running or exited-but-kept) uses is never removed, and images outside the `forgedock-lane:` prefix (`image` overrides) are never touched. Every `build_cache_interval_s` seconds (default `21600`, 6 h) `reap()` also runs `docker builder prune --keep-storage <build_cache_keep_gb>gb` (`build_cache_keep_gb`, default `20`) and removes dangling anonymous volumes (64-hex names no container references; named `cs-work-`/`cs-cache-` volumes are not touched). Failures are logged and never fail an update or a reap.
 
 **Remote provider** (`bin/lean/sandbox-remote.mjs`, forge#4254). The sandbox is addressed by the id ForgeDock picks (`fdrsbx-<batch>-<issue>`), JSON over HTTP:
 
@@ -2922,6 +2942,47 @@ There is no CLI subcommand to read it yet — `doctor()` reading the receipt to 
 
 ---
 
+## Pool agent cache volumes
+
+Keys of the pool agent's JSON config (`forgedock pool agent`), not of `forge.yaml`. Each repo's `cs-cache-<slug>` volume holds the package caches, depcache, env snapshots, git mirror and lane work dirs. The agent labels the volumes it creates `computeshare.cache=1` (`forgedock gc` reports them and never reclaims them) and sweeps them every `cache_sweep_interval_s`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `cache_max_age_days` | number | `14` | uv/npm/pip/poetry cache files, depcache and env snapshot entries older than this are deleted by the agent sweep, with no launch needed. The pnpm store is pruned and the git mirror gets `git gc --auto`. |
+| `cache_max_gb` | number | unset (no cap) | Per-volume cap. A volume over it is shrunk oldest-first below the cap; work dirs of live sandboxes are never touched. |
+| `depcache_max_gb` | number | `40` | Per-repo cap on `forge-depcache/<repo>/` (#5901). Over it, the least recently used snapshots (by their `last-used` stamp) are deleted, never one held by a lane lock. `/capacity` `cache_volumes.<volume>.depcache_gb` and `forgedock pool status` show each repo's depcache size. Snapshots are also aged out per snapshot by `cache_max_age_days`. |
+| `cache_idle_days` | number | `30` | A volume with no launch for this long and no referencing sandbox is removed. Evicted only when its last use is known (`/cache/.last-used`, written by the lane entrypoint). |
+| `cache_never_evict` | list of volume names | `[]` | Volumes (e.g. `cs-cache-marcode`) that are never swept or evicted. |
+| `cache_sweep_interval_s` | number | `3600` | Gap between cache sweeps. |
+| `lane_disk_cap_gb` | number | unset (off) | #5884: hard cap on lane disk (running sandbox dirs plus this agent's cache volumes). At or over it `/capacity` has `disk_capped: true`, a launch answers 503 `pool.disk_cap` (a deferral, like `pool.disk_low`) and the router skips the host. Fields `lane_disk_used_gb`/`lane_disk_cap_gb` appear only when set. A dedicated volume or filesystem quota for the state dir is the operator-side alternative. |
+| `disk_prune_at_pct` | number | `80` | From this percent of `lane_disk_cap_gb` each reap prunes this agent's stopped containers, dangling images and build cache (agent-label scoped) and runs a cache sweep, then an fstrim. |
+| `fstrim_interval_s` | number | `21600` | Gap between best-effort `fstrim -v <docker root>` runs (`sudo -n` when not root; failure is a log line). `fstrim: false` turns it off; `docker_root` overrides `/var/lib/docker`. The WSL installer also enables `sparseVhd=true` in `.wslconfig` and `wsl --manage --set-sparse`. |
+| `agent_id` | string | `name` | Owner label `computeshare.agent=<id>` (#5881) on every container and cache volume the agent creates. Reap, orphan-volume, cache and work sweeps touch only resources carrying it, so a co-resident agent or foreign containers are never removed; unlabelled pre-existing items are left alone. Setting it also namespaces the cache volume (`cs-cache-<id>-<key>`) so two agents never share `/cache/work`. |
+
+A failed or timed-out sweep (10 min limit) shows as `cache_sweep_error` in the agent's `/capacity`, next to `cache_volumes` (size per volume).
+
 ## Complete Example
 
 See [`forge.yaml.example`](../forge.yaml.example) at the repository root for a fully annotated example covering all sections.
+
+---
+
+## Router config: `ci_autoscale` (#5695)
+
+Keys of the pool router's own config file (not `forge.yaml`). The CI runner autoscaler is off by default.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `ci_autoscale.enabled` | `false` | Turns on `POST /ci/workflow-job` tracking and the reconcile at the end of each router tick. |
+| `ci_autoscale.dry_run` | `false` | Log every scale decision with its inputs but start or stop nothing. |
+| `ci_autoscale.repo` | unset | `owner/name` for `generate-jitconfig` and the jobs-API poll fallback. Uses the router host's `gh auth token`. |
+| `ci_autoscale.poll_s` | `300` | Seconds between jobs-API polls. |
+| `ci_autoscale.runner_group_id` | `1` | Runner group for JIT runners. |
+| `ci_autoscale.labels.<label>` | none | One entry per runner label: `min` (warm runners), `max` (hard cap), `size` `{cpus, mem_gb}` (default 1 / 2). Only jobs carrying a configured label are counted. |
+| `ci_autoscale.floors.mem_available_gb` | `3` | MemAvailable that must remain after the reservation. |
+| `ci_autoscale.floors.load_per_cpu` | `0.8` | Load per vCPU allowed after the reservation. |
+| `ci_autoscale.floors.net_rx_mbps_max` | unset | Refuse starts above this host RX rate (deploy exempt). |
+| `ci_autoscale.lane_floor` | `{cpus: 2, mem_gb: 3}` | Pool `cpus_free`/`mem_free_gb` left for lanes. CI never takes it. |
+| `ci_autoscale.windows` | `[]` | `[{from, to, why}]` ISO times: no starts or stops inside a window. |
+
+Priority is deploy label > release branch (`release/*`, `hotfix/*`) > lanes > ordinary PR CI. Agent config `runner_image` (default `ghcr.io/actions/actions-runner:latest`) is the runner container image.

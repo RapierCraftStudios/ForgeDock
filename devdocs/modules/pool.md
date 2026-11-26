@@ -10,6 +10,77 @@ last_compacted: "2026-11-15"
 
 Rolling per-module knowledge log. Hard cap: 150 lines.
 
+## Entry 2026-11-26 — light lanes + heavy-phase tokens (#6047)
+Default-off `cfg.elastic_lanes` (pushed through the router `/policy` allowlist). On: a lane is admitted on its base reservation, and each
+heavy step leases a token from the agent: `POST /sandboxes/:id/heavy/acquire|release|renew` (sandbox credential, like `creds`/`relay`;
+agent-local, reached by the lane at `CS_HEAVY_BASE` via host.docker.internal, so no production ingress rule is involved, as in the relay
+entry above). Weight = max(`heavy_weight`, p90 repo history - base) from `estimateFor`, so docker lanes take a token sized from their own
+history. A grant needs base reservations + held tokens + weight within effective capacity and live MemAvailable; denied returns
+`{granted:false, retry_after_s}` and the client polls; the first holder is always granted. Tokens live in `store.data.heavy`, are refcounted
+per sandbox and expire with `heavy_ttl_s` (renewed by the client), on sandbox exit and on destroy. `projectedUse` becomes base + held
+tokens, `/capacity` adds `elastic_lanes`, `heavy_tokens`, `heavy_held`, `cpus_free_elastic`, `mem_free_gb_elastic` (the router places on
+these) and `lanes_ceiling_derived`. With no explicit ceiling (the router passes its `max_lanes` in the launch body) the agent refuses at the
+derived ceiling = default-weight tokens the host holds x `elastic_lane_factor` (3); an explicit `pool limit` or router.json `max_lanes` wins.
+Waiting phases hold no token so they already count only the base. Promotion of the flag (R13) needs the live measurement: >=2x lanes at the
+same peak memory, no rise in OOM kills or lane wall time. The lane env also gets `CS_CPU_QUOTA` (its `--cpus`).
+
+## Entry 2026-11-24 — dispatcher-seeded repo mirrors (#5949)
+
+- A lane no longer depends on the pool host's own GitHub link. Agent `GET /mirrors?slug=&cache_key=[&upload=]` returns `{mirrors: {<slug>: {<ref>: <sha>} | "absent"}, upload_offset?}` (`bin/pool/agent.mjs`); `POST /mirrors/seed` takes a base64 chunk `{slug, cache_key, upload (bundle sha256), offset, data_b64, sha256}` (a wrong offset is 409 with the resume `offset`) or `{finish: {size}}`.
+- `bin/pool/mirror-seed.mjs` applies the bundle in a helper container on the cache volume: copy of `/cache/git/<slug>.git` (or a fresh bare repo) -> `git fetch <bundle>` -> `fsck --connectivity-only` -> rename, under a per-slug flock; a `cs-seeded` marker is written. Any failure removes the tmp copy and leaves the mirror untouched.
+- Router: `GET /sandboxes/:id/mirrors` and `POST /sandboxes/:id/seed` relay to the agent chosen for that sandbox id (remembered so `launch` prefers it), over direct and poll transports; chunks over 768 KB (base64) are 413. Older router/agent: 404/405 means the dispatcher falls back.
+- `pool/image/entrypoint.sh`: a seeded mirror is cloned `--shared` with no GitHub fetch when it already has the lane ref (else a best-effort fetch, 3 tries); origin is reset to GitHub, so pushes stay there. Unseeded mirrors keep the old clone/fetch path.
+- Seed upload limits (#5970): `<state>/seed/*.part` idle over 1 h are swept (at start and on each chunk); one upload is capped at 2 GiB and all `.part` files at 4 GiB (413).
+- `execution.repo_source: dispatcher | github | auto` (default auto): github never seeds; dispatcher fails the launch when seeding fails; auto falls back to the GitHub path.
+
+## Entry 2026-11-21 — Per-host lane ceiling (#5735)
+
+- Decision: `devdocs/decisions/5735-host-lane-ceiling.md`.
+- `bin/pool/router.mjs`: a lane sandbox is one whose id starts with `fdrsbx-`. Ceiling = the agent state entry's `max_lanes`, else router.json `agents.<name>.max_lanes`; no valid value = no ceiling. Used = placed `fdrsbx-` sandboxes on the agent plus in-flight reservations, taken synchronously before the agent POST (launch and warm claim) and released in `finally`.
+- `launch()` skips agents at the ceiling for a new lane id. When none is left and one was skipped for the ceiling: 503 `{error, code: "pool.host_lane_ceiling", agents: [{name, used, ceiling}]}` with Retry-After (a capacity deferral in the dispatcher). Re-launch of a placed id is not re-checked. `claim()` skips capped agents (404, then a cold launch).
+- `GET /agents`: each agent gains `lanes {used, ceiling|null}`; the body gains `remote_lanes`. `POST /agents/:name/limit {max_lanes: N|null}` (fd token; 404 unknown agent, 400 bad value) sets or clears the ceiling; re-enrollment keeps it.
+- `bin/pool/cli.mjs`: `forgedock pool limit <agent> --lanes N|none`; `status` adds `<agent>: lanes used/ceiling` and `remote lanes across batches: N`. `bin/lean/sandbox-remote.mjs` `agentLanes()` feeds the `--set-max-remote` note.
+- Tests: `bin/tests/computeshare.test.mjs` (lane ceiling), `bin/tests/pool-cli.test.mjs`.
+
+## Entry 2026-11-24 — pool status table, owner pause/resume (#5885, parent #5857)
+
+- `forgedock pool status` prints one row per host from router `GET /agents`: HOST, CPUS and MEM GB as used/borrowable/total (used = total - free; borrowable = `cpus_borrowable`/`mem_borrowable_gb` on weighted agents, else free), ACTIVE, THROTTLED, PAUSED (`no`, `owner`, `resize`, `yes`), REASON (owner pause, resize drain, idle gate, last drain). Unreachable agents show `unreachable: <error>`. The `<name>: transport <t>` lines follow. `--json` prints the raw `/agents` body as before.
+- New `capacity()` fields (also on `/health`): `owner_paused` always; `idle_gate` (the `notIdle` reason or null), `throttled` (count of throttled active lanes) and `last_drain` `{reason, at, sandbox}` only on weighted agents (reservations or `idle_only`), so flat agents gain no priority fields. `paused` is now `cfg.paused || owner_paused`, so the router stops placing on an owner-paused host.
+- `forgedock pool pause` / `resume` run on the host itself: they read agent.json (`--config`, default `/etc/computeshare/agent.json`) and call `POST /pause` / `POST /resume` on the agent's own listen address (127.0.0.1 when it binds 0.0.0.0) with the agent token, never through the router; works for outbound agents too. Pause refuses new launches with 503; running lanes finish. The flag is the file `owner-paused` beside agent.json (state dir when no config path), so it survives restarts; it is separate from the resize drain's `cfg.paused`, which a resize clears.
+- `forgedock pool uninstall [--yes]` removes the agent from this box by running the shipped `pool/install/uninstall-agent-{linux,macos}.sh` (Windows: `uninstall-agent.ps1`); no `--config` (the scripts use the fixed install paths, nothing from the command line reaches a delete). Without `--yes` it runs the script with `--dry-run`, so the preview is exactly what `--yes` does. Tests: `bin/tests/pool-cli.test.mjs`, `bin/tests/computeshare.test.mjs` (#5885, #5956).
+
+## Entry 2026-11-24 — One-command installers: /install, Linux/macOS uninstall (#5883, parent #5857)
+
+- `GET /install` (router, `auth: none`) serves `installScript()`: a POSIX sh script with only `cfg.public_url` baked in, never a token. `curl -fsSL <router>/install | sh -s -- --code CODE [--name N --cpus N --mem GB]`; the code goes to `/bootstrap/bundle.tar.gz?token=` (checked, not consumed) and `/enroll` (consumed). Detects `uname` Linux|Darwin and runs `install-agent-linux.sh` or `install-agent-macos.sh` with `--outbound` (always). `--uninstall` runs the shipped `uninstall-agent-{linux,macos}.sh` from the installed code root (bundle fallback when `--code` is given). `--dry-run` prints the plan (code redacted).
+- Idempotent: with an agent token present (`/etc/computeshare/agent.token`, macOS `/usr/local/etc/computeshare/agent.token`) the bootstrap and the installers reuse the installed code (no bundle download, so a used code works) and never re-enroll.
+- Install marker `/etc/computeshare/installed-by` (macOS `/usr/local/etc/computeshare/installed-by`): one line per component the installer added (`docker`, `node`, `sysctl`, `fstrim.timer` only if this install enabled it). `uninstall-agent-linux.sh` stops and removes `computeshare-agent.service`, removes this agent's containers and volumes by `computeshare.agent=<id>` label (id from agent.json `agent_id`/`name`), `forgedock-lane` images, `/opt/computeshare`, `/etc/computeshare`, `/var/lib/computeshare`, the sysctl drop-in; `/opt/node`, fstrim.timer and docker only when marked. Never `docker system prune`. No user is created, so none is removed. `--dry-run` prints `would run:`/`would remove:` lines; a clean host is a no-op.
+- macOS: needs a running Docker Desktop / colima (never installed); node and code under `/usr/local/computeshare`, state `/usr/local/var/computeshare`, LaunchDaemon `io.forgedock.computeshare-agent` with the console user's `DOCKER_HOST`; agent listens on 127.0.0.1 (lanes use host.docker.internal). `uninstall-agent-macos.sh` boots it out and removes plist, dirs and labelled docker objects.
+- `forgedock pool enroll --outbound` prints the curl|sh line first, then the unchanged `OUTBOUND=1 ...` line; `--one-liner` prints only the curl|sh line. Scripts honour `CS_PREFIX` (tests only). Tests: `bin/tests/pool-install.test.mjs`.
+
+## Entry 2026-11-23 — Outbound-only agent transport (#5882, parent #5857)
+
+- An agent enrolled without `url` (`POST /enroll` {token,name}) is stored `{name, transport:"poll", token}`; the router never dials it. `agentCall` (`bin/pool/router.mjs`) enqueues the request and awaits the reply (rejects at once when the agent has not polled for `poll_offline_s`, default 60, so callers answer 502 / `ok:false` in `capacities()`).
+- Agent side (`startPoll`, `bin/pool/agent.mjs`, on when `outbound: true` in agent.json): `GET /agent/poll?wait=25` (router clamps to 55s; 204 on timeout; the poll is the heartbeat), runs the request on its own bearer-checked API via loopback, `POST /agent/reply/:rid`. Reconnect backoff 1s..30s. Queue is in memory (a router restart drops it).
+- The local listener stays for the lanes' credential calls; `install-agent.sh` binds it to the docker bridge (`AGENT_LISTEN_HOST`, default 172.17.0.1) in outbound mode. `forgedock pool enroll --outbound` prints `OUTBOUND=1 install-agent-linux.sh ...`.
+- Long-poll chosen over WebSocket: no stdlib WS server, no new dependency. Tests: `bin/tests/pool-outbound.test.mjs`.
+
+## Entry 2026-11-22 — Priority classes, reservations, borrowing (#5856)
+
+- `spec.priority` is `reserved | normal | borrow` (default `normal`; anything else is 400). Lanes send `borrow` (`bin/lean/sandbox-remote.mjs`). Agent config: `reservations: [{name, cpus, mem_gb}]`, `idle_only`, optional `idle_max_owner_load_per_core` (0.5), `idle_min_free_mem_gb` (4), `cpu_shares` ({reserved 4096, normal 1024, borrow 128, throttled 2}), `drain_grace_s` (20), `cores`.
+- Admission (`admit` in `bin/pool/agent.mjs`): reserved is admitted up to its reservation whatever borrow/lanes use (503 `pool.reservation_full` past it, 400 for an unknown name); it skips the live-load gate. Reclaim order: every borrower is throttled (`docker update --cpu-shares 2`), then the newest borrowers are SIGTERMed (the lane checkpoints and reports `run.interrupted`, so the router/dispatcher reschedules it), SIGKILL after `drain_grace_s`, only as many as cpu and memory need. `normal` only gets space outside every reservation. `borrow` gets any physical headroom, i.e. reserved-but-idle space.
+- A reservation is idle when no reserved sandbox holds it; usage inside a running reserved sandbox is not lent (rejected for now: live-usage borrowing, needs `memory.high` which the docker CLI does not expose).
+- `idle_only`: borrow is admitted only while owner load per core (host load minus this agent's own sandboxes' sampled cpu) is under the floor and free memory above it (503 `pool.not_idle`). Each `reap()` throttles borrowed lanes when the owner is busy, drains one per pass if that did not help, and lifts the throttle when idle and no reserved sandbox runs.
+- Weights (`--cpu-shares`) and the new `/capacity` fields (`cpus_free_unreserved`, `mem_free_unreserved_gb`, `cpus_borrowable`, `mem_borrowable_gb`, `reservations[]`, `idle_only`) appear only when `reservations` or `idle_only` is configured; other agents are byte-identical to before. The router (`fitsPriority`/`headroom`) places reserved on the host holding the reservation, normal on unreserved headroom, borrow preferring free non-reserved capacity.
+- One agent per docker daemon: `reap()` removes any labelled container not in its own store, so reservations live inside the single agent.
+- `forgedock pool enroll --agent-url http://127.0.0.1:<port>` prints a Linux install command with `AGENT_URL` set (SSH-tunnel hosts).
+- Tests: `bin/tests/computeshare.test.mjs` (`#5856`).
+
+## Entry 2026-11-23 — lane disk cap, prune, fstrim, sparse VHD (#5884)
+
+- `bin/pool/disk.mjs` (pure, dependency-free): `laneDiskUsedGb`, `planDiskCap` (ok|prune|full), `fstrimDue`, `runFstrim` (never throws). Keys: `lane_disk_cap_gb` (unset = off, `/capacity` byte-identical), `disk_prune_at_pct` (80), `fstrim_interval_s` (6 h), `fstrim`, `docker_root`.
+- `launch` answers 503 `pool.disk_cap` at the cap; the router skips `disk_capped` agents and defers with the same code. From the threshold `reap()` runs label-scoped `containerPrune`/`imagePrune` (`docker.mjs`, #5881 scoping), builder prune and `cacheSweep`, then fstrim.
+- Installer: `.wslconfig` `[experimental] sparseVhd=true` plus `wsl --manage --set-sparse` (reverted with the backup on uninstall); Linux enables `fstrim.timer` best effort. Tests: `bin/tests/pool-disk-cap.test.mjs`.
+
 ## Entry 2026-11-15 — Environment snapshots (#5714)
 
 - Design, failure modes and rejected options: `devdocs/decisions/5714-env-library.md`. User guide: `docs/ENV-LIBRARY.md`.
@@ -40,3 +111,52 @@ The router ships agents only `AGENT_BUNDLE_PATHS` (`package.json`, `bin/pool`, `
 ## Entry 2026-11-21 — WSL host-disk admission (#5733)
 
 - `bin/pool/health.mjs` `hostDiskFree` (WSL only: osrelease /microsoft/i; Lxss BasePath drive via reg.exe over the interop socket, else /mnt/c) feeds `host_disk_free_gb`/`host_disk_low` in agent `capacity()`; `launch` answers 503 `pool.disk_low` under `min_host_disk_free_gb` (25) or after `sandbox_disk_growth_gb` (3.5) × (active + 1), and the router skips `host_disk_low` agents with its own 503 `pool.disk_low`. It is a capacity deferral (lane `SANDBOX_CAPACITY`), never a failure; unreadable means no field and no gate.
+
+## Entry 2026-11-22 — CI runner autoscaler (#5695)
+
+- `bin/pool/ci-autoscale.mjs`: pure `admitRunner`, `planScale`, `runnerPriority`, `decisionRecord`, plus `createAutoscaler` (router side). Off unless router config `ci_autoscale.enabled`; with it off, lane sizing and placement are untouched.
+- Demand: `POST /ci/workflow-job` (auth class `ci`, same tokens as `/ci/events`; the router is reached directly on :7710, so no ingress rule) takes a GitHub `workflow_job` payload (queued, in_progress, completed), keyed by the label in `ci_autoscale.labels`. A jobs-API poll (`ci_autoscale.repo`, every `poll_s`, default 300) is the fallback; queued entries the API no longer lists, and any entry over 6 h old, are dropped.
+- Reconcile runs at the end of the router `tick` on the agent with the most MemAvailable. It plans starts and stops per label (`min` warm, `max` cap, size from `labels.<l>.size`, default 1 cpu / 2 GB), admitted in priority order deploy > release CI > lane > PR CI. A waiting lane holds ordinary PR CI. Start = `generate-jitconfig` then agent `POST /runners`; stop = agent `DELETE /runners/:name` for an idle runner above `max(min, queued)`.
+- Floors (`ci_autoscale.floors`): `mem_available_gb` 3, `load_per_cpu` 0.8, `net_rx_mbps_max` (unset = off; deploy is exempt), and `lane_floor` `{cpus, mem_gb}` (default 2 / 3) of pool `cpus_free`/`mem_free_gb` that CI never takes. `windows: [{from,to,why}]` (ISO) are maintenance windows: no starts and no stops.
+- `dry_run: true` logs every decision (`ci-autoscale {...}` with `inputs`) and starts nothing; the last 200 are kept on `router.autoscale().decisions`.
+- Agent: `POST /runners` starts one `--ephemeral` runner container from a JIT config (`--rm`, 2 GB cap, label `computeshare.runner=1`, not `computeshare=1`, so the orphan reaper ignores it; the config goes in a 0600 env file, never argv). Runners count in `cpus_free`/`mem_free_gb` like a lane. `capacity()` adds `runners` and `net.rx_mbps` (host RX since the last call). Exited runners are forgotten by the reaper sweep.
+- Deferred: per-job measured sizes and result reporting (need the AlterLab #40991 dataset endpoint), live acceptance numbers (queue wait, 14-day OOM, before/after CI wall time), and promotion of the flag (first cohort `alterlab-ci` only, 3 days of `dry_run` first).
+
+## Entry 2026-11-22 — cache volume hygiene (#5757)
+
+- `bin/pool/cache-sweep.mjs`: pure `planCacheCap` (oldest-first, live work dirs never chosen) and `planIdleEviction` (last use known, idle, unreferenced, not never-evict); `sweepVolume` runs in a lane-image container (`docker.sweepCache`, 10 min timeout, source passed via env) and ages out uv/npm/pip/poetry, forge-depcache, env entries, prunes pnpm, `git gc --auto`.
+  - #5901: depcache is swept per snapshot (`forge-depcache/<repo>/<eco>-<key>`): age-out and LRU trim (`planDepcacheCap`, `depcache_max_gb`, default 40) go by the snapshot's `last-used` stamp, locked snapshots are kept, and the sweep result carries `depcache_bytes` per repo (surfaced in `/capacity` and `pool status`).
+- `agent.mjs` `cacheSweep` runs from `reap()` every `cache_sweep_interval_s`; failures land in `/capacity` `cache_sweep_error` (also work-dir sweep/destroy failures), sizes in `cache_volumes`. Volumes are created with label `computeshare.cache=1` (`docker.createVolume`); `gc.mjs` reports them, never reclaims (`forgedock.owner=1` stays the only reclaim label). Entrypoint writes `/cache/.last-used`.
+- #5901: the per-repo depcache cap also runs at the start of each new launch (throttled to once a minute), so it is trimmed before the lane writes a new snapshot.
+
+## Entry 2026-11-24 — mirror integrity, net.transient, live --clear-breaker (#5947)
+
+- `pool/image/mirror.sh` (installed as `cs-mirror`; `checkout_repo` calls `cs-mirror prepare <url> <mirror>`): a mirror is valid with refs and no zero-length file under `objects/` (`MIRROR_FSCK=1` adds `fsck --connectivity-only`). Valid: `ok`, the lane clones with `--reference`. Bad: quarantined as `<name>.git.corrupt-<ts>`, the lane clones directly (`direct`), and one background rebuild runs. A failed mirror step never fails a lane.
+- Builds hold a per-repo `flock` (`<name>.git.lock` under `/cache/git`), clone into `<name>.git.tmp-<pid>` with retries and rename only when refs exist, so a timed-out clone leaves no `<name>.git`. Ten concurrent lanes on a missing mirror build it once.
+- `forgedock env ensure` does the same validity check before `git clone --shared`; an unhealthy mirror is "not ready" (exit 0) unless `--url` gives a direct clone source.
+- `orchestrate.mjs`: git transport failures (`GIT_TRANSPORT_TEXT`: curl 56/28, early EOF, RPC failed, invalid index-pack output, unexpected disconnect, not a local repository) end a lane as a `net.transient` deferral with the #5161 backoff, capped by `max_deferrals`. They never reach `noteEngineError`, so the breaker does not count them.
+- `forgedock orchestrate --clear-breaker <id>` on a schedd-hosted batch sends `{op:"clear-breaker"}`; the runner consumes the batch's `clear-breaker` request file, resets its in-memory breaker, writes `clear-breaker.ack`, and the CLI prints whether the live runner acknowledged. Unhosted batches keep the state.json rewrite.
+
+## Entry 2026-11-24 — device login, accounts, per-box policy (#5886)
+
+- `router.mjs`: `POST /device/code` (auth none; rate limited by `device_codes_per_min`, TTL `device_ttl_s`), `POST /device/approve` (forgedock token; binds a user code to an `account` label), `POST /device/token` (poll: `authorization_pending`, `slow_down` when faster than `interval`, `expired_token`, then a single-use enroll code carrying the account). `enroll()` stamps `account` on the agent record; legacy tokens and `/codes` are unchanged. State lives in `store.data.devices`, read with `own()`.
+- `GET /agents?account=` filters agents (and their sandboxes); `account`/`policy` appear only on records that have them, so legacy output is byte-identical. `launch`/`claim` honour `spec.account` (only that account's agents); no account means any agent, as before.
+- `PUT /agents/:name/policy` validates an allowlist (`cpus`, `mem_gb`, `idle_only`, `paused`, `floors.host_disk_gb`), stores it on the record and pushes to the agent's `POST /admin/policy`; an unreachable box keeps `policy_pending` and `tick()` re-pushes. The agent persists the keys beside its config; the router's `paused` is `policyPaused`, separate from `owner_paused`, so the router can never clear the owner's pause.
+- CLI: `pool link <user_code> [--account A]`, `pool policy <agent> [--cpus --mem --idle-only --pause]`, `pool status --account A` (ACCOUNT column only when an agent has one). Installer: `install-agent-linux.sh --device`. Tests: `bin/tests/pool-device.test.mjs`.
+
+## Entry 2026-11-24 — WSL host-memory floor (#5967)
+
+- `health.mjs` `hostMemFree` (WSL only; powershell.exe over the interop socket: `FreePhysicalMemory` KB to GB plus `vmmem*` working sets) returns `{free_gb, vmmem:[{name,gb}]}`, null off WSL or on any error. The agent caches it 30 s and adds `host_mem_free_gb`, `host_mem_low`, `host_mem_floor_gb`, `vmmem`, `mem_paused` to `capacity()`; null means no field and no gate.
+- `launch` answers 503 `pool.host_mem` (reason `host_mem`) under `host_mem_floor_gb` (4), after the disk gate, before any docker run; `Retry-After` is `host_mem_retry_after_s` (60). The router skips `host_mem_low` agents and defers with the same code (lane `SANDBOX_CAPACITY`). `reap()` pauses the newest running sandbox below floor/2 (`memPaused`, lease kept) and resumes at floor + `host_mem_resume_margin_gb` (1).
+- `pool status` prints `<agent>: host_mem_free_gb N, other VMs: ...` and a WARNING when low (stderr, like the disk line). Tests: `bin/tests/pool-host-mem-gate.test.mjs`.
+- The VM-restart class is the existing `sandbox.lost` (#5859, breaker-exempt); no separate `pool.vm_restart` code. `orchestrate-envhold.test.mjs` covers N lanes lost together.
+
+## Entry 2026-11-24 — package cache layout pinned to entrypoint (#5969)
+
+- `pool/image/entrypoint.sh` points `UV_CACHE_DIR`, `npm_config_cache`, `POETRY_CACHE_DIR` and `PIP_CACHE_DIR` at `/cache/forge-depcache/stores/*`, the same layout as `depcache.mjs` `env()`. `cache-sweep.mjs` `PACKAGE_STORES` still includes `LEGACY_STORES` (`uv`, `npm`, `pip`, `poetry`) so old volumes and old images stay swept, capped and pruned. `pool-cache.test.mjs` pins every `/cache/...` path exported by the entrypoint to a `PACKAGE_STORES` entry.
+
+## Entry 2026-11-26 — per-repo agent affinity (#6041)
+
+- `router.json` `repos.<slug>.agents` (allowlist) and `exclude_agents` pin a repo to hosts. `placeable(c, spec)` in `router.mjs` is the one eligibility rule: account (#5886) AND allowlist AND not excluded. `launch()`, `claim()` and `seedAgent()` all use it, so no placement path bypasses it. A repo whose allowed agents are all busy gets the usual 503 capacity deferral, never another host.
+- `agents` counts only when a non-empty array of strings; empty or any other type is unset (any agent), so unset config behaves exactly as before. `exclude_agents` subtracts from the allowlist. Seed picks use the slug of the `/sandboxes/:id/mirrors` query or `/seed` body.
+- `GET /status?repo=<slug>` and `GET /agents?repo=<slug>` return only the repo's placeable agents (and their sandboxes); `httpTransport.capacity({repo})` sends it, so the dispatcher admits against capacity the repo can use. No `?repo=` = unchanged. Tests: `bin/pool/affinity.test.mjs`.

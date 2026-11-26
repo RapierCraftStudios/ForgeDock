@@ -9,13 +9,16 @@ import { dirname, join, resolve, sep } from "node:path";
 import { resolveSpawn } from "./winspawn.mjs";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import { runCliBackendAsync, resolveClaudeCliBinary, getClaudeCliCapabilities, buildLeanSessionFlags, buildReadOnlyToolFlags, sanitizeCliModel } from "../runner.mjs";
+import { runCliBackendAsync, resolveClaudeCliBinary, cliProbeTimedOut, spawnTargetMissing, getClaudeCliCapabilities, buildLeanSessionFlags, buildReadOnlyToolFlags, sanitizeCliModel } from "../runner.mjs";
 import { makeIo, readSubagentModel } from "../engine-cli.mjs";
+import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { makeProjector } from "../engine/projector.mjs";
 import { makeLedger, countLiveLanes, ledgerRoot } from "./ledger.mjs";
 import { makeDepCache } from "./depcache.mjs";
 import { makeHeavyIo } from "./heavy.mjs";
-import { diskLow } from "./admission.mjs";
+import { diskLow, ADMISSION_DEFAULTS } from "./admission.mjs";
+import { writeAtomic } from "./batch.mjs";
+import { schedDir } from "./sched.mjs";
 import { gatherContextFacts } from "./context.mjs";
 import { makePitfallStore } from "./pitfalls.mjs";
 import { enumeratingTests, missingEntries } from "./enumerating.mjs";
@@ -132,10 +135,15 @@ export const leanSettingsFlags = ({ subagentModel = null, reread = false, guard 
   return ["--settings", JSON.stringify({ env: ownedModelEnv(subagentModel), includeCoAuthoredBy: false, attribution: { commit: "", pr: "" }, ...(Object.keys(hooks).length ? { hooks } : {}) })];
 };
 
-export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable, subagentModel = null, sandboxed = inSandbox() } = {}) {
+export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable, subagentModel = null, sandboxed = inSandbox(), resolveBin = resolveClaudeCliBinary, probeTimedOut = cliProbeTimedOut, platform = process.platform, binMissing = spawnTargetMissing } = {}) {
   return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, rereadNudge = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, session = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null, bin: pinnedBin = null, fullSession = false }) => {
     // #5205: a rotation relaunch pins the real claude past the tokenbaton shim; absent, the usual resolution
-    const bin = pinnedBin || resolveClaudeCliBinary(cwd) || resolveSpawn("claude", []).bin; // win32: a probe miss must not fall back to a bare name (spawn ENOENT)
+    const resolved = pinnedBin || resolveBin(cwd);
+    // #5844: a probe that timed out under host load is not an absent CLI; spawning a bare name would end needs-human
+    if (!resolved && probeTimedOut(cwd)) throw Object.assign(new Error("the claude CLI probe timed out (host busy); not spawning an unresolved name"), { deferCode: OUTCOME_CODES.HOST_BUSY, retryInSeconds: 120, deferDetail: "the claude CLI probe timed out under host load; retried later" });
+    const bin = resolved || resolveSpawn("claude", [], { platform }).bin; // win32: a probe miss must not fall back to a bare name (spawn ENOENT)
+    // #5844: win32 cannot spawn a bare name; left unresolved while absence is not proven, defer instead of ENOENT
+    if (!resolved && platform === "win32" && bin === "claude" && !binMissing("claude", process.env, { platform })) throw Object.assign(new Error("the claude CLI is on PATH but did not resolve to a spawnable target; not spawning a bare name"), { deferCode: OUTCOME_CODES.HOST_BUSY, retryInSeconds: 120, deferDetail: "the claude CLI did not resolve to a spawnable target; retried later" });
     const caps = getClaudeCliCapabilities(cwd);
     // #4391: custom subagents (the explorer) for the builder session; null leaves argv unchanged
     // #5516: fullSession keeps slash commands/Skill/Task (the release test gate invokes /test-gate); otherwise the lean minimal group
@@ -229,9 +237,28 @@ export function makeRunTmp({ root = runTmpRoot(), now = () => Date.now(), alive 
 }
 
 /**
- * SIGTERM to a ledger-registered pid's process group (#4179). Only when the pid is alive and, where /proc exists, its
+ * SIGTERM to a ledger-registered pid's process group (#4179) and every descendant pid (#5746). Only when the pid is alive and, where /proc exists, its
  * command line still names `marker`, so a reused pid is never signalled. Returns true when the pid is gone or signalled.
  */
+/** #5746: every descendant pid of `pid` from `/proc/<n>/stat` ppids, children before none; includes ones that left the group (setsid). */
+export function descendantPids(pid, { procDir = "/proc" } = {}) {
+  const kids = new Map();
+  let names = [];
+  try { names = readdirSync(procDir); } catch { return []; }
+  for (const d of names) {
+    if (!/^\d+$/.test(d)) continue;
+    let st = "";
+    try { st = readFileSync(join(procDir, d, "stat"), "utf8"); } catch { continue; }
+    const ppid = Number(st.slice(st.lastIndexOf(")") + 2).split(" ")[1]); // fields after comm: state ppid ...
+    if (!Number.isSafeInteger(ppid)) continue;
+    if (!kids.has(ppid)) kids.set(ppid, []);
+    kids.get(ppid).push(Number(d));
+  }
+  const out = [], seen = new Set([Number(pid)]), queue = [Number(pid)];
+  while (queue.length) for (const c of kids.get(queue.shift()) ?? []) if (!seen.has(c)) { seen.add(c); out.push(c); queue.push(c); }
+  return out;
+}
+
 export function killLedgerPid(pid, marker, { kill = process.kill.bind(process), procDir = "/proc" } = {}) {
   const n = Number(pid);
   if (!Number.isSafeInteger(n) || n <= 1) return false;
@@ -241,7 +268,12 @@ export function killLedgerPid(pid, marker, { kill = process.kill.bind(process), 
     try { cmd = readFileSync(join(procDir, String(n), "cmdline"), "utf8"); } catch { return true; } // exited meanwhile
     if (!cmd.includes(String(marker))) return true; // pid reused by something else: not ours any more
   }
-  try { kill(-n, "SIGTERM"); return true; } catch { try { kill(n, "SIGTERM"); return true; } catch (e) { return e?.code === "ESRCH"; } }
+  // #5746: stopping a lane stops its whole process tree; a builder that left the lane's process group (setsid) is signalled by pid
+  const tree = existsSync(procDir) ? descendantPids(n, { procDir }) : [];
+  let ok;
+  try { kill(-n, "SIGTERM"); ok = true; } catch { try { kill(n, "SIGTERM"); ok = true; } catch (e) { ok = e?.code === "ESRCH"; } }
+  for (const c of tree) { try { kill(c, "SIGTERM"); } catch { /* gone */ } }
+  return ok;
 }
 
 /**
@@ -265,9 +297,54 @@ export function guardHeavyDisk(heavy, { host, minFreeGb = () => null, gc = async
   };
 }
 
+/**
+ * Lane ramp stamps (#5845): lanes are separate processes, so the lanes admitted within the ramp window are files in
+ * `schedDir()/lane-ramp/` (one `<pid>.json` per lane, `{pid, at, mb}`, so concurrent lanes never overwrite each other),
+ * plus `peaks.json` (recent peak RSS in MB, newest last). Every read fails open to null/0 and drops dead or expired stamps.
+ */
+const PEAKS_KEPT = 20;
+export function makeRampStore({ dir = join(schedDir(), "lane-ramp"), now = () => Date.now(), pid = process.pid, defaultMb = ADMISSION_DEFAULTS.lane_mem_mb } = {}) {
+  const live = (rampS) => {
+    const out = [];
+    for (const f of readdirSync(dir)) {
+      if (!/^\d+\.json$/.test(f)) continue;
+      const file = join(dir, f);
+      try {
+        const st = JSON.parse(readFileSync(file, "utf8"));
+        const stale = now() - st.at >= Math.max(rampS, 1) * 1000 * 2; // kept for one extra window so a slightly longer ramp still sees it
+        if (stale || !pidAlive(st.pid)) { rmSync(file, { force: true }); continue; }
+        if (now() - st.at < rampS * 1000) out.push(st);
+      } catch { /* unreadable stamp: ignore */ }
+    }
+    return out;
+  };
+  const peaks = () => { try { return (JSON.parse(readFileSync(join(dir, "peaks.json"), "utf8")).peaks ?? []).filter(Number.isFinite); } catch { return []; } };
+  const footprint = () => {
+    const p = peaks();
+    if (!p.length) return defaultMb;
+    const sorted = [...p].sort((a, b) => a - b);
+    return Math.max(defaultMb, Math.ceil(sorted[Math.floor(sorted.length / 2)]), Math.ceil(sorted[sorted.length - 1] * 0.9)); // conservative: near the max, never under the default
+  };
+  const guard = (fn, fallback) => (...a) => { try { return fn(...a); } catch { return fallback; } };
+  return {
+    rampingMb: guard((rampS) => live(rampS).reduce((t, st) => t + (Number(st.mb) > 0 ? Number(st.mb) : defaultMb), 0), null),
+    rampingLanes: guard((rampS) => live(rampS).length, null),
+    laneFootprintMb: guard(footprint, null),
+    /** Called once this lane passed admission: it will grow for the next ramp window. */
+    recordAdmission: guard((mb = footprint()) => { writeAtomic(join(dir, `${pid}.json`), JSON.stringify({ pid, at: now(), mb })); return true; }, false),
+    /** Called at lane end with the lane's peak RSS in MB. */
+    recordPeakRss: guard((mb) => {
+      if (!(Number(mb) > 0)) return false;
+      writeAtomic(join(dir, "peaks.json"), JSON.stringify({ peaks: [...peaks(), Math.ceil(Number(mb))].slice(-PEAKS_KEPT) }));
+      return true;
+    }, false),
+  };
+}
+
 /** Real host probes for admission (#4105). MemAvailable from /proc/meminfo (fallback os.freemem), statfs for tmp. */
 export function makeHostProbe() {
   return {
+    ...makeRampStore(),
     memAvailableMb() {
       try {
         const m = /^MemAvailable:\s+(\d+)\s+kB/m.exec(readFileSync("/proc/meminfo", "utf8"));
@@ -342,6 +419,9 @@ export async function requiredChecksRead({ gh, repo, lane }) {
 
 export const requiredChecksFor = async (opts) => (await requiredChecksRead(opts)).checks;
 
+/** Command-failure messages keep short args verbatim and replace any longer than 200 chars with its length, so stderr stays visible. */
+export const elideArgs = (args) => (args ?? []).map((a) => { const t = String(a); return t.length > 200 ? `<${t.length} chars>` : t; }).join(" ");
+
 /** #5592: stdout cap of a lane-path git/gh/docker call; output past it is cut, never an error. */
 export const EXEC_CAPPED_BYTES = 100 * 1024 * 1024;
 /**
@@ -367,7 +447,8 @@ export function execCapped(bin, args, { cwd, env, timeout = 120000, cap = EXEC_C
       if (timer) clearTimeout(timer);
       const out = Buffer.concat(chunks).toString("utf8") + (cut ? `\n[forgedock: output truncated at ${cap} bytes]\n` : "");
       if (cut || code === 0) return res(out);
-      const e = new Error(`Command failed: ${bin} ${args.join(" ")}${timedOut ? " (timed out)" : ""}\n${err}`);
+      // 2026-11-26: a long argument (a --body of a FORGE:CONTRACT) filled the recorded detail and hid stderr, the actual reason
+      const e = new Error(`Command failed: ${bin} ${elideArgs(args)}${timedOut ? " (timed out)" : ""}\n${err}`);
       Object.assign(e, { code: timedOut ? null : code, signal, killed: timedOut, stdout: out, stderr: err });
       rej(e);
     });
