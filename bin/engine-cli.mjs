@@ -1133,7 +1133,12 @@ export async function runFromCli(argv, deps = {}) {
       if (interrupted) return;
       interrupted = true;
       let r = null;
-      try { r = teardown ? await teardown(sig) : null; } catch { r = null; }
+      // #6081: a teardown that hangs (a builder child that ignores SIGTERM, a blocked git call) must not leave the lane alive after the operator stop:
+      // bounded, then the lane reports and exits anyway.
+      const bound = Number(deps.teardownMs ?? process.env.FORGEDOCK_TEARDOWN_MS) > 0 ? Number(deps.teardownMs ?? process.env.FORGEDOCK_TEARDOWN_MS) : 30000;
+      let timer;
+      try { r = teardown ? await Promise.race([teardown(sig), new Promise((res) => { timer = setTimeout(() => res(null), bound); })]) : null; } catch { r = null; }
+      clearTimeout(timer);
       try { report({ ...(r ?? {}), terminalReason: "deferred", code: OUTCOME_CODES.RUN_INTERRUPTED, detail: r?.detail ?? `interrupted by ${sig}` }); } catch { /* exit anyway */ }
       console.log(`issue #${issue} → deferred (interrupted by ${sig})`);
       exit(128 + SIGNO[sig]);

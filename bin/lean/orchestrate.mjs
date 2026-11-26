@@ -1230,6 +1230,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       }
       row.detail = `gave up after ${deferrals.get(n) ?? 0} deferrals: ${r?.detail ?? r?.code ?? ""}`;
     }
+    // #6081: a held issue whose lane died without a result was stopped by the operator (SIGTERM / kill / sandbox stop), not by the engine:
+    // a hold row, no engine-error, no breaker count, no relaunch budget spent; the issue waits pending for --release.
+    if (row.outcome === "engine-error" && !cancelled && (r?.lostWithoutResult || /exited without a result|interrupted by SIG/i.test(String(r?.detail ?? ""))) && (refreshHeld(), opHeld.has(n))) {
+      requeue(n, 0); done(); save();
+      decided({ issue: n, what: `#${n} stopped while held (${heldByOperator(n)}); not an engine-error, not counted toward the breaker`, why: firstLine(row.detail) || "lane ended without a result", alternative: "count it as an engine-error and relaunch" });
+      update({ ...row, outcome: "hold", detail: `#${n} stopped by operator hold: ${firstLine(row.detail) || "lane ended without a result"}` });
+      return;
+    }
     const la = row.outcome === "engine-error" && r?.lostWithoutResult && !cancelled && !lostOnce.has(n) ? (r.agent ?? r.sandbox?.agent ?? null) : null;
     let lostNow = null;
     if (la) { // #5859
@@ -1472,7 +1480,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         if (!["merged", "invalid", "deferred"].includes(gone?.outcome)) gone = null; // #4920: deferred = another lane owns the issue (lease or open PR on GitHub)
       }
       // #5526: a hold placed since the pass read is honoured at launch: the issue goes back to pending, no lane
-      if (!cancelled && !halted) { refreshHeld(); refreshPause(); if (opHeld.has(n) || opPause) { running.delete(n); runRecs.delete(n); releaseSlot(n); endRemote(n); requeue(n, 0); save(); return; } }
+      if (!cancelled && !halted) { refreshHeld(); refreshPause(); if (opHeld.has(n) || opPause) { await null; /* #6081: track() registers this promise after the sync prefix; delete after it, or the entry leaks and the runner never ends */ running.delete(n); runRecs.delete(n); releaseSlot(n); endRemote(n); requeue(n, 0); save(); return; } }
       if (halted) return; // #4454: stopped before launch; no pid, so a resume queues it again
       let r;
       if (cancelled) r = { terminalReason: "deferred", code: "run.interrupted", cost_usd: 0, detail: "cancelled before launch" }; // #4376
