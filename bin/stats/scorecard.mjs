@@ -10,7 +10,7 @@ import { DEFAULT_MIN_N, UNKNOWN, compareVersions, percentile } from "./aggregate
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { batchRoot, listBatches } from "../lean/batch.mjs";
-import { defaultGh, fetchGithubRecords, isValidRepo, toModel } from "./github-source.mjs";
+import { defaultGh, fetchGithubRecords, isTrusted, isValidRepo, parsePages, toModel } from "./github-source.mjs";
 
 export const SCORECARD_MARKER = "<!-- FORGE:SCORECARD v1 -->";
 const isNum = (x) => typeof x === "number" && Number.isFinite(x);
@@ -137,11 +137,39 @@ export function batchRowsFromDisk(repo, root = batchRoot()) {
   });
 }
 
+export const LANE_AUDIT_RE = /^<!-- FORGE:LANE_AUDIT v1 -->/;
+export const FAILURE_CENSUS_RE = /^<!-- FORGE:FAILURE_CENSUS v1 -->/;
+
+/**
+ * Trusted LANE_AUDIT and failure-census comments -> entries. Each comment starts with its marker and carries a fenced
+ * json block holding one object or an array: LANE_AUDIT `{issue, release?, class: "genuine"|"pipeline"}`, failure-census
+ * `{issue, release?, class?, reverted?}` (a census `class` counts as a needs-human audit when no LANE_AUDIT covers the issue).
+ */
+export function parseRegisterComments(comments, env = process.env) {
+  const out = { laneAudits: [], census: [] };
+  for (const c of comments ?? []) {
+    const body = String(c?.body ?? "");
+    const kind = LANE_AUDIT_RE.test(body) ? "laneAudits" : FAILURE_CENSUS_RE.test(body) ? "census" : null;
+    if (!kind || !isTrusted(c, env)) continue;
+    const block = /```json\n([\s\S]*?)(?:\n```|$)/.exec(body);
+    if (!block) continue;
+    let v; try { v = JSON.parse(block[1]); } catch { continue; }
+    for (const e of Array.isArray(v) ? v : [v]) if (e && typeof e === "object") out[kind].push(e);
+  }
+  const audited = new Set(out.laneAudits.map((a) => a.issue));
+  out.laneAudits.push(...out.census.filter((e) => e.class && !audited.has(e.issue)).map((e) => ({ issue: e.issue, release: e.release, class: e.class })));
+  return out;
+}
+
 /** Fetch the register and build the scorecard. `deps.gh`/`deps.fetch` are injectable. */
 export async function gatherScorecard({ repo, release, minN = DEFAULT_MIN_N }, deps = {}) {
   const result = await (deps.fetch ?? fetchGithubRecords)({ repo, gh: deps.gh ?? defaultGh, useCache: deps.useCache ?? true });
-  const { runs } = toModel(repo, result);
-  return buildScorecard({ records: runs, batchRows: deps.batchRows ?? (() => { try { return batchRowsFromDisk(repo); } catch { return []; } })(), laneAudits: deps.laneAudits ?? [], release, minN });
+  const model = toModel(repo, result);
+  let reg = { laneAudits: [], census: [] };
+  try { reg = deps.register ?? parseRegisterComments(parsePages(await (deps.gh ?? defaultGh)(["api", "--paginate", `repos/${repo}/issues/comments`]))); } catch { /* no register comments: those metrics stay n/a */ }
+  const reverted = new Set(reg.census.filter((e) => e.reverted === true).map((e) => e.issue)), tracked = new Set(reg.census.filter((e) => typeof e.reverted === "boolean").map((e) => e.issue));
+  const runs = model.runs.map((r) => (tracked.has(r.issue) ? { ...r, reverted: reverted.has(r.issue) } : r));
+  return buildScorecard({ records: runs, laneAudits: [...(deps.laneAudits ?? []), ...reg.laneAudits], batchRows: deps.batchRows ?? (() => { try { return batchRowsFromDisk(repo); } catch { return []; } })(), release, minN });
 }
 
 export async function runScorecard(argv, deps = {}) {

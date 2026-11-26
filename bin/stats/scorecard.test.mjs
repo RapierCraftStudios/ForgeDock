@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { batchRowsFromDisk, buildScorecard, renderScorecard, scorecardComment, parseScorecardArgs, runScorecard, gatherScorecard, SCORECARD_MARKER } from "./scorecard.mjs";
+import { parseRegisterComments, batchRowsFromDisk, buildScorecard, renderScorecard, scorecardComment, parseScorecardArgs, runScorecard, gatherScorecard, SCORECARD_MARKER } from "./scorecard.mjs";
 
 const run = (version, i, o = {}) => ({ version, issue: i, finished: true, reason: "merged", remediated: false, wallMs: 600000, verified: true,
   phases: { implement: { usd: 2, ms: 300000 } }, builderAttempts: [{ attempt: 1 }], ...o });
@@ -69,5 +69,21 @@ describe("scorecard", () => {
     mk("b-2", "o/r", {});
     mk("b-3", "x/y", { requeueApplied: ["a"] });
     assert.deepEqual(batchRowsFromDisk("o/r", root), [{ batch: "b-1", interventions: 2 }, { batch: "b-2", interventions: 0 }]);
+  });
+  it("reads LANE_AUDIT and failure-census comments from the register; untrusted or malformed ones are ignored", async () => {
+    const c = (marker, v, assoc = "OWNER") => ({ author_association: assoc, user: { login: "u" }, body: `<!-- FORGE:${marker} v1 -->\n\`\`\`json\n${typeof v === "string" ? v : JSON.stringify(v)}\n\`\`\`` });
+    const reg = parseRegisterComments([
+      c("LANE_AUDIT", [{ issue: 1, class: "genuine" }, { issue: 2, class: "pipeline" }]),
+      c("FAILURE_CENSUS", { issue: 3, class: "pipeline", reverted: true }),
+      c("LANE_AUDIT", { issue: 9, class: "genuine" }, "NONE"),
+      c("LANE_AUDIT", "{not json"),
+      { body: "plain", author_association: "OWNER" },
+    ], {});
+    assert.deepEqual(reg.laneAudits.map((a) => `${a.issue}:${a.class}`), ["1:genuine", "2:pipeline", "3:pipeline"]);
+    assert.equal(reg.census.length, 1);
+    const fetch = async () => ({ records: [], items: [] });
+    const sc = await gatherScorecard({ repo: "o/r", release: "v1", minN: 1 }, { fetch, register: reg, batchRows: [] });
+    assert.equal(sc.values.needs_human_genuine, 1);
+    assert.equal(sc.values.needs_human_pipeline, 2);
   });
 });
