@@ -3,8 +3,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { manifestDepOwner, venvPythonRewrite, testRunnerProblems, shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems, runProbeMiss, unsetEnvVars, runPreflight, knownToContract, contractCommands, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins } from "./preflight.mjs";
+import { join, delimiter } from "node:path";
+import { manifestDepOwner, venvPythonRewrite, testRunnerProblems, shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems, runProbeMiss, unsetEnvVars, runPreflight, knownToContract, contractCommands, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, collectOnlyCommand, collectImportMiss, declaredEnv } from "./preflight.mjs";
 import { runCheckCommand } from "./effects.mjs";
 import { repoTracks } from "./conformance.mjs";
 import { tmpDir } from "../tests/_tmp.mjs";
@@ -54,7 +54,7 @@ describe("#4328 validate preflight: what a command needs", () => {
     assert.equal(rc["command:node"], 0); assert.equal(rc["node-module:here"], 0, "found in an ancestor node_modules");
     assert.notEqual(rc["node-module:absent-pkg-4328"], 0);
     const py = preflightProbes(C(`python3 -c "import json, no_such_mod_4328"`)).probes.filter((p) => p.kind === "python-module");
-    if ((await runCheckCommand({ command: "command -v python3", cwd: dir })).rc === 0) {
+    if ((await runCheckCommand({ command: "python3 -c pass", cwd: dir })).rc === 0) { // #5753: a Windows Store python3 stub is on PATH but runs nothing
       assert.deepEqual(await Promise.all(py.map(async (p) => (await runCheckCommand({ command: p.probe, cwd: dir })).rc !== 0)), [false, true]);
     }
   });
@@ -209,7 +209,7 @@ describe("project-local executables (#5592 3d/9)", () => {
     assert.equal((await runCheckCommand({ command: probes[0].probe, cwd: wt, env: { PATH: withLocalBins(base, local) } })).rc, 0);
   });
   it("local bins go after the lane PATH, never ahead, and are not duplicated", () => {
-    assert.equal(withLocalBins("/a:/b", ["/c", "/a"]), "/a:/b:/c");
+    assert.equal(withLocalBins(["/a", "/b"].join(delimiter), ["/c", "/a"]), ["/a", "/b", "/c"].join(delimiter)); // #5753: the host PATH delimiter (; on Windows)
   });
 });
 
@@ -239,5 +239,28 @@ describe("#5683 sub-project manifest deps and venv python", () => {
     assert.equal(venvPythonRewrite("cd services/api && python -m pytest tests/x.py -q", files, exists), "cd services/api && .venv/bin/python -m pytest tests/x.py -q");
     assert.equal(venvPythonRewrite("python3 -m pytest shared/content/tests/t.py::a", files, exists), "shared/content/.venv/bin/python -m pytest shared/content/tests/t.py::a");
     assert.equal(venvPythonRewrite("cd web && pytest", files, exists), "cd web && pytest");
+  });
+});
+
+describe("#5753 collect-only import preflight and tracked-dir env names", () => {
+  it("collectOnlyCommand adds --collect-only -q after the pytest invocation, dropping later segments", () => {
+    assert.equal(collectOnlyCommand("cd services/worker && poetry run pytest ../../shared/t.py -x"), "cd services/worker && poetry run pytest --collect-only -q ../../shared/t.py -x");
+    assert.equal(collectOnlyCommand("python3 -m pytest -q tests/t.py | tail -5"), "python3 -m pytest --collect-only -q -q tests/t.py ");
+    assert.equal(collectOnlyCommand(".venv/bin/python -m pytest t.py"), ".venv/bin/python -m pytest --collect-only -q t.py");
+    assert.equal(collectOnlyCommand("uv run --frozen pytest"), "uv run --frozen pytest --collect-only -q");
+    assert.equal(collectOnlyCommand("node --test x.test.mjs"), null);
+  });
+  it("a collect-only ModuleNotFoundError of a module the repo does not track is a miss; RED-on-base shapes are not", () => {
+    const out = "ImportError while importing test module '/w/shared/detection/test_x.py'.\nE   ModuleNotFoundError: No module named 'html2text'\n";
+    assert.deepEqual(collectImportMiss({ rc: 2, output: out }), { tool: "html2text", kind: "python-module", line: "E   ModuleNotFoundError: No module named 'html2text'" });
+    assert.equal(collectImportMiss({ rc: 2, output: out }, { repoHas: (n) => n === "html2text" }), null, "a repo-owned module is the change's");
+    assert.equal(collectImportMiss({ rc: 2, output: "ImportError: cannot import name 'new_fn' from 'shared.x'" }), null, "a name the change adds");
+    assert.equal(collectImportMiss({ rc: 0, output: out }), null);
+    assert.equal(collectImportMiss({ rc: 5, output: "no tests ran" }), null);
+  });
+  it("a tracked repo directory name (shared) in declared env is never a host tool", () => {
+    const c = { test_plan: [{ requirement: "R1", env: ["shared", "pytest"] }] };
+    assert.deepEqual(declaredEnv(c, ["shared/detection/test_x.py", "services/worker/pyproject.toml"]), ["pytest"]);
+    assert.deepEqual(declaredEnv(c), ["shared", "pytest"], "without tracked paths the name is unchanged");
   });
 });

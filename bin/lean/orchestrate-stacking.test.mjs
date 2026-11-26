@@ -39,6 +39,7 @@ describe("orchestrate stacking (#5831)", () => {
     assert.deepEqual(h.calls.map((c) => [c.n, !!c.ctx.plan]), [[1, false], [2, true], [2, false]]);
     assert.deepEqual(h.calls[2].ctx.planned, { contractHash: HASH, baseSha: SHA });
     assert.deepEqual(h.updates.filter((u) => u.issue === 2).map((u) => u.outcome), ["planned", "merged"]);
+    assert.ok(h.updates.find((u) => u.issue === 2 && u.outcome === "merged").plan_minutes >= 0, "#5834: plan lane minutes ride the final row");
     assert.deepEqual(h.events.filter((e) => e.event?.startsWith("STACK_")).map((e) => e.event), ["STACK_PLAN_START", "STACK_PLANNED"]);
   });
   it("plan: one plan lane per issue; a failed plan lane is plan-failed, not counted, and the build lane runs without ctx.planned", async () => {
@@ -91,6 +92,8 @@ describe("orchestrate stacked builds, phase 2 (#5832)", () => {
     assert.equal(ev.issue, 2); assert.equal(ev.stacked, true);
     const row = h.updates.find((u) => u.issue === 2 && u.outcome === "merged");
     assert.equal(row.stacked, true); assert.equal(row.stackedOn.dependency, 1);
+    assert.deepEqual(row.deps, [1], "#5834: the row carries its in-batch edges");
+    assert.ok(Number.isFinite(row.admitted_at) && row.ended_at >= row.admitted_at, "#5834: admission and end timestamps");
   });
   it("full: nothing is stacked before the dependency is PR-ready (it falls back to waiting for the merge)", async () => {
     let ready = false;

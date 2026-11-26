@@ -219,6 +219,12 @@ describe("remote adapter (#4254)", () => {
     await assert.rejects(t504.launch({ id: "x" }), (e) => e.status === 504 && e.transient === true && e.retryable !== true && e.retryInSeconds === undefined);
   });
 
+  it("#5957 httpTransport: a disk-paused sandbox (#5891) is still running, never exited", async () => {
+    const t = (state) => httpTransport({ endpoint: "https://pool.example", token: TOKEN, fetchFn: async () => ({ status: 200, ok: true, text: async () => JSON.stringify({ state }), headers: { get: () => null } }) });
+    assert.equal(await t("paused").status("x"), "running");
+    assert.equal(await t("exited").status("x"), "exited");
+  });
+
   it("#5053 httpTransport: a 401 on status is transient and names its hop; a launch 401 is not transient", async () => {
     const reply = (status, body) => ({ status, ok: status < 300, text: async () => JSON.stringify(body), headers: { get: () => null } });
     const t = httpTransport({ endpoint: "https://pool.example", token: TOKEN, fetchFn: async () => reply(401, { error: "unauthorized", hop: "agent", agent: "a1", reason: "agent auth: router token rejected by agent" }) });

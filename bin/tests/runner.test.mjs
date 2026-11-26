@@ -4467,6 +4467,11 @@ describe("runCliBackendAsync context ceiling never stops mid-edit (#5346)", () =
     writeFileSync(`${d}/fake`, `#!/bin/sh\n${lines.map((l) => (l === "SLEEP" ? "sleep 2" : `echo '${l}'`)).join("\n")}\nexec sleep 30\n`); chmodSync(`${d}/fake`, 0o755);
     return runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake`, logger: { log() {} }, stream: true, contextMax });
   };
+  it("#5829 a context stop carries the stream's session id so the session can be compacted", async () => {
+    const sid = JSON.stringify({ type: "system", subtype: "init", session_id: "sess-abc" });
+    await assert.rejects(run([sid, asst("m1", 150)], 100), (e) => { assert.equal(e.code, "CLI_CONTEXT"); assert.equal(e.sessionId, "sess-abc"); return true; });
+    await assert.rejects(run([asst("m1", 150)], 100), (e) => { assert.equal(e.sessionId, null); return true; });
+  });
   it("a ceiling crossed with an Edit pending stops only after that edit's tool_result", async () => {
     const t0 = Date.now();
     await assert.rejects(run([asst("m1", 50), asst("m2", 120, "Edit"), "SLEEP", res("m2"), asst("m3", 130)], 100), (e) => {

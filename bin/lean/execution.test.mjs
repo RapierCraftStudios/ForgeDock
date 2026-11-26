@@ -7,7 +7,8 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { renderContract } from "./render.mjs";
-import { parseExecution, hostFallbackAllowed, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, containerProvider, providerByName, openExecutionBudget, poolCredential, remoteTransportFor, resolveDefaultExecution, repoIsPublic } from "./execution.mjs";
+import { sandboxBudgetKey } from "./liveness.mjs";
+import { parseExecution, hostFallbackAllowed, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, remoteHoldId, usageLimitInTail, isTransportError, isCloneFailure, isEgressTimeout, SANDBOX_EGRESS_TIMEOUT_CODE, containerProvider, providerByName, openExecutionBudget, poolCredential, remoteTransportFor, resolveDefaultExecution, repoIsPublic } from "./execution.mjs";
 import * as executionModule from "./execution.mjs";
 import { remoteProvider } from "./sandbox-remote.mjs";
 import { makeLedger, countLiveLanes } from "./ledger.mjs";
@@ -62,9 +63,17 @@ describe("execution config (#4253)", () => {
     assert.equal(parseExecution({ mode: "remote", provider: "My Provider" }).provider, "container");
   });
 
+  it("remote mode with max_remote 0 pauses starts (#5933)", () => {
+    assert.notEqual(placement({ mode: "remote", maxRemote: 0 }), "local");
+    assert.equal(placeLane({ exec: { mode: "remote", maxRemote: 0 } }).where, "remote");
+  });
+  it("#5933 hybrid max_remote 0 stays local", () => {
+    assert.deepEqual(placeLane({ exec: { mode: "hybrid", maxRemote: 0 } }), { where: "local", reason: "max_remote 0" });
+  });
+
   it("placement: remote only for mode remote with max_remote >= 1; hybrid is placed per lane by placeLane (#4256)", () => {
     assert.equal(placement(parseExecution({})), "local");
-    assert.equal(placement(parseExecution({ mode: "remote", max_remote: "0" })), "local");
+    assert.equal(placement(parseExecution({ mode: "remote", max_remote: "0" })), "remote");
     assert.equal(placement(parseExecution({ mode: "hybrid", max_remote: "3" })), "local");
     assert.equal(placement(parseExecution({ mode: "remote", max_remote: "3" })), "remote");
     assert.equal(placement(undefined), "local");
@@ -116,6 +125,35 @@ describe("providerLanes: an unreachable provider is retried, then deferred witho
     assert.deepEqual([r.terminalReason, r.code], ["deferred", "sandbox.unreachable"]);
     assert.equal(prov.calls.some((c) => c[0] === "teardown"), false);
     assert.deepEqual(ledgerFor(7).entries("sandbox").map((e) => e.value), ["fake-7"]);
+  });
+
+  it("#5991 transport failure with the agent answering ends sandbox.unreachable within 90 s; agent down keeps the window", async () => {
+    const run = async (agentOnline) => {
+      const prov = flaky(1e9); prov.start = async () => ({ provider: "fake", id: "fake-7", issue: 7 }); let total = 0;
+      const r = await providerLanes({ provider: prov, laneArgs: () => [], ledgerFor: ledgerIn(tmpDir("exec-up-")), pollMs: 5000, unreachableWindowMs: 300000, agentOnline, sleep: async (ms) => { total += ms; } }).runOne(7, "staging");
+      return { r, total };
+    };
+    const up = await run(async () => true);
+    assert.deepEqual([up.r.terminalReason, up.r.code], ["deferred", "sandbox.unreachable"]);
+    assert.ok(up.total <= 90000, `waited ${up.total}`);
+    for (const a of [async () => false, async () => { throw new Error("router down"); }, null]) {
+      const down = await run(a);
+      assert.equal(down.r.code, "sandbox.unreachable");
+      assert.ok(down.total >= 300000, `waited ${down.total}`);
+    }
+  });
+
+  it("#5991 24 replayed attempts of one sandbox leave one budget row within 5% of the real minutes", () => {
+    const file = join(tmpDir("exec-budget-"), "execution-budget.json");
+    const b = openExecutionBudget({ file, now: () => 0 });
+    for (let i = 1; i <= 24; i++) b.record(sandboxBudgetKey("b1", "fdrsbx-9"), { minutes: i * 5, cost_usd: 0 });
+    const rows = Object.values(JSON.parse(readFileSync(file, "utf8")).days).flatMap((d) => Object.keys(d));
+    assert.deepEqual(rows, ["b1#fdrsbx-9"]);
+    assert.ok(Math.abs(b.dayTotals().minutes - 120) / 120 <= 0.05);
+    assert.equal(b.record(sandboxBudgetKey("b1", "fdrsbx-9"), { minutes: 10 }), false); // a smaller replay changes nothing
+    const before = b.dayTotals().minutes;
+    b.record(sandboxBudgetKey("b1", "fdrsbx-9", 99), { minutes: 7 }); // #6023: a rerun reusing the sandbox id adds its own usage
+    assert.equal(b.dayTotals().minutes, before + 7);
   });
 
   it("#5053 a 401 on status/result of a launched sandbox is retried, then ends sandbox.auth (capped), never engine-error", async () => {
@@ -433,6 +471,7 @@ describe("container provider (#4253)", () => {
     const p = containerProvider({ batch, image: "i", gitDir: "/g", docker });
     const h = { provider: "container", id: "fdsbx-bt-1", issue: 1 };
     assert.equal(await p.status(h), "running");
+    state = "paused"; assert.equal(await p.status(h), "running"); // #5957
     state = "exited"; assert.equal(await p.status(h), "exited");
     state = null; assert.equal(await p.status(h), "gone");
     assert.equal(await p.teardown(h), true);
@@ -633,6 +672,13 @@ describe("execution budget and sandbox cost (#4255)", () => {
     const a = openExecutionBudget({ budget: { dayMinutes: 15 }, file, now });
     assert.equal(a.record("b1#fdsbx-1#100", { minutes: 10, cost_usd: 1 }), true);
     assert.equal(a.record("b1#fdsbx-1#100", { minutes: 10, cost_usd: 1 }), false);
+    // #5987: cumulative samples of one sandbox are one entry holding the latest usage; the day sum tracks the log's minutes
+    const u = openExecutionBudget({ budget: {}, file: join(tmpDir("exec-up-"), "b.json"), now });
+    for (const m of [1, 2, 3, 5, 8, 10]) u.record("b2#fdsbx-2", { minutes: m, cost_usd: m / 10 });
+    u.record("b2#fdsbx-3", { minutes: 20, cost_usd: 2 });
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(u.file, "utf8")).days["2026-10-20"]).sort(), ["b2#fdsbx-2", "b2#fdsbx-3"]);
+    const logMinutes = 10 + 20;
+    assert.ok(Math.abs(u.dayTotals().minutes - logMinutes) <= logMinutes * 0.05);
     const b = openExecutionBudget({ budget: { dayMinutes: 15 }, file, now }); // a fresh daemon
     assert.deepEqual(b.dayTotals(), { ok: true, day: "2026-10-20", minutes: 10, cost_usd: 1 });
     assert.equal(b.admit({ minutes: 0, cost_usd: 0, running: { minutes: 0, cost_usd: 0 } }).ok, true);
@@ -705,7 +751,7 @@ describe("hybrid placement (#4256)", () => {
     const cases = [
       [{ exec: parseExecution({}) }, "local", "mode local"],
       [{ exec: parseExecution({ mode: "remote", max_remote: "3" }), weight: LIGHT }, "remote", "mode remote"],
-      [{ exec: parseExecution({ mode: "remote", max_remote: "0" }) }, "local", "mode remote"],
+      [{ exec: parseExecution({ mode: "remote", max_remote: "0" }) }, "remote", "mode remote"],
       [{ exec: hy("0"), weight: HEAVY }, "local", "max_remote 0"],
       [{ exec: hy(), verifyMode: "ci", weight: HEAVY, headroom: BUSY }, "local", "verify.mode ci: validation runs on CI, not billed twice"],
       [{ exec: hy(), labels: ["Documentation"], weight: HEAVY, headroom: BUSY }, "local", "docs-only lane"],
@@ -837,6 +883,15 @@ describe("hybrid placement (#4256)", () => {
     assert.deepEqual(prov.calls.filter((c) => c[0] === "start").map((c) => c[1]), [1]);
     assert.equal(res.rows[1].detail, "--placement|local|--placement-reason|docs-only lane");
     assert.deepEqual(res.rows[0].placement, { where: "remote", reason: "heavy validation: tsc" });
+  });
+});
+
+describe("#5923: egress timeout classification", () => {
+  it("isEgressTimeout matches network hangs only", () => {
+    assert.equal(SANDBOX_EGRESS_TIMEOUT_CODE, "sandbox.egress_timeout");
+    assert.equal(isEgressTimeout("ssh: connect: Connection timed out"), true);
+    assert.equal(isEgressTimeout("fatal: unable to access: Failed to connect to github.com"), true);
+    assert.equal(isEgressTimeout("fatal: repository not found"), false);
   });
 });
 
@@ -1130,6 +1185,15 @@ describe("#5095: launch 5xx and a pool usage limit are deferred, never needs-hum
     const prov = fakeProvider();
     prov.start = async () => { throw Object.assign(new Error("sandbox launch: HTTP 503"), { status: 503, transient: true, retryable: true }); };
     assert.equal((await lanesFor(prov).runOne(7, null)).code, "sandbox.capacity");
+  });
+
+  it("a pool refusal code and live figures ride the sandbox.capacity deferral row as reason/live (#5985)", async () => {
+    const prov = fakeProvider();
+    prov.start = async () => { throw Object.assign(new Error("sandbox launch: HTTP 503"), { status: 503, retryable: true, poolCode: "pool.host_load", live: { load_per_core: 2.1, mem_available_gb: 8 }, retryInSeconds: 60 }); };
+    const r = await lanesFor(prov).runOne(7, null);
+    assert.deepEqual([r.code, r.reason, r.live.load_per_core, r.retryInSeconds], ["sandbox.capacity", "host_load", 2.1, 60]);
+    prov.start = async () => { throw Object.assign(new Error("x"), { status: 503, retryable: true, poolCode: "pool.disk_low" }); };
+    assert.equal((await lanesFor(prov).runOne(7, null)).reason, "disk");
   });
 
   it("usageLimitInTail reads the lean finish line and the CLI's own limit message", () => {
