@@ -17,5 +17,5 @@ test("tailscale IP resolution is null-safe and falls back to the adapter", () =>
 test("-KeepaliveAtStartup registers a startup trigger with an S4U principal", () => {
   assert.match(ps, /\[switch\] \$KeepaliveAtStartup/);
   assert.match(ps, /New-ScheduledTaskTrigger -AtStartup/);
-  assert.match(ps, /-LogonType S4U/);
+  assert.match(ps, /'S4U'/);
 });
