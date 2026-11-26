@@ -549,6 +549,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
         // Hard burst cap per container; the (smaller) reservation is only what placement counts.
         // --memory-swap above --memory lets a rare spike page out instead of being OOM-killed (swap deal).
         "--cpus", String(laneCpus), ...sharesArgs(prio), "--memory", mb(laneMem), "--memory-swap", mb(laneMem + swapFor(limit?.lane_swap_gb)), "--pids-limit", "4096",
+        "--init", // lane-compute audit 2026-11-26: PID 1 never reaped children (72–1408 zombies/lane in 17 min; the worst lane would reach the 4096 pid limit in ~50 min)
         "--env-file", envFile, ...laneNet, ...work,
         ...(spec.claim_dir ? ["-v", `${join(dir, "claim")}:/claim`] : []), // #4912: warm sandboxes receive their lane here
         ...(withDocker ? [] : cacheMount), "-v", `${join(dir, "result")}:/result`, "-v", `${join(dir, "out")}:/csout`,
