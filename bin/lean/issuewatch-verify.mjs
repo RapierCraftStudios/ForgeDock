@@ -7,7 +7,7 @@
  * `CONFORMS`, shadow `would PASS`, or a `review.trigger` skip; an enforced NONCONFORMING/BLOCK/FAIL fails; a shadow
  * `would BLOCK` is advisory, as its label says: the lane merges by design, so it is recorded in the evidence, not reopened); every required check of the
  * lane is green on the merged head; the merge commit is on the lane; no check on the merge commit failed
- * (`forgedock/verify` is report-only; a `cancelled`/`stale` check, superseded by a newer run, is resolved against the newest
+ * (a check also red on the first parent is base-red, noted and not blamed on the PR; `forgedock/verify` is report-only; a `cancelled`/`stale` check, superseded by a newer run, is resolved against the newest
  * descendant run of the same check on the lane). A failure reopens the issue with `needs-human` and the evidence; nothing is
  * reverted, a human decides. No LLM calls.
  */
@@ -95,7 +95,10 @@ export async function verifyMerge({ gh, repo, lane, issue, comments, requiredChe
   ev.push(`PR #${pr.number} merged into ${pr.baseRefName} at ${sha.slice(0, 12) || "?"}`);
   if (pr.baseRefName !== lane) return fail(`PR #${pr.number} targets ${pr.baseRefName}, not ${lane}`, { pr: pr.number });
   if (labelNames(pr).has("review-degraded")) return fail(`PR #${pr.number} merged with an incomplete review (review-degraded)`, { pr: pr.number });
-  const verdict = reviewVerdict(comments);
+  let verdict = reviewVerdict(comments);
+  if (verdict === null) { // no trusted issue-level record: the PR's own review record (FORGE:REVIEW incl. the trigger-skip note), best effort
+    try { verdict = reviewVerdict(JSON.parse(String(await gh(["pr", "view", String(pr.number), "-R", repo, "--json", "comments"])) || "{}").comments ?? []); } catch { verdict = null; }
+  }
   if (verdict !== "pass" && verdict !== "shadow-block") return fail(verdict === "block" ? "the latest FORGE:REVIEW did not pass (enforced NONCONFORMING)" : "no trusted FORGE:REVIEW on the issue", { pr: pr.number });
   ev.push(verdict === "pass" ? "FORGE:REVIEW passed" : "FORGE:REVIEW shadow `would BLOCK` (advisory: shadow mode does not enforce; see the review comment)");
   let required = [];
@@ -122,13 +125,25 @@ export async function verifyMerge({ gh, repo, lane, issue, comments, requiredChe
   ev.push(`merge commit is on ${lane}`);
   const post = (await checkStates({ gh, repo, sha })).filter((x) => !REPORT_ONLY_CHECKS.has(x.name));
   const red = post.filter((x) => !OK_STATES.has(x.state) && x.state !== "pending" && !SUPERSEDED_STATES.has(x.state));
-  if (red.length) return fail(`${lane} CI red on the merge commit: ${red.map((x) => `${x.name}=${x.state}`).join(", ")}`, { pr: pr.number, sha });
+  const baseRed = [];
+  if (red.length) { // red on the merge commit counts against the PR only when it was green or absent on the first parent
+    let parent = "";
+    try { parent = String(await gh(["api", `repos/${repo}/commits/${sha}`, "--jq", ".parents[0].sha"])).trim(); } catch { parent = ""; }
+    const before = parent ? await checkStates({ gh, repo, sha: parent }) : [];
+    for (const x of red) {
+      const b = before.find((c) => c.name === x.name);
+      if (b && !OK_STATES.has(b.state) && b.state !== "pending" && !SUPERSEDED_STATES.has(b.state)) baseRed.push(`${x.name}=${x.state} (also ${b.state} on the first parent ${parent.slice(0, 12)})`);
+    }
+    const own = red.filter((x) => !baseRed.some((l) => l.startsWith(`${x.name}=`)));
+    if (own.length) return fail(`${lane} CI red on the merge commit: ${own.map((x) => `${x.name}=${x.state}`).join(", ")}`, { pr: pr.number, sha });
+    ev.push(`base-red, not blamed on the PR: ${baseRed.join(", ")}`);
+  }
   const sup = await resolveSuperseded({ gh, repo, lane, sha, names: post.filter((x) => SUPERSEDED_STATES.has(x.state)).map((x) => x.name) });
   if (sup.red.length) return fail(`${lane} CI red: a cancelled check on the merge commit was superseded by a failing run: ${sup.red.join(", ")}`, { pr: pr.number, sha });
   ev.push(...sup.green);
   const pending = [...post.filter((x) => x.state === "pending"), ...sup.pending.map((name) => ({ name }))];
   if (pending.length) return { status: "pending", evidence: [...ev, `${lane} CI pending: ${pending.map((x) => x.name).join(", ")}`], pr: pr.number, sha };
-  ev.push(post.length ? `${lane} CI green on the merge commit (${post.length} check(s))` : "no CI ran on the merge commit");
+  ev.push(baseRed.length ? `${lane} CI otherwise green on the merge commit (${post.length - baseRed.length} check(s))` : post.length ? `${lane} CI green on the merge commit (${post.length} check(s))` : "no CI ran on the merge commit");
   return { status: "verified", evidence: ev, pr: pr.number, sha };
 }
 

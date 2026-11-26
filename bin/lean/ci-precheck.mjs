@@ -34,7 +34,8 @@ const HEAVY = [
 ];
 const CHEAP = [
   ["typecheck", /type-?check|\btsc\b|\bmypy\b|pyright|\btypes\b/i],
-  ["lint", /lint|eslint|ruff|prettier|\bformat|clippy|shellcheck|golangci|\bvet\b|stylelint|biome/i],
+  ["lint", /lint|eslint|ruff|prettier|\bformat|\bfmt\b|\bblack\b|gofmt|rustfmt|clippy|shellcheck|golangci|\bvet\b|stylelint|biome/i],
+  ["wiring", /wiring|registered|\bmanifest\b|\bcoverage[-_ ]map\b/i],
   ["test", /test|vitest|jest|pytest|\bspec\b|mocha|\bbats\b/i],
 ];
 export const HEAVY_KINDS = HEAVY.map(([k]) => k);
@@ -93,13 +94,21 @@ export function requiredFor(job, required) {
  * @returns {{source:"required"|"fallback", run:object[], skipped:{job,name,reason}[], unrunnable:{job,name,reason}[], note:string}}
  *   run: [{job, name, workflow, kind, why, steps: string[], plan: object}] (plan: a one-job ci-local plan)
  */
-export function selectCiPrecheck({ plan, required = null, cfg = parseCiPrecheckConfig(null) }) {
+export function selectCiPrecheck({ plan, required = null, releaseRequired = null, cfg = parseCiPrecheckConfig(null) }) {
   const jobs = (Array.isArray(plan?.jobs) ? plan.jobs : []).filter((j) => j && CI_SOURCES.has(j.source) && !/:variants$/.test(str(j.id)));
   const byId = new Map(jobs.map((j) => [j.id, j]));
   const req = (Array.isArray(required) ? required : []).map(str).filter(Boolean);
   // required jobs, then (transitively) the jobs an aggregator required job needs
   const why = new Map();
   for (const j of jobs) { const hit = requiredFor(j, req); if (hit.length) why.set(j.id, `required check ${hit.map((h) => `"${h}"`).join(", ")}`); }
+  // #6049: required checks of the release branch, run in the lane too (a release-only formatter or wiring job)
+  const relReq = (Array.isArray(releaseRequired) ? releaseRequired : []).map(str).filter(Boolean);
+  const relHit = new Set();
+  for (const j of jobs) {
+    const hit = requiredFor(j, relReq);
+    for (const h of hit) relHit.add(h);
+    if (hit.length && !why.has(j.id)) why.set(j.id, `required check ${hit.map((h) => `"${h}"`).join(", ")} on release branch`);
+  }
   const queue = [...why.keys()];
   while (queue.length) {
     const id = queue.shift();
@@ -126,7 +135,15 @@ export function selectCiPrecheck({ plan, required = null, cfg = parseCiPrecheckC
   }
   const cap = Number.isInteger(cfg.maxJobs) ? cfg.maxJobs : DEFAULT_MAX_JOBS;
   for (const r of run.splice(cap)) skipped.push({ job: r.job, name: r.name, reason: `over lean.ci_precheck_max_jobs (${cap}): left to CI` });
-  return { source, run, skipped, unrunnable, note };
+  // #6049: release-required contexts with no job the lane runs (no job maps, or the job is skipped / unrunnable here)
+  const covered = new Set(run.flatMap((r) => requiredFor(jobs.find((j) => j.id === r.job), relReq)));
+  const parity = relReq.filter((c) => !covered.has(c)).map((context) => {
+    const j = jobs.find((x) => requiredFor(x, [context]).length);
+    if (!j) return { context, reason: "no CI job maps to this required release check" };
+    const s = [...skipped, ...unrunnable].find((x) => x.job === j.id);
+    return { context, job: j.id, reason: s?.reason ?? "job not run in the lane" };
+  });
+  return { source, run, skipped, unrunnable, note, parity };
 }
 
 const slug = (id) => str(id).replace(/[^A-Za-z0-9_.-]+/g, "_").slice(0, 120) || "job";
@@ -144,19 +161,19 @@ export function ciPrecheckCommand(sel, { perCommandMs = 300000, script = CI_LOCA
  *   skipJobs: job ids an earlier round found unrunnable (not rerun)
  * @returns {Promise<{source, note, commands:{job,name,workflow,kind,why,steps,command}[], skipped, unrunnable}>}
  */
-export async function deriveCiPrecheck({ buildPlan, required = null, cfg, wt, base, lane, files = [], perCommandMs, writeFile, skipJobs = new Set() }) {
+export async function deriveCiPrecheck({ buildPlan, required = null, releaseRequired = null, releaseBranch = "", cfg, wt, base, lane, files = [], perCommandMs, writeFile, skipJobs = new Set() }) {
   let plan;
-  try { plan = await buildPlan({ repo: wt, base, baseBranch: lane, files }); } catch (e) {
-    return { source: "none", note: "", commands: [], skipped: [], unrunnable: [{ job: "*", name: "ci-local plan", reason: `CI check plan unavailable: ${str(e?.message ?? e).split("\n")[0].slice(0, 200)}` }] };
+  try { plan = await buildPlan({ repo: wt, base, baseBranch: lane, ...(releaseBranch ? { releaseBranch } : {}), files }); } catch (e) {
+    return { source: "none", note: "", commands: [], skipped: [], unrunnable: [{ job: "*", name: "ci-local plan", reason: `CI check plan unavailable: ${str(e?.message ?? e).split("\n")[0].slice(0, 200)}` }], parity: [] };
   }
-  const sel = selectCiPrecheck({ plan, required, cfg });
+  const sel = selectCiPrecheck({ plan, required, releaseRequired, cfg });
   const commands = [], unrunnable = [...sel.unrunnable], skipped = [...sel.skipped];
   for (const r of sel.run) {
     if (skipJobs.has(r.job)) { skipped.push({ job: r.job, name: r.name, reason: "unrunnable in an earlier round: left to CI" }); continue; }
     try { await writeFile(`${CI_PRECHECK_DIR}/${slug(r.job)}.json`, `${JSON.stringify(r.plan)}\n`); } catch (e) { unrunnable.push({ job: r.job, name: r.name, reason: `plan file not written: ${str(e?.message ?? e).slice(0, 120)}` }); continue; }
     commands.push({ job: r.job, name: r.name, workflow: r.workflow, kind: r.kind, why: r.why, steps: r.steps, command: ciPrecheckCommand(r, { perCommandMs }) });
   }
-  return { source: sel.source, note: sel.note, commands, skipped, unrunnable };
+  return { source: sel.source, note: sel.note, commands, skipped, unrunnable, parity: sel.parity };
 }
 
 /** The first line of `output` starting with `prefix`, without it; "" when none. */

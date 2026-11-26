@@ -419,6 +419,9 @@ export async function requiredChecksRead({ gh, repo, lane }) {
 
 export const requiredChecksFor = async (opts) => (await requiredChecksRead(opts)).checks;
 
+/** Command-failure messages keep short args verbatim and replace any longer than 200 chars with its length, so stderr stays visible. */
+export const elideArgs = (args) => (args ?? []).map((a) => { const t = String(a); return t.length > 200 ? `<${t.length} chars>` : t; }).join(" ");
+
 /** #5592: stdout cap of a lane-path git/gh/docker call; output past it is cut, never an error. */
 export const EXEC_CAPPED_BYTES = 100 * 1024 * 1024;
 /**
@@ -444,7 +447,8 @@ export function execCapped(bin, args, { cwd, env, timeout = 120000, cap = EXEC_C
       if (timer) clearTimeout(timer);
       const out = Buffer.concat(chunks).toString("utf8") + (cut ? `\n[forgedock: output truncated at ${cap} bytes]\n` : "");
       if (cut || code === 0) return res(out);
-      const e = new Error(`Command failed: ${bin} ${args.join(" ")}${timedOut ? " (timed out)" : ""}\n${err}`);
+      // 2026-11-26: a long argument (a --body of a FORGE:CONTRACT) filled the recorded detail and hid stderr, the actual reason
+      const e = new Error(`Command failed: ${bin} ${elideArgs(args)}${timedOut ? " (timed out)" : ""}\n${err}`);
       Object.assign(e, { code: timedOut ? null : code, signal, killed: timedOut, stdout: out, stderr: err });
       rej(e);
     });
@@ -531,11 +535,11 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
      * #5820: the scripts/ci-local plan of the lane's change (CI definitions from the base ref plus the lane's edits, change
      * scoped), in a child process so the yq calls never block the lane. Rejects with ci-local's DEGRADED reason (no yq).
      */
-    async ciLocalPlan({ repo: wt, base, baseBranch, files = [] }) {
+    async ciLocalPlan({ repo: wt, base, baseBranch, releaseBranch = "", files = [] }) {
       const list = join(wt, ".forge-lean", "ci-precheck", "files.txt");
       mkdirSync(dirname(list), { recursive: true }); writeFileSync(list, `${files.join("\n")}\n`);
       try {
-        const { stdout } = await pexec(process.execPath, [script("ci-local/cli.mjs"), "plan", "--repo", wt, "--base", base, "--base-branch", baseBranch, "--files-from", list, "--json"], { cwd: wt, timeout: 120000, maxBuffer: 64 * 1024 * 1024 });
+        const { stdout } = await pexec(process.execPath, [script("ci-local/cli.mjs"), "plan", "--repo", wt, "--base", base, "--base-branch", baseBranch, ...(releaseBranch ? ["--release-branch", releaseBranch] : []), "--files-from", list, "--json"], { cwd: wt, timeout: 120000, maxBuffer: 64 * 1024 * 1024 });
         return JSON.parse(String(stdout));
       } catch (e) {
         const why = /CI_LOCAL_RESULT: DEGRADED reason=(.*)/.exec(String(e?.stdout ?? ""))?.[1] ?? String(e?.stderr || e?.message || e).split("\n")[0];

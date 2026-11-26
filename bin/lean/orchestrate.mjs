@@ -144,7 +144,7 @@ import { normalizeStacking, planAdmissible, stackAdmissible } from "./stacking.m
 import { lackedTools } from "./toolplace.mjs";
 import { openPrerequisites } from "./prereq.mjs";
 import { makeController, classifyRepo, formatConcurrency } from "./concurrency.mjs";
-import { admitInput, breach, recordFailure, markEscalated, NO_NEW_INPUT } from "./attempts.mjs";
+import { admitInput, breach, recordFailure, blockerSignature, markEscalated, NO_NEW_INPUT } from "./attempts.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
@@ -299,6 +299,7 @@ export function deferPolicy(r, { now, deferrals = 0, maxDeferrals = DEFAULT_MAX_
 const STOP_RETRY_MS = 15 * 1000;
 const STOP_TIMEOUT_MS = 120 * 1000;
 
+const OVERLOAD_RECOVERY_MAX_MS = 30 * 60 * 1000; // #5749: longest an env.validate_timeout recovery waits for the host to stop being overloaded
 const cancellableSleep = (ms, signal) => new Promise((res) => {
   const t = setTimeout(res, ms);
   signal?.addEventListener("abort", () => { clearTimeout(t); res(); }, { once: true });
@@ -392,6 +393,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const ehMaxMs = Number(envHold?.maxMs) > 0 ? Number(envHold.maxMs) : ENV_HOLD_MAX_MS;
   const ehWatchMs = Number(envHold?.watchMs) > 0 ? Number(envHold.watchMs) : ENV_WATCH_MS;
   const curVersion = () => { try { return envHold?.version?.() ?? version ?? null; } catch { return version ?? null; } };
+  const vmm2 = (x) => (/^v?(\d+\.\d+)/.exec(String(x ?? "")) ?? [])[1] ?? null;
+  const agentVersionOf = async () => { try { return (await envHold?.agentVersion?.()) ?? null; } catch { return null; } };
+  const curEnvValues = () => { try { return envHold?.envValues?.() ?? null; } catch { return null; } }; // #5931
   const curEnv = () => { try { return envHold?.envFingerprint?.() ?? null; } catch { return null; } };
   const missingTools = async (tools) => { if (typeof envHold?.missingTools !== "function") return null; try { const m = await envHold.missingTools(tools); return Array.isArray(m) ? m : null; } catch { return null; } };
   const checked = toMap(saved?.prefilter); // issue -> pre-filter result
@@ -462,7 +466,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const rec = recovering.get(n);
     if (rec?.code === OUTCOME_CODES.ENV_TOOL_MISSING && rec.where === "remote" && !rec.toolNoRecipe && (rec.attempt ?? 1) <= 1 && !budgetLocal) return { where: "remote", reason: "retry remotely after sandbox provisioning" };
     // #5652: with host fallback off (execution.host_fallback / host.role: orchestrator) the host is orchestrator-only: no re-placement here
-    if (hostFallbackOn() && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
+    // #5931: a credentials block pinned the issue to the host (ledger hostPin): applied on readmit whatever host fallback says
+    if (ledgers.get(n)?.hostPin) return { where: "local", reason: "host pin: ops_credentials block" };
+    if (hostFallbackOn() && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_ENGINE_SKEW].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
     // #5371: a mechanical recovery never repeats the placement of the run that failed (a remote sandbox env defect recurs there), and a remote validate failure is rerun on the host
     if (recovering.get(n)?.code === ENV_VALIDATE_PLACEMENT || (MECHANICAL_CODES.includes(recovering.get(n)?.code) && recovering.get(n)?.where === "remote")) {
       if (hostFallbackOn()) return { where: "local", reason: `different placement: recovering ${rec.code} off the remote run` };
@@ -495,7 +501,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #5592: env.tool_missing repeats are the same defect when the same tools are missing, whatever else the detail says (probe lines, ids, paths vary per run)
   const toolsOf = (d) => { const m = /(?:host|sandbox) is missing ([^\n]+?), so validate command/i.exec(String(d ?? "")); return m ? m[1].split(/\s*,\s*/).sort().join(",") : null; };
   const envSig = (code, d) => (code === OUTCOME_CODES.ENV_TOOL_MISSING ? toolsOf(d) : null) ?? sigOf(d);
-  const ENV_ALL_CODES = [...REPEAT_ENV_CODES, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE]; // #5755
+  const ENV_ALL_CODES = [...REPEAT_ENV_CODES, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_ENGINE_SKEW]; // #5755, #5931
   const envKey = (code, d) => `${code}|${code === OUTCOME_CODES.ENV_TOOL_MISSING && toolsOf(d) ? toolsOf(d) : failureSignature(code, d).split("|").slice(1).join("|")}`;
   const maxFor = (cls) => (cls === "mechanical" ? mechMax : recoveryMax);
   const classUsed = toMap(saved?.recoveryClasses); // `${issue}:${class}` -> recovery lanes launched in that class
@@ -989,9 +995,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #5986: a failed lane lands in the issue's ledger; a lifetime-budget breach escalates once (FORGE:ESCALATION, needs-human) and parks the row.
   const recordAttempt = async (n, row, r) => {
     try {
+      if (row.placement?.where === "remote" && r?.engineVersion) attempts.noteSandboxVersion?.(r.engineVersion); // #5931: the version the lane ran feeds the input hash
       const hash = (await attempts.hash?.(n)) ?? null;
       let l = ledgers.get(n) ?? (await attempts.load?.(n)) ?? null;
-      l = recordFailure(l, { signature: failureSignature(row.code ?? r?.code, row.detail), hash, spend: Number(row.cost_usd) || 0, run: r?.runUrl ?? null });
+      l = recordFailure(l, { signature: failureSignature(row.code ?? r?.code, row.detail), hash, spend: Number(row.cost_usd) || 0, run: r?.runUrl ?? null,
+        blocker: blockerSignature({ code: row.code ?? r?.code, detail: row.detail, contractHash: r?.contractHash ?? null, engineVersion: r?.engineVersion ?? (row.placement?.where === "remote" ? null : curVersion()), placement: row.placement?.where ?? null, env: curEnvValues() }) });
       const b = breach(l, attempts.cfg);
       if (b && !l.escalated) {
         l = markEscalated(l);
@@ -1090,6 +1098,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         alternative: kind === "engine" ? "relaunch into the same engine-error, or end engine-error and wait for a manual --requeue" : "launch a recovery that fails the same way, or end needs-human and wait for a manual --requeue" });
       update(final);
     };
+    // #5931: a remote lane that ran another engine version than the host is an environment outcome, never conformance (gates fixed in the host version still fire there)
+    const ranVersion = r?.engineVersion ?? /ForgeDock\s*[·-]\s*v?(\d+\.\d+(?:\.\d+)?)/.exec(String(r?.banner ?? row.detail ?? ""))?.[1] ?? null;
+    if (ranVersion && row.placement?.where === "remote") row.engineVersion = String(ranVersion); // R3: the engine that actually ran stays on the row
+    const vmm = (v) => (/^v?(\d+\.\d+)/.exec(String(v ?? "")) ?? [])[1] ?? null;
+    if (row.placement?.where === "remote" && ranVersion && vmm(curVersion()) && vmm(ranVersion) !== vmm(curVersion()) && ["needs-human", "failed", "invalid", "budget-exceeded"].includes(row.outcome)) {
+      row.code = OUTCOME_CODES.ENV_ENGINE_SKEW;
+      row.detail = `${OUTCOME_CODES.ENV_ENGINE_SKEW}: the sandbox ran engine v${ranVersion}, the host is v${curVersion()}; not a conformance result. Place it locally or upgrade the agent.\n${String(row.detail ?? "")}`;
+      if (ehOn) return holdEnv({ kind: "env", sig: `${OUTCOME_CODES.ENV_ENGINE_SKEW}|${ranVersion}|${curVersion()}`, why: `sandbox engine v${ranVersion} differs from the host v${curVersion()}` });
+    }
     if (row.outcome === "dependency-open" && depList.length) {
       // #4387: a parked dependency is not pulled in again (fail-open on an unreadable label).
       let parked;
@@ -1212,6 +1229,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         return;
       }
       row.detail = `gave up after ${deferrals.get(n) ?? 0} deferrals: ${r?.detail ?? r?.code ?? ""}`;
+    }
+    // #6081: a held issue whose lane died without a result was stopped by the operator (SIGTERM / kill / sandbox stop), not by the engine:
+    // a hold row, no engine-error, no breaker count, no relaunch budget spent; the issue waits pending for --release.
+    if (row.outcome === "engine-error" && !cancelled && (r?.lostWithoutResult || /exited without a result|interrupted by SIG/i.test(String(r?.detail ?? ""))) && (refreshHeld(), opHeld.has(n))) {
+      requeue(n, 0); done(); save();
+      decided({ issue: n, what: `#${n} stopped while held by the operator; not an engine-error, not counted toward the breaker`, why: firstLine(row.detail) || "lane ended without a result", alternative: "count it as an engine-error and relaunch" });
+      update({ ...row, outcome: "hold", detail: `#${n} stopped by operator hold: ${firstLine(row.detail) || "lane ended without a result"}` });
+      return;
     }
     const la = row.outcome === "engine-error" && r?.lostWithoutResult && !cancelled && !lostOnce.has(n) ? (r.agent ?? r.sandbox?.agent ?? null) : null;
     let lostNow = null;
@@ -1351,6 +1376,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       // #5652: a remote lane's tool/capability end is not recovered on the host when host fallback is off; the lane message names the fix
       const noHostRecovery = !hostFallbackOn() && row.placement?.where === "remote" && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(row.code);
       if (noHostRecovery) decided({ issue: n, what: `no host re-placement for ${row.code}: host fallback is off (execution.host_fallback / host.role: orchestrator)`, why: firstLine(row.detail), alternative: "re-place the lane on the host" });
+      // #5749: an env.validate_timeout is host load, so its recovery lane is not started while the host is overloaded (it would time out again)
+      if (overload && row.code === ENV_VALIDATE_TIMEOUT && classifyNeedsHuman(facts) === "recoverable" && used < max) {
+        const isOver = () => { try { return overload()?.overloaded === true; } catch { return false; } };
+        const t0 = now();
+        if (isOver()) {
+          decided({ issue: n, what: `recovery for ${row.code} deferred: the host is overloaded`, why: firstLine(row.detail) || row.code, alternative: "start the recovery lane under load and time out again" });
+          while (isOver() && now() - t0 < OVERLOAD_RECOVERY_MAX_MS) await sleep(Math.max(pollMs, 1));
+        }
+      }
       // #5979: failure.repeated is a typed park (not in RECOVERABLE_CODES): never relaunched, reported parked below
       if (!repeatEnv && !noHostRecovery && !sameHostReplay && row.code !== OUTCOME_CODES.FAILURE_REPEATED && classifyNeedsHuman(facts) === "recoverable" && used < max) {
         // #5727: the first remote end on a tool no recipe can install, before any build work, is re-placed on the host without spending an attempt
@@ -1446,7 +1480,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         if (!["merged", "invalid", "deferred"].includes(gone?.outcome)) gone = null; // #4920: deferred = another lane owns the issue (lease or open PR on GitHub)
       }
       // #5526: a hold placed since the pass read is honoured at launch: the issue goes back to pending, no lane
-      if (!cancelled && !halted) { refreshHeld(); refreshPause(); if (opHeld.has(n) || opPause) { running.delete(n); runRecs.delete(n); releaseSlot(n); endRemote(n); requeue(n, 0); save(); return; } }
+      if (!cancelled && !halted) { refreshHeld(); refreshPause(); if (opHeld.has(n) || opPause) { await null; /* #6081: track() registers this promise after the sync prefix; delete after it, or the entry leaks and the runner never ends */ running.delete(n); runRecs.delete(n); releaseSlot(n); endRemote(n); requeue(n, 0); save(); return; } }
       if (halted) return; // #4454: stopped before launch; no pid, so a resume queues it again
       let r;
       if (cancelled) r = { terminalReason: "deferred", code: "run.interrupted", cost_usd: 0, detail: "cancelled before launch" }; // #4376
@@ -1578,7 +1612,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     for (const e of envSigs.values()) if (Number.isInteger(e.number) && !set.has(e.number)) selFresh.push(e.number); // R7: the engine-filed env.* issue joins the order
     let base = null;
     try { base = (await reconcile.base?.()) ?? null; } catch { base = null; }
-    const { requeue, parked } = readmitDue({ results, state: readmit, now: t, version: reconcile.version?.() ?? null, base, labels: (n) => labels.get(n) ?? [] });
+    const agentV = await agentVersionOf(); // R6: the agent that would run the lane, so an agent upgrade re-admits
+    const { requeue, parked } = readmitDue({ results, state: readmit, now: t, version: agentV ? `${reconcile.version?.() ?? ""}|agent=${agentV}` : reconcile.version?.() ?? null, base, labels: (n) => labels.get(n) ?? [] });
     for (const q of requeue) autoRequeues.push({ issue: q.issue, at: `reconcile-${t}`, reason: q.reason, by: "reconcile" });
     const digest = needsDecisionDigest(parked);
     if (digest !== parkedDigest) {
@@ -1885,8 +1920,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       let l = ledgers.get(n) ?? null;
       if (!l) { l = (await attempts.load?.(n)) ?? null; if (l) ledgers.set(n, l); }
       if (!l) return true;
-      const hash = (await attempts.hash?.(n)) ?? null, a = admitInput(l, hash, attempts.cfg);
-      if (a.ok) return true;
+      const hash = (await attempts.hash?.(n)) ?? null, a = admitInput(l, hash, attempts.cfg, { engineVersion: curVersion(), placement: placeOf(n)?.where ?? null, env: curEnvValues() });
+      if (a.ok) { if (a.reason) update({ issue: n, event: "readmit.signature_changed", detail: `readmitted: ${a.reason}`, batch: batchId ?? null }); return true; }
       const key = `${n}|${hash}|${a.code}`;
       if (!refusedNoted.has(key)) {
         refusedNoted.add(key);
@@ -1939,7 +1974,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       }
       let why = null;
       if (h.envIssue && typeof envIssue?.isClosed === "function") { let c = false; try { c = (await envIssue.isClosed(h.envIssue)) === true; } catch { c = false; } if (c) why = `env issue #${h.envIssue} closed`; }
-      if (!why && v && h.version && v !== h.version) why = `engine version changed v${h.version} → v${v}`;
+      // R6/R8: a remote lane runs on a pool agent, so its engine is the agent's, not this host's. While every placeable agent is below the engine
+      // the lane needs, the hold stays; an agent upgrade (not the orchestrator's) is the trigger.
+      const av = r.placement?.where === "remote" ? await agentVersionOf() : null;
+      if (av) {
+        const needMM = vmm2(v), ranV = String(h.sig ?? "").startsWith(`${OUTCOME_CODES.ENV_ENGINE_SKEW}|`) ? h.sig.split("|")[1] : null;
+        if (ranV) { if (vmm2(av) === needMM && vmm2(av) !== vmm2(ranV)) why = `agent engine upgraded v${ranV} → v${av}`; }
+        else if (needMM && vmm2(av) === needMM && v && h.version && v !== h.version) why = `engine version changed v${h.version} → v${v}`;
+      } else if (!why && v && h.version && v !== h.version) why = `engine version changed v${h.version} → v${v}`;
       if (why) { /* env issue closed */ } else if (fp && h.env && fp !== h.env) why = "batch env changed (--set-env)";
       else if (h.tools?.length && !toolReadmits.has(`${n}|${h.sig}`) && (await missingTools(h.tools))?.length === 0) { why = `${h.tools.join(", ")} now found on the host`; toolReadmits.add(`${n}|${h.sig}`); }
       if (why) { if (!(await gateAdmit(n))) continue; engineSigs.delete(n); releaseHeld(n, true, `re-admitted: ${why}`); continue; }
@@ -2253,8 +2295,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       // #4685: a breaker tripped only by link failures (a router restart) closes itself after a cooldown
       if (tripped?.transport && now() - tripped.at >= TRANSPORT_COOLDOWN_MS) { tripped = null; errorTimes = []; transportErrors = 0; save(); }
       // #5978: a standing order's breaker closes itself after a cooldown when the failures were environmental and the pool is healthy
-      if (tripped && reconcile && !tripped.transport) {
-        let healthy = true; try { healthy = reconcile.poolHealthy ? reconcile.poolHealthy() !== false : true; } catch { healthy = true; }
+      if (tripped && !tripped.transport) { // #6042: every batch, not only a standing order
+        let healthy = true; try { healthy = reconcile?.poolHealthy ? reconcile.poolHealthy() !== false : true; } catch { healthy = true; }
         const d = decideAutoReset({ tripped, now: now(), cooldownMs: BREAKER_COOLDOWN_MS, environmental: tripped.environmental === true, poolHealthy: healthy });
         if (d.reset) {
           tripped = null; errorTimes = []; transportErrors = 0; save();
@@ -2275,6 +2317,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           if (d.clear && wasTripped) continue; // admission ran before this check: re-run the pass so the cleared batch resumes instead of falling to the "nothing runnable" skip
         }
       }
+      // #6042: a breaker pauses admission; it ends the run only when nothing can clear it (a non-environmental trip with no hosted clear channel)
+      const breakerClearable = Boolean(tripped && pending.length && !cancelled && !budgetStop && !signal?.aborted && (tripped.environmental || tripped.transport || getClearBreaker));
+      if (tripped && !running.size && breakerClearable) { await nap(pollMs); continue; }
       if (tripped && !running.size) { await drainAdds(); break; } // breaker: let running lanes finish, keep the rest pending for a resume
       if (cancelled && !running.size) { await drainAdds(); break; } // #4376: cancel: the rest end held for a resume
       if (budgetStop && !running.size) { await drainAdds(); break; } // execution budget (stop): the same, the rest end held
@@ -2312,7 +2357,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (running.size && envWaiting()) wake = Math.min(wake ?? ehWatchMs, ehWatchMs); // #5805: re-check engine/env holds while lanes run
       if (train?.size()) wake = Math.min(wake ?? trainEveryMs, Math.max(0, trainEveryMs - (now() - lastTrainTick))); // #5836
       if (reconcile && running.size) wake = Math.min(wake ?? reconcile.everyMs ?? RECONCILE_MS, reconcile.everyMs ?? RECONCILE_MS); // #5978
-      if (tripped) wake = getClearBreaker ? Math.min(wake ?? pollMs, pollMs) : null;
+      if (tripped) wake = getClearBreaker || tripped.environmental || tripped.transport ? Math.min(wake ?? pollMs, pollMs) : null;
       if (getCancelled && running.size && (!cancelled || [...running.keys()].some((n) => { const x = stopSent.get(n); return x && !(x.accepted && x.reported); }))) wake = Math.min(wake ?? pollMs, pollMs); // #5241: a cancel keeps polling a lane whose stop is unconfirmed // #4376: notice a cancel while lanes run
       if (running.size) {
         if (wake === null) await race(running.values());

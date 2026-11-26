@@ -234,6 +234,26 @@ export function quietFailure(output, { lines = QUIET_TAIL_LINES, maxChars = Infi
   return out.join("\n");
 }
 
+/** #6107: masks credential-looking text before a check's output reaches a needs-human comment or the run log. Generic patterns only. */
+export function redactSecrets(text) {
+  return String(text ?? "")
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[redacted private key]")
+    .replace(/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{8,}/g, "[redacted]")
+    .replace(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat|glpat|xox[abprs]|npm|AKIA|ASIA)[_-]?[A-Za-z0-9_-]{12,}/g, "[redacted]")
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]{8,}/gi, "$1 [redacted]")
+    .replace(/\b([A-Za-z0-9_.-]*(?:token|secret|password|passwd|api[_-]?key|private[_-]?key|credential|authorization)[A-Za-z0-9_.-]*)(["']?\s*[:=]\s*["']?)[^\s"',}]{4,}/gi, "$1$2[redacted]")
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/[^\s:@\/]+:)[^\s@\/]+@/gi, "$1[redacted]@");
+}
+
+/**
+ * #6107: one failed check as park/run-log text: its name (a CI job name, else the command) and the last `lines` lines of
+ * its output, secrets redacted, within `maxChars`.
+ */
+export function checkFailureTail(f, { name = null, lines = QUIET_TAIL_LINES, maxChars = 4000 } = {}) {
+  const label = name ? `${name} (\`${f.command}\`)` : `\`${f.command}\``;
+  return `\n\nFailing check ${label}, exit ${f.rc}, last ${lines} lines of its output:\n${redactSecrets(quietFailure(f.output, { lines, maxChars }))}`;
+}
+
 /** #4364: the compact pass/fail table `forgedock check` prints; #4390: each failure quiet (`quietFailure`), within `cap` chars. */
 export function formatCheckTable(r, cap = LOG_CAP) {
   const word = (x) => (x.status === "ci" ? "CI" : x.status ? "DEFERRED" : x.rc === 0 ? "PASS" : `FAIL exit ${x.rc}`);
