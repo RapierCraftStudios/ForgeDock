@@ -70,7 +70,7 @@ import { reserveForBuild, revalidate } from "./seqreserve.mjs";
 import { patchEcho, mutationsOf, runReproMutations, classifyRepro } from "./reproquality.mjs";
 import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, amendmentCorrectionPrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, docsPlanNote, pagePlanNote, contextPackNote, buildOpeningNote, sequenceBuildRule, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, routeDigestPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
-import { classifyBaseRed, diffTouchesGuard, attribute as attributeBaseRed, runOnBase, reportBaseRed, recordBaseVerdict, bypassesGuard } from "./basered.mjs"; // #5239
+import { reportParityGaps, classifyBaseRed, diffTouchesGuard, attribute as attributeBaseRed, runOnBase, reportBaseRed, recordBaseVerdict, bypassesGuard } from "./basered.mjs"; // #5239
 import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
 import { parseProdParity, prodParityFailures as prodParityOf } from "./prodparity.mjs";
 import { routePathsFromFiles, routeReachabilityFailures } from "./routecheck.mjs";
@@ -2893,14 +2893,22 @@ export async function runCore(o) {
     // #4331: a learned command the map covers runs only when its globs match a changed file; unmapped ones always run (#4315)
     // #5820: the PR's required CI jobs (scripts/ci-local plan, heavy jobs CI-only) join the round as derived commands
     const ciCfg = o.precheck?.ci ?? parseCiPrecheckConfig(null);
-    let ciRequired, ciDerived = new Map(); // command -> {job, name, why, steps}
+    let ciRequired, ciRelease, ciDerived = new Map(); // command -> {job, name, why, steps}
     const ciGaveUp = new Set(); // jobs found unrunnable in an earlier round: recorded once, not rerun
     async function ciPrecheckPlan(round) {
       ciDerived = new Map();
       if (ciCfg.mode === "off" || isSplit || !io.ciLocalPlan || !io.fs?.write) return [];
       if (ciRequired === undefined) { try { ciRequired = (await io.requiredChecks?.(lane)) ?? null; } catch { ciRequired = null; } }
-      const p = await deriveCiPrecheck({ buildPlan: io.ciLocalPlan, required: ciRequired, cfg: ciCfg, wt, base, lane, files, perCommandMs: vcfg.precheckTimeoutSeconds * 1000, writeFile: (rel, text) => io.fs.write(`${wt}/${rel}`, text), skipJobs: ciGaveUp });
+      // #6049: the release branch's required checks (the integration target's CI) join the lane's pre-PR set
+      const releaseBranch = String(defaults.find(Boolean) ?? "");
+      const useRelease = Boolean(releaseBranch) && releaseBranch !== lane;
+      if (useRelease && ciRelease === undefined) { try { ciRelease = (await io.requiredChecks?.(releaseBranch)) ?? []; } catch { ciRelease = []; } }
+      const p = await deriveCiPrecheck({ buildPlan: io.ciLocalPlan, required: ciRequired, releaseRequired: useRelease ? ciRelease : null, releaseBranch: useRelease ? releaseBranch : "", cfg: ciCfg, wt, base, lane, files, perCommandMs: vcfg.precheckTimeoutSeconds * 1000, writeFile: (rel, text) => io.fs.write(`${wt}/${rel}`, text), skipJobs: ciGaveUp });
       for (const c of p.commands) ciDerived.set(c.command, c);
+      if (useRelease && p.parity?.length) {
+        ev({ event: "CI_PRECHECK_PARITY", round, release: releaseBranch, gaps: p.parity });
+        if (!round) { const issues = await reportParityGaps({ ghc, repo, release: releaseBranch, gaps: p.parity }); T.decisions.push(`Lane-check parity gap(s) vs ${releaseBranch}: ${p.parity.map((g) => g.context).join(", ")}${issues.length ? ` (filed ${issues.map((n) => `#${n}`).join(", ")})` : ""}`); }
+      }
       ev({ event: "CI_PRECHECK_PLAN", round, source: p.source, ...(p.note ? { note: p.note } : {}), commands: p.commands.map(({ job, name, workflow, kind, why, steps, command }) => ({ job, name, workflow, kind, why, steps, command })), skipped: p.skipped, unrunnable: p.unrunnable });
       if (!round) T.decisions.push(`CI precheck (${p.source}): ${p.commands.length ? p.commands.map((c) => `${c.name} (${c.why})`).join(", ") : "no job to run locally"}${p.unrunnable.length ? `; unrunnable: ${p.unrunnable.map((u) => `${u.name}: ${u.reason}`).join("; ")}` : ""}`);
       return p.commands.map((c) => c.command);

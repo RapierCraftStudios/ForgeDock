@@ -531,11 +531,11 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
      * #5820: the scripts/ci-local plan of the lane's change (CI definitions from the base ref plus the lane's edits, change
      * scoped), in a child process so the yq calls never block the lane. Rejects with ci-local's DEGRADED reason (no yq).
      */
-    async ciLocalPlan({ repo: wt, base, baseBranch, files = [] }) {
+    async ciLocalPlan({ repo: wt, base, baseBranch, releaseBranch = "", files = [] }) {
       const list = join(wt, ".forge-lean", "ci-precheck", "files.txt");
       mkdirSync(dirname(list), { recursive: true }); writeFileSync(list, `${files.join("\n")}\n`);
       try {
-        const { stdout } = await pexec(process.execPath, [script("ci-local/cli.mjs"), "plan", "--repo", wt, "--base", base, "--base-branch", baseBranch, "--files-from", list, "--json"], { cwd: wt, timeout: 120000, maxBuffer: 64 * 1024 * 1024 });
+        const { stdout } = await pexec(process.execPath, [script("ci-local/cli.mjs"), "plan", "--repo", wt, "--base", base, "--base-branch", baseBranch, ...(releaseBranch ? ["--release-branch", releaseBranch] : []), "--files-from", list, "--json"], { cwd: wt, timeout: 120000, maxBuffer: 64 * 1024 * 1024 });
         return JSON.parse(String(stdout));
       } catch (e) {
         const why = /CI_LOCAL_RESULT: DEGRADED reason=(.*)/.exec(String(e?.stdout ?? ""))?.[1] ?? String(e?.stderr || e?.message || e).split("\n")[0];

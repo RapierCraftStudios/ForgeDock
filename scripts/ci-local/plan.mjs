@@ -62,8 +62,9 @@ export function buildPlan(opts) {
   const tracked = git(repo, ['ls-files', '-z', '--cached', '--others', '--exclude-standard']).out.split('\0').filter(Boolean);
   const baseFiles = baseSha ? listAtRef(repo, baseRef) : [];
 
+  const releaseBranch = opts.releaseBranch && opts.releaseBranch !== baseBranch ? String(opts.releaseBranch) : '';
   const a = {
-    repo, baseRef, baseSha, baseBranch, headBranch, headSha: head, changed, from, tracked, config, repository: repoSlug(repo),
+    repo, releaseBranch, baseRef, baseSha, baseBranch, headBranch, headSha: head, changed, from, tracked, config, repository: repoSlug(repo),
     defFiles(re) { return [...new Set([...baseFiles, ...tracked].filter((f) => re.test(f)))].sort(); },
     readDefs(f) {
       const baseText = baseSha ? readAtRef(repo, baseRef, f) : null;
@@ -76,7 +77,7 @@ export function buildPlan(opts) {
   const defRe = new RegExp([gha, gitlab, circle, azure, bitbucket, buildkite].map((m) => m.DEF_RE.source).join('|'));
   const defContents = a.defFiles(defRe).map((f) => { const d = a.readDefs(f); return `${f}\n${d.base}\n${d.head}`; }).join('\n--\n');
   const changeContents = changed.map((f) => `${f}:${fileHash(repo, f)}`);
-  const key = sha256(JSON.stringify([PLAN_VERSION, repo, defContents, changeContents, baseSha, baseBranch, headBranch, hostClass(), config, process.version, process.env.FORGE_CI_LOCAL_SERVICES || '', fs.existsSync(path.join(repo, 'package.json')) ? sha256(fs.readFileSync(path.join(repo, 'package.json'))) : '']));
+  const key = sha256(JSON.stringify([PLAN_VERSION, repo, defContents, changeContents, baseSha, baseBranch, headBranch, hostClass(), config, releaseBranch, process.version, process.env.FORGE_CI_LOCAL_SERVICES || '', fs.existsSync(path.join(repo, 'package.json')) ? sha256(fs.readFileSync(path.join(repo, 'package.json'))) : '']));
   const cacheDir = path.join(opts.cacheDir || path.join(homeForgeDir(), 'ci-local', 'plans'));
   const cacheFile = path.join(cacheDir, key + '.json');
   if (!opts.noCache && fs.existsSync(cacheFile)) {
