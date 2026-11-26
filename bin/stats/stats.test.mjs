@@ -1117,3 +1117,12 @@ describe("stats --ci-awareness (#5692)", () => {
     assert.equal(ciAwarenessReport(logs).total.lanes, 2);
   });
 });
+
+describe("stats --chains (#5834)", () => {
+  it("parses, takes --window, and is rejected with --card", () => {
+    const o = parseArgs(["--chains", "--window", "7d"]);
+    assert.equal(o.chains, true); assert.equal(o.windows.length, 1);
+    assert.throws(() => parseArgs(["--card", "--chains"]), /cannot be combined/);
+    assert.equal(parseArgs(["--pool"]).chains, false, "--pool is unchanged");
+  });
+});

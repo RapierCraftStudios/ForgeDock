@@ -9,7 +9,7 @@ import { openBatch } from "./batch.mjs";
 import { DEFAULT_HEALTH, parseHealthConfig, rootsOf, evaluateHealth, formatAlert, runCheck, scheduleChecks, scheduleLine, runNotify, deliverAlert,
   resolvedOnGithub, recordRefusal, readRefusals, statusLines, REFUSAL_KEEP,
   evaluateDispatchStall, firstHourReport, writeFirstHour, readFirstHour, recordStallAlert, summaryLines, statelessNeedsHuman, statelessOnGithub,
-  DEFAULT_STALL_MIN, MAX_STALL_RECOVERIES, decideStallAction, recordStallRecovery, readHealth } from "./batch-health.mjs";
+  DEFAULT_STALL_MIN, MAX_STALL_RECOVERIES, decideStallAction, recordStallRecovery, readHealth, runningSplit, clearStaleStall, batchVerdict } from "./batch-health.mjs";
 
 // #1 and #3 are roots; #2 depends on #1, #4 on #3.
 const base = (results, extra = {}) => ({ order: [1, 2, 3, 4], deps: { 2: [1], 4: [3] }, results, running: {}, pending: [], ...extra });
@@ -359,5 +359,66 @@ describe("#5469: holds in health and the first-hour report", () => {
   it("the first-hour report lists a held issue as held (owner, since)", () => {
     const rep = firstHourReport(base({}, { pending: [3] }), { batchId: "b1", held: [3], holdInfo: { 3: { owner: "op@h", since: "2026-11-11T00:00:00.000Z" } } });
     assert.match(rep.summary, /#3 held \(op@h, since 2026-11-11T00:00:00.000Z\)/);
+  });
+});
+
+describe("#5938 stall verdict is re-evaluated: full K, recovery lanes, pool capacity, clear", () => {
+  const NOW = 10_000_000, MIN = 60000;
+  const st = (extra = {}) => ({ order: [1, 2, 3], deps: {}, results: {}, running: {}, pending: [1, 2, 3], parallel: 2, ...extra });
+  const stall = (state, o = {}) => evaluateDispatchStall(state, { lastProgressMs: NOW - 12 * MIN, now: NOW, windowMin: 10, ...o });
+
+  it("running == K with ready pending issues is healthy", () => {
+    assert.equal(stall(st({ running: { 1: { remote: true }, 2: {} } })), null);
+  });
+  it("a pending issue with a running record (recovery lane) is not ready", () => {
+    const r = stall(st({ running: { 1: {} }, pending: [1, 2] }));
+    assert.deepEqual(r.ready, [2]);
+    assert.equal(stall(st({ running: { 1: {} }, pending: [1], parallel: 2 })), null);
+  });
+  it("the detail names running/K with the local/remote split", () => {
+    const r = stall(st({ running: { 1: { remote: true } }, pending: [2, 3] }));
+    assert.match(r.detail, /running 1\/2 \(local 0, remote 1\)/);
+    assert.deepEqual(runningSplit(st({ running: { 1: {}, 2: { remote: true } } })), { running: 2, k: 2, local: 1, remote: 1, text: "running 2/2 (local 1, remote 1)" });
+  });
+  it("pool capacity deferrals report pool-capacity naming the pool's reason", () => {
+    const reason = "host_disk_free 10.8 GB < floor 25 + 3.5/sandbox";
+    const r = stall(st({ pending: [2, 3], capReasons: { 2: reason, 3: reason } }));
+    assert.equal(r.code, "pool-capacity");
+    assert.ok(r.detail.includes(reason));
+    assert.equal(stall(st({ pending: [2, 3], capReasons: { 2: reason } })).code, "dispatch-stalled", "one unblocked ready issue keeps the stall");
+  });
+  it("clearStaleStall removes the stored stall and logs STALL CLEARED; summaryLines skips a stall that no longer holds", () => {
+    const root = tmpDir("stall-clear-"), b = openBatch(root, "b1");
+    b.writePlan({ daemon: true, repo: "o/r" });
+    recordStallAlert(b, stall(st()), { now: NOW });
+    assert.equal(clearStaleStall(b, { now: NOW }), true);
+    assert.equal(readHealth(b.dir).stall, undefined);
+    assert.match(readFileSync(join(b.dir, "batch.log"), "utf8"), /STALL CLEARED/);
+    assert.equal(clearStaleStall(b, { now: NOW }), false);
+    recordStallAlert(b, stall(st()), { now: NOW });
+    b.store.save(st({ running: { 1: {}, 2: {} } }));
+    assert.ok(!summaryLines(root, { now: NOW }).some((l) => /DISPATCH STALLED/.test(l)));
+  });
+  it("batchVerdict: healthy, stalled -> action, stalled -> no action", () => {
+    const s = stall(st());
+    assert.equal(batchVerdict("b1", null), "batch b1: healthy");
+    assert.match(batchVerdict("b1", s, { action: "resume" }, { acted: true }), /stalled -> action resume/);
+    assert.match(batchVerdict("b1", s, { action: "alert", cause: "no gh" }), /stalled -> no action, needs you \(no gh;/);
+  });
+});
+
+describe("#5987 efficiency status line", () => {
+  it("batch status shows the efficiency line with and without breaches; none without a ledger", async () => {
+    const { writeEfficiency } = await import("./efficiency.mjs");
+    const root = tmpDir("bh-eff-");
+    mkdirSync(join(root, "b1"));
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: ["1"], created: new Date().toISOString() });
+    assert.ok(!statusLines(root, { batch: "b1" }).some((l) => /efficiency:/.test(l)));
+    const eff = { v: 1, concurrency: { running: 3, ceiling: 12, achieved: 3 }, limiters: ["sandbox.capacity", "pool.host_load"], breaches: [] };
+    writeEfficiency(b.dir, eff);
+    assert.ok(statusLines(root, { batch: "b1" }).includes("  efficiency: 3/12 lanes (25%) - limiter sandbox.capacity pool.host_load"));
+    writeEfficiency(b.dir, { ...eff, breaches: [{ issue: 6001 }, { issue: 6001 }] });
+    assert.ok(statusLines(root, { batch: "b1" }).includes("  efficiency: 3/12 lanes (25%) - limiter sandbox.capacity pool.host_load; 2 SLO breaches -> FD#6001"));
   });
 });

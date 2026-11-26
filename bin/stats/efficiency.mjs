@@ -183,7 +183,7 @@ export function efficiencyMetrics({ entries = [], logs = new Map(), issues = nul
     const info = issues?.get(row.issue) ?? null;
     const term = [...slices].reverse().find((s) => s.terminal?.reason === "merged")?.terminal;
     merged.push({ issue: row.issue, slices: slices.length, cost: sum(atts.map((a) => a.cost)), implCost: sum(impl.map((a) => a.cost)),
-      reviewCost: sum(atts.filter((a) => a.phase === "review").map((a) => a.cost)), implTurns: sum(impl.map((a) => a.turns)), implCache: sum(impl.map((a) => a.cacheRead)),
+      reviewCost: sum(atts.filter((a) => a.phase === "review").map((a) => a.cost)), implTurns: sum(impl.map((a) => a.turns)), ctxRestarts: impl.filter((a) => a.trigger === "context_restart").length, implCache: sum(impl.map((a) => a.cacheRead)),
       size: term?.size ?? laneSize({ labels: info?.labels ?? [] }) ?? "unknown", impl, retries, info, tools: laneTools(impl), shape: slices.at(-1)?.shape ?? null, implWall: laneWall(impl), phases: term?.phases ?? null });
   }
   const all = group(merged);
@@ -226,7 +226,7 @@ export function efficiencyMetrics({ entries = [], logs = new Map(), issues = nul
   }
   return {
     merged: merged.length, cost_usd: all.cost_usd, implement_usd: r(sum(merged.map((m) => m.implCost)), 1e6), review_usd: r(sum(merged.map((m) => m.reviewCost)), 1e6),
-    usd_per_merge: all.usd_per_merge, turns_per_merge: all.turns_per_merge, context_per_turn: all.context_per_turn,
+    usd_per_merge: all.usd_per_merge, turns_per_merge: all.turns_per_merge, context_restarts_per_merge: r(per(sum(merged.map((m) => m.ctxRestarts)), merged.length), 100), context_per_turn: all.context_per_turn,
     implement_turns: sum(merged.map((m) => m.implTurns)), implement_cache_read: sum(merged.map((m) => m.implCache)),
     implement_wall_p50_min: all.implement_wall_p50_min, merge_rate: r(per(merged.length, rows.length)),
     conformance_pass_rate: r(per(verdicts.filter((v) => v === "conforms").length, verdicts.length)),
@@ -238,7 +238,7 @@ export function efficiencyMetrics({ entries = [], logs = new Map(), issues = nul
       by_kind: Object.fromEntries(Object.entries(noAction).map(([k, g]) => [k, { ...g, cost_usd: r(g.cost_usd, 1e6) }])) },
     quality, acceptance, lanes, baseline_by_profile: baselineByProfile, wait: summarizeWaits(merged.map((m) => m.phases)), // #5349: non-model time by phase and cause
     tool_calls_per_turn_p50: median(withTools.map((m) => m.tools.per_turn)), tool_calls_per_turn_n: withTools.length, rereads_per_merge: withTools.length ? r(per(sum(withTools.map((m) => m.tools.rereads)), withTools.length), 100) : null,
-    per_issue: merged.map((m) => ({ issue: m.issue, slices: m.slices, cost_usd: r(m.cost, 1e6), implement_usd: r(m.implCost, 1e6), implement_turns: m.implTurns,
+    per_issue: merged.map((m) => ({ issue: m.issue, slices: m.slices, cost_usd: r(m.cost, 1e6), implement_usd: r(m.implCost, 1e6), implement_turns: m.implTurns, context_restarts: m.ctxRestarts,
       implement_cache_read: m.implCache, size: m.size, retries: m.retries, ...(m.shape ? { shape: m.shape } : {}), ...(m.info ? { quality: issueQuality(m.info.body).tag } : {}),
       ...(m.tools ? { implement_tool_calls_per_turn: m.tools.per_turn, implement_rereads: m.tools.rereads } : {}),
       ...(m.implWall != null ? { implement_wall_min: m.implWall } : {}) })),
@@ -327,7 +327,7 @@ export async function windowEfficiency({ batchRoot, runsDir, repo = null, gh = n
   return out;
 }
 
-export const COMPARE_KEYS = Object.freeze(["turns_per_merge", "implement_wall_p50_min", "tool_calls_per_turn_p50", "rereads_per_merge", "merge_rate", "conformance_pass_rate"]);
+export const COMPARE_KEYS = Object.freeze(["turns_per_merge", "context_restarts_per_merge", "usd_per_merge", "implement_wall_p50_min", "tool_calls_per_turn_p50", "rereads_per_merge", "merge_rate", "conformance_pass_rate"]);
 const delta = (a, b) => Object.fromEntries(COMPARE_KEYS.map((k) => [k, num(a?.[k]) == null || num(b?.[k]) == null ? null : r(b[k] - a[k], 100)]));
 
 /**
@@ -341,6 +341,7 @@ function matchedCohorts(pre, post) {
   const g = (xs) => {
     const tools = xs.filter((x) => x.implement_tool_calls_per_turn != null);
     return { n: xs.length, turns_per_merge: r(per(sum(xs.map((x) => x.implement_turns)), xs.length), 10),
+      context_restarts_per_merge: r(per(sum(xs.map((x) => x.context_restarts ?? 0)), xs.length), 100), usd_per_merge: r(per(sum(xs.map((x) => x.cost_usd ?? 0)), xs.length)),
       implement_wall_p50_min: median(xs.map((x) => x.implement_wall_min).filter((w) => w != null)),
       tool_calls_per_turn_p50: median(tools.map((x) => x.implement_tool_calls_per_turn)),
       rereads_per_merge: tools.length ? r(per(sum(tools.map((x) => x.implement_rereads)), tools.length), 100) : null };
@@ -428,9 +429,9 @@ function waitLines(w) {
 const pct = (x) => (num(x) == null ? "n/a" : `${Math.round(x * 100)}%`);
 const rates = (m) => `implement wall p50 ${m.implement_wall_p50_min == null ? "n/a" : `${f(m.implement_wall_p50_min, 1)} min`}, merge rate ${pct(m.merge_rate)}, conformance pass ${pct(m.conformance_pass_rate)}`;
 const sign = (x, d, unit = "") => (num(x) == null ? "n/a" : `${x > 0 ? "+" : ""}${x.toFixed(d)}${unit}`);
-const deltaLine = (d, withRates = true) => `turns/merge ${sign(d.turns_per_merge, 1)}, implement wall p50 ${sign(d.implement_wall_p50_min, 1, " min")}, calls/turn p50 ${sign(d.tool_calls_per_turn_p50, 2)}, `
+const deltaLine = (d, withRates = true) => `turns/merge ${sign(d.turns_per_merge, 1)}, restarts/merge ${sign(d.context_restarts_per_merge, 2)}, $/merge ${sign(d.usd_per_merge, 2)}, implement wall p50 ${sign(d.implement_wall_p50_min, 1, " min")}, calls/turn p50 ${sign(d.tool_calls_per_turn_p50, 2)}, `
   + `re-reads/merge ${sign(d.rereads_per_merge, 2)}${withRates ? `, merge rate ${sign(d.merge_rate == null ? null : d.merge_rate * 100, 0, " pts")}, conformance pass ${sign(d.conformance_pass_rate == null ? null : d.conformance_pass_rate * 100, 0, " pts")}` : ""}`;
-const cohortLine = (k, m) => `compare ${k}: n=${m.n ?? m.merged} turns/merge ${f(m.turns_per_merge, 1)}, implement wall p50 ${m.implement_wall_p50_min == null ? "n/a" : `${f(m.implement_wall_p50_min, 1)} min`}, `
+const cohortLine = (k, m) => `compare ${k}: n=${m.n ?? m.merged} turns/merge ${f(m.turns_per_merge, 1)}, restarts/merge ${f(m.context_restarts_per_merge, 2)}, $/merge ${usd(m.usd_per_merge)}, implement wall p50 ${m.implement_wall_p50_min == null ? "n/a" : `${f(m.implement_wall_p50_min, 1)} min`}, `
   + `calls/turn p50 ${f(m.tool_calls_per_turn_p50)}, re-reads/merge ${f(m.rereads_per_merge)}${"merge_rate" in m ? `, merge rate ${pct(m.merge_rate)}, conformance pass ${pct(m.conformance_pass_rate)}` : ""}`;
 
 /** #4491: the `--compare` report: pre/post cohorts, their delta, then the full-shape per-size matched cohorts. */

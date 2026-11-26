@@ -10,6 +10,7 @@ import { capText, FIX_CAPS, FIX_PROMPT_MAX, NARROW_CAPS, NARROW_PROMPT_MAX } fro
 import { SPLIT_MIN_FILES, SPLIT_MIN_LINES } from "./decompose.mjs";
 import { relaxationBlock } from "./relaxation.mjs";
 import { visualReviewCheck } from "./ui-quality.mjs";
+import { amendmentPromptLines, AMEND_KINDS } from "./amendment-schema.mjs"; // #5979
 import { stampRule } from "./stagestamp.mjs";
 import { FINDING_PITFALLS, PLANNER_TIGHTENING } from "./selfreview.mjs";
 import { isTrustedIssueComment } from "./prefilter.mjs"; // call-time use only: prefilter.mjs imports this module
@@ -262,12 +263,7 @@ export function builderImplementPrompt(mode = "local", { toolchain = null, spars
 ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}${stampRule(stamp)}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
 
 The contract changes only through typed amendments in ${RESULT_FILE}, each with a why:
-- {"kind":"add-deliverable","path":"<file>","why":""}: a file not listed.
-- {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: a missed requirement.
-- {"kind":"defer|post-deploy","requirement":"R#","why":"","check":"<id>"}: separate work or a post-deploy check, filed as a follow-up. Not "type"; unknown kinds are rejected. One requirement id per row. An impossible deliverable is a defer, not a new kind.
-- {"kind":"amend-requirement","requirement":"R#","text":"<revised wording>","why":""}: reworded.
-- {"kind":"supersedes","guard":"#N","why":""}: overrides a guard_broken failure; {"kind":"supersedes","mechanism":"<name>","why":""} retires every guard whose test this lane deletes.
-- {"kind":"decision","decision":{"choice":"","anchors":["<base path>"],"supersedes":"<id>"},"why":""}: supersedes changes an H-row.
+${amendmentPromptLines()}
 New keys: translate, never copy English; status entries in place.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
 Never name or number migration files by hand; use the generator.
@@ -276,7 +272,7 @@ A [type:e2e] requirement needs a validate that runs a real e2e check (repo e2e s
 A new keyword/regex classifier ships negative examples (inputs it must not match).
 A forge.yaml outcome_evidence area change needs result outcome_evidence [{area,metric,corpus,before,after,better}] measured on recorded real inputs; its post-deploy checks get a numeric baseline.
 A new workspace-package dependency in a package.json no deliverable names is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
-If scripts/check-devdocs-freshness.sh exists, a behaviour change under its paths must update the matching dossier (devdocs/modules/*.md, per devdocs/index.yaml) in the same change; run it against the base first.
+If scripts/check-devdocs-freshness.sh exists, a behaviour change under its paths adds a new devdocs/decisions/<issue>-<slug>.md in the same change (a new file never conflicts with parallel lanes); run it against the base first.
 
 Before writing ${RESULT_FILE}, after your last edit, run \`node ${FORGEDOCK_CLI} check\` in the worktree and fix until it passes; if it cannot pass, report the problem as blocked.
 A \`FAIL review\` line from check is a finding the reviewer would raise; fix it. Also:
@@ -445,7 +441,7 @@ export function apiEditPrompt(task, files) {
 
 /** #5089: the builder's amendments name an unknown kind or miss a field; one correction before the conformance gate. */
 export function amendmentCorrectionPrompt(problems) {
-  return `The amendments in ${RESULT_FILE} are not valid:\n${problems.slice(0, 20).map((p) => `- ${p}`).join("\n")}\n\nRewrite them with a valid kind: add-deliverable, add-requirement, defer, post-deploy, amend-requirement, supersedes, decision, substitute-validate or out-of-band. A deliverable that is impossible on this platform is {"kind":"defer","requirement":"R#","why":""}, not a changed deliverable. Edit only ${RESULT_FILE} (commit nothing else) and stop. Do not push or touch GitHub.`;
+  return `The amendments in ${RESULT_FILE} are not valid:\n${problems.slice(0, 20).map((p) => `- ${p}`).join("\n")}\n\nRewrite them with a valid kind (${AMEND_KINDS.join(", ")}). A validate-row id (G2) is never a supersedes guard: use {"kind":"substitute-validate","validate":"G2","command":"<runnable equivalent>","why":""}. A deliverable that is impossible on this platform is {"kind":"defer","requirement":"R#","why":""}, not a changed deliverable. Edit only ${RESULT_FILE} (commit nothing else) and stop. Do not push or touch GitHub.`;
 }
 
 /** The one bounded correction round, in the builder's own session. */
@@ -461,9 +457,9 @@ export function structurePrompt(edges, mode = "local") {
   return `This change adds dependencies between workspace packages that the frozen contract does not name:\n${edges.slice(0, 30).map((e) => `- ${e.from} -> ${e.to} (${e.kind}, ${e.manifest})`).join("\n")}\n\nFor each one, add it to the contract with a reason, or remove it: either record {"kind":"add-deliverable","path":"<that package.json>","why":"<names the package and why this dependency is right>"} in ${RESULT_FILE}, or drop the dependency from the package.json and the code that needs it. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
-/** The repo's devdocs freshness rule failed on the committed change: update the named dossier(s) and commit. */
+/** The repo's devdocs freshness rule failed on the committed change: add a decision record (conflict-free) and commit. */
 export function docsPrompt(output, mode = "local") {
-  return `The repository's docs freshness check (scripts/check-devdocs-freshness.sh) fails on this change:\n${String(output ?? "").slice(0, 4000)}\n\nUpdate the module dossier it names (devdocs/modules/*.md; devdocs/index.yaml maps files to dossiers) to describe the behaviour you changed, in the dossier's existing style and in a few lines. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+  return `The repository's docs freshness check (scripts/check-devdocs-freshness.sh) fails on this change:\n${String(output ?? "").slice(0, 4000)}\n\nAdd a new devdocs/decisions/<issue>-<slug>.md describing the behaviour you changed in a few lines (a new file never conflicts with parallel lanes; edit a shared dossier only when the check accepts nothing else). ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
 /**
