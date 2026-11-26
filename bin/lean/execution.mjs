@@ -297,11 +297,14 @@ export function detectNeeds(text, exec = null, { prose = false } = {}) {
 
 /**
  * #5652: may a remote lane that lacks a tool or host capability be re-placed on the dispatching host? An explicit
- * `execution.host_fallback` wins; else off when forge.yaml `host.role` is `orchestrator`; else on (existing repos unchanged).
+ * `execution.host_fallback` wins; else off when forge.yaml `host.role` is `orchestrator`; else off in `mode: remote` (#5746);
+ * else on (hybrid and local unchanged).
  */
-export function hostFallbackAllowed({ hostFallback = null, hostRole = null } = {}) {
+export function hostFallbackAllowed({ hostFallback = null, hostRole = null, mode = null } = {}) {
   if (typeof hostFallback === "boolean") return hostFallback;
-  return String(hostRole ?? "").trim().toLowerCase() !== "orchestrator";
+  if (String(hostRole ?? "").trim().toLowerCase() === "orchestrator") return false;
+  // #5746: in remote mode the host is not a fallback unless the repo opts in with host_fallback: true
+  return mode !== "remote";
 }
 
 /** Declared host capabilities a remote lane's block summary names (#4542); empty when it names none the host has. */
@@ -404,7 +407,10 @@ export function placeLane({ exec = null, verifyMode = "local", labels = [], weig
     const missing = (Array.isArray(needs) ? needs : []).map(String).filter((n) => n && !(Array.isArray(relays) ? relays : []).includes(n));
     if (missing.length) return { where: "local", reason: `host capability: ${missing.join(", ")}` };
   }
-  if (mode !== "hybrid") { const where = placement(exec); return { where, reason: `mode ${EXECUTION_MODES.includes(mode) ? mode : "local"}` }; }
+  if (mode !== "hybrid") {
+    const where = placement(exec);
+    return { where, reason: `mode ${EXECUTION_MODES.includes(mode) ? mode : "local"}` };
+  }
   if (!(Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1)) return { where: "local", reason: "max_remote 0" };
   if (verifyMode === "ci") return { where: "local", reason: "verify.mode ci: validation runs on CI, not billed twice" };
   const names = (Array.isArray(labels) ? labels : []).map((l) => String(l ?? "").trim().toLowerCase());

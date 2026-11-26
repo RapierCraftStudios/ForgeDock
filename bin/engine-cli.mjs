@@ -521,7 +521,8 @@ export function readRelayCaps(env = process.env) {
 export function readHostFallback(cwd = process.cwd()) {
   let hostRole = null;
   try { hostRole = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.host?.role ?? null; } catch { /* unreadable: role unset */ }
-  return hostFallbackAllowed({ hostFallback: readExecution(cwd)?.hostFallback ?? null, hostRole });
+  const exec = readExecution(cwd);
+  return hostFallbackAllowed({ hostFallback: exec?.hostFallback ?? null, hostRole, mode: exec?.mode ?? null });
 }
 export function readExecution(cwd = process.cwd()) {
   try {
@@ -2201,7 +2202,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
           try { execBudget.record(sandboxBudgetKey(batch.id, sb.id ?? n, rec?.handle?.startedAt ?? rec?.startedAt ?? null), sb); } catch { /* the batch total still counts it */ }
           Promise.resolve(emitSbx({ event: "SANDBOX_USAGE", issue: n, provider: sb.provider, sandbox_id: sb.id, minutes: sb.minutes, cost_usd: sb.cost_usd, batch: batch.id })).catch(() => {});
         },
-      }, { exec, readOverride: batch.readExecution, place, onChange: (e) => sink.line(`execution: live placement ${e.mode}, max_remote ${e.maxRemote}`) });
+      }, { exec, readOverride: batch.readExecution, place, onChange: (e) => sink.line(`execution: live placement ${e.mode}, max_remote ${e.maxRemote}`),
+        // #5746: a live max_remote left below the pinned value is announced once after FORGEDOCK_MAX_REMOTE_WARN_HOURS (default 6)
+        belowPinnedHours: Number(process.env.FORGEDOCK_MAX_REMOTE_WARN_HOURS) || undefined,
+        onBelowPinned: (w) => sink.line(`WARNING: execution: live max_remote ${w.maxRemote} has been below the pinned ${w.pinned} for over ${w.hours}h (forgedock orchestrate --set-max-remote ${batch.id} ${w.pinned} restores it)`) });
       sink.line(`execution: ${hybrid ? "hybrid" : "remote"} via ${provider.name}, max_remote ${exec.maxRemote}`);
     } else {
       lanes = withPlacement(batchMod.detachedLanes({ batch, cwd, env: laneEnv, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs, spawnFn: laneSpawn }));
