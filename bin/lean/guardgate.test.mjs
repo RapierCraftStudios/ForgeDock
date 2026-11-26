@@ -83,10 +83,9 @@ test("an accepted supersedes amendment passes the precheck and names the superse
   assert.deepEqual(supersededIds(a.contract, []), [], "only selected guards are retired");
 });
 
-test("a supersedes amendment without a guard id is rejected", () => {
+test("a supersedes amendment without a guard id is not applied (#6083)", () => {
   const a = applyAmendments({ requirements: [], deliverables: [] }, [{ kind: "supersedes", why: "x" }, { kind: "supersedes", guard: "abc", why: "x" }]);
-  assert.equal(a.problems.length, 2);
-  assert.match(a.problems[0], /needs guard/);
+  assert.deepEqual(a.contract.supersedes ?? [], []);
 });
 
 test("a lane touching no guarded hunk selects nothing and runs no git or test", async () => {

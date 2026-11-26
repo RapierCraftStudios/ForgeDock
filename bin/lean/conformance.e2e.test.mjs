@@ -166,6 +166,9 @@ function oracle(c, quotes = Q) {
   const bad = rv.issue_coverage.some((x) => x.status !== "covered") || rows.some((r) => ["missing", "partial"].includes(r.status)) || rv.scope.some((s) => s.authorized_by === "none") || billing;
   return "```json\n" + JSON.stringify({ ...rv, verdict: bad ? "NONCONFORMING" : "CONFORMS", summary: "oracle" }) + "\n```";
 }
+// #6083: these gates are advisory by default; the tests of their blocking path re-promote them with engine.conformance_kinds enforce
+const ENFORCED = Object.fromEntries(["conformance.unimplemented", "conformance.untracked_deferral", "conformance.preserve_violated"].map((c) => [c, "enforce"]));
+const runCaseEnf = (cs, conformance = "enforce", extra = {}) => runCase(cs, conformance, { ...extra, opts: { ...(extra.opts ?? {}), conformanceKinds: ENFORCED } });
 const generic = () => "```json\n" + JSON.stringify({ verdict: "PASS", fixes_issue: true, regression: false, reason: "looks good" }) + "\n```";
 
 async function runCase(cs, conformance = "enforce", extra = {}) {
@@ -205,18 +208,18 @@ describe("conformance gate end-to-end (real git, disposable repo)", { skip: !HAV
     merged(o); assert.ok(o.staging.export); assert.ok(o.markers.includes("FORGE:AMENDMENT"));
   });
   it("3 scope creep: an unauthorized billing change is caught by the review's preserve check and reverted before it can reach staging", async () => {
-    const o = await runCase({ contract: FULL, impl: (t) => { fix(t, ["scrape", "search", "export"]); t.write({ "src/billing.js": "export function price(units) { return Math.round(units) * 0.01; }\n" }); },
+    const o = await runCaseEnf({ contract: FULL, impl: (t) => { fix(t, ["scrape", "search", "export"]); t.write({ "src/billing.js": "export function price(units) { return Math.round(units) * 0.01; }\n" }); },
       resume: (t) => t.restore("src/billing.js") });
     // unclog: file scope alone is advisory (no precheck stop); the violated preserve row (P1) blocks and the resume reverts it
     merged(o); assert.equal(o.staging.billingChanged, false); assert.deepEqual([o.counts.builder, o.counts.reviewer], [3, 2]);
     assert.ok(o.log.some((e) => e.event === "ADVISORY" && e.rows.includes("scope_creep")), "scope creep is recorded as advisory");
   });
   it("4 a claimed follow-up without a tracking issue blocks merge before any review", async () => {
-    const o = await runCase({ contract: FULL, impl: (t) => fix(t, ["scrape", "search"]), claims: (k) => claimAll(k).map((r) => (r.id === "R3" ? { id: "R3", status: "deferred", note: "follow-up" } : r)) });
+    const o = await runCaseEnf({ contract: FULL, impl: (t) => fix(t, ["scrape", "search"]), claims: (k) => claimAll(k).map((r) => (r.id === "R3" ? { id: "R3", status: "deferred", note: "follow-up" } : r)) });
     blocked(o, "conformance.untracked_deferral"); assert.equal(o.counts.reviewer, 0); assert.equal(o.followups.length, 0);
   });
   it("4b the deferral made typed on the resume is tracked, linked, and the issue closes", async () => {
-    const o = await runCase({ contract: FULL, impl: (t) => fix(t, ["scrape", "search"]), claims: (k) => claimAll(k).map((r) => (r.id === "R3" ? { id: "R3", status: "deferred" } : r)),
+    const o = await runCaseEnf({ contract: FULL, impl: (t) => fix(t, ["scrape", "search"]), claims: (k) => claimAll(k).map((r) => (r.id === "R3" ? { id: "R3", status: "deferred" } : r)),
       resume: (t, res) => { res.amendments = [{ kind: "defer", requirement: "R3", why: "export ships on its own release train" }]; } });
     merged(o); assert.equal(o.followups.length, 1); assert.equal(o.followups[0].state, "OPEN");
     assert.match(o.pr.body, new RegExp(`Remaining work tracked\\n- #${o.followups[0].number}`)); assert.ok(o.markers.includes("FORGE:TRACKED"));
@@ -266,14 +269,14 @@ describe("conformance gate end-to-end (real git, disposable repo)", { skip: !HAV
   it("#5087 a declared topology.route_reachability that rejects the new route blocks before merge (#38241 fixture)", async () => {
     const ingress = path.join(tmpDir("ingress-"), "check-ingress.sh");
     fs.writeFileSync(ingress, "for p in \"$@\"; do case \"$p\" in /api/v1/batch*) ;; /api/v1/*) echo \"unreachable: $p -> api\" >&2; exit 1 ;; esac; done\n");
-    const o = await runCase({ contract: ROUTED, impl: addRoute }, "enforce", { runCommand: runCheckCommand, opts: { routeReachability: `bash ${ingress.replace(/\\/g, "/")}`, verify: { maxRounds: 0 } } });
+    const o = await runCaseEnf({ contract: ROUTED, impl: addRoute }, "enforce", { runCommand: runCheckCommand, opts: { routeReachability: `bash ${ingress.replace(/\\/g, "/")}`, verify: { maxRounds: 0 } } });
     assert.equal(o.staging.search, false, "staging untouched");
     assert.equal(o.ret.terminalReason, "needs-human"); assert.equal(o.pr, undefined, "no PR");
     assert.ok(o.log.some((e) => e.event === "PRECHECK" && e.failures.includes("conformance.unimplemented")));
     assert.match(o.ret.detail, /topology\.route_reachability[\s\S]*\/api\/v1\/agent\/signup\/pending[\s\S]*unreachable: \/api\/v1\/agent\/signup\/pending -> api/);
   });
   it("#5284 a declared topology.prod_parity surface touched without a check result or justification blocks before merge", async () => {
-    const o = await runCase({ contract: ROUTED, impl: addRoute }, "enforce", { runCommand: runCheckCommand, opts: { prodParity: { "web/src/app/**": "note: exercise the page under the production runtime" }, verify: { maxRounds: 0 } } });
+    const o = await runCaseEnf({ contract: ROUTED, impl: addRoute }, "enforce", { runCommand: runCheckCommand, opts: { prodParity: { "web/src/app/**": "note: exercise the page under the production runtime" }, verify: { maxRounds: 0 } } });
     assert.equal(o.staging.search, false, "staging untouched");
     assert.equal(o.ret.terminalReason, "needs-human"); assert.equal(o.pr, undefined, "no PR");
     assert.ok(o.log.some((e) => e.event === "PRECHECK" && e.failures.includes("conformance.unimplemented")));
@@ -299,7 +302,7 @@ describe("conformance gate end-to-end (real git, disposable repo)", { skip: !HAV
     assert.ok(review.includes("**Issue coverage:** 2/2 "), "the guidance row is not counted as an issue requirement");
   });
   it("#5750 a lane following the prescription but missing the outcome fails", async () => {
-    const o = await runCase({ issue: GISSUE, quotes: GQ, contract: GUIDED, impl: (t) => t.write({ "src/routes/scrape.js": prescribed, "test/leak.test.js": leakTest([]) }) });
+    const o = await runCaseEnf({ issue: GISSUE, quotes: GQ, contract: GUIDED, impl: (t) => t.write({ "src/routes/scrape.js": prescribed, "test/leak.test.js": leakTest([]) }) });
     assert.equal(o.ret.terminalReason, "needs-human"); assert.equal(o.pr, undefined, "no PR"); assert.equal(o.issue.state, "OPEN");
     assert.equal(o.ret.code, "conformance.unimplemented");
   });

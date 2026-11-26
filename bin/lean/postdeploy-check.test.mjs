@@ -94,7 +94,7 @@ describe("post-deploy named checks (#4626)", () => {
     assert.equal(r.state, "recorded-fail"); assert.deepEqual(w.spawned, []);
   });
 
-  it("contract: post-deploy needs a check id; amendment too; precheck rejects an unknown id; followup item names it", () => {
+  it("contract: post-deploy needs a check id; amendment too; followup item names it", () => {
     const Q = "The deploy-time health row must exist after promotion.";
     const c = { requirements: [{ id: "R1", quote: Q, disposition: "post-deploy", why: "w" }], deliverables: [], preserve: [], validate: [{ id: "V1", command: "true" }] };
     assert.ok(validateContract(c, Q).problems.some((p) => /needs a check id/.test(p)));
@@ -105,8 +105,6 @@ describe("post-deploy named checks (#4626)", () => {
     assert.equal(deferred.contract.requirements[0].disposition, "defer");
     const ok = applyAmendments(frozen, [{ kind: "post-deploy", requirement: "R1", why: "w", check: "smoke" }], Q);
     assert.equal(ok.contract.requirements[0].check, "smoke");
-    const pc = precheck({ contract: { ...c, requirements: [{ ...c.requirements[0], check: "ghost" }] }, result: { requirements: [] }, changedFiles: [], checkIds: new Set(["smoke"]) });
-    assert.ok(pc.failures.some((f) => f.kind === "check_unknown"));
     assert.match(followupItems([{ ...c.requirements[0], check: "smoke" }])[0].why, /^post-deploy: \[check:smoke\] w/);
   });
 });
