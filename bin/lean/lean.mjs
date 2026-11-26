@@ -49,7 +49,7 @@ import { prepareToolchain } from "./toolchain.mjs";
 import { toolStats } from "./toolstats.mjs";
 import { readTestMap, readTestMapAtRef, selectCommands, mergeChecks, factsPath, TEST_MAP_FILE } from "./testmap.mjs";
 import { deriveCiPrecheck, ciPrecheckOutcome, parseCiPrecheckConfig } from "./ci-precheck.mjs";
-import { runChecks, runWithTimeoutRetry, splitPrecheckResults, timedOutDetail, planPrecheck, worktreeFingerprint, selfCheckState, quietFailure, CHECK_PLAN_FILE, SELF_CHECK_FILE, CHECK_LOG_DIR } from "./precheck.mjs";
+import { runChecks, runWithTimeoutRetry, splitPrecheckResults, timedOutDetail, planPrecheck, worktreeFingerprint, selfCheckState, quietFailure, checkFailureTail, CHECK_PLAN_FILE, SELF_CHECK_FILE, CHECK_LOG_DIR } from "./precheck.mjs";
 import { retrying, ghCacheRetry, refreshAuthOnce, runRefreshScript, GH_AUTH_RE, GH_AUTH_RETRY_SECONDS, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, parseAmendmentsComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
 import { parseVerifierConfig, pickVerifierModel, changedSymbols, callersOf, verifierBudget, verifierPrompt, parseVerifierFindings, findingsToFailures, renderVerifierNote, VERIFIER_SYSTEM } from "./verifier.mjs";
@@ -165,6 +165,9 @@ export function builderFixable(failures) {
 const AUTH_RETRY_SECONDS = 900;
 /** #5762: retry-in for a `backend.cli_failed` deferral (transient, not an account condition). */
 const CLI_FAILED_RETRY_SECONDS = 120;
+/** #6105: a builder session the API cut short (terminal_reason api_error and kin) is resumed by id after these backoffs; past them the lane defers (backend.cli_failed), never the breaker. */
+export const API_RESUME_BACKOFF_MS = Object.freeze([20_000, 60_000, 180_000]);
+const API_RESUME_PROMPT = "Your previous turn was cut off by a transient API error (not by anything you did). Nothing you committed or wrote in the worktree was lost. Continue the task exactly where you left off; do not start over and do not redo finished work.";
 /** #5762: the account number (digits only) a lane used: the rotator's capture, else TOKENBATON_ACCOUNT / CLAUDE_CONFIG_DIR `.claude-<n>`; null when unknown. */
 export function laneAccountNumber(env = process.env, account = null) {
   if (account != null && /^\d+$/.test(String(account))) return String(account);
@@ -611,6 +614,7 @@ export async function runCore(o) {
   }
   let sparse = null; // #4221: {excluded, maxKb} when the lane worktree is a sparse checkout; null leaves prompts unchanged
   // #4395: lane profile. full (FORGEDOCK_FULL_SESSION=1): unchanged sessions; memory-off: no auto-memory; lane: also no CLAUDE.md, the lane file appended
+  let laneApiResumes = 0; // #6105: builder sessions resumed after a transient API termination (RUN_TERMINAL api_resumes)
   let laneProfile = { name: process.env.FORGEDOCK_FULL_SESSION === "1" ? "full" : "memory-off", text: null };
   let toolchain = null; // #4163: {env, summary} when the repo pins its toolchain (env only with a pm shim); null leaves runner env and prompts unchanged
   // #4169: heavy steps take a host semaphore slot (io.heavy); LLM phases are not gated. `heavyEnv` puts the heavy shims on
@@ -775,7 +779,7 @@ export async function runCore(o) {
     const term = { event: "RUN_TERMINAL", reason, code, ...(extra.cliResult != null ? { cli_result: extra.cliResult } : {}), ...(typeof extra.cliIsError === "boolean" ? { cli_is_error: extra.cliIsError } : {}), ...(extra.account ? { account: extra.account } : {}), // #5762
       ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}), ...(verifiedLane != null ? { verified: verifiedLane } : {}),
       ...(reproQ ? { repro_quality: reproQ } : {}), conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}), ...(firstReview ? { first_review: firstReview } : {}), ...(adequacyTel ?? {}),
-      ...(laneHead && reason !== "merged" ? { lane_branch: laneHead.pushedTo ?? "unpushed", lane_sha: laneHead.sha } : {}), context_pack: ctxCfg.mode, ...ctxAb, ...expTag, explore: exploreCfg.mode, wall_ms: now() - t0, ...(guardAddedMs ? { guard_added_ms: guardAddedMs } : {}), model_ms: modelMs, ...(usageUnknown ? { usage_unknown: true } : {}), light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
+      ...(laneHead && reason !== "merged" ? { lane_branch: laneHead.pushedTo ?? "unpushed", lane_sha: laneHead.sha } : {}), context_pack: ctxCfg.mode, ...ctxAb, ...expTag, explore: exploreCfg.mode, wall_ms: now() - t0, ...(guardAddedMs ? { guard_added_ms: guardAddedMs } : {}), model_ms: modelMs, ...(usageUnknown ? { usage_unknown: true } : {}), light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(laneApiResumes ? { api_resumes: laneApiResumes } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
       ...(route ? { builder_tier: route.tier, builder_class: route.class, builder_escalated: escalated, builder_model: route.model ?? "default" } : {}) }; // forge#4275: the on/off A/B groups runs by these; #4394: per-tier stats
     Object.assign(term, overheadStats(null, term.wall_ms, term.model_ms)); // fixed_overhead_ms + model_share for the SLO
     const phases = phaseLedger.snapshot(); // #4908: run log gets the nested ledger, FORGE:TELEMETRY the flattened scalars
@@ -1230,7 +1234,7 @@ export async function runCore(o) {
   let planSession = null;
   const notePlanSession = (r, trigger) => { planSession = { endTokens: num(r.endTokens), read: [...new Set([...(planSession?.read ?? []), ...handoffFacts(r.toolUses).read])], text: trigger === "plan" ? String(r.text ?? "") : planSession?.text ?? "" }; };
   async function builder(n, prompt, resume, live = false, restart = implementRestart, opts = {}) {
-    let timeoutRetries = 0, contextRestarts = 0, p = prompt;
+    let timeoutRetries = 0, contextRestarts = 0, apiResumes = 0, p = prompt;
     opts = { ...opts };
     const ceiled = laneCeiling > 0 && !opts.noCeiling && !UNCEILED.includes(opts.trigger); // #5346: per-size ceiling; noCeiling = a restart is certain
     for (;;) {
@@ -1249,6 +1253,20 @@ export async function runCore(o) {
         if (e?.code === "CLI_TURNS") {
           await attempt("implement", n, { usage: e.usage ?? null, turns: e.turns ?? null, tools: toolStats(e.toolUses), costUsd: null, model: opts.model ?? builderModel ?? null }, opts.mode, opts.trigger, opts.restartOf);
           return await budgetWrapup(n, opts);
+        }
+        if (e?.apiError === true) { // #6105: the API ended the session after real work: resume the same session (worktree and commits kept) with backoff, never relaunch the lane
+          const sid = e.cliSessionId ?? null;
+          if (!sid || apiResumes >= API_RESUME_BACKOFF_MS.length) {
+            ev({ event: "API_ERROR_RESUME_EXHAUSTED", session_id: sid, terminal_reason: e.cliTerminalReason ?? null, resumes: apiResumes, trigger: opts.trigger ?? null });
+            T.anomalies.push(`builder session ended ${e.cliTerminalReason ?? "api_error"} ${sid ? `after ${apiResumes} resume(s)` : "with no session id to resume"}: lane deferred`);
+            throw Object.assign(cliFailedDeferral(e), { deferDetail: `builder session ended ${e.cliTerminalReason ?? "api_error"} (transient API error) ${sid ? `and ${apiResumes} resume(s) of ${sid} failed` : "with no session id to resume"}; the branch keeps its commits; retried shortly${cliDetail(e)}` });
+          }
+          const waitMs = API_RESUME_BACKOFF_MS[apiResumes++]; laneApiResumes++;
+          ev({ event: "API_ERROR_RESUME", session_id: sid, terminal_reason: e.cliTerminalReason ?? null, attempt: apiResumes, wait_ms: waitMs, trigger: opts.trigger ?? null });
+          T.decisions.push(`Builder session ${sid} ended ${e.cliTerminalReason ?? "api_error"}: resuming the same session after ${Math.round(waitMs / 1000)}s (resume ${apiResumes}/${API_RESUME_BACKOFF_MS.length}), no relaunch`);
+          await renew(); await sleep(waitMs); await renew();
+          p = API_RESUME_PROMPT; resume = sid; opts.restartOf ??= opts.trigger ?? null; opts.trigger = "api_error_resume";
+          continue;
         }
         if (e?.code === "CLI_CONTEXT") {
           contextRestarts++; ctxStats.restarts++;
@@ -2925,6 +2943,30 @@ export async function runCore(o) {
       if (!round) T.decisions.push(`CI precheck (${p.source}): ${p.commands.length ? p.commands.map((c) => `${c.name} (${c.why})`).join(", ") : "no job to run locally"}${p.unrunnable.length ? `; unrunnable: ${p.unrunnable.map((u) => `${u.name}: ${u.reason}`).join("; ")}` : ""}`);
       return p.commands.map((c) => c.command);
     }
+    // #6107: a ci.red recovery must not judge a stale tree: the base's current head is merged in before any check runs. A conflict
+    // the engine cannot resolve deterministically ends base.conflict (recoverable), never ci.red for a branch that is only behind.
+    if (recover?.code === OUTCOME_CODES.CI_RED && !isSplit && io.runCommand) {
+      try { await git(["fetch", "origin", lane]); } catch { /* offline: the local ref */ }
+      const behind = Number(String(await git(["rev-list", "--count", `HEAD..${base}`]).catch(() => "0")).trim()) || 0;
+      if (behind > 0) {
+        let merged = true, conflicted = [];
+        try { await git(["merge", "--no-edit", base]); } catch { merged = false; conflicted = String(await git(["diff", "--name-only", "--diff-filter=U"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean); }
+        if (!merged && conflicted.length) {
+          const bm = o.baseMerge, cr = io.conflictResolve && bm && Object.values(bm).some((v) => v?.length) ? await io.conflictResolve({ cwd: wt, files: conflicted, cfg: bm }).catch(() => null) : null;
+          if (cr?.resolved?.length && !(cr.remaining ?? []).length) { try { await git(["commit", "--no-edit"]); merged = true; } catch { /* abort below */ } }
+          if (!merged) {
+            await git(["merge", "--abort"]).catch(() => {});
+            ev({ event: "RECOVERY_BASE_SYNC", base, behind, result: "conflict", files: conflicted.slice(0, 20) });
+            return await needsHuman(`The branch conflicts with ${base} in ${conflicted.slice(0, 20).join(", ")}; the recovery's checks were not run on the stale tree (a conflicting base is not a check failure); nothing merged.`, OUTCOME_CODES.BASE_CONFLICT);
+          }
+        } else if (!merged) { await git(["merge", "--abort"]).catch(() => {}); T.anomalies.push(`Recovery base-sync could not merge ${base} (${behind} commit(s) behind, no conflict files); checks run on the branch as it is`); }
+        if (merged) {
+          ev({ event: "RECOVERY_BASE_SYNC", base, behind, result: "merged" });
+          T.decisions.push(`Recovery: merged ${base} (${behind} commit(s) behind) before re-running the checks`);
+          files = await changedFiles();
+        }
+      }
+    }
     let ciCommands = await ciPrecheckPlan(0);
     const pickChecks = () => planPrecheck({ testMap, files, learned: [...learnedCommands, ...ciCommands], maxMinutes: o.precheck?.maxMinutes, verify: vcfg });
     let picked = pickChecks();
@@ -2969,8 +3011,9 @@ export async function runCore(o) {
         if (!failed.length && timedOut.length && (vcfg.precheckBlock || guardFailing(timedOut))) return await needsHuman(`Environment error (not a check failure): pre-PR check command(s) timed out even after one longer retry, which is host load rather than a failing check; no builder resume was spent, the branch is pushed and nothing merged: ${timedNames}`, ENV_VALIDATE_TIMEOUT);
         if (!failed.length) { checkCommandsFailing = false; if (round) T.decisions.push(`Declared check commands pass after ${round} builder fix round(s)`); await gatePassed("precheck"); break; }
         const names = failed.map((f) => `\`${f.command}\` (exit ${f.rc})`).join(", ");
-        const failTail = (fs) => fs.map((f) => `\n\n\`${f.command}\` output tail:\n${quietFailure(f.output, { maxChars: 2000 })}`).join(""); // #5749: the recovery lane starts from the failing check's output, not only its name
-        if (isSplit) return await needsHuman(`Declared check command(s) fail on the refactor:split move (no builder edits a split); nothing merged: ${names}`, OUTCOME_CODES.CI_RED);
+        // #5749/#6107: the park names each failing check and carries the last ~40 lines of its output, secrets redacted (run log too)
+        const failTail = (fs) => { const rows = fs.map((f) => ({ name: ciDerived.get(f.command)?.name ?? null, command: f.command, rc: f.rc, tail: checkFailureTail(f, { name: ciDerived.get(f.command)?.name }) })); ev({ event: "PRECHECK_FAILED", round, checks: rows.map(({ name, command, rc, tail }) => ({ name, command, rc, tail })) }); return rows.map((r) => r.tail).join(""); };
+        if (isSplit) return await needsHuman(`Declared check command(s) fail on the refactor:split move (no builder edits a split); nothing merged: ${names}${failTail(failed)}`, OUTCOME_CODES.CI_RED);
         checkCommandsFailing = true;
         { const red = await guardRed(failed, { bypass: vcfg.guardBypass === true }); if (red === "bypass") { checkCommandsFailing = false; break; } if (red) return red; } // #5239: a guard that also fails on the base defers the lane; #5992: unless the lane is clear of the guarded surface
         if (round >= vcfg.maxRounds || !sessionId) { if (vcfg.precheckBlock || guardFailing(failed)) return await needsHuman(`Declared check command(s) still failing before the PR (verify.precheck_block); nothing merged: ${names}${failTail(failed)}`, OUTCOME_CODES.CI_RED); T.anomalies.push(`Declared check command(s) still failing before the PR: ${names}`); break; }
@@ -3957,7 +4000,12 @@ export async function runCore(o) {
         if (outcome.state === "review.incomplete") return await needsHuman(`The conformance review was incomplete twice (a review without complete rows cannot pass); nothing merged:\n${list}`, OUTCOME_CODES.REVIEW_INCOMPLETE);
         if (outcome.state === "review.inconsistent") return await needsHuman(`The conformance reviewer twice said NONCONFORMING without a failing row; nothing merged.`, OUTCOME_CODES.REVIEW_INCONSISTENT);
         let failKey = JSON.stringify((outcome.failures ?? []).map((f) => `${f.code}|${f.detail}`).sort()); // #5644: a round that leaves the failure set unchanged ends the rounds
-        if (!sessionId || resumes >= (builderFixable(outcome.failures) ? reviewMaxResumes : 1) || failKey === lastFailKey) return await needsHuman(`The change does not conform to the issue and its frozen contract after ${resumes ? (resumes === 1 ? "one builder resume" : `${resumes} builder resumes`) : "the build (no session to resume)"} (${outcome.by}); nothing merged:\n${list}`, outcome.failures?.[0]?.code);
+        if (!sessionId || resumes >= (builderFixable(outcome.failures) ? reviewMaxResumes : 1) || failKey === lastFailKey) {
+          // #6058: a requirement with no status row was skipped after the targeted resume, not failed: a distinct park (kind requirement_no_status)
+          const skippedIds = [...new Set((outcome.failures ?? []).filter((f) => f?.kind === "requirement_no_status" && f.reqId).map((f) => f.reqId))];
+          if (skippedIds.length) return await needsHuman(`The builder did not address ${skippedIds.join(", ")}: no status row in ${RESULT_FILE}${resumes ? ` after ${resumes === 1 ? "a targeted resume" : `${resumes} targeted resumes`} naming ${skippedIds.length === 1 ? "it" : "them"}` : " (no session to resume)"} (skipped, not a failing check); nothing merged:\n${list}`, outcome.failures?.[0]?.code, { kind: "requirement_no_status", requirements: skippedIds });
+          return await needsHuman(`The change does not conform to the issue and its frozen contract after ${resumes ? (resumes === 1 ? "one builder resume" : `${resumes} builder resumes`) : "the build (no session to resume)"} (${outcome.by}); nothing merged:\n${list}`, outcome.failures?.[0]?.code);
+        }
         lastFailKey = failKey;
         resumes++;
         T.decisions.push(`Not conforming (${outcome.by}${outcome.inconsistent ? ", reviewer verdict contradicted its rows" : ""}): ${[...new Set(outcome.failures.map((f) => f.code))].join(", ")} (${explained.slice(0, 5).map((f) => String(f.detail).slice(0, 160)).join("; ")}); builder resumed (round ${resumes} of ${reviewMaxResumes})`);
