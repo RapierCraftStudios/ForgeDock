@@ -2035,6 +2035,30 @@ export function normalizeKindModes(raw) {
  * @param {{code?: string}[]} failures
  * @param {{shadow?: boolean, kinds?: Record<string,string>|null, allow?: string[]}} [o]
  */
+/**
+ * Advisory gates (2026-11-26 unclog): rules about the shape of the work (file scope, registries, docs placement,
+ * recurrence design, amendment syntax, growth counters) are reported, never blocking. Measured on 102 open FD/AlterLab
+ * issues: these rows caused ~30% of needs-human parks, repeated identically across reruns, and forced every lane to edit
+ * the same shared files (45 of 67 conflicted base-syncs). A lane still blocks on what shows the change is wrong: failing
+ * validate/CI/guard/repro runs, regressions and unimplemented requirements.
+ */
+export const ADVISORY_CODES = Object.freeze([OUTCOME_CODES.CONFORMANCE_SCOPE_CREEP, OUTCOME_CODES.RECURRENCE_DESIGN_MISSING, OUTCOME_CODES.MAINTENANCE_HOTSPOT_GROWTH, OUTCOME_CODES.MAINTENANCE_COUNTER_GROWTH]);
+export const ADVISORY_KINDS = Object.freeze([
+  "scope_creep", "check_unknown", "design_missing", "design_missing_repeated", "docs_missing", "docs_link_broken",
+  "ci_budget_unannotated", "hotspot_growth", "counter_growth",
+  "amendment_invalid", "substitute_unverified",
+  "page_metadata_missing", "page_sitemap_missing", "page_canonical_missing", "page_structured_data_missing",
+]);
+/**
+ * Split failures into {block, advisory}; advisory rows are reported on the issue and never park a lane. `enforce`: codes
+ * a repo explicitly set to "enforce" (forge.yaml engine.conformance_kinds), which stay blocking.
+ */
+export function splitAdvisory(failures, { enforce = [] } = {}) {
+  const block = [], advisory = [];
+  for (const f of failures ?? []) (!enforce.includes(f?.code) && (ADVISORY_KINDS.includes(f?.kind) || ADVISORY_CODES.includes(f?.code)) ? advisory : block).push(f);
+  return { block, advisory };
+}
+
 export function blockingFailures(failures, { shadow = false, kinds = null, allow = [] } = {}) {
   const block = [], record = [];
   for (const f of failures ?? []) {

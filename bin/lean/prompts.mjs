@@ -272,7 +272,7 @@ A [type:e2e] requirement needs a validate that runs a real e2e check (repo e2e s
 A new keyword/regex classifier ships negative examples (inputs it must not match).
 A forge.yaml outcome_evidence area change needs result outcome_evidence [{area,metric,corpus,before,after,better}] measured on recorded real inputs; its post-deploy checks get a numeric baseline.
 A new workspace-package dependency in a package.json no deliverable names is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
-If scripts/check-devdocs-freshness.sh exists, a behaviour change under its paths must update the matching dossier (devdocs/modules/*.md, per devdocs/index.yaml) in the same change; run it against the base first.
+If scripts/check-devdocs-freshness.sh exists, a behaviour change under its paths adds a new devdocs/decisions/<issue>-<slug>.md in the same change (a new file never conflicts with parallel lanes); run it against the base first.
 
 Before writing ${RESULT_FILE}, after your last edit, run \`node ${FORGEDOCK_CLI} check\` in the worktree and fix until it passes; if it cannot pass, report the problem as blocked.
 A \`FAIL review\` line from check is a finding the reviewer would raise; fix it. Also:
@@ -444,9 +444,9 @@ export function structurePrompt(edges, mode = "local") {
   return `This change adds dependencies between workspace packages that the frozen contract does not name:\n${edges.slice(0, 30).map((e) => `- ${e.from} -> ${e.to} (${e.kind}, ${e.manifest})`).join("\n")}\n\nFor each one, add it to the contract with a reason, or remove it: either record {"kind":"add-deliverable","path":"<that package.json>","why":"<names the package and why this dependency is right>"} in ${RESULT_FILE}, or drop the dependency from the package.json and the code that needs it. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
-/** The repo's devdocs freshness rule failed on the committed change: update the named dossier(s) and commit. */
+/** The repo's devdocs freshness rule failed on the committed change: add a decision record (conflict-free) and commit. */
 export function docsPrompt(output, mode = "local") {
-  return `The repository's docs freshness check (scripts/check-devdocs-freshness.sh) fails on this change:\n${String(output ?? "").slice(0, 4000)}\n\nUpdate the module dossier it names (devdocs/modules/*.md; devdocs/index.yaml maps files to dossiers) to describe the behaviour you changed, in the dossier's existing style and in a few lines. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+  return `The repository's docs freshness check (scripts/check-devdocs-freshness.sh) fails on this change:\n${String(output ?? "").slice(0, 4000)}\n\nAdd a new devdocs/decisions/<issue>-<slug>.md describing the behaviour you changed in a few lines (a new file never conflicts with parallel lanes; edit a shared dossier only when the check accepts nothing else). ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
 /**
