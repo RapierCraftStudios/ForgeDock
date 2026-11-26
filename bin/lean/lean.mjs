@@ -464,6 +464,7 @@ export async function runCore(o) {
     usage.input += u.input_tokens ?? 0; usage.output += u.output_tokens ?? 0;
     usage.cache += (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
   }
+  let iss; // the issue as read at intake; declared early so the comment helpers below can see it
   const localPosts = []; // #5979: comments this lane created, so a second post in the same run sees them
   const allComments = () => [...(iss?.comments ?? []), ...localPosts];
   let statusCache = null; // #5592: {id, sections} of this issue's one FORGE:STATUS comment, edited in place
@@ -612,7 +613,7 @@ export async function runCore(o) {
   // #4169: heavy steps take a host semaphore slot (io.heavy); LLM phases are not gated. `heavyEnv` puts the heavy shims on
   // the runner PATH; `waits` ({phase: ms}) and `heavyQueueMax` ride on the lane result for the batch report.
   const heavyCfg = o.heavy ?? {}, heavyOn = Boolean(io.heavy) && heavyCfg.enabled !== false;
-  let heavyEnv = null, heavyWaitsFile = null, heavyQueueMax = 0, stage = "plan", iss;
+  let heavyEnv = null, heavyWaitsFile = null, heavyQueueMax = 0, stage = "plan";
   let seqBuildNote = ""; // #5235: numbers reserved for this lane at build start (prompt paragraph)
   const recCfg = parseRecurrenceConfig(o.recurrenceConfig); // #5751: forge.yaml recurrence: (absent: mode on, threshold 2, no hot areas or counters)
   let recurrence = null, hotLock = null; // #5751: the recurrence detection; the hot-area locks held until teardown

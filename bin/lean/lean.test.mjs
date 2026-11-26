@@ -549,29 +549,6 @@ describe("core work-on", () => {
     assert.equal(r.code, "review.no_verdict"); assert.equal(w.merges.length, 0);
   });
 
-  it("#5979 a second identical failure parks with one PARKED summary (failure.repeated), no relaunch; an unchanged DEPENDENCY is not re-posted", async () => {
-    const block = { status: "blocked", summary: "need creds", block: { kind: "human", why: "credentials" } };
-    const opts = { changed: [] };
-    const first = world(opts);
-    const r1 = await run(first);
-    assert.notEqual(r1.code, "failure.repeated", "the 1st failure is not parked");
-    const nh = first.comments.find((c) => c.includes("<!-- FORGE:NEEDS_HUMAN -->"));
-    assert.ok(nh && /sig=[0-9a-f]{12}/.test(nh), "every NEEDS_HUMAN carries its signature");
-    const again = world({ ...opts, viewComments: [{ author: { login: "rapiercraft-forgedock" }, body: nh }] });
-    const r2 = await run(again);
-    assert.equal(r2.code, "failure.repeated");
-    {
-      assert.equal(again.comments.filter((c) => c.includes("<!-- FORGE:PARKED -->")).length, 1);
-      assert.ok(again.edits.some((e) => e.includes("parked:failure.repeated")));
-      assert.ok(!again.comments.some((c) => c.includes("<!-- FORGE:NEEDS_HUMAN -->")), "the repeat posts the summary instead of another NEEDS_HUMAN");
-    }
-    const dep = depWorld({ changed: [], result: { status: "blocked", summary: "needs #3", block: { kind: "dependency", issues: [3] } } }, { 3: { state: "OPEN", labels: [] } });
-    await run(dep);
-    const posted = dep.comments.find((c) => c.includes("<!-- FORGE:DEPENDENCY -->"));
-    const dep2 = depWorld({ changed: [], viewComments: [{ author: { login: "rapiercraft-forgedock" }, body: posted }], result: block.block ? { status: "blocked", summary: "needs #3", block: { kind: "dependency", issues: [3] } } : null }, { 3: { state: "OPEN", labels: [] } });
-    await run(dep2);
-    assert.ok(!dep2.comments.some((c) => c.includes("<!-- FORGE:DEPENDENCY -->")), "same state: skipped");
-  });
   it("builder blocked on a typed human reason, or no commit, is needs-human", async () => {
     assert.equal((await run(world({ result: { status: "blocked", summary: "need creds", block: { kind: "human", why: "credentials" } } }))).terminalReason, "needs-human");
     assert.equal((await run(world({ changed: [] }))).terminalReason, "needs-human");
@@ -602,6 +579,29 @@ describe("core work-on", () => {
     };
     return w;
   };
+  it("#5979 a second identical failure parks with one PARKED summary (failure.repeated), no relaunch; an unchanged DEPENDENCY is not re-posted", async () => {
+    const block = { status: "blocked", summary: "need creds", block: { kind: "human", why: "credentials" } };
+    const opts = { changed: [] };
+    const first = world(opts);
+    const r1 = await run(first);
+    assert.notEqual(r1.code, "failure.repeated", "the 1st failure is not parked");
+    const nh = first.comments.find((c) => c.includes("<!-- FORGE:NEEDS_HUMAN -->"));
+    assert.ok(nh && /sig=[0-9a-f]{12}/.test(nh), "every NEEDS_HUMAN carries its signature");
+    const again = world({ ...opts, viewComments: [{ author: { login: "rapiercraft-forgedock" }, body: nh }] });
+    const r2 = await run(again);
+    assert.equal(r2.code, "failure.repeated");
+    {
+      assert.equal(again.comments.filter((c) => c.includes("<!-- FORGE:PARKED -->")).length, 1);
+      assert.ok(again.edits.some((e) => e.includes("parked:failure.repeated")));
+      assert.ok(!again.comments.some((c) => c.includes("<!-- FORGE:NEEDS_HUMAN -->")), "the repeat posts the summary instead of another NEEDS_HUMAN");
+    }
+    const dep = depWorld({ changed: [], result: { status: "blocked", summary: "needs #3", block: { kind: "dependency", issues: [3] } } }, { 3: { state: "OPEN", labels: [] } });
+    await run(dep);
+    const posted = dep.comments.find((c) => c.includes("<!-- FORGE:DEPENDENCY -->"));
+    const dep2 = depWorld({ changed: [], viewComments: [{ author: { login: "rapiercraft-forgedock" }, body: posted }], result: block.block ? { status: "blocked", summary: "needs #3", block: { kind: "dependency", issues: [3] } } : null }, { 3: { state: "OPEN", labels: [] } });
+    await run(dep2);
+    assert.ok(!dep2.comments.some((c) => c.includes("<!-- FORGE:DEPENDENCY -->")), "same state: skipped");
+  });
   const noNeedsHuman = (w) => {
     assert.ok(!w.edits.some((e) => e.includes("--add-label") && e.includes("needs-human")), JSON.stringify(w.edits));
     assert.ok(!w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN")));
