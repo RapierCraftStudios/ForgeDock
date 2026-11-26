@@ -259,11 +259,11 @@ describe("recordSync (#5566)", async () => {
 
 describe("release ledger rounds (#6013)", () => {
   it("records rounds with count, wall time and cause, redacted on write and read back", async () => {
-    const { recordRound, roundStats } = await import("./release-ledger.mjs");
+    const { recordReleaseRound, roundStats } = await import("./release-ledger.mjs");
     const gh = fakeGh(), ctx = ctxOf(gh);
     const state = { status: "running" };
-    recordRound(state, { pr: 9, head: "a1", outcome: "fail", cause: "regression", startedAt: "2026-11-01T10:00:00Z", endedAt: "2026-11-01T10:30:00Z" });
-    recordRound(state, { pr: 10, head: "b2", outcome: "pass", cause: "bogus", startedAt: "2026-11-01T11:00:00Z", endedAt: "2026-11-01T11:45:00Z" });
+    recordReleaseRound(state, { pr: 9, head: "a1", outcome: "fail", cause: "regression", startedAt: "2026-11-01T10:00:00Z", endedAt: "2026-11-01T10:30:00Z" });
+    recordReleaseRound(state, { pr: 10, head: "b2", outcome: "pass", cause: "bogus", startedAt: "2026-11-01T11:00:00Z", endedAt: "2026-11-01T11:45:00Z" });
     assert.deepEqual(state.rounds.map((r) => r.n), [1, 2]);
     assert.equal(state.rounds[1].cause, null, "unknown cause is not recorded");
     const s = roundStats(state.rounds);

@@ -223,7 +223,7 @@ export async function recordTrain(ctx, rec, now = Date.now()) {
 
 const CAUSES = ["regression", "flake", "runner"];
 /** #6013: append one snapshot round `{n, pr, head, outcome, cause, startedAt, endedAt}` to `state.rounds` (n is assigned, cause normalised). */
-export function recordRound(state, r) {
+export function recordReleaseRound(state, r) {
   state.rounds ??= [];
   const round = { n: state.rounds.length + 1, pr: r.pr ?? null, head: r.head ?? null, outcome: r.outcome ?? null, cause: CAUSES.includes(r.cause) ? r.cause : null, startedAt: r.startedAt ?? null, endedAt: r.endedAt ?? null };
   state.rounds.push(round);
