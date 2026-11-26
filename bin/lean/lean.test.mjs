@@ -569,6 +569,23 @@ describe("core work-on", () => {
     assert.equal(real.code, "builder.blocked");
   });
 
+  it("#6076 an unhappy terminal posts one FORGE:LANE_AUDIT; a failing audit post leaves the terminal reason unchanged", async () => {
+    const block = { status: "blocked", summary: "need creds", block: { kind: "human", why: "credentials" } };
+    const w = world({ changed: [], result: block });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human");
+    const audits = w.comments.filter((c) => c.includes("<!-- FORGE:LANE_AUDIT -->"));
+    assert.equal(audits.length, 1);
+    assert.match(audits[0], /"status": "proposed"/);
+    assert.match(audits[0], /"engine_version"/);
+    const bad = world({ changed: [], result: block });
+    const gh = bad.io.gh;
+    bad.io.gh = async (a) => { if (a[0] === "issue" && a[1] === "comment" && String(a[a.indexOf("--body") + 1]).includes("FORGE:LANE_AUDIT")) throw new Error("gh down"); return gh(a); };
+    const r2 = await run(bad);
+    assert.equal(r2.terminalReason, "needs-human");
+    assert.equal(r2.code, r.code);
+  });
+
   // #4124: a builder block is typed; only kind "human" with an allowed reason may reach needs-human.
   const depWorld = (o, deps) => {
     const w = world(o);

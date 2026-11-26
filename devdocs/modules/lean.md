@@ -3789,6 +3789,13 @@ Filing: `file_issues` is **opt-in, default off** (only an explicit `file_issues:
 - The dispatcher writes the marker (`suspendLane`, `suspendMarker` in `bin/engine-cli.mjs`): when a kept sandbox is recorded (halted, `sandbox.unreachable`, `sandbox.auth`; `providerLanes` `suspendKept`), when a kept issue is held (`--hold`) or its batch paused (`--pause`); cleared on release, unpause and adopt (`resumeKept`). Held/paused batches still admit nothing, including deferred issues whose retry timer fires (`isReady`, launch re-read); `--hold <id> pending` holds every pending and backing-off issue.
 - Kept sandboxes are recorded in `state.kept` (issue, since, phase) and listed by `orchestrate --status` and `pool status` (table section and `kept_sandboxes` in `--json`) via `keptSandboxes` (`bin/lean/batch.mjs`).
 
+## Lane audit at unhappy terminals (#6076)
+
+- `finish()` in `bin/lean/lean.mjs` calls `runLaneAudit` (`bin/lean/lane-audit.mjs`) once at needs-human (including PARKED), engine-error and a final budget/ci-pending terminal, after the terminal post. The call is wrapped in try/catch and `runLaneAudit` never throws, so an audit cannot change the terminal reason or code.
+- It posts one `FORGE:LANE_AUDIT` comment: a JSON audit `{key, issue, terminal, signature, class, owner, action, active, fixed_in_later, status: proposed|confirmed, stamp}`. `stamp` = engine version, build sha, agent version, image tag, forge.yaml hash, batch id, attempt. Idempotent: keyed on issue + attempt + signature, so a rerun posts nothing.
+- `bin/lean/lane-audit-signatures.mjs` is the data table `{id, class (genuine|pipeline|spec|env|pool), owner, action, match(evidence), introduced_in, fixed_in}`, seeded from #6072. A match whose `fixed_in` is later than the lane's engine version is `fixed_in_later`: not active, and the gap seam is not called. No LLM is involved in classification.
+- Seams: `lane-audit-gap.mjs` (`auditGap`, called for active pipeline/env/pool findings; filled by #6078) and `lane-audit-llm.mjs` (`classifyWithLlm`, called for unmatched evidence; filled by #6079). Both are no-ops returning null.
+
 ## Entry 2026-11-26 — remote heavy backend, quota-aware workers (#6047)
 `heavy.mjs` `runWrapped` uses `acquireRemote` when `CS_HEAVY_BASE` is set (the pool agent's per-sandbox token route; only set when the
 agent runs with `elastic_lanes`): acquire polls while denied, a timer renews the lease, release is best effort, and an unreachable or
