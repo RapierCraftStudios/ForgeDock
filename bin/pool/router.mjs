@@ -17,7 +17,7 @@ import { versionOf } from "./version.mjs";
  * What the router ships to pool agents (self-update and bootstrap). Every module the agent can load statically from
  * bin/pool/agent.mjs must live under these paths; bin/tests/pool-agent-bundle.test.mjs enforces it.
  */
-export const AGENT_BUNDLE_PATHS = Object.freeze(["package.json", "bin/pool", "pool"]);
+export const AGENT_BUNDLE_PATHS = Object.freeze(["package.json", "bin/pool", "bin/lean/concurrency.mjs", "pool"]); // concurrency.mjs: thresholds imported by pool/lane-target.mjs (#6061); it has no imports
 
 const run = promisify(execFile);
 
@@ -248,13 +248,16 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   }
   /** #5967: host free memory and the other-VM (vmmem) working sets per agent. */
   const memReport = (c) => Number.isFinite(c.host_mem_free_gb) ? { host_mem_free_gb: c.host_mem_free_gb, ...(Array.isArray(c.vmmem) && c.vmmem.length ? { vmmem: c.vmmem } : {}), ...(c.host_mem_low === true ? { host_mem_low: true } : {}) } : {};
+  const reportedTarget = new Map(); // #6061: agent -> lane_target from its last answered /capacity
   async function capacities() {
     const out = [];
     for (const [name, a] of Object.entries(agents())) {
       try {
         const r = await agentCall(a, "GET", "/capacity", undefined, 5000);
+        if (r.ok && Number.isInteger(r.data?.lane_target)) reportedTarget.set(name, r.data.lane_target); else reportedTarget.delete(name);
+        if (!r.ok) dropPending(name);
         out.push(r.ok ? { name, ok: true, ...(a.transport ? { transport: a.transport } : {}), ...r.data } : { name, ok: false, error: `HTTP ${r.status}` });
-      } catch (e) { out.push({ name, ok: false, ...(a.transport ? { transport: a.transport } : {}), error: String(e.message ?? e) }); }
+      } catch (e) { reportedTarget.delete(name); dropPending(name); out.push({ name, ok: false, ...(a.transport ? { transport: a.transport } : {}), error: String(e.message ?? e) }); }
     }
     return out;
   }
@@ -292,13 +295,19 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   // awaited agent call, so concurrent launches cannot overshoot.
   const isLane = (id) => typeof id === "string" && id.startsWith("fdrsbx-");
   const validCeiling = (v) => Number.isInteger(v) && v >= 0;
-  function ceilingOf(name) {
+  function configuredCeiling(name) {
     const st = own(agents(), name)?.max_lanes;
     if (validCeiling(st)) return st;
     const c = cfg.agents && Object.hasOwn(cfg.agents, name) ? cfg.agents[name]?.max_lanes : undefined;
     return validCeiling(c) ? c : null;
   }
+  // #6061: the lower of the configured ceiling and the agent's own lane_target (from its last /capacity).
+  function ceilingOf(name) {
+    const c = configuredCeiling(name), t = reportedTarget.get(name);
+    return t === undefined ? c : c === null ? t : Math.min(c, t);
+  }
   const pending = new Map(); // agent -> Set of lane ids reserved by an in-flight launch or claim
+  const dropPending = (name) => { pending.delete(name); }; // #6061: a worker that stopped answering must not hold batch slots
   const lanesOn = (name) => {
     const ids = new Set(pending.get(name) ?? []);
     for (const [id, s] of Object.entries(sbx())) if (s?.agent === name && isLane(id)) ids.add(id);
@@ -345,7 +354,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     const hit = seedPick.get(id);
     if (hit && own(agents(), hit.agent) && now() - hit.at < 30 * 60000) return hit.agent;
     for (const [k, v] of seedPick) if (now() - v.at >= 30 * 60000) seedPick.delete(k);
-    const fits = (await capacities()).filter((c) => c.ok && !c.paused && c.host_disk_low !== true && c.disk_capped !== true).sort((a, b) => b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
+    const fits = (await capacities()).filter((c) => c.ok && !c.paused && !c.draining && c.accepting !== false && c.host_disk_low !== true && c.disk_capped !== true).sort((a, b) => b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
     if (!fits.length) return null;
     seedPick.set(id, { agent: fits[0].name, at: now() });
     return fits[0].name;
@@ -371,7 +380,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       delete sbx()[spec.id]; store.save();
     }
     const size = sizeFor(spec);
-    const sized = (await capacities()).filter((c) => c.ok && !c.paused && inAccount(c, spec) && fitsPriority(c, spec, size));
+    const sized = (await capacities()).filter((c) => c.ok && !c.paused && !c.draining && c.accepting !== false && inAccount(c, spec) && fitsPriority(c, spec, size));
     const diskLow = sized.filter((c) => c.host_disk_low === true).map((c) => c.name); // #5733: never POST to a host whose drive is short
     const capped = sized.filter((c) => c.disk_capped === true && c.host_disk_low !== true).map((c) => c.name); // #5884: lane disk at its hard cap
     const memLow = sized.filter((c) => c.host_mem_low === true && c.host_disk_low !== true && c.disk_capped !== true).map((c) => c.name); // #5967: host memory under the floor
@@ -404,7 +413,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     if (own(sbx(), spec.id)) return launch(spec); // already placed: the same idempotent path
     const size = sizeFor(spec);
     const laneId = isLane(spec.id);
-    for (const c of (await capacities()).filter((x) => x.ok && !x.paused && inAccount(x, spec))) {
+    for (const c of (await capacities()).filter((x) => x.ok && !x.paused && !x.draining && x.accepting !== false && inAccount(x, spec))) {
       if (laneId && atCeiling(c.name)) continue; // #5735: the 404 makes the caller cold-launch, which gets the ceiling 503
       if (laneId) reserve(c.name, spec.id);
       try {
