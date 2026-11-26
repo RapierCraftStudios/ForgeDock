@@ -75,7 +75,9 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
     const hop = r.status === 401 && ["router", "agent"].includes(r.data?.hop) ? r.data.hop : null;
     const who = hop === "agent" && typeof r.data?.agent === "string" ? `agent ${r.data.agent.slice(0, 64)}` : hop;
     const reason = hop && typeof r.data?.reason === "string" ? r.data.reason.replace(/^(router|agent) auth: /, "").replace(/[^\x20-\x7e]/g, "").slice(0, 80) : "";
-    const e = new Error(`sandbox ${what}: HTTP ${r.status}${who ? ` (${who} auth${reason ? `: ${reason}` : ""})` : ""}`);
+    // 2026-11-26: non-auth failures keep the pool's error text (printable, ≤160 chars, never a token), so a seed 409/422 says why
+    const err = !hop && typeof r.data?.error === "string" ? r.data.error.replace(/[^\x20-\x7e]/g, "").slice(0, 160) : "";
+    const e = new Error(`sandbox ${what}: HTTP ${r.status}${who ? ` (${who} auth${reason ? `: ${reason}` : ""})` : ""}${err ? `: ${err}` : ""}`);
     e.status = r.status;
     if (hop) e.hop = hop;
     if (typeof r.data?.code === "string" && r.data.code.startsWith("pool.")) e.poolCode = r.data.code; // #5985: the pool's refusal code reaches the deferral row

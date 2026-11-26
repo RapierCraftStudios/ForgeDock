@@ -66,8 +66,12 @@ export function localRunner({ root, seedDir }) {
 /** `runnerFor({slug, cache_key})` -> runner. Returns the agent's mirror seed handlers. */
 export function makeMirrorSeed({ seedDir, runnerFor, partTtlMs = SEED_PART_TTL_MS, uploadMax = SEED_UPLOAD_MAX, totalMax = SEED_TOTAL_MAX }) {
   mkdirSync(seedDir, { recursive: true });
-  const part = (up) => join(seedDir, `${up}.part`);
-  const size = (up) => { try { return statSync(part(up)).size; } catch { return 0; } };
+  // Concurrent lanes seeding the same repo build byte-identical bundles (same sha256). One shared `<sha>.part` let them
+  // append into each other's upload: 409 offset mismatch, then 422 when one finish deleted the file under the others
+  // (2026-11-26 lane-lifecycle audit: bursts of 5–12 lanes within seconds). Each uploader now has its own part file.
+  const who = (u) => (typeof u === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(u) ? `.${u}` : "");
+  const part = (up, uploader) => join(seedDir, `${up}${who(uploader)}.part`);
+  const size = (up, uploader) => { try { return statSync(part(up, uploader)).size; } catch { return 0; } };
   /** Removes `.part` files idle past the TTL; returns the bytes the remaining ones hold. */
   const sweep = () => {
     let total = 0;
@@ -87,11 +91,11 @@ export function makeMirrorSeed({ seedDir, runnerFor, partTtlMs = SEED_PART_TTL_M
   };
   return {
     /** `GET /mirrors`: {mirrors: {slug: {ref: sha} | "absent"}, upload_offset?}. */
-    async tips({ slug, cache_key = null, upload = null }) {
+    async tips({ slug, cache_key = null, upload = null, uploader = null }) {
       if (typeof slug !== "string" || !SLUG_RE.test(slug)) throw fail(400, "slug required");
       const out = String(await runnerFor({ slug, cache_key })(TIPS_SCRIPT, { NAME: mirrorName(slug) })).trim();
       const mirror = out === "ABSENT" ? "absent" : Object.fromEntries(out.split("\n").filter(Boolean).map((l) => { const i = l.indexOf(" "); return [l.slice(i + 1), l.slice(0, i)]; }));
-      return { mirrors: { [slug]: mirror }, ...(upload && SHA_RE.test(upload) ? { upload_offset: size(upload) } : {}) };
+      return { mirrors: { [slug]: mirror }, ...(upload && SHA_RE.test(upload) ? { upload_offset: size(upload, uploader) } : {}) };
     },
     /** One chunk: {slug, cache_key, upload, offset, data_b64, sha256}. A wrong offset is a 409 carrying the offset to resume from. */
     chunk(b) {
@@ -99,23 +103,23 @@ export function makeMirrorSeed({ seedDir, runnerFor, partTtlMs = SEED_PART_TTL_M
       const buf = Buffer.from(String(b.data_b64 ?? ""), "base64");
       if (!buf.length || buf.length > SEED_CHUNK_MAX) throw fail(413, `chunk must be 1..${SEED_CHUNK_MAX} bytes`);
       if (sha256(buf) !== b.sha256) throw fail(422, "chunk checksum mismatch");
-      const have = size(b.upload);
+      const have = size(b.upload, b.uploader);
       if (b.offset !== have) throw fail(409, "offset mismatch", { offset: have });
       if (have + buf.length > uploadMax) throw fail(413, `upload exceeds ${uploadMax} bytes`);
       if (sweep() + buf.length > totalMax) throw fail(413, `seed dir exceeds ${totalMax} bytes`);
-      appendFileSync(part(b.upload), buf);
+      appendFileSync(part(b.upload, b.uploader), buf);
       return { offset: have + buf.length };
     },
     /** Verifies the whole bundle against {size, sha256 = upload} and applies it. A corrupt upload is dropped; the mirror is never touched on failure. */
     async finish(b) {
       check(b);
       const f = b.finish ?? {};
-      const have = size(b.upload);
+      const p = part(b.upload, b.uploader), have = size(b.upload, b.uploader);
       if (!Number.isInteger(f.size) || have !== f.size) throw fail(409, "incomplete upload", { offset: have });
-      if (!existsSync(part(b.upload)) || sha256(readFileSync(part(b.upload))) !== b.upload) { rmSync(part(b.upload), { force: true }); throw fail(422, "bundle checksum mismatch"); }
-      try { await runnerFor(b)(APPLY_SCRIPT, { NAME: mirrorName(b.slug), BUNDLE: `${b.upload}.part` }); }
-      catch (e) { rmSync(part(b.upload), { force: true }); throw fail(422, `bundle apply failed: ${String(e.stderr || e.message).slice(-300)}`); }
-      rmSync(part(b.upload), { force: true });
+      if (!existsSync(p) || sha256(readFileSync(p)) !== b.upload) { rmSync(p, { force: true }); throw fail(422, "bundle checksum mismatch"); }
+      try { await runnerFor(b)(APPLY_SCRIPT, { NAME: mirrorName(b.slug), BUNDLE: `${b.upload}${who(b.uploader)}.part` }); }
+      catch (e) { rmSync(p, { force: true }); throw fail(422, `bundle apply failed: ${String(e.stderr || e.message).slice(-300)}`); }
+      rmSync(p, { force: true });
       return { ok: true, ...(await this.tips({ slug: b.slug, cache_key: b.cache_key })) };
     },
   };
