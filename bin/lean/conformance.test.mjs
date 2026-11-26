@@ -2484,3 +2484,30 @@ describe("builder prompt amendments agree with the validator (#5979)", () => {
     assert.match(applyAmendments(frozen, [{ kind: "supersedes", guard: "G2", why: "w" }]).problems[0], /substitute-validate/);
   });
 });
+
+describe("#6051 frozen defer/post-deploy rows are follow-ups, not omissions", () => {
+  const Q3 = "Metric: the failure rate stays under 5% over a real batch.";
+  const k = { ...C, requirements: [...C.requirements, { id: "R3", quote: Q3, disposition: "post-deploy", bucket: "post-deploy", check: "c1", why: "needs production traffic" }], decisions: [{ id: "K1", choice: "gate on frozen disposition" }] };
+  const kctx = { ...ctx, contract: k, issueText: `${ISSUE}\n${Q3}` };
+  const rows = { ...good, requirements: [...good.requirements, { id: "R3", status: "post-deploy", evidence: "", validated_by: "", deferral_ok: true }] };
+  it("6051 deferred row narrowed in coverage is not an omission", () => {
+    const d = decide({ ...rows, issue_coverage: [...good.issue_coverage, { quote: Q3, contract_ids: ["R3"], status: "narrowed" }, ] }, kctx);
+    assert.equal(d.state, "conforms", JSON.stringify(d.failures));
+    assert.deepEqual(d.followUps.map((x) => x.ids), [["R3"]]);
+  });
+  it("a deliver row narrowed is still an omission", () => {
+    const d = decide({ ...good, issue_coverage: [{ quote: Q1, contract_ids: ["R1"], status: "narrowed" }, ...good.issue_coverage.slice(1)] }, ctx);
+    assert.ok(codes(d).includes("conformance.omission"));
+  });
+  it("a Metric-over-real-batch requirement is post-deploy at freeze; plain rows are not", () => {
+    const out = autoPostDeployE2e({ requirements: [{ id: "R1", quote: Q3, disposition: "deliver" }, { id: "R2", quote: "The scrape route must release the reservation.", disposition: "deliver" }] });
+    assert.deepEqual(out.contract.requirements.map((r) => r.disposition), ["post-deploy", "deliver"]);
+    assert.deepEqual(out.converted.map((c) => c.id), ["R1"]);
+  });
+  it("an amendment citing a frozen decision is weighed against it", () => {
+    const am = (text) => ({ ...k, requirements: k.requirements.map((r) => (r.id === "R1" ? { ...r, amendment: { text, why: "w" } } : r)) });
+    const cov = { ...rows, issue_coverage: [{ quote: Q1, contract_ids: ["R1"], status: "narrowed" }, ...good.issue_coverage.slice(1)] };
+    assert.match(decide(cov, { ...kctx, contract: am("narrowed per K1") }).failures[0].detail, /frozen decision K1/);
+    assert.match(decide(cov, { ...kctx, contract: am("narrowed per K9") }).failures[0].detail, /amendment not accepted/);
+  });
+});
