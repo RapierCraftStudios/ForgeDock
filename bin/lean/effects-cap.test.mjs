@@ -19,12 +19,18 @@ describe("#5592 a huge git/gh output never crashes the lane", () => {
 describe("#5821 api route", () => {
   const cliRes = { text: "cli", sessionId: "s", usage: null, costUsd: 1, durationMs: 1, turns: 3, cliModel: "m", baselineTokens: 37000, toolUses: [] };
   const mk = (extra = {}) => { const calls = { cli: 0, api: 0 }; const runner = makeLeanRunner({ runCli: async () => { calls.cli++; return cliRes; }, probe: () => false, sandboxed: false, env: { ANTHROPIC_API_KEY: "k" },
-    apiRunner: async () => { calls.api++; return { text: "api", route: "api", turns: 1 }; }, ...extra }); return { runner, calls }; };
+    apiRunner: async (a) => { calls.api++; calls.args = a; return { text: "api", route: "api", turns: 1, baselineTokens: 120 }; }, ...extra }); return { runner, calls }; };
   const call = (runner, o = {}) => runner({ role: "reviewer", issue: 1, cwd: ".", model: null, resume: null, system: "s", prompt: "p<diff>\n</diff>", apiEligible: true, ...o });
   it("api route: configured reviewer role bypasses the CLI", async () => {
     const { runner, calls } = mk({ apiRoles: ["reviewer"] });
     const r = await call(runner);
-    assert.equal(r.route, "api"); assert.deepEqual(calls, { cli: 0, api: 1 });
+    assert.equal(r.route, "api"); assert.equal(calls.cli, 0); assert.equal(calls.api, 1);
+    // root cause: the old path spawned a CLI session (turns 3, 37k baseline); the API result must come back untouched, with the cacheable prefix split off the variable tail
+    assert.equal(r.text, "api"); assert.equal(r.turns, 1); assert.equal(r.baselineTokens, 120);
+    assert.equal(calls.args.system, "s"); assert.equal(calls.args.prefix, "p<diff>\n</diff>"); assert.equal(calls.args.tail, "");
+    assert.equal(calls.args.env.ANTHROPIC_API_KEY, "k");
+    const t = mk({ apiRoles: ["reviewer"] }); await call(t.runner, { prompt: "A<diff>\nD\n</diff>\nTAIL" });
+    assert.equal(t.calls.args.prefix, "A<diff>\nD\n</diff>"); assert.equal(t.calls.args.tail, "\nTAIL");
   });
   it("api route: default config, other roles and ineligible calls stay on the CLI", async () => {
     const a = mk(); assert.equal((await call(a.runner)).route, "cli"); assert.equal(a.calls.api, 0);

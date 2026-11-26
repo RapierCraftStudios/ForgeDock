@@ -25,3 +25,6 @@ Default off. New config: lean.api_roles, lean.api_fallback; env ANTHROPIC_API_KE
 Re-inspected the flagged lines in the 10 test files: none holds a list of bin/lean modules. The 30 (symbol, test) pairs are recorded in result.json not_members with reasons. No code changed.
 - R5b ✅ bin/lean/lean.mjs:2399, :2685 (delivered; amendment replaces the deferral)
 - R9 ✅ bin/lean/api-runner.mjs:40-42 cache_control on system and prefix (amended)
+
+### Test strengthening (conformance.test_weak)
+The R5 repro test in effects-cap.test.mjs now asserts the API result passes through (text, turns, baselineTokens), the runner receives system, the cacheable prefix, the tail and the key; dropping the prefix split fails it (mutation checked).
