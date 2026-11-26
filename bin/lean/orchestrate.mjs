@@ -396,6 +396,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const enqueued = toMap(saved?.enqueued); // #4409: issue -> when it last entered the queue (starvation guard)
   const heads = new Set(saved?.heads ?? []); // #4409: decomposed sub-issues not started yet: the head of their priority band
   let errorTimes = [...(saved?.errorTimes ?? [])];
+  const ceilingK = () => { let k = null; try { k = getParallel?.(); } catch { k = null; } return Number.isInteger(k) && k >= 1 ? k : parallel; }; // #5988: declared early: refreshHeld reads it
   const holdWarned = new Set(); let holdRamp = null; // #5988: declared early: the hoisted refreshHeld reads them from finish/recovery callbacks
   // #5859: agent restarts of this batch (one record each, shown by `status --batch`) and the lanes already requeued as `sandbox.lost`
   const agentRestarts = [...(saved?.agentRestarts ?? [])];
@@ -1999,7 +2000,6 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     if (back.size) save();
   };
-  const ceilingK = () => { let k = null; try { k = getParallel?.(); } catch { k = null; } return Number.isInteger(k) && k >= 1 ? k : parallel; };
   // #5985: K is the ceiling; the controller's operating point (and a lower heavy-lane cap) sits under it. A pool with no load/memory data leaves K unchanged.
   // #5985: light/heavy per lane (its repo's recent cpu_avg from usage-history rows, array or getter); heavy lanes have their own concurrent cap
   const laneClassOf = (n) => { let rows = null; try { rows = typeof usageRows === "function" ? usageRows() : usageRows; } catch { rows = null; } let repo = repoSlug; try { repo = repoOf?.(n) ?? repoSlug; } catch { repo = repoSlug; } return rows && repo ? classifyRepo(rows, repo) : "light"; };
