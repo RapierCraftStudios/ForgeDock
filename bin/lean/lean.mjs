@@ -614,6 +614,7 @@ export async function runCore(o) {
   }
   let sparse = null; // #4221: {excluded, maxKb} when the lane worktree is a sparse checkout; null leaves prompts unchanged
   // #4395: lane profile. full (FORGEDOCK_FULL_SESSION=1): unchanged sessions; memory-off: no auto-memory; lane: also no CLAUDE.md, the lane file appended
+  let laneApiResumes = 0; // #6105: builder sessions resumed after a transient API termination (RUN_TERMINAL api_resumes)
   let laneProfile = { name: process.env.FORGEDOCK_FULL_SESSION === "1" ? "full" : "memory-off", text: null };
   let toolchain = null; // #4163: {env, summary} when the repo pins its toolchain (env only with a pm shim); null leaves runner env and prompts unchanged
   // #4169: heavy steps take a host semaphore slot (io.heavy); LLM phases are not gated. `heavyEnv` puts the heavy shims on
@@ -1230,7 +1231,6 @@ export async function runCore(o) {
   let laneModelInfo = null; // #5829: the routed model's static window and cache-read price (null = unknown: kill-and-restart at the ceiling)
   const UNCEILED = ["plan", "contract_correction", "block_correction"], CONTEXT_RESTARTS_MAX = 3, CONTEXT_COMPACT_MAX = 2;
   /** #5812: the planning session's last-turn context, the files it read and its final reply, for the route hand-off. */
-  let laneApiResumes = 0; // #6105: builder sessions resumed after a transient API termination (RUN_TERMINAL api_resumes)
   let planSession = null;
   const notePlanSession = (r, trigger) => { planSession = { endTokens: num(r.endTokens), read: [...new Set([...(planSession?.read ?? []), ...handoffFacts(r.toolUses).read])], text: trigger === "plan" ? String(r.text ?? "") : planSession?.text ?? "" }; };
   async function builder(n, prompt, resume, live = false, restart = implementRestart, opts = {}) {
