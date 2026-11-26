@@ -79,13 +79,17 @@ export function installCommands(entry, { root = true } = {}) {
  */
 const PYPI = { yaml: "PyYAML", PIL: "Pillow", cv2: "opencv-python-headless", bs4: "beautifulsoup4", sklearn: "scikit-learn", dateutil: "python-dateutil", jwt: "PyJWT", dotenv: "python-dotenv", google: "protobuf", attr: "attrs", magic: "python-magic", Crypto: "pycryptodome", OpenSSL: "pyOpenSSL", serial: "pyserial", usb: "pyusb", zmq: "pyzmq", git: "GitPython", jose: "python-jose", multipart: "python-multipart" };
 const SAFE = /^@?[A-Za-z0-9][A-Za-z0-9._/+-]*$/;
+/** Debian/Ubuntu package stems where the import name differs (python3-<stem>). */
+const APT_PY = { PIL: "pil", cv2: "opencv", bs4: "bs4", sklearn: "sklearn", dateutil: "dateutil", jwt: "jwt", dotenv: "dotenv", serial: "serial", git: "git", magic: "magic" };
 export function genericInstallCommands(miss, { root = true } = {}) {
   const tool = String(miss?.tool ?? "").trim();
   if (!tool || !SAFE.test(tool) || tool.includes("..")) return [];
   const su = (c) => (root ? c : `sudo sh -c ${JSON.stringify(c)}`);
   if (miss.kind === "python-module") {
-    const pkg = PYPI[tool.split(".")[0]] ?? tool.split(".")[0];
-    return [`python3 -m pip install --user --quiet ${pkg} || python3 -m pip install --user --quiet --break-system-packages ${pkg}`];
+    const mod = tool.split(".")[0], pkg = PYPI[mod] ?? mod;
+    // 2026-11-26: lane images may ship python3 without pip; the distro package (python3-<module>) is the fallback
+    const deb = `python3-${(APT_PY[mod] ?? mod).toLowerCase().replace(/_/g, "-")}`;
+    return [`python3 -m pip install --user --quiet ${pkg} || python3 -m pip install --user --quiet --break-system-packages ${pkg} || (${su(`apt-get update -qq && apt-get install -y --no-install-recommends ${deb} && rm -rf /var/lib/apt/lists/*`)})`];
   }
   if (miss.kind === "node-module") return [`npm install --no-save --no-audit --no-fund ${tool}`];
   if (miss.kind === "command" && !tool.includes("/")) return [su(`apt-get update -qq && apt-get install -y --no-install-recommends ${tool} && rm -rf /var/lib/apt/lists/*`)];

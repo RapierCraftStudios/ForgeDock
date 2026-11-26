@@ -2796,6 +2796,7 @@ export async function runCore(o) {
               for (const command of shim ?? genericInstallCommands(miss, { root })) {
                 const r = await io.runCommand({ command, cwd: wt, timeoutMs: 600000, env: laneEnv() }).catch((e) => ({ rc: 1, stderr: String(e?.message ?? e) }));
                 tried.push({ tool: t, kind: miss.kind, rc: r?.rc ?? 0 });
+                process.stderr.write(`forgedock: generic install of ${t} (${miss.kind}) rc=${r?.rc ?? 0}${(r?.rc ?? 0) ? `: ${String(r?.output ?? r?.stderr ?? "").trim().split("\n").slice(-3).join(" | ").slice(0, 300)}` : ""}\n`); // lands in the lane log (dispatcher side)
               }
             }
             rawMisses = await preflightValidates(frozen).catch(() => []);
