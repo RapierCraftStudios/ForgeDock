@@ -25,6 +25,7 @@ import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statS
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { writeAtomic } from "./batch.mjs";
+import { formatConcurrency } from "./concurrency.mjs";
 
 export const DEFAULT_PRIORITY = 2;
 export const LOCK_WAIT_MS = 2000;
@@ -258,4 +259,37 @@ export function remoteLines(st, { agentOf = null } = {}) {
   const down = st?.pool ?? [];
   if (down.length) out.push(`pool: unreachable (${down.map((e) => `batch ${e.batch}${e.reason ? `: ${e.reason}` : ""}`).join("; ")})`);
   return out;
+}
+
+/**
+ * #5985: `sched show`/status lines `batch B concurrency: running/K/ceiling (limiting factor)`, from each running batch's last
+ * controller event in `log.jsonl` (`eventsOf(batch) -> rows`); `achieved` is running over the configured ceiling. Empty when none logged.
+ */
+export function concurrencyLines(st, { eventsOf = null } = {}) {
+  if (typeof eventsOf !== "function") return [];
+  const batches = [...new Set([...(st?.slots ?? []), ...(st?.remote ?? [])].map((e) => e.batch).filter(Boolean))];
+  const out = [];
+  for (const b of batches) {
+    let last = null;
+    try { for (const r of eventsOf(b) ?? []) if (r?.event === "concurrency") last = r; } catch { last = null; }
+    if (!last || !Number.isInteger(last.ceiling)) continue;
+    const running = Number.isInteger(last.running) ? last.running : 0;
+    out.push(`batch ${b} ${formatConcurrency({ running, k: last.k, ceiling: last.ceiling, factor: last.factor })}; achieved ${running} of ${last.ceiling} configured`);
+  }
+  return out;
+}
+
+/** #5847: batch-start report of the effective concurrency K, the host cap and which source set it; pure and read-only. */
+export function describeConcurrency({ parallel, parallelFrom = "default", registryCap = null, globalParallel = null, derivedCap = null, yamlFound = true, cwd = "." } = {}) {
+  const pos = (n) => (Number.isInteger(n) && n > 0 ? n : null);
+  const [reg, glob, derived] = [pos(registryCap), pos(globalParallel), pos(derivedCap)];
+  let cap = null, source = "none";
+  if (reg !== null) { cap = reg; source = "forgedock sched cap"; }
+  else if (glob !== null && (derived === null || glob <= derived)) { cap = glob; source = "forge.yaml orchestration.global_parallel"; }
+  else if (derived !== null) { cap = derived; source = "host-derived limit"; }
+  const line = `concurrency: K=${parallel} (host cap ${cap ?? "none"} from ${source}) [K from ${parallelFrom}]`;
+  const warnings = [];
+  if (cap !== null && Number(parallel) > cap) warnings.push(`warning: K=${parallel} exceeds the host cap ${cap} (${source}); lanes beyond ${cap} queue. Raise it with: forgedock sched cap ${parallel}`);
+  if (!yamlFound) warnings.push(`warning: no forge.yaml in ${cwd}; defaults apply (global_parallel unset, host-derived admission limits)`);
+  return { line, warnings };
 }

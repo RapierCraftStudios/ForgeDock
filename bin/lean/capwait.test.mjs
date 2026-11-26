@@ -46,3 +46,23 @@ describe("at pool capacity a lane waits for a free slot (#4909)", () => {
     assert.ok(Number.isFinite(rows[0].waits?.queue) && rows[0].waits.queue >= 0, "wait recorded as queue time");
   });
 });
+
+describe("capwait wakes on the named condition (#5985)", () => {
+  it("a host_load refusal holds until load < 1.0 whatever the slots say; host_mem until free mem > floor; no figures: slot fallback", () => {
+    let t = 0;
+    const w = makeCapWait({ now: () => t });
+    w.refused(1, "host_load");
+    assert.equal(w.blocked(1, { free: 5, load_per_core: 1.2 }), true, "free slots do not wake a load refusal");
+    t += 1000;
+    assert.equal(w.blocked(1, { free: 0, load_per_core: 0.8 }), false, "wakes the moment load clears, not on a timer");
+    w.refused(2, "pool.host_mem");
+    assert.equal(w.blocked(2, { mem_available_gb: 2 }), true);
+    assert.equal(w.blocked(2, { mem_available_gb: 9 }), false);
+    w.refused(3, "host_load");
+    assert.equal(w.blocked(3, { free: 0 }), true, "no load figure: the slot count is the fallback");
+    assert.equal(w.conditional(3, { free: 0 }), false);
+    assert.equal(w.conditional(1, { load_per_core: 0.5 }), true);
+    w.refused(4);
+    assert.equal(w.blocked(4, { free: 1, load_per_core: 3 }), false, "no reason: slot gate only");
+  });
+});

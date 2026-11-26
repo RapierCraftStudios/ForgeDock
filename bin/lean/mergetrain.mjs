@@ -37,13 +37,16 @@ export function judgeChecks(states, { required = [], policy = "required" } = {})
 /** Median (nearest rank) of a number list; null when empty. */
 export const p50 = (xs) => { const s = [...xs].sort((a, b) => a - b); return s.length ? s[Math.ceil(s.length / 2) - 1] : null; };
 
+/** 90th percentile (nearest rank); null when empty. */
+export const waitP90 = (xs) => { const s = [...xs].sort((a, b) => a - b); return s.length ? s[Math.ceil(s.length * 0.9) - 1] : null; };
+
 /** The batch report line, or null when the train never held a PR. */
 export function formatTrainSummary(stats) {
   if (!stats || (!stats.merged && !Object.keys(stats.handedBack ?? {}).length && !stats.syncs && !stats.batches && !stats.waits?.length)) return null;
   const hb = Object.entries(stats.handedBack ?? {}).sort(([a], [b]) => a.localeCompare(b));
   const total = hb.reduce((n, [, c]) => n + c, 0);
-  const w = p50(stats.waits ?? []);
-  return `merge train: merged ${stats.merged ?? 0}, handed back ${total}${hb.length ? ` (${hb.map(([k, c]) => `${k} ${c}`).join(", ")})` : ""}, wait p50 ${w === null ? "n/a" : `${(w / 60000).toFixed(1)} min`}, base-syncs ${stats.syncs ?? 0}${stats.batches ? `, batches ${stats.batches}, candidate CI runs ${stats.candidateRuns ?? 0}${stats.candidateRed ? ` (${stats.candidateRed} red)` : ""}${stats.bisections ? `, bisections ${stats.bisections}` : ""}${stats.culprits ? `, culprits ${stats.culprits}` : ""}${stats.redBase ? `, red base ${stats.redBase}` : ""}` : ""}`;
+  const w = p50(stats.waits ?? []), w90 = waitP90(stats.waits ?? []), ls = stats.laneSide;
+  return `merge train: merged ${stats.merged ?? 0}, handed back ${total}${hb.length ? ` (${hb.map(([k, c]) => `${k} ${c}`).join(", ")})` : ""}, wait p50 ${w === null ? "n/a" : `${(w / 60000).toFixed(1)} min`} p90 ${w90 === null ? "n/a" : `${(w90 / 60000).toFixed(1)} min`}, base-syncs ${stats.syncs ?? 0} (lane ${ls?.syncs ?? 0}), base.conflict ${stats.baseConflicts ?? stats.handedBack?.["base.conflict"] ?? 0} (lane ${ls?.baseConflicts ?? 0})${stats.batches ? `, batches ${stats.batches}, candidate CI runs ${stats.candidateRuns ?? 0}${stats.candidateRed ? ` (${stats.candidateRed} red)` : ""}${stats.bisections ? `, bisections ${stats.bisections}` : ""}${stats.culprits ? `, culprits ${stats.culprits}` : ""}${stats.redBase ? `, red base ${stats.redBase}` : ""}` : ""}`;
 }
 
 /**
@@ -59,7 +62,7 @@ export function formatTrainSummary(stats) {
  */
 export function createMergeTrain({ gh, repo, now = () => Date.now(), saved = null, batchSize = 1, dispatch = null, batchTimeoutMs = 90 * 60000, flaky = [], onBaseRed = null }) {
   const entries = new Map((saved?.entries ?? []).map((e) => [e.issue, { ...e }]));
-  const stats = { merged: saved?.stats?.merged ?? 0, handedBack: { ...(saved?.stats?.handedBack ?? {}) }, waits: [...(saved?.stats?.waits ?? [])], syncs: saved?.stats?.syncs ?? 0, batches: saved?.stats?.batches ?? 0, candidateRuns: saved?.stats?.candidateRuns ?? 0, candidateRed: saved?.stats?.candidateRed ?? 0,
+  const stats = { merged: saved?.stats?.merged ?? 0, handedBack: { ...(saved?.stats?.handedBack ?? {}) }, waits: [...(saved?.stats?.waits ?? [])], syncs: saved?.stats?.syncs ?? 0, baseConflicts: saved?.stats?.baseConflicts ?? 0, laneSide: { syncs: saved?.stats?.laneSide?.syncs ?? 0, baseConflicts: saved?.stats?.laneSide?.baseConflicts ?? 0 }, batches: saved?.stats?.batches ?? 0, candidateRuns: saved?.stats?.candidateRuns ?? 0, candidateRed: saved?.stats?.candidateRed ?? 0,
     bisections: saved?.stats?.bisections ?? 0, culprits: saved?.stats?.culprits ?? 0, redBase: saved?.stats?.redBase ?? 0 };
   const copyBatch = (b) => ({ ...b, prs: b.prs.map((p) => ({ ...p })), ...(b.bisect ? { bisect: JSON.parse(JSON.stringify(b.bisect)) } : {}) });
   const batches = (saved?.batches ?? []).map(copyBatch); // [{id, base, baseSha, prs, candidate, state, bisect?}]
@@ -69,6 +72,7 @@ export function createMergeTrain({ gh, repo, now = () => Date.now(), saved = nul
   const handBack = (e, code, detail, extra = {}) => {
     entries.delete(e.issue);
     stats.handedBack[code] = (stats.handedBack[code] ?? 0) + 1;
+    if (code === "base.conflict") stats.baseConflicts += 1;
     return { kind: "handback", issue: e.issue, pr: e.pr, code, detail, entry: e, ...extra };
   };
   const landed = (e, detail) => {
@@ -78,7 +82,13 @@ export function createMergeTrain({ gh, repo, now = () => Date.now(), saved = nul
     return { kind: "merged", issue: e.issue, pr: e.pr, detail, entry: e };
   };
 
-  const postMerge = (e) => closeMergedIssue({ gh, repo, issue: e.issue, branch: e.branch }); // the lane's shared post-merge helper
+  /** #5839: replays the lane's persisted post-merge record (notes, then close unless the record keeps the issue open). */
+  const postMerge = async (e) => {
+    const rec = e.postMerge;
+    for (const n of rec?.notes ?? []) { try { await gh(["issue", "comment", String(e.issue), "-R", repo, "--body", `<!-- ${n.marker} -->\n${n.body}`]); } catch { /* the lane result carries it too */ } }
+    if (rec?.keepOpen) { if (e.branch) { try { await gh(["api", "-X", "DELETE", `repos/${repo}/git/refs/heads/${e.branch}`]); } catch { /* already gone */ } } return; }
+    await closeMergedIssue({ gh, repo, issue: e.issue, branch: e.branch }); // the lane's shared post-merge helper
+  };
 
   const ref = (b) => `repos/${repo}/git/refs/heads/${b}`;
   const json = async (args) => JSON.parse(String(await gh(args)));
@@ -324,13 +334,15 @@ export function createMergeTrain({ gh, repo, now = () => Date.now(), saved = nul
 
   return {
     /** A lane's `pr-ready` result: `{issue, pr, head, required, policy, lane, milestone?}`. */
-    add(r) { entries.set(r.issue, { issue: r.issue, pr: r.pr, head: r.head, required: r.required ?? [], policy: r.policy ?? "required", lane: r.lane ?? null, ...(r.milestone ? { milestone: r.milestone } : {}), since: now() }); },
+    add(r) { entries.set(r.issue, { issue: r.issue, pr: r.pr, head: r.head, required: r.required ?? [], policy: r.policy ?? "required", lane: r.lane ?? null, ...(r.milestone ? { milestone: r.milestone } : {}), ...(r.postMerge ? { postMerge: r.postMerge } : {}), since: now() });
+      if (r.laneSide) { stats.laneSide.syncs += Number(r.laneSide.syncs) || 0; stats.laneSide.baseConflicts += Number(r.laneSide.baseConflicts) || 0; }
+    },
     drop(issue) { entries.delete(issue); },
     /** Resume: replace the held PRs and the counters with a prior `snapshot()`. */
     restore(snap) {
       entries.clear();
       for (const e of snap?.entries ?? []) entries.set(e.issue, { ...e });
-      stats.merged = snap?.stats?.merged ?? 0; stats.handedBack = { ...(snap?.stats?.handedBack ?? {}) }; stats.waits = [...(snap?.stats?.waits ?? [])]; stats.syncs = snap?.stats?.syncs ?? 0;
+      stats.merged = snap?.stats?.merged ?? 0; stats.handedBack = { ...(snap?.stats?.handedBack ?? {}) }; stats.waits = [...(snap?.stats?.waits ?? [])]; stats.syncs = snap?.stats?.syncs ?? 0; stats.baseConflicts = snap?.stats?.baseConflicts ?? 0; stats.laneSide = { syncs: snap?.stats?.laneSide?.syncs ?? 0, baseConflicts: snap?.stats?.laneSide?.baseConflicts ?? 0 };
       stats.batches = snap?.stats?.batches ?? 0; stats.candidateRuns = snap?.stats?.candidateRuns ?? 0; stats.candidateRed = snap?.stats?.candidateRed ?? 0;
       stats.bisections = snap?.stats?.bisections ?? 0; stats.culprits = snap?.stats?.culprits ?? 0; stats.redBase = snap?.stats?.redBase ?? 0;
       for (const k of Object.keys(redBases)) delete redBases[k]; Object.assign(redBases, snap?.redBases ?? {});
@@ -339,7 +351,7 @@ export function createMergeTrain({ gh, repo, now = () => Date.now(), saved = nul
     has: (issue) => entries.has(issue),
     size: () => entries.size,
     tick,
-    stats: () => ({ merged: stats.merged, handedBack: { ...stats.handedBack }, waits: [...stats.waits], syncs: stats.syncs, batches: stats.batches, candidateRuns: stats.candidateRuns, candidateRed: stats.candidateRed, bisections: stats.bisections, culprits: stats.culprits, redBase: stats.redBase }),
-    snapshot: () => ({ entries: [...entries.values()], batches: batches.map(copyBatch), ...(Object.keys(redBases).length ? { redBases: { ...redBases } } : {}), stats: { ...stats, handedBack: { ...stats.handedBack }, waits: [...stats.waits] } }),
+    stats: () => ({ merged: stats.merged, handedBack: { ...stats.handedBack }, waits: [...stats.waits], syncs: stats.syncs, baseConflicts: stats.baseConflicts, laneSide: { ...stats.laneSide }, batches: stats.batches, candidateRuns: stats.candidateRuns, candidateRed: stats.candidateRed, bisections: stats.bisections, culprits: stats.culprits, redBase: stats.redBase }),
+    snapshot: () => ({ entries: [...entries.values()], batches: batches.map(copyBatch), ...(Object.keys(redBases).length ? { redBases: { ...redBases } } : {}), stats: { ...stats, handedBack: { ...stats.handedBack }, waits: [...stats.waits], laneSide: { ...stats.laneSide } } }),
   };
 }

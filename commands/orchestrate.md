@@ -58,12 +58,10 @@ Do this yourself. Spawn no sub-agents here.
 `K` = `--parallel` if given, otherwise `orchestration.max_concurrent` from the repo's `forge.yaml`
 (`yq '.orchestration.max_concurrent' forge.yaml`), otherwise 3.
 
-**Lanes (base branches).** Each issue has its own lane, and ForgeDock works it out: an issue with a milestone
-goes to forge.yaml `branches.feature_pattern` (`milestone/<slug>`, which must exist on origin), any other issue
-to `branches.staging`. The default (production) branch is never a lane. Do not pass `--lane`; a `--lane` that
-differs from the issue's lane is refused (`lane-refused`, `lane.mismatch`). A dependency edge between two lanes
-(for example a milestone issue waiting on a staging-lane fix) never gets that fix on its base: list it in the
-plan and either re-milestone the dependency or wait for a milestone sync. Never mix lanes silently.
+**Lanes (base branches).** ForgeDock picks each issue's lane: a milestone issue goes to forge.yaml
+`branches.feature_pattern` (`milestone/<slug>`, must exist on origin), any other to `branches.staging`, never the
+default branch. Do not pass `--lane` (a mismatch is refused: `lane-refused`, `lane.mismatch`). A cross-lane dependency
+never gets the fix on its base: list it, then re-milestone the dependency or wait for a milestone sync.
 
 ## 3. Launch lanes
 
@@ -119,14 +117,11 @@ remaining maintenance once no feature is pending; otherwise the rest ends `held 
 When a lane finishes (agent lanes; the batch runner applies the same rules itself):
 - `deferred` (lease held by another or a dead session): put it back in the queue and retry after the
   lease time printed in its output.
-- `deferred` with "host busy" (code `host.busy`: the host is short of memory, tmp space or CPU headroom;
-  no lease was taken and nothing was posted): put the issue back in the queue and lower the effective K by
-  1 for the next 5 minutes, never below 1. Before raising K back, start one lane and check that it is not
-  host busy again.
-- `deferred` with `rate_limited` (usage limit; the last output line carries the reset time): stop launching
-  new lanes until that reset time, let running lanes finish, then resume the queue.
-- `dependency-open`: the engine or the builder found a dependency you missed (its output names it). This is a
-  scheduling fact, not a failure: add the edge and requeue the issue behind it. Do not skip its dependents.
+- `deferred` `host.busy` (host short of memory, tmp or CPU; nothing taken or posted): requeue it and lower K by 1
+  for 5 minutes (never below 1); before raising K, check one lane is not host busy again.
+- `deferred` `rate_limited`: launch nothing until the reset time on its last line; running lanes finish.
+- `dependency-open`: the engine or the builder found a dependency you missed (its output names it). A
+  scheduling fact, not a failure: add the edge and requeue the issue behind it. Keep its dependents.
   If the dependency is outside the set and agents can resolve it, add it to the batch and launch it.
 - `lane-refused` (codes `lane.mismatch`, `lane.default_branch`, `lane.branch_missing`, `lane.unresolved`): nothing
   ran (no lease, comment or worktree). Report the code and its detail (for example a missing `milestone/<slug>`
@@ -191,10 +186,7 @@ other lane running meanwhile.
 
 ## 3b. Settle scope (#4665)
 
-When settle begins, freeze the milestone's issue set (`scripts/settle-scope.mjs` `freezeScope`). Issues filed later are
-classified by `classifyNew`: decomposition children of a frozen issue stay in the milestone and join the measured set;
-deferred follow-ups go to the next milestone or the backlog; review findings and others count as growth only.
-`convergence` measures the frozen set plus those children; a STOP prints `formatStopReport` (growth and sources).
+At settle, freeze the milestone's issue set and classify later issues with `scripts/settle-scope.mjs` (its header documents the rules).
 
 ## 4. Report
 
@@ -207,3 +199,14 @@ show `invalid (pre-filter)`). Then print:
 5. one escalation list: the human-code `needs-human` issues only, asked once.
 
 Nothing else.
+
+## Standing orders (`--select`)
+
+`forgedock orchestrate --select '<query>'` (a GitHub issue search: `no:milestone`, `milestone:X`, `label:Y`) stores the selector in the batch and keeps owning it; no watcher process is needed (the schedd-hosted runner reconciles every few minutes):
+
+- matching open issues join under the same DAG, priority and lane rules as `--add`; closed or moved ones leave.
+- an issue stays scheduled until it is closed, merged, or blocked by a human code (credentials, spend, customer, promotion, product decision). Re-admission needs no operator command: `deferred` retries with exponential backoff (cap 2 h); `held` / `engine-error` re-admit on an agent or lane-image version change or after a 6 h cooldown; a conformance failure gets one more attempt after the base moves, then is listed in a single "needs decision" digest; the engine's `env.*` issue joins the order and its closure re-admits the waiters.
+- the breaker resets itself after a cooldown when the failures were environmental (VM restart, mirror, network) and the pool is healthy, with a FORGE:DECISION.
+- a merge into a staging lane branch closes the issue (and notes it on the post-deploy rollup when `FORGE_POSTDEPLOY_ROLLUP=<issue>` is set).
+
+`forgedock orchestrate --status <id>` shows the coverage: matching open = running + queued + backing-off + waiting on deps + human-blocked (listed) + unscheduled. `unscheduled: 0` is the healthy state.
