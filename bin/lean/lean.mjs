@@ -3334,6 +3334,7 @@ export async function runCore(o) {
     const kindsNow = () => (riskEnforced ? null : kinds);
     const recording = () => shadow || (!riskEnforced && Object.keys(kinds).length > 0); // the gate records what it would have blocked
     const blockingOf = (fs, allow) => blockingFailures(fs, { shadow, kinds: kindsNow(), allow });
+    const enforcedKinds = () => Object.entries(kinds ?? {}).filter(([, m]) => m === "enforce").map(([c]) => c); // unclog: an explicit enforce re-promotes an advisory code
     let effective = frozen, review = null, lastAmend = "", resumes = 0, lastFailKey = null, verdict = null, degraded = null, triggerSkipped = false, selfReviewCompared = false;
     const TRIGGER_SKIP = "skipped (review.trigger enforce: no risk trigger)";
     const triggerSkipNote = "## Conformance Review\n**Skipped by `review.trigger: enforce`:** no risk path, package edge or hotspot in the diff, and every deterministic gate passed; no reviewer ran (#4273).";
@@ -3742,7 +3743,7 @@ export async function runCore(o) {
       // #4323/#4334: a missing host tool or module, or a repro test the harness could not run, is an environment error:
       // never a conformance failure, never a builder resume
       const envFails = pc.failures.filter((f) => ENV_CODES.includes(f.code));
-      const preSplit = splitAdvisory([...pc.failures.filter((f) => !ENV_CODES.includes(f.code)), ...amendProblems, ...mutBlock, ...adqFail]);
+      const preSplit = splitAdvisory([...pc.failures.filter((f) => !ENV_CODES.includes(f.code)), ...amendProblems, ...mutBlock, ...adqFail], { enforce: enforcedKinds() });
       noteAdvisory(preSplit.advisory);
       const pre = preSplit.block;
       if (pre.length) ev({ event: "PRECHECK", failures: pre.map((f) => f.code) });
@@ -3792,7 +3793,7 @@ export async function runCore(o) {
         if (vf.length) d = { state: "nonconforming", failures: vf, by: "verifier" };
       }
       if (d.state === "nonconforming") { // unclog: advisory kinds from the reviewer/verifier never park a lane either
-        const ds = splitAdvisory(d.failures);
+        const ds = splitAdvisory(d.failures, { enforce: enforcedKinds() });
         noteAdvisory(ds.advisory);
         if (!ds.block.length) d = { ...d, state: "conforms", failures: [] };
         else d = { ...d, failures: ds.block };

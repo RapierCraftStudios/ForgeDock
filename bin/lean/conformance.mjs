@@ -2049,10 +2049,13 @@ export const ADVISORY_KINDS = Object.freeze([
   "amendment_invalid", "substitute_unverified",
   "page_metadata_missing", "page_sitemap_missing", "page_canonical_missing", "page_structured_data_missing",
 ]);
-/** Split failures into {block, advisory}; advisory rows are reported on the issue and never park a lane. */
-export function splitAdvisory(failures) {
+/**
+ * Split failures into {block, advisory}; advisory rows are reported on the issue and never park a lane. `enforce`: codes
+ * a repo explicitly set to "enforce" (forge.yaml engine.conformance_kinds), which stay blocking.
+ */
+export function splitAdvisory(failures, { enforce = [] } = {}) {
   const block = [], advisory = [];
-  for (const f of failures ?? []) (ADVISORY_KINDS.includes(f?.kind) || ADVISORY_CODES.includes(f?.code) ? advisory : block).push(f);
+  for (const f of failures ?? []) (!enforce.includes(f?.code) && (ADVISORY_KINDS.includes(f?.kind) || ADVISORY_CODES.includes(f?.code)) ? advisory : block).push(f);
   return { block, advisory };
 }
 

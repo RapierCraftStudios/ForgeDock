@@ -9402,9 +9402,9 @@ describe("per-kind conformance modes (engine.conformance_kinds)", () => {
     blockedNothingMerged(w);
   });
 
-  it("an enforce lane without kinds still blocks scope creep (unchanged default)", async () => {
+  it("an enforce lane without kinds records scope creep as advisory and merges (unclog default)", async () => {
     const w = world({ changed: CREEP });
-    assert.equal((await run(w, { conformance: "enforce", conformanceKinds: {} })).code, "conformance.scope_creep");
+    assert.equal((await run(w, { conformance: "enforce", conformanceKinds: {} })).terminalReason, "merged");
   });
 });
 

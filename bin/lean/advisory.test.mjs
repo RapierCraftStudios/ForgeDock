@@ -25,6 +25,10 @@ describe("advisory gates (unclog)", () => {
   it("never lists a kind that proves the change wrong", () => {
     for (const k of ["validate_failed", "validate_missing", "guard_broken", "requirement_unimplemented", "repro_red_green"]) assert.ok(!ADVISORY_KINDS.includes(k), k);
   });
+  it("a code the repo explicitly enforces stays blocking", () => {
+    const { block, advisory } = splitAdvisory([{ code: C.CONFORMANCE_SCOPE_CREEP, kind: "scope_creep", detail: "x" }], { enforce: [C.CONFORMANCE_SCOPE_CREEP] });
+    assert.equal(block.length, 1); assert.equal(advisory.length, 0);
+  });
   it("empty and missing input", () => {
     assert.deepEqual(splitAdvisory(undefined), { block: [], advisory: [] });
   });
