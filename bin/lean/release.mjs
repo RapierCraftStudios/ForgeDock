@@ -187,7 +187,7 @@ async function snapshotPrStep(ctx) {
   const found = json(await io.gh(["pr", "list", "--repo", repo, "--base", def, "--head", branch, "--state", "open", "--json", "number,headRefOid,url"]))?.[0];
   if (found) return { pr: found.number, head: found.headRefOid, url: found.url, reused: true, branch };
   const list = state.releaseBundle ?? [];
-  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", branch, "--title", `Release: ${branch} -> ${def}`, "--body", bundleBody(list) + await exemptionBody(ctx)])).trim();
+  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", branch, "--title", `Release: ${branch} -> ${def}`, "--body", bundleBody(list) + await exemptionBody(ctx) + await scorecardBody(ctx)])).trim();
   const n = Number(/\/pull\/(\d+)/.exec(url)?.[1]);
   if (!Number.isSafeInteger(n)) throw new Error(`gh pr create returned no PR url: ${url}`);
   state.steps["release-pr"] = { done: false, result: { pr: n } }; // writeRecord reads the PR number from here
@@ -202,11 +202,21 @@ async function releasePrStep(ctx) {
   const found = json(await io.gh(["pr", "list", "--repo", repo, "--base", def, "--head", staging, "--state", "open", "--json", "number,headRefOid,url"]))?.[0];
   if (found) return { pr: found.number, head: found.headRefOid, url: found.url, reused: true };
   const list = await bundleList({ io, repo, head: staging, base: def });
-  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", staging, "--title", `Release: ${staging} -> ${def}`, "--body", bundleBody(list) + await exemptionBody(ctx), ...(ctx.config.preflight ? ["--draft"] : [])])).trim();
+  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", staging, "--title", `Release: ${staging} -> ${def}`, "--body", bundleBody(list) + await exemptionBody(ctx) + await scorecardBody(ctx), ...(ctx.config.preflight ? ["--draft"] : [])])).trim();
   const n = Number(/\/pull\/(\d+)/.exec(url)?.[1]);
   if (!Number.isSafeInteger(n)) throw new Error(`gh pr create returned no PR url: ${url}`);
   const v = json(await io.gh(["pr", "view", String(n), "--repo", repo, "--json", "headRefOid"]));
   return { pr: n, head: v?.headRefOid, url, reused: false, bundle: list.length };
+}
+
+/** The per-release scorecard (#6084) as a PR-body section with its regressions line; "" on any error (never blocks the PR). */
+async function scorecardBody({ io, repo, state }) {
+  try {
+    const sc = io.scorecard ? await io.scorecard({ repo, release: state.release?.version ?? state.id }) : await (await import("../stats/scorecard.mjs")).gatherScorecard({ repo, release: state.release?.version ?? state.id }, { gh: io.gh, useCache: false });
+    if (!sc) return "";
+    const { renderScorecard } = await import("../stats/scorecard.mjs");
+    return `\n\n${renderScorecard(sc)}\n`;
+  } catch { return ""; }
 }
 
 /** The live operator exemptions as a PR-body section (#5568, I20); "" when unmanaged, none, or `_active` is unreadable. */
