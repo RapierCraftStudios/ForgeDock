@@ -31,7 +31,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    busy host → `deferred` / `host.busy`, before any lease or GitHub call.
    #5421: free disk is the third GC trigger. `diskLow` (`admission.mjs`) compares `host.freeMb` of the worktree root and `~/.forge`
    (`host.hygienePaths`) with forge.yaml `hygiene.min_free_gb` (default 5, 0 = off); `nearCeiling({minFreeGb})` counts it, so the
-   orchestrate `beforeAdmit` runs owned GC. `guardHeavyDisk` (`effects.mjs`) wraps `io.heavy`: below the threshold it runs GC once and,
+   orchestrate `beforeAdmit` runs owned GC. #6081: a held issue whose lane ended without a result (operator stop) is requeued as a `hold` row, never an engine-error or a breaker count; `run-issue` teardown on SIGTERM is bounded by `FORGEDOCK_TEARDOWN_MS` (default 30 s). `guardHeavyDisk` (`effects.mjs`) wraps `io.heavy`: below the threshold it runs GC once and,
    if still low, refuses the heavy step with `DISK_LOW` (`heavyAcquire` rethrows only that code). `hygiene.schedule` installs a
    systemd user timer or cron entry (`gc-schedule.mjs`, by `doctor --fix` / `init`) running `gc --apply`. Lanes get
    `COMPOSE_PROJECT_NAME=forgedock-lane-<issue>`; gc owns compose volumes/containers of that project.
@@ -3783,7 +3783,7 @@ Filing: `file_issues` is **opt-in, default off** (only an explicit `file_issues:
 - `backend.auth`: `orchestrate` probes the login every `AUTH_PROBE_MS` (5 min) through an injectable `authProbe`, resumes at once on success, and on failure tries the next rotator account (`rotator.nextAccountAfterAuthFailure`, tried first on resume). After `AUTH_ESCALATE_MS` (30 min) it escalates once (`auth-escalation` row, `onEscalate` notify + one issue comment). The pause no longer runs to the quoted reset; rate_limited/quota.exhausted holds keep their known-reset delay.
 - Holds: `limits.holdExpiryWarnings` lists hold-info entries within `HOLD_EXPIRY_WARN_MS` (T-30 min) of `expiresAt`, once per expiry; `refreshHeld` posts one `hold-alert` each and releases expired holds through the concurrency controller, so expiry re-admits at its pace. `--hold` on more than 10 issues needs `--ttl`/`--for` (`engine.holdTtlRefusal`) and prints `holdResumePlan`.
 - Breaker: engine-errors are keyed by signature plus agent (generalising the `lostSeen` window of #5859). A tripped key quarantines only that agent (`quarantineAgent`) and reseeds the cache once (`reseedCache`), emits `agent-quarantine`, and keeps admitting other work; the batch breaker and `--clear-breaker` are unchanged.
-- Stall recovery: `recordStallRecovery` stores the `dispatch-stalled` cause plus gates (`stallCause`); `decideStallAction` refuses a second restart for the same cause and alerts instead.
+- Stall recovery: `recordStallRecovery` stores the `dispatch-stalled` cause plus gates (`stallCause`); `decideStallAction` (#6082) waits out a doubling backoff after a recovery, then recovers again up to `MAX_STALL_RECOVERIES` before alerting; a `pool-capacity` stall only waits.
 
 ## Lease/hold/pause guard and kept sandboxes (#6008)
 
@@ -3816,3 +3816,6 @@ cgroup v2 `cpu.max` / v1 `cfs_quota_us`/`cfs_period_us` (fallback `CS_CPU_QUOTA`
 `bin/stats/scorecard.mjs` (`gatherScorecard` over the injected `io.gh`, or `io.scorecard`) rendered as a table with a `Regressions vs <prev>: ...`
 line. It is best effort: any error yields an empty section and the PR is still created. PR reuse, title, bundle and exemption sections are unchanged.
 `forgedock scorecard --repo R --release vX` prints the same table (no LLM); LANE_AUDIT-dependent metrics are n/a when that source is absent.
+
+## Entry 2026-11-26 — lane recovery: targeted no-status resume, API-error session resume, precheck output and recovery base-sync (#6058, #6105, #6107)
+`conformance.mjs` tags a deliver requirement without a status row `kind: "requirement_no_status"` (`reqId`, `quote`; code unchanged); `conformanceResumePrompt` names each id with its quote, and a still-skipped requirement parks `The builder did not address R#` with `kind` and `requirements` on the result. `runner.mjs` keeps the envelope's `terminal_reason`/`session_id` (`cliTerminalReason`, `cliSessionId`) and sets `err.apiError` for transient API terminations; `builder()` resumes the same session after `API_RESUME_BACKOFF_MS` (20 s, 60 s, 180 s; events `API_ERROR_RESUME`, `RUN_TERMINAL.api_resumes`), then defers `backend.cli_failed`. `precheck.mjs` `checkFailureTail` + `redactSecrets` put the failing check's name and last 40 lines (redacted) in every precheck park and in a `PRECHECK_FAILED` event. A `ci.red` recovery merges the fetched base before running checks; an unresolvable conflict ends `base.conflict`. Tests: `lean.test.mjs` "#6058", "#6105", "#6107"; `lane-recovery.test.mjs`; `tests/runner.test.mjs` "#6105". Decision: `devdocs/decisions/6058-6105-6107-lane-recovery.md`.

@@ -1258,10 +1258,10 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
     if (r.disposition === "deliver" && isOutOfBand(r)) {
       // #4404: measured outside the lane; the builder delivers its instrumentation (budget test or bench committed, job configured)
       const row = st.find((x) => x?.id === r.id);
-      if (row?.instrumented !== true && s !== "implemented") failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "requirement_unimplemented", detail: `${r.id} is verified out of band${r.evidence ? ` by ${r.evidence}` : ""} but reported "${s ?? "no status"}" without instrumented: true` });
+      if (row?.instrumented !== true && s !== "implemented") failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: s == null ? "requirement_no_status" : "requirement_unimplemented", ...(s == null ? { reqId: r.id, quote: r.quote } : {}), detail: `${r.id} is verified out of band${r.evidence ? ` by ${r.evidence}` : ""} but reported "${s ?? "no status"}" without instrumented: true` });
     } else if (r.disposition === "deliver") {
       if (s === "deferred" || s === "post-deploy") failures.push({ code: C.CONFORMANCE_UNTRACKED_DEFERRAL, kind: "untracked_deferral", detail: `${r.id} was contracted as deliver but reported "${s}" without a typed amendment` });
-      else if (s !== "implemented") failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "requirement_unimplemented", detail: `${r.id} reported "${s ?? "no status"}"` });
+      else if (s !== "implemented") failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: s == null ? "requirement_no_status" : "requirement_unimplemented", ...(s == null ? { reqId: r.id, quote: r.quote } : {}), detail: `${r.id} reported "${s ?? "no status"}"` }); // #6058: a missing row is a skipped requirement, not a failed one
     }
   }
   for (const f of baselineFailures ?? []) failures.push({ code: C.CONFORMANCE_REGRESSION, ...f }); // #5448

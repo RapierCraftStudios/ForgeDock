@@ -109,7 +109,7 @@ function world(o = {}) {
     contract: o.contract ?? CONTRACT, issueComments: o.issueComments, issueStates: o.issueStates,
     changed: o.changed ?? ["src/foo.js", "test/foo.test.js"], reviews: [...(o.reviews ?? [])], waits: [...(o.waits ?? [])], clock: 0,
     result: o.result ?? { status: "fixed", summary: "fixed foo", evidence: [], tests: ["test/foo.test.js"] },
-    prList: o.prList ?? [], remote: o.remote ?? "", resumeResult: o.resumeResult, seq: [], mtimes: {}, envs: [], pushes: 0, pushErrors: [...(o.pushErrors ?? [])], commentErrors: [...(o.commentErrors ?? [])], dirty: o.dirty ?? false, lastSubject: o.lastSubject ?? "", prView: [...(o.prView ?? [])], mergeResults: [...(o.mergeResults ?? [])], mergeErrors: [...(o.mergeErrors ?? [])], conflictFiles: [], baseHeads: [...(o.baseHeads ?? ["ba5e000000000000"])], mergeInProgress: false, markers: false, mergeAttempts: 0, branchDeletes: [],
+    prList: o.prList ?? [], remote: o.remote ?? "", resumeResult: o.resumeResult, seq: [], mtimes: {}, envs: [], pushes: 0, pushErrors: [...(o.pushErrors ?? [])], commentErrors: [...(o.commentErrors ?? [])], dirty: o.dirty ?? false, lastSubject: o.lastSubject ?? "", prView: [...(o.prView ?? [])], mergeResults: [...(o.mergeResults ?? [])], behind: o.behind ?? 0, mergeErrors: [...(o.mergeErrors ?? [])], conflictFiles: [], baseHeads: [...(o.baseHeads ?? ["ba5e000000000000"])], mergeInProgress: false, markers: false, mergeAttempts: 0, branchDeletes: [],
     stages: { ...STAGE_MD, ...(o.stages ?? {}) }, builderN: 0,
     salvageTrees: [...(o.salvageTrees ?? [])], alive: new Set((o.procs ?? []).map((p) => p.pid)), kills: [],
   };
@@ -176,6 +176,7 @@ function world(o = {}) {
       if (a[0] === "ls-tree" && w.stagedDeletions) return a.slice(a.indexOf("--") + 1).filter((p) => !(w.laneAdded ?? []).includes(p)).join("\0"); // #5819: on the base unless the lane added it
       if (a[0] === "checkout" && a.includes("HEAD") && w.stagedDeletions) { w.restoredPaths = [...(w.restoredPaths ?? []), ...a.slice(a.indexOf("--") + 1)]; return ""; }
       if (a[0] === "rm" && a[1] === "--cached" && w.added) w.added = w.added.filter((f) => !a.includes(f));
+      if (a[0] === "rev-list" && a.includes("--count")) return String(w.behind ?? 0); // #6107: commits the branch is behind its base
       if (a[0] === "diff" && a.includes("--diff-filter=U")) return w.conflictFiles.join("\n");
       if (a[0] === "diff" && a[1] === "--check") return "";
       if (a[0] === "grep") return w.markers ? "src/foo.js:3:<<<<<<< HEAD" : "";
@@ -221,7 +222,7 @@ function world(o = {}) {
           if (fix && n > 2 && /does not conform/.test(c.prompt) && o.resumeChanged) w.changed = o.resumeChanged;
           if (/Merging origin\//.test(c.prompt) && o.syncChanged) w.changed = o.syncChanged;
           if (r?.status === "blocked" || ["invalid", "already-fixed"].includes(r?.status)) put("result.json", JSON.stringify(r));
-          else if (r) put("result.json", JSON.stringify({ ...r, requirements: o.claims ?? w.contract.requirements.filter((x) => x.disposition === "deliver").map((x) => ({ id: x.id, status: "implemented", evidence: "src/foo.js:3" })),
+          else if (r) put("result.json", JSON.stringify({ ...r, requirements: (fix && n > 2 ? o.resumeClaims : null) ?? o.claims ?? w.contract.requirements.filter((x) => x.disposition === "deliver").map((x) => ({ id: x.id, status: "implemented", evidence: "src/foo.js:3" })),
             validation: (fix && n > 2 ? o.resumeValidation : null) ?? o.validation ?? (w.contract.validate ?? []).map((v) => ({ id: v.id, command: v.command, exit: 0 })), amendments: (fix && n > 2 ? o.resumeAmendments : null) ?? o.amendments ?? [] }));
         }
         if ((fix && !o.freshNoCommit) || /Merging origin\//.test(c.prompt)) { w.head = `bbbb${w.calls.length}`.padEnd(16, "0"); if (!o.leaveConflicts) { w.conflictFiles = []; w.mergeInProgress = false; } }
@@ -2880,6 +2881,35 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     assert.equal((await run(fixed, { conformance: "shadow" })).terminalReason, "merged"); assert.equal(fixed.rgCalls.length, 2);
   });
 
+  describe("#6058 a requirement with no status row is skipped, not failed", () => {
+    const two2 = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "deliver" }],
+      deliverables: [...CONTRACT.deliverables, { id: "D2", path: "src/bar.js", change: "keep callers", requirements: ["R2"] }] };
+    const row = (id) => ({ id, status: "implemented", evidence: "src/foo.js:3" }), runShadow = (w) => run(w, { conformance: "shadow" });
+    it("the one resume names R2 and its quote; a resume that adds the row merges", async () => {
+      const w = world({ contract: two2, claims: [row("R1")], resumeClaims: [row("R1"), row("R2")], reviews: [conf({}, two2)] });
+      const r = await runShadow(w);
+      assert.equal(r.terminalReason, "merged");
+      const resume = builders(w)[2][4];
+      assert.match(resume, /no status row for R2/); assert.match(resume, /R2: "Existing callers of foo keep working\."/);
+      assert.doesNotMatch(resume, /R1:/);
+    });
+    it("still skipped after the targeted resume: a distinct park kind and a detail that says the builder did not address it", async () => {
+      const w = world({ contract: two2, claims: [row("R1")], reviews: [conf({}, two2)] });
+      const r = await runShadow(w);
+      assert.equal(r.terminalReason, "needs-human"); assert.equal(r.kind, "requirement_no_status"); assert.deepEqual(r.requirements, ["R2"]);
+      assert.equal(builders(w).length, 3, "plan + implement + one targeted resume");
+      assert.match(r.detail, /The builder did not address R2: no status row/);
+      assert.match(r.detail, /reported "no status"/, "the census still buckets it");
+    });
+    it("a failing row (not a missing one) keeps the generic resume and park", async () => {
+      const w = world({ contract: two2, claims: [row("R1"), { id: "R2", status: "partial" }], reviews: [conf({}, two2)] });
+      const r = await runShadow(w);
+      assert.equal(r.code, "conformance.unimplemented"); assert.equal(r.kind, undefined);
+      assert.doesNotMatch(builders(w)[2][4], /no status row/);
+      assert.match(builders(w)[2][4], /does not conform/);
+    });
+  });
+
   it("#5732 a head that failed on an absent interpreter is env.repro_unrunnable with its output, no builder resume", async () => {
     const w = rworld([{ base: "SKIPPED", head: "FAILED" }]);
     w.io.runCommand = async () => ({ rc: 1, output: "Creating virtualenv\npoetry env use: python3.11 not found" });
@@ -4592,6 +4622,33 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     assert.match(r.detail, /spawn EAGAIN/);
     assert.equal(r.cliResult, "spawn EAGAIN");
     assert.equal(r.account, "3");
+  });
+
+  it("#6105 a builder session ended api_error is resumed by id with backoff; the lane continues and nothing is relaunched", async () => {
+    const w = world(); const sleeps = []; const dir = tmpDir("core-"); const s0 = w.io.sleep; w.io.sleep = async (ms) => { sleeps.push(ms); return s0(ms); };
+    const apiErr = Object.assign(new Error("claude CLI exited with status 1"), { code: "CLI_BACKEND_FAILED", apiError: true, cliIsError: true, cliTerminalReason: "api_error", cliSessionId: "sess-api" });
+    const orig = w.io.runner; let n = 0; const sent = [];
+    w.io.runner = async (c) => { if (c.role === "builder") { sent.push({ resume: c.resume ?? null, prompt: c.prompt }); if (++n === 2) throw apiErr; } return orig(c); };
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const resumed = sent.filter((x) => x.resume === "sess-api");
+    assert.equal(resumed.length, 1, "the failed session is resumed by id");
+    assert.match(resumed[0].prompt, /transient API error/);
+    assert.ok(sleeps.includes(20_000), "backoff before the resume");
+    const log = readLog(dir, 7);
+    assert.equal(log.filter((e) => e.event === "API_ERROR_RESUME").length, 1);
+    assert.equal(log.find((e) => e.event === "RUN_TERMINAL").api_resumes, 1, "resumes are counted apart from relaunches");
+  });
+
+  it("#6105 an api_error that keeps recurring defers backend.cli_failed after the capped resumes (never engine-error)", async () => {
+    const w = world(); projector(w, null);
+    const apiErr = () => Object.assign(new Error("claude CLI exited with status 1"), { code: "CLI_BACKEND_FAILED", apiError: true, cliIsError: true, cliTerminalReason: "api_error", cliSessionId: "sess-api" });
+    const orig = w.io.runner; let resumes = 0;
+    w.io.runner = async (c) => { if (c.role === "builder") { if (c.resume === "sess-api") resumes++; throw apiErr(); } return orig(c); };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "backend.cli_failed");
+    assert.equal(resumes, 3, "three resumes, then the deferral");
+    assert.match(r.detail, /transient API error/);
   });
 
   it("#5168 an error that is both a usage limit and auth-like stays rate_limited", async () => {
@@ -10316,6 +10373,44 @@ describe("#5749 freeze-time runnability: host-only commands, recipes, check tail
     const r = await atIdleLoad(() => run(w, { precheck: { commands: ["make lanecheck"] }, verify: { ...parseVerify({}), precheckBlock: true } }));
     assert.equal(r.code, "ci.red");
     assert.match((w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN")) ?? ""), /`make lanecheck`[\s\S]*FAILED lane-check shellcheck scripts\/x\.sh/);
+  });
+});
+
+describe("#6107 precheck parks carry the failing check; a ci.red recovery runs the checks on a synced tree", () => {
+  const block = { precheck: { commands: ["make lanecheck"] }, verify: { ...parseVerify({}), precheckBlock: true } };
+  const nhOf = (w) => w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN")) ?? "";
+  it("the park names the failing check and carries only its last 40 lines, secrets redacted, and the run log has them too", async () => {
+    const w = world(); const dir = tmpDir("lean-6107-");
+    w.io.runCommand = async () => ({ rc: 1, output: `EARLY-NOISE-MARKER\n${"noise\n".repeat(60)}API_TOKEN=hunter2hunter2\nAuthorization: Bearer abcdefghijklmnop\nFAILED lane-check shellcheck scripts/x.sh` });
+    const r = await atIdleLoad(() => run(w, { dir, ...block }));
+    assert.equal(r.code, "ci.red");
+    const nh = nhOf(w);
+    assert.match(nh, /Failing check `make lanecheck`, exit 1, last 40 lines/);
+    assert.match(nh, /FAILED lane-check shellcheck scripts\/x\.sh/);
+    assert.doesNotMatch(nh, /EARLY-NOISE-MARKER/); assert.doesNotMatch(nh, /hunter2hunter2|abcdefghijklmnop/);
+    const rec = readLog(dir, 7).find((e) => e.event === "PRECHECK_FAILED");
+    assert.equal(rec.checks[0].command, "make lanecheck"); assert.match(rec.checks[0].tail, /FAILED lane-check/); assert.doesNotMatch(rec.checks[0].tail, /hunter2hunter2/);
+  });
+  it("a ci.red recovery that is behind its base merges the base before any check runs", async () => {
+    const w = world({ behind: 2 }); const order = [];
+    w.io.runCommand = async () => { order.push("check"); return { rc: 0, output: "" }; };
+    const orig = w.io.git; w.io.git = async (a, ...rest) => { if (a[0] === "merge" && a[1] === "--no-edit") order.push("merge"); return orig(a, ...rest); };
+    const r = await atIdleLoad(() => run(w, { recover: { code: "ci.red", attempt: 1 }, precheck: { commands: ["make lanecheck"] } }));
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(order.indexOf("merge") >= 0 && order.indexOf("merge") < order.indexOf("check"), `merge before check: ${order}`);
+  });
+  it("a ci.red recovery whose branch conflicts with the base ends base.conflict and never runs the checks on the stale tree", async () => {
+    const w = world({ behind: 3, mergeResults: ["conflict"], conflictFiles: [".github/workflows/ci.yml"] }); let checks = 0;
+    w.io.runCommand = async () => { checks++; return { rc: 1, output: "stale tree failure" }; };
+    const r = await atIdleLoad(() => run(w, { recover: { code: "ci.red", attempt: 1 }, ...block }));
+    assert.equal(r.code, "base.conflict"); assert.equal(checks, 0); assert.equal(w.merges.length, 0);
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "merge" && c[2] === "--abort"));
+  });
+  it("a first lane (no recovery) does not base-sync before the checks", async () => {
+    const w = world({ behind: 2 });
+    w.io.runCommand = async () => ({ rc: 0, output: "" });
+    await atIdleLoad(() => run(w, { precheck: { commands: ["make lanecheck"] } }));
+    assert.equal(w.calls.filter((c) => c[0] === "git" && c[1] === "merge" && c[2] === "--no-edit").length, 0);
   });
 });
 
