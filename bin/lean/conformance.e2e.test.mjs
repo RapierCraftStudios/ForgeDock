@@ -204,10 +204,12 @@ describe("conformance gate end-to-end (real git, disposable repo)", { skip: !HAV
         res.amendments = [{ kind: "add-requirement", requirement: req("R3"), why: "the issue's requirement 3 was missing" }, { kind: "add-deliverable", id: "D3", path: "src/routes/export.js", why: "implements R3" }]; } });
     merged(o); assert.ok(o.staging.export); assert.ok(o.markers.includes("FORGE:AMENDMENT"));
   });
-  it("3 scope creep: an unauthorized billing change is stopped by the precheck and reverted before it can reach staging", async () => {
+  it("3 scope creep: an unauthorized billing change is caught by the review's preserve check and reverted before it can reach staging", async () => {
     const o = await runCase({ contract: FULL, impl: (t) => { fix(t, ["scrape", "search", "export"]); t.write({ "src/billing.js": "export function price(units) { return Math.round(units) * 0.01; }\n" }); },
       resume: (t) => t.restore("src/billing.js") });
-    merged(o); assert.equal(o.staging.billingChanged, false); assert.deepEqual([o.counts.builder, o.counts.reviewer], [3, 1]);
+    // unclog: file scope alone is advisory (no precheck stop); the violated preserve row (P1) blocks and the resume reverts it
+    merged(o); assert.equal(o.staging.billingChanged, false); assert.deepEqual([o.counts.builder, o.counts.reviewer], [3, 2]);
+    assert.ok(o.log.some((e) => e.event === "ADVISORY" && e.rows.includes("scope_creep")), "scope creep is recorded as advisory");
   });
   it("4 a claimed follow-up without a tracking issue blocks merge before any review", async () => {
     const o = await runCase({ contract: FULL, impl: (t) => fix(t, ["scrape", "search"]), claims: (k) => claimAll(k).map((r) => (r.id === "R3" ? { id: "R3", status: "deferred", note: "follow-up" } : r)) });

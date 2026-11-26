@@ -1,0 +1,609 @@
+{
+ "note": "recorded 503 storm: the pool refuses every launch attempt (60s retry timer) until t=420s, then load clears; times are ms from storm start",
+ "lanes": 6,
+ "pollMs": 10000,
+ "clearsAtMs": 420000,
+ "endMs": 900000,
+ "codes": [
+  "pool.host_load",
+  "pool.host_mem",
+  "pool.projected_peak",
+  "pool.disk_low"
+ ],
+ "attempts": [
+  {
+   "lane": 1,
+   "at": 1000,
+   "code": "pool.host_mem",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 1,
+   "at": 61000,
+   "code": "pool.projected_peak",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 1,
+   "at": 121000,
+   "code": "pool.disk_low",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 1,
+   "at": 181000,
+   "code": "pool.host_load",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 1,
+   "at": 241000,
+   "code": "pool.host_mem",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 1,
+   "at": 301000,
+   "code": "pool.projected_peak",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 1,
+   "at": 361000,
+   "code": "pool.disk_low",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 1,
+   "at": 421000,
+   "code": "pool.host_load",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 1,
+   "at": 481000,
+   "code": "pool.host_mem",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 1,
+   "at": 541000,
+   "code": "pool.projected_peak",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 1,
+   "at": 601000,
+   "code": "pool.disk_low",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 2,
+   "at": 2000,
+   "code": "pool.projected_peak",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 2,
+   "at": 62000,
+   "code": "pool.disk_low",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 2,
+   "at": 122000,
+   "code": "pool.host_load",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 2,
+   "at": 182000,
+   "code": "pool.host_mem",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 2,
+   "at": 242000,
+   "code": "pool.projected_peak",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 2,
+   "at": 302000,
+   "code": "pool.disk_low",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 2,
+   "at": 362000,
+   "code": "pool.host_load",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 2,
+   "at": 422000,
+   "code": "pool.host_mem",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 2,
+   "at": 482000,
+   "code": "pool.projected_peak",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 2,
+   "at": 542000,
+   "code": "pool.disk_low",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 2,
+   "at": 602000,
+   "code": "pool.host_load",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 3,
+   "at": 3000,
+   "code": "pool.disk_low",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 3,
+   "at": 63000,
+   "code": "pool.host_load",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 3,
+   "at": 123000,
+   "code": "pool.host_mem",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 3,
+   "at": 183000,
+   "code": "pool.projected_peak",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 3,
+   "at": 243000,
+   "code": "pool.disk_low",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 3,
+   "at": 303000,
+   "code": "pool.host_load",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 3,
+   "at": 363000,
+   "code": "pool.host_mem",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 3,
+   "at": 423000,
+   "code": "pool.projected_peak",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 3,
+   "at": 483000,
+   "code": "pool.disk_low",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 3,
+   "at": 543000,
+   "code": "pool.host_load",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 3,
+   "at": 603000,
+   "code": "pool.host_mem",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 4,
+   "at": 4000,
+   "code": "pool.host_load",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 4,
+   "at": 64000,
+   "code": "pool.host_mem",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 4,
+   "at": 124000,
+   "code": "pool.projected_peak",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 4,
+   "at": 184000,
+   "code": "pool.disk_low",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 4,
+   "at": 244000,
+   "code": "pool.host_load",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 4,
+   "at": 304000,
+   "code": "pool.host_mem",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 4,
+   "at": 364000,
+   "code": "pool.projected_peak",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 4,
+   "at": 424000,
+   "code": "pool.disk_low",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 4,
+   "at": 484000,
+   "code": "pool.host_load",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 4,
+   "at": 544000,
+   "code": "pool.host_mem",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 4,
+   "at": 604000,
+   "code": "pool.projected_peak",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 5,
+   "at": 5000,
+   "code": "pool.host_mem",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 5,
+   "at": 65000,
+   "code": "pool.projected_peak",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 5,
+   "at": 125000,
+   "code": "pool.disk_low",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 5,
+   "at": 185000,
+   "code": "pool.host_load",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 5,
+   "at": 245000,
+   "code": "pool.host_mem",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 5,
+   "at": 305000,
+   "code": "pool.projected_peak",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 5,
+   "at": 365000,
+   "code": "pool.disk_low",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 5,
+   "at": 425000,
+   "code": "pool.host_load",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 5,
+   "at": 485000,
+   "code": "pool.host_mem",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 5,
+   "at": 545000,
+   "code": "pool.projected_peak",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 5,
+   "at": 605000,
+   "code": "pool.disk_low",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 6,
+   "at": 6000,
+   "code": "pool.projected_peak",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 6,
+   "at": 66000,
+   "code": "pool.disk_low",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 6,
+   "at": 126000,
+   "code": "pool.host_load",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 6,
+   "at": 186000,
+   "code": "pool.host_mem",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 6,
+   "at": 246000,
+   "code": "pool.projected_peak",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 6,
+   "at": 306000,
+   "code": "pool.disk_low",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 6,
+   "at": 366000,
+   "code": "pool.host_load",
+   "live": {
+    "load_per_core": 2.1,
+    "mem_available_gb": 1.2
+   }
+  },
+  {
+   "lane": 6,
+   "at": 426000,
+   "code": "pool.host_mem",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 6,
+   "at": 486000,
+   "code": "pool.projected_peak",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 6,
+   "at": 546000,
+   "code": "pool.disk_low",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  },
+  {
+   "lane": 6,
+   "at": 606000,
+   "code": "pool.host_load",
+   "live": {
+    "load_per_core": 0.6,
+    "mem_available_gb": 9
+   }
+  }
+ ]
+}

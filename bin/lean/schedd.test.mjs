@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { openBatch, isLaneAlive, listBatches, SECRET_ENV, scanStats } from "./batch.mjs";
 import { killTrackedChildren, runWithInput, trackedChildCount } from "./effects.mjs";
-import { findUnhosted, startDaemon, scheddPaths, connectDaemon, request, unitState, SCHEDD_SCRIPT, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals, readInstalledVersion, batchVerdicts } from "./schedd.mjs";
+import { findUnhosted, startDaemon, scheddPaths, connectDaemon, request, unitState, SCHEDD_SCRIPT, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals, readInstalledVersion, batchVerdicts, restartUnit } from "./schedd.mjs";
 import { schedDir } from "./sched.mjs";
 import { readHeartbeat } from "./schedd-health.mjs";
 import { formatTable, orchestrate } from "./orchestrate.mjs";
@@ -146,6 +146,42 @@ describe("schedd host scheduler (#4192)", () => {
       const id = done[0].batch;
       await withRoot(h, () => capture(() => orchestrateFromCli(["--set-parallel", id, "5"], h.client)));
       assert.equal(openBatch(h.root, id).readParallel(), 5);
+    } finally { await h.cleanup(); }
+  });
+
+  it("#5964 a hosted clear-breaker not acked within its wait answers pending, and the request is still honoured by the runner (never dropped)", async () => {
+    const h = host();
+    try {
+      await h.daemon();
+      const all = capture(() => h.inWork(() => orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client)));
+      await until(() => h.launched().length === 1 && h.lanePids().length === 1);
+      const [id] = listBatches(h.root);
+      const b = openBatch(h.root, id);
+      // a 1 ms wait only polls the ack once, so the reply is pending unless the runner happened to ack in that instant: retry until it does not
+      let r = null;
+      for (let i = 0; i < 40 && !r?.pending; i++) r = await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "clear-breaker", id, waitMs: 1 }, undefined, { timeoutMs: 20000 });
+      assert.deepEqual({ hosted: r.hosted, acknowledged: r.acknowledged, pending: r.pending }, { hosted: true, acknowledged: false, pending: true });
+      // the old code deleted the request here and rewrote state.json, so no ack would ever follow
+      await until(() => b.readClearBreakerAck() && !existsSync(join(h.root, id, "clear-breaker")));
+      writeFileSync(h.release, "");
+      await all;
+    } finally { await h.cleanup(); }
+  });
+
+  it("#5964 cli prints pending message when the hosted runner has not acked within its wait", async () => {
+    const h = host();
+    try {
+      await h.daemon();
+      const all = capture(() => h.inWork(() => orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client)));
+      await until(() => h.launched().length === 1 && h.lanePids().length === 1);
+      const [id] = listBatches(h.root);
+      const lines = []; let r = null;
+      for (let i = 0; i < 40 && !r?.pending; i++) { lines.length = 0; r = await runBatch({ argv: ["--clear-breaker", id], deps: { batchRoot: h.root, scheddDir: h.sched, pollMs: 1 }, sink: { line: (l) => lines.push(l) } }); }
+      assert.equal(r.pending, true);
+      assert.match(lines[0], /pending: the runner will clear it on its next pass/);
+      assert.doesNotMatch(lines[0], /did not acknowledge/);
+      writeFileSync(h.release, "");
+      await all;
     } finally { await h.cleanup(); }
   });
 
@@ -505,6 +541,25 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await d.close(); }
   });
 
+  it("R3: efficiencyTick reads forge.yaml from plan.cwd (not the daemon cwd) and spawns introspect there", async () => {
+    const dir = tmpDir("schedd-slo-cwd-"), root = join(dir, "batches"), repo = join(dir, "repo"), id = "b20261126-000000-6025", ghCalls = [], spawned = [];
+    mkdirSync(repo, { recursive: true });
+    const b = openBatch(root, id);
+    b.writePlan({ daemon: true, repo: "o/r", cwd: repo, created: new Date().toISOString() });
+    b.store.save({ v: 1, order: [1], results: {}, running: {}, pending: [], parallel: 2 });
+    b.writeReport({ done: true });
+    const start = () => startDaemon({ dir, root, runBatch: async () => ({}), log: () => {}, resumeOnStart: false, stallCheckMs: 50, sloGh: async (a) => { ghCalls.push(a); return "[]"; }, introspect: (i, cwd) => spawned.push([i, cwd]) });
+    writeFileSync(join(repo, "forge.yaml"), "orchestrate:\n  slo:\n    file_issues: false\n");
+    let d = await start();
+    try { await new Promise((r) => setTimeout(r, 600)); } finally { await d.close(); }
+    assert.deepEqual(spawned, [], "file_issues false in plan.cwd is honored");
+    assert.equal(ghCalls.length, 0);
+    writeFileSync(join(repo, "forge.yaml"), "orchestrate:\n  slo:\n    file_issues: true\n");
+    d = await start();
+    try { await until(() => spawned.length === 1, 8000); } finally { await d.close(); }
+    assert.deepEqual(spawned[0], [id, repo], "introspect runs on the batch repo");
+  });
+
   it("#5938: a stored stall clears within one tick (STALL CLEARED) once the batch is at K; status shows running/K and the split; the watchdog verdict is healthy", async () => {
     const dir = tmpDir("schedd-stall-clear-"), root = join(dir, "batches"), id = "b20261122-000000-5938", lines = [];
     const b = openBatch(root, id);
@@ -757,6 +812,92 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await d2?.close?.(); }
   });
 
+  it("#5966: a handover under an active unit exits non-zero after close, and the hard bound fires when a batch stop hangs", async () => {
+    for (const hang of [false, true]) {
+      const dir = tmpDir("schedd-exit-"), root = join(dir, "batches"), lines = [], exits = [];
+      let version = "1.51.0";
+      const d = await startDaemon({ dir, root, log: (m) => lines.push(m), resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => "active",
+        exit: (c) => exits.push(c), stopMs: hang ? 60_000 : 1000, hardExitMs: 200,
+        runBatch: ({ sink, signal }) => { sink.batch({ id: "x", dir }); return new Promise((_, rej) => { if (!hang) signal.addEventListener("abort", () => rej(Object.assign(new Error("stopped"), { code: "batch.stopped" }))); }); } });
+      request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: ["x"], cwd: dir, env: {} }).catch(() => {});
+      await until(() => lines.some((l) => l.includes("listening")));
+      version = "1.52.0";
+      await until(() => exits.length > 0);
+      assert.deepEqual(exits, [1], `hang=${hang}`);
+      assert.equal(d.stopCode(), 1);
+      if (hang) assert.ok(lines.some((l) => l.includes("did not finish within")), lines.join("\n"));
+      await d.close();
+    }
+  });
+
+  it("#5966 R1: without a unit, a handover whose successor never listens keeps hosting (re-hosted here); if that fails it exits non-zero", async () => {
+    const dir = tmpDir("schedd-nosucc-"), root = join(dir, "batches"), lines = [], exits = [];
+    let version = "1.51.0", spawns = 0;
+    const d = await startDaemon({ dir, root, log: (m) => lines.push(m), resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => null,
+      exit: (c) => exits.push(c), respawn: () => { spawns++; }, probe: async () => false, successorMs: 50, successorPollMs: 10, runBatch: async () => ({}) });
+    version = "1.52.0";
+    await until(() => d.rehosted());
+    const d2 = d.rehosted();
+    try {
+      assert.equal(d2.running, true, "a daemon hosts again and holds the lock");
+      assert.equal(readFileSync(scheddPaths(dir).lock, "utf8").trim(), String(process.pid));
+      assert.deepEqual(exits, [], "no exit while hosting continues");
+      assert.equal(spawns, 2, "the successor was started twice");
+      assert.ok(lines.some((l) => l.includes("hosting the batches again")));
+    } finally { await d2.close(); }
+    // re-host impossible -> exit non-zero
+    const dir2 = tmpDir("schedd-nosucc2-"), exits2 = [];
+    let v2 = "1.51.0";
+    await startDaemon({ dir: dir2, root: join(dir2, "batches"), log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => v2, unit: () => null,
+      exit: (c) => exits2.push(c), respawn: () => {}, probe: async () => false, successorMs: 30, successorPollMs: 10, rehost: async () => null, runBatch: async () => ({}) });
+    v2 = "1.52.0";
+    await until(() => exits2.length > 0);
+    assert.deepEqual(exits2, [1]);
+  });
+
+  it("#5984 handover: settled() outlives closed until the successor is spawned and probed (CLI exits only after it)", async () => {
+    const dir = tmpDir("schedd-settled-"), order = [];
+    let version = "1.51.0";
+    const d = await startDaemon({ dir, root: join(dir, "batches"), log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => null,
+      exit: (c) => order.push(`daemon-exit${c}`), respawn: () => order.push("respawn"), probe: async () => { order.push("probe"); return true; }, successorMs: 200, successorPollMs: 10, runBatch: async () => ({}) });
+    version = "1.52.0";
+    await d.closed;
+    order.push("closed-seen"); // what scheddFromCli used to exit on
+    await d.settled();
+    order.push("settled");
+    order.push(`exit${d.stopCode()}`); // the CLI's exit(stopCode), issued only once settled() resolved
+    assert.ok(order.indexOf("respawn") < order.indexOf("settled") && order.indexOf("probe") < order.indexOf("settled"), order.join(","));
+    assert.ok(order.indexOf("probe") < order.indexOf("settled") && order.indexOf("settled") < order.indexOf("exit1"), `exit1 after respawn, probe and settled: ${order.join(",")}`);
+    assert.equal(d.stopCode(), 1);
+  });
+
+  it("#5984 rehost: settled() of the stopped daemon resolves once the rehosted daemon is up; lost-lock/idle close settles via closed", async () => {
+    const dir = tmpDir("schedd-settled2-");
+    let version = "1.51.0";
+    const d = await startDaemon({ dir, root: join(dir, "batches"), log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => null,
+      exit: () => {}, respawn: () => {}, probe: async () => false, successorMs: 30, successorPollMs: 10, runBatch: async () => ({}) });
+    version = "1.52.0";
+    await d.closed; await d.settled();
+    const d2 = d.rehosted();
+    assert.equal(d2?.running, true, "rehosted before settled resolves");
+    await d2.close();
+    const dir3 = tmpDir("schedd-settled3-");
+    const d3 = await startDaemon({ dir: dir3, root: join(dir3, "batches"), log: () => {}, resumeOnStart: false, runBatch: async () => ({}) });
+    await d3.close();
+    await d3.settled();
+    assert.equal(d3.stopCode(), null);
+  });
+
+  it("#5966: a stall-recovery restart also exits (shared self-stop path)", async () => {
+    const dir = tmpDir("schedd-stallexit-"), root = join(dir, "batches"), exits = [];
+    let version = "1.51.0";
+    const d = await startDaemon({ dir, root, log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => "active", exit: (c) => exits.push(c), runBatch: async () => ({}) });
+    version = "1.52.0";
+    await until(() => exits.length > 0);
+    assert.deepEqual(exits, [1]);
+    await d.closed;
+  });
+
   it("#5204: readInstalledVersion reads this install's package.json version, null when unreadable", () => {
     assert.equal(readInstalledVersion(), JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version);
     const dir = tmpDir("schedd-ver-");
@@ -987,6 +1128,15 @@ describe("schedd under load and restart (#4775)", () => {
     await assert.rejects(connectDaemon({ dir: tmpDir("schedd-unit-"), spawnDaemon: null, unit: () => { throw new Error("not consulted"); } }), { code: "ENOENT" });
   });
 
+  it("restartUnit issues systemctl --user restart --no-block and never throws", () => {
+    const calls = [];
+    restartUnit({ run: (...a) => { calls.push(a); } });
+    assert.equal(calls[0][0], "systemctl");
+    assert.deepEqual(calls[0][1].slice(0, 3), ["--user", "restart", "--no-block"]);
+    assert.equal(calls[0][1].length, 4);
+    restartUnit({ run: () => { throw new Error("x"); } });
+  });
+
   it("unitState reads the systemctl state (also from a non-zero exit) and is null without a unit file", () => {
     assert.equal(unitState({ exists: () => false }), null);
     assert.equal(unitState({ exists: () => true, run: () => "activating\n" }), "activating");
@@ -1055,6 +1205,29 @@ describe("schedd under load and restart (#4775)", () => {
       const e = await hung;
       assert.match(e.message, /did not start within 150 ms/);
     } finally { await d.close(); }
+  });
+
+  it("#6001 scheddFromCli handover: exit(stopCode) runs only after the successor is spawned and probed (awaits d.settled)", async () => {
+    const events = [], tick = () => new Promise((r) => setTimeout(r, 15));
+    const d = { running: true, closed: Promise.resolve(), stopCode: () => 1, rehosted: () => null,
+      settled: async () => { await tick(); events.push("respawn"); await tick(); events.push("probe"); } };
+    const res = await scheddFromCli([], { scheddDir: tmpDir("schedd-cli-h-"), startDaemon: async () => d, processOn: () => {}, exit: (c) => events.push(`exit${c}`), due: null, renice: () => {}, batchDeps: {} });
+    assert.deepEqual(events, ["respawn", "probe", "exit1"]);
+    assert.deepEqual(res, { running: false, exitCode: 1 });
+  });
+
+  it("#6001 scheddFromCli rehost: exit waits for the rehosted daemon's closed and settled", async () => {
+    const events = [], tick = () => new Promise((r) => setTimeout(r, 15));
+    let closeB, settleB;
+    const b = { running: true, closed: new Promise((r) => { closeB = r; }), stopCode: () => 1, rehosted: () => null, settled: () => new Promise((r) => { settleB = r; }) };
+    const a = { running: true, closed: Promise.resolve(), stopCode: () => 1, rehosted: () => b, settled: async () => {} };
+    const done = scheddFromCli([], { scheddDir: tmpDir("schedd-cli-r-"), startDaemon: async () => a, processOn: () => {}, exit: (c) => events.push(`exit${c}`), due: null, renice: () => {}, batchDeps: {} });
+    await tick();
+    assert.deepEqual(events, [], "exit must wait for the rehosted daemon's closed");
+    closeB(); await tick();
+    assert.deepEqual(events, [], "exit must wait for the rehosted daemon's settled");
+    settleB(); await done;
+    assert.deepEqual(events, ["exit1"]);
   });
 
   it("the unit stands by while another daemon holds the lock instead of exiting 0 (no Restart=always loop)", async () => {

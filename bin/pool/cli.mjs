@@ -46,6 +46,19 @@ function rejectUnknownFlags(cmd, rest) {
   }
 }
 
+/** #6008: sandboxes kept for adopt across the batches under `root` (issue, batch, age, phase): lanes no live dispatcher awaits. */
+export async function keptRows(root, { now = Date.now() } = {}) {
+  try {
+    const B = await import("../lean/batch.mjs"), out = [];
+    for (const id of B.listBatches(root)) {
+      const b = B.openBatch(root, id), last = b.lastProgressMs();
+      const live = !b.readReport() && last !== null && now - last <= 10 * 60000;
+      for (const k of b.keptSandboxes(live)) out.push({ batch: id, ...k });
+    }
+    return out;
+  } catch { return []; }
+}
+export const keptLines = (rows) => rows.length ? [`kept sandboxes (${rows.length}):`, ...rows.map((k) => `  #${k.issue} batch ${k.batch} age ${Math.round((k.ageMs ?? 0) / 60000)}m phase ${k.phase ?? "?"}`)] : [];
 const num = (x) => (Number.isFinite(x) ? String(Math.round(x * 10) / 10) : "-");
 /** #5885: one row per host: used/borrowable/total cpus and memory, lane counts, pause state and why lanes are throttled or drained. */
 export function statusTable(agents) {
@@ -69,6 +82,16 @@ export function statusTable(agents) {
 }
 
 /** The `forgedock pool` verbs (and the `computeshare` script). Throws on usage or router errors; `deps` injects the HTTP client and config. */
+/** #5901: one line per agent cache volume with each repo's depcache size, from the router's /agents view. */
+export function depcacheLines(agents) {
+  const out = [];
+  for (const a of agents ?? []) for (const [vol, v] of Object.entries(a.cache_volumes ?? {})) {
+    const repos = Object.entries(v.depcache_gb ?? {}).map(([k, gb]) => `${k} ${gb} GB`).join(", ");
+    if (repos) out.push(`${a.name} ${vol}: depcache ${repos}`);
+  }
+  return out;
+}
+
 export async function runPoolCli(argv, deps = {}) {
   const [cmd, ...rest] = argv;
   const call = deps.call ?? httpCall;
@@ -114,9 +137,12 @@ export async function runPoolCli(argv, deps = {}) {
     case "status": {
       const cfg = routerConfig();
       const r = await call(`http://${cfg.listen.host}:${cfg.listen.port}`, "GET", `/agents${flag("account") ? `?account=${encodeURIComponent(flag("account"))}` : ""}`, { token: cfg.forgedock_token });
-      if (rest.includes("--json")) console.log(JSON.stringify(r.data, null, 2));
+      const kept = await keptRows((await import("../lean/batch.mjs")).batchRoot());
+      if (rest.includes("--json")) console.log(JSON.stringify(r.data && typeof r.data === "object" && !Array.isArray(r.data) && kept.length ? { ...r.data, kept_sandboxes: kept } : r.data, null, 2));
       else if (!r.ok) throw new Error(`router refused: HTTP ${r.status} ${JSON.stringify(r.data)}`);
       else console.log(statusTable(r.data?.agents ?? []));
+      if (!rest.includes("--json") && r.ok) for (const l of depcacheLines(r.data?.agents)) console.log(l); // #5901
+      if (!rest.includes("--json")) for (const l of keptLines(kept)) console.log(l); // #6008
       // #5735: lane sandboxes used/ceiling per agent, and the lane total across all batches
       for (const a of Array.isArray(r.data?.agents) ? r.data.agents : []) if (a?.lanes) console.log(`${a.name}: lanes ${a.lanes.used}/${a.lanes.ceiling ?? "-"}`);
       if (Number.isInteger(r.data?.remote_lanes)) console.log(`remote lanes across batches: ${r.data.remote_lanes}`);
@@ -124,6 +150,7 @@ export async function runPoolCli(argv, deps = {}) {
         if (a.transport) console.log(`${a.name}: transport ${a.transport}`); // #5882
         const n = a.net; // #5923
         if (n?.mirrored) console.log(`${a.name}: net mirrored, port range ${n.port_range ?? "?"}, NAT pin ${n.nat_pin ? "present" : "MISSING"}${n.degraded ? " DEGRADED" : ""}`);
+        if (Number.isFinite(a.host_mem_free_gb)) console.error(`${a.name}: host_mem_free_gb ${a.host_mem_free_gb}${Array.isArray(a.vmmem) && a.vmmem.length ? `, other VMs: ${a.vmmem.map((v) => `${v.name} ${v.gb} GB`).join(", ")}` : ""}${a.host_mem_low ? " WARNING: host memory below the floor, new sandboxes are refused" : ""}`); // #5967
         if (!Number.isFinite(a.host_disk_free_gb)) continue;
         console.error(`${a.name}: host_disk_free_gb ${a.host_disk_free_gb}${Number.isFinite(a.host_disk_growth_gb_per_h) ? `, growth ${a.host_disk_growth_gb_per_h} GB/h` : ""}${a.disk_warning ? ` WARNING: ${a.disk_warning}` : ""}`);
       }

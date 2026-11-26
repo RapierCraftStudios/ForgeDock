@@ -1107,6 +1107,13 @@ async function installHygieneSchedule(cwd, write = () => {}) {
     const { installGcSchedule } = await import("./gc-schedule.mjs");
     const r = await installGcSchedule({ schedule: h.schedule, enabled: h.auto_gc, cwd });
     if (r.status !== "off") write(`  Hygiene schedule: ${r.status} (${r.kind}) ${r.detail}\n`);
+    try { // #5987: daily introspect, filed only on an explicit orchestrate.slo.file_issues: true (the installer removes the entry otherwise)
+      const [{ installIntrospectSchedule }, { parseSloConfig }, { parseForgeYaml }] = await Promise.all([import("./introspect-schedule.mjs"), import("./lean/slo.mjs"), import("./forge-utils.mjs")]);
+      let fileIssues = false;
+      try { fileIssues = parseSloConfig(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))).fileIssues; } catch { fileIssues = false; }
+      const i = await installIntrospectSchedule({ enabled: fileIssues, cwd });
+      if (i.status !== "off") write(`  Introspect schedule: ${i.status} (${i.kind}) ${i.detail}\n`);
+    } catch { /* advisory */ }
     return r;
   } catch { return null; }
 }

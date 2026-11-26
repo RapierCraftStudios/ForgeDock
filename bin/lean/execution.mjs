@@ -70,6 +70,7 @@ import { classifyStep, heavyConfig, memAvailableMb } from "./heavy.mjs";
 import { detectPins } from "./toolchain.mjs";
 import { parseContractComment, noComments } from "./render.mjs";
 import { parseRelayCommands } from "./relay.mjs";
+import { classifyTransportLoss, AGENT_UP_WINDOW_MS } from "./liveness.mjs";
 import { detectUsageLimit, parseSessionLimitResetEpochMs } from "../runner.mjs";
 
 export const EXECUTION_MODES = Object.freeze(["local", "remote", "hybrid"]);
@@ -141,6 +142,7 @@ export function parseExecution(sec = {}) {
     onBudget: str(s.on_budget) === "local" ? "local" : "stop", costPerMinute: cpm ?? 0 };
   const capList = (v) => (Array.isArray(v) ? v : str(v) ? str(v).split(",") : []).map((x) => str(x).toLowerCase()).filter((x) => CAPABILITY_RE.test(x));
   const hostCapabilities = [...new Set(capList(s.host_capabilities))];
+  const offloadWrappers = [...new Set(capList(s.offload_wrappers))]; // unclog: host commands that only send work elsewhere (e.g. a remote-run wrapper); a sandbox runs their argument directly
   const patRaw = Array.isArray(s.host_capability_patterns) ? s.host_capability_patterns : str(s.host_capability_patterns) ? str(s.host_capability_patterns).split(",") : [];
   const hostCapabilityPatterns = patRaw.map((x) => { const t = str(x), i = t.indexOf(":"); return { name: t.slice(0, i).trim().toLowerCase(), pattern: t.slice(i + 1).trim() }; })
     .filter((x) => CAPABILITY_RE.test(x.name) && x.pattern && safeRegExp(x.pattern));
@@ -161,7 +163,7 @@ export function parseExecution(sec = {}) {
   const plan = ["free", "pro", "team", "enterprise"].includes(str(s.plan).toLowerCase()) ? str(s.plan).toLowerCase() : null;
   const publicDefault = str(s.public_default).toLowerCase() === "actions" ? "actions" : null; // #5900: opt-in only
   const dispatcher = /^[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?$/.test(str(s.dispatcher)) ? str(s.dispatcher) : null;
-  return { mode, maxRemote, provider, image, secrets, budget, ...(jobLimit ? { jobLimit } : {}), ...(ciReserve !== null ? { ciReserve } : {}), ...(plan ? { plan } : {}), ...(publicDefault ? { publicDefault } : {}), ...(dispatcher ? { dispatcher } : {}), ...(hostFallback !== null ? { hostFallback } : {}), ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(repoSource ? { repoSource } : {}), ...(accountRotator ? { accountRotator } : {}), ...(lt.tools.length ? { laneTools: lt.tools } : {}), ...(lt.errors.length ? { laneToolsErrors: lt.errors } : {}) };
+  return { mode, maxRemote, provider, image, secrets, budget, ...(jobLimit ? { jobLimit } : {}), ...(ciReserve !== null ? { ciReserve } : {}), ...(plan ? { plan } : {}), ...(publicDefault ? { publicDefault } : {}), ...(dispatcher ? { dispatcher } : {}), ...(hostFallback !== null ? { hostFallback } : {}), ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(offloadWrappers.length ? { offloadWrappers } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(repoSource ? { repoSource } : {}), ...(accountRotator ? { accountRotator } : {}), ...(lt.tools.length ? { laneTools: lt.tools } : {}), ...(lt.errors.length ? { laneToolsErrors: lt.errors } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -178,7 +180,7 @@ const KEEP_DAYS = 7;
 
 /**
  * The execution budget (#4255). `record(key, {minutes, cost_usd})` adds one lane attempt to today's host total; the key
- * (`<batch>#<sandbox id>#<startedAt>`) makes a repeated record a no-op. `admit({minutes, cost_usd, running})` gets the
+ * (`<batch>#<sandbox id>`) holds one entry per sandbox with its latest cumulative usage (#5987); an identical repeat is a no-op. `admit({minutes, cost_usd, running})` gets the
  * batch's settled + running usage (`running` the running part alone) and refuses once a batch cap, or a day cap with
  * today's host total plus this batch's running usage, is reached. A corrupt or unreadable day file refuses while a day
  * cap is set (a hard cap fails closed) and is ignored otherwise; it is never overwritten.
@@ -207,8 +209,10 @@ export function openExecutionBudget({ budget = {}, file = executionBudgetFile(),
       const r = read();
       if (!r.ok) return false;
       const d = utcDay(now()), today = { ...(r.days[d] ?? {}) };
-      if (today[key]) return false;
-      today[key] = { minutes: nonNeg(u?.minutes) ?? 0, cost_usd: nonNeg(u?.cost_usd) ?? 0, at: now() };
+      const min = nonNeg(u?.minutes) ?? 0, usd = nonNeg(u?.cost_usd) ?? 0;
+      // #5991: one row per key; a replay of the same sandbox keeps the larger usage instead of adding a row
+      if (today[key] && !(min > (nonNeg(today[key].minutes) ?? 0) || usd > (nonNeg(today[key].cost_usd) ?? 0))) return false;
+      today[key] = { minutes: Math.max(min, nonNeg(today[key]?.minutes) ?? 0), cost_usd: Math.max(usd, nonNeg(today[key]?.cost_usd) ?? 0), at: now() };
       const days = { [d]: today };
       for (const [k, v] of Object.entries(r.days)) if (k !== d && Date.parse(k) > now() - KEEP_DAYS * 86400000) days[k] = v;
       writeAtomic(file, JSON.stringify({ v: 1, days }, null, 2) + "\n");
@@ -293,11 +297,14 @@ export function detectNeeds(text, exec = null, { prose = false } = {}) {
 
 /**
  * #5652: may a remote lane that lacks a tool or host capability be re-placed on the dispatching host? An explicit
- * `execution.host_fallback` wins; else off when forge.yaml `host.role` is `orchestrator`; else on (existing repos unchanged).
+ * `execution.host_fallback` wins; else off when forge.yaml `host.role` is `orchestrator`; else off in `mode: remote` (#5746);
+ * else on (hybrid and local unchanged).
  */
-export function hostFallbackAllowed({ hostFallback = null, hostRole = null } = {}) {
+export function hostFallbackAllowed({ hostFallback = null, hostRole = null, mode = null } = {}) {
   if (typeof hostFallback === "boolean") return hostFallback;
-  return String(hostRole ?? "").trim().toLowerCase() !== "orchestrator";
+  if (String(hostRole ?? "").trim().toLowerCase() === "orchestrator") return false;
+  // #5746: in remote mode the host is not a fallback unless the repo opts in with host_fallback: true
+  return mode !== "remote";
 }
 
 /** Declared host capabilities a remote lane's block summary names (#4542); empty when it names none the host has. */
@@ -400,7 +407,10 @@ export function placeLane({ exec = null, verifyMode = "local", labels = [], weig
     const missing = (Array.isArray(needs) ? needs : []).map(String).filter((n) => n && !(Array.isArray(relays) ? relays : []).includes(n));
     if (missing.length) return { where: "local", reason: `host capability: ${missing.join(", ")}` };
   }
-  if (mode !== "hybrid") { const where = placement(exec); return { where, reason: `mode ${EXECUTION_MODES.includes(mode) ? mode : "local"}` }; }
+  if (mode !== "hybrid") {
+    const where = placement(exec);
+    return { where, reason: `mode ${EXECUTION_MODES.includes(mode) ? mode : "local"}` };
+  }
   if (!(Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1)) return { where: "local", reason: "max_remote 0" };
   if (verifyMode === "ci") return { where: "local", reason: "verify.mode ci: validation runs on CI, not billed twice" };
   const names = (Array.isArray(labels) ? labels : []).map((l) => String(l ?? "").trim().toLowerCase());
@@ -699,7 +709,15 @@ const HALTED = { terminalReason: "deferred", detail: "batch halted (schedd hando
  * (`backendId`; the sandbox's own id kept as `laneBackendId`), so orchestrate can place lanes away from a limited pool.
  */
 export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env, secrets = [], pollMs = 5000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
-  costPerMinute = 0, now = () => Date.now(), unreachableWindowMs = 300000, logTail = null, holdId = null }) {
+  costPerMinute = 0, now = () => Date.now(), unreachableWindowMs = 300000, logTail = null, holdId = null, agentOnline = null, suspendKept = null, resumeKept = null, phaseOf = null }) {
+  // #6008: a sandbox kept for adopt keeps running with no dispatcher: record it (issue, since, phase) and tell it to suspend (the lane refuses push/merge until adopted)
+  const keepNote = (r, n, h) => {
+    if (!Number.isInteger(n)) return r;
+    let phase = null; try { phase = phaseOf?.(n) ?? null; } catch { phase = null; }
+    const kept = { issue: n, since: now(), phase, ...(h?.id ? { id: h.id } : {}) };
+    try { Promise.resolve(suspendKept?.(n, kept)).catch(() => {}); } catch { /* best effort */ }
+    return { ...r, kept };
+  };
   const cpm = nonNeg(Number(costPerMinute)) ?? 0;
   // #4255: the sandbox's usage: the provider's `usage()`, else the billable minutes it put on the handle (#4254), else wall
   // clock since the handle's startedAt; cost is the provider's, else minutes x cost_per_minute.
@@ -734,22 +752,27 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
       try { const v = await fn(); st.waited = 0; st.tries = 0; return v; } catch (e) {
         if (!isTransportError(e)) throw e;
         // release review BUG-6: a 401 that outlasts the window is an auth failure (capped sandbox.auth), not an uncapped unreachable pool
-        if (st.waited >= unreachableWindowMs) throw Object.assign(new Error(`unreachable for ${Math.round(st.waited / 1000)}s: ${errText(e)}`), { unreachable: true, ...(e?.status === 401 ? { auth: true, hop: e.hop } : {}) });
-        const d = Math.min(pollMs * 2 ** Math.min(st.tries++, 10), 30000, Math.max(1, unreachableWindowMs - st.waited));
+        // #5991: once the wait reaches the agent-up window, ask the pool agent; an answering agent means this sandbox is gone
+        let up = null;
+        if (typeof agentOnline === "function" && st.waited >= AGENT_UP_WINDOW_MS && st.waited < unreachableWindowMs) { try { up = (await agentOnline(st.h)) === true; } catch { up = false; } }
+        if (classifyTransportLoss({ agentOnline: up, waitedMs: st.waited, windowMs: unreachableWindowMs }) === "unreachable") throw Object.assign(new Error(`unreachable for ${Math.round(st.waited / 1000)}s: ${errText(e)}`), { unreachable: true, ...(e?.status === 401 ? { auth: true, hop: e.hop } : {}) });
+        const d = Math.min(pollMs * 2 ** Math.min(st.tries++, 10), 30000, Math.max(1, unreachableWindowMs - st.waited),
+          typeof agentOnline === "function" && st.waited < AGENT_UP_WINDOW_MS ? AGENT_UP_WINDOW_MS - st.waited : Infinity); // land on the probe point
         st.waited += d;
         await sleep(d);
       }
     }
   };
-  const unreachable = (h, e) => (e?.auth
+  const unreachable0 = (h, e) => (e?.auth
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_AUTH, retryInSeconds: 300, detail: `sandbox ${h.id} kept answering 401 (${e.hop === "agent" ? "the pool agent refused the router" : "check the pool token"}): ${errText(e)}; kept for adopt on resume` }
     : { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_UNREACHABLE, retryInSeconds: 60,
       detail: `sandbox ${h.id} ${errText(e)}; kept for adopt on resume` });
+  const unreachable = (h, e) => keepNote(unreachable0(h, e), h?.issue, h);
   const tailOf = async (h) => { try { return typeof logTail === "function" ? String(await logTail(h) ?? "") : ""; } catch { return ""; } };
   const settleClone = (r, id) => (r?.terminalReason === "engine-error" && r.code === undefined && isEgressTimeout(r.detail) ? egressDeferred(id, errLine(r.detail))
     : r?.terminalReason === "engine-error" && r.code === undefined && isCloneFailure(r.detail) ? cloneDeferred(id, errLine(r.detail)) : r);
   // #5669: a halted batch (schedd handover) stops polling; the sandbox is neither torn down nor released, so the next daemon adopts it.
-  const wait = async (h, g = guard({ waited: 0, tries: 0 }), sig = null) => {
+  const wait = async (h, g = guard({ waited: 0, tries: 0, h }), sig = null) => {
     for (;;) {
       if (sig?.aborted) return null;
       const r = await g(() => provider.fetchResult(h));
@@ -779,7 +802,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
   const startFailed = (id, e) => ([401, 403].includes(e?.status)
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_AUTH, retryInSeconds: 300, detail: `sandbox ${id} could not start (auth): ${errText(e)}; ${e?.hop === "agent" ? "the pool agent refused the router (re-enroll or fix the agent token)" : "check the pool token (COMPUTESHARE_TOKEN or ~/.config/computeshare/forgedock.token)"}` }
     : e?.retryable === true
-    ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, detail: `sandbox ${id} could not start (capacity): ${errText(e)}`, ...(Number(e.retryInSeconds) > 0 ? { retryInSeconds: Number(e.retryInSeconds) } : {}) }
+    ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, detail: `sandbox ${id} could not start (capacity): ${errText(e)}`, ...(typeof e.poolCode === "string" ? { reason: e.poolCode.replace(/^pool\./, "").replace(/^disk_(low|cap)$/, "disk") } : {}), ...(e.live ? { live: e.live } : {}), ...(Number(e.retryInSeconds) > 0 ? { retryInSeconds: Number(e.retryInSeconds) } : {}) }
     // #5095: a 5xx from the pool router or agent is infrastructure: deferred with backoff (capped), never needs-human
     : (Number.isInteger(e?.status) && e.status >= 500 && e.status <= 599) || e?.transient === true || (isTransportError(e) && !isCloneFailure(errText(e))) // #5656: fetch failed, ECONNRESET, ETIMEDOUT; a clone timeout keeps its own code
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_TRANSIENT, retryInSeconds: Number(e.retryInSeconds) > 0 ? Number(e.retryInSeconds) : TRANSIENT_RETRY_S,
@@ -817,7 +840,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
         started = true;
         ctx.onStart?.({ ...(Number.isInteger(h.pid) ? { pid: h.pid } : {}), handle: h, remote: true });
         r = settleClone(await wait(h, undefined, ctx.signal), base.id);
-        if (ctx.signal?.aborted) return HALTED; // #5669: the sandbox stays for adopt, whatever `r` is
+        if (ctx.signal?.aborted) return keepNote(HALTED, n, h); // #5669: the sandbox stays for adopt, whatever `r` is
       } catch (e) {
         if (started && e?.unreachable) return withUsage(unreachable(h, e), h); // #4672: no tear, the ledger keeps it
         r = started ? settleClone({ terminalReason: "engine-error", detail: `sandbox ${base.id}: ${errText(e)}` }, base.id) : startFailed(base.id, e);
@@ -836,17 +859,18 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
         saved = (ledgerFor(n)?.entries("sandbox") ?? []).find((e) => e.value === id && (e.provider ?? e.handle?.provider) === provider.name)?.handle;
       }
       if (!saved?.id || saved.provider !== provider.name) return null;
+      try { Promise.resolve(resumeKept?.(n)).catch(() => {}); } catch { /* best effort */ } // #6008: adopted: the lease is re-established
       // Usage runs from the sandbox's real start (persisted on the handle), not from this adopt.
       const h = { ...saved, ...(Number.isFinite(saved.startedAt) ? {} : Number.isFinite(rec?.startedAt) ? { startedAt: rec.startedAt } : {}) };
       const led = ledgerFor(n);
       led?.register("sandbox", h.id, { provider: provider.name, handle: { provider: h.provider, id: h.id, issue: h.issue, ...(Number.isFinite(h.startedAt) ? { startedAt: h.startedAt } : {}) } }); // now owned by this dispatcher
       let r;
-      const g = guard({ waited: 0, tries: 0 });
+      const g = guard({ waited: 0, tries: 0, h });
       try {
         const ended = await g(() => provider.fetchResult(h));
         if (!ended && (await g(() => provider.status(h))) !== "running") r = null; // relaunched
         else { if (!ended) ctx.onLive?.(); r = await wait(h, g, ctx.signal); } // #4504: a live sandbox is awaited in the background
-        if (ctx.signal?.aborted) return null; // #5669: halted: left for the next adopt, no tear
+        if (ctx.signal?.aborted) { keepNote(HALTED, n, h); return null; } // #5669: halted: left for the next adopt, no tear
       } catch (e) {
         if (e?.unreachable) return withUsage(unreachable(h, e), h); // #4672: same tolerance; no tear, left for the next adopt
         r = { terminalReason: "engine-error", detail: `sandbox ${h.id}: ${errText(e)}` };

@@ -13,6 +13,7 @@ import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { spawn as spawnProc } from "node:child_process";
 import { join } from "node:path";
 import { listBatches, openBatch, REQUEUABLE, writeAtomic } from "./batch.mjs";
+import { efficiencyLine, readEfficiency } from "./efficiency.mjs";
 
 export const DEFAULT_HEALTH = Object.freeze({ rootFailed: true, terminalShare: 0.5, stalled: true, checksMin: Object.freeze([15, 60]), issue: null, notifyCommand: null });
 /** #5469: a hold older than this many hours is flagged (`config.holdHours` overrides). */
@@ -224,6 +225,8 @@ export function batchStatusLines(root, id, { now = Date.now() } = {}) {
     const k = Array.isArray(g?.lanes) ? g.lanes.length : Number(g?.requeued) || 0;
     if (g?.agent) out.push(`  agent ${g.agent} restarted at ${g.at ?? "?"}; ${k} lane${k === 1 ? "" : "s"} requeued (sandbox.lost)${g.closed ? "" : ", waiting for the agent"}`);
   }
+  const eff = efficiencyLine(readEfficiency(b.dir)); // #5987: the efficiency ledger, when the daemon wrote one
+  if (eff) out.push(`  ${eff}`);
   return out;
 }
 
@@ -325,8 +328,9 @@ export function runningSplit(state, parallel = null) {
  * not held, no retry-at in the future, every in-batch dependency ended well. Independent of the runner (it may be dead), so the
  * schedd polls it. `hosted`: a runner is alive. `gates` (#5745): the failing preflight checks `[{code, detail}]` holding admission, named in the detail. @returns null (healthy) or `{code, ready, idleMin, hosted, detail[, gates]}`. Pure.
  */
-export function evaluateDispatchStall(state, { held = [], parallel = null, hosted = false, lastProgressMs = null, now = Date.now(), windowMin = DEFAULT_STALL_MIN, cancelled = false, reported = false, gates = [], lanesAliveMs = null } = {}) {
+export function evaluateDispatchStall(state, { held = [], parallel = null, hosted = false, lastProgressMs = null, now = Date.now(), windowMin = DEFAULT_STALL_MIN, cancelled = false, reported = false, gates = [], lanesAliveMs = null, paused = null } = {}) {
   if (!state || cancelled || reported || lastProgressMs === null) return null;
+  if (paused) return null; // #5975: an operator pause is an intended wait, not a dispatch stall
   if (state.breaker && !state.breaker.transport) return null; // an operator --resume clears it; a re-host would stop again at once
   const order = new Set((state.order ?? []).map(Number)), results = state.results ?? {}, heldSet = new Set(held.map(Number));
   const running = Object.keys(state.running ?? {}).length;
@@ -352,12 +356,16 @@ export function evaluateDispatchStall(state, { held = [], parallel = null, hoste
  * stalling again, or a batch past `maxRecoveries`, alerts with the probed cause. Pure.
  * @returns {{action: "resume"|"restart-daemon"|"alert", sig: string, cause: string|null}}
  */
+/** #5988: the diagnosis a stall recovery acts on: the `dispatch-stalled` cause plus the gates in force. */
+export const stallCause = (stall) => `${stall.code ?? "dispatch-stalled"}${stall.gates?.length ? `[${[...stall.gates].sort().join(",")}]` : ""}`;
+
 export function decideStallAction(stall, { recovery = null, probe = null, hosted = false, maxRecoveries = MAX_STALL_RECOVERIES } = {}) {
   const sig = stall.ready.join(",");
   if (probe && !probe.ok) return { action: "alert", sig, cause: `batch env: ${probe.detail}; fix it with --set-env <id> PATH=<dirs holding the tools>, then --resume` };
   const count = Number(recovery?.count) || 0;
-  if (recovery?.sig === sig || count >= maxRecoveries) {
-    const why = recovery?.sig === sig ? `stalled again after auto-recovery (${recovery.action} at ${recovery.at})` : `${count} auto-recoveries already spent`;
+  const cause = stallCause(stall), sameCause = recovery?.cause === cause && recovery?.action === (hosted ? "restart-daemon" : "resume");
+  if (recovery?.sig === sig || sameCause || count >= maxRecoveries) {
+    const why = sameCause && recovery?.sig !== sig ? `a second ${recovery.action} for the same cause (${cause}) is refused (first at ${recovery.at})` : recovery?.sig === sig ? `stalled again after auto-recovery (${recovery.action} at ${recovery.at})` : `${count} auto-recoveries already spent`;
     return { action: "alert", sig, cause: `${why}${probe ? `; ${probe.detail}` : ""}` };
   }
   return { action: hosted ? "restart-daemon" : "resume", sig, cause: null };
@@ -368,20 +376,23 @@ export function recordStallRecovery(batch, stall, { action, sig = stall.ready.jo
   const prev = readHealth(batch.dir) ?? {}, at = new Date(now).toISOString();
   const what = action === "restart-daemon" ? "restart the hosting schedd (its runner is alive but not progressing)" : "resume the batch (no runner hosts it)";
   const text = `FORGE:DECISION batch ${batch.id} stall-recovery: ${what}; why: ${stall.detail}; alternative: alert only (a repeat of this stall alerts instead)`;
-  try { writeHealth(batch.dir, { ...prev, stallRecovery: { sig, at, action, count: (Number(prev.stallRecovery?.count) || 0) + 1, detail: stall.detail } }); } catch { /* advisory */ }
+  try { writeHealth(batch.dir, { ...prev, stallRecovery: { sig, at, action, cause: stallCause(stall), gates: stall.gates ?? [], count: (Number(prev.stallRecovery?.count) || 0) + 1, detail: stall.detail } }); } catch { /* advisory */ }
   appendBatchLog(batch.dir, `${at} ${text}`);
   return text;
 }
 
+/** #5975: `paused (reason, until …)`, the text every surface shows for a batch pause. */
+export const pausedText = (p) => `paused (${p?.reason ?? "no reason given"}, until ${p?.expiresAt ?? "unpause"})`;
+
 /** The first-hour report of one batch: dispatched / running / merged / stuck, and why. Pure. */
-export function firstHourReport(state, { batchId, now = Date.now(), held = [], stall = null, holdInfo = null } = {}) {
+export function firstHourReport(state, { batchId, now = Date.now(), held = [], stall = null, holdInfo = null, paused = null } = {}) {
   const order = (state?.order ?? []).map(Number), results = state?.results ?? {}, running = Object.keys(state?.running ?? {}).map(Number);
   const merged = order.filter((n) => GOOD_END.has(results[n]?.outcome)), heldSet = new Set(held.map(Number));
   const stuck = order.filter((n) => !running.includes(n) && !GOOD_END.has(results[n]?.outcome) && (results[n] !== undefined || (state?.pending ?? []).map(Number).includes(n)));
   const why = (n) => results[n]?.outcome ? `#${n} ${results[n].outcome}` : heldSet.has(n) ? `#${n} held${holdInfo?.[n] ? ` (${holdInfo[n].owner}, since ${holdInfo[n].since})` : ""}` : Number(state?.notBefore?.[n]) > now ? `#${n} waiting on a retry` : `#${n} pending`;
   const dispatched = order.filter((n) => results[n] !== undefined || running.includes(n)).length;
   const counts = { total: order.length, dispatched, running: running.length, merged: merged.length, stuck: stuck.length };
-  const reasons = [...stuck.map(why), ...(stall ? [stall.detail] : [])];
+  const reasons = [...(paused ? [pausedText(paused)] : []), ...stuck.map(why), ...(stall ? [stall.detail] : [])];
   const summary = `first hour: ${dispatched}/${order.length} dispatched, ${running.length} running, ${merged.length} merged, ${stuck.length} stuck${reasons.length ? ` (${reasons.slice(0, 6).join("; ")})` : ""}`;
   return { batch: batchId, at: new Date(now).toISOString(), counts, summary, lines: [`batch ${batchId}: ${summary}`, ...reasons.slice(0, 12).map((r) => `  ${r}`)] };
 }
@@ -429,7 +440,7 @@ export function batchVerdict(id, stall, decision = null, { acted = false } = {})
 
 /** #5938: whether the batch still has ready issues with a free lane (the idle window was already met when the stall was stored). */
 const stallStillHolds = (b, now) => {
-  try { const state = b.store.peek(); if (!state) return true; return evaluateDispatchStall(state, { held: b.readHeld(), parallel: b.readParallel(), hosted: true, lastProgressMs: b.lastProgressMs() ?? now, now, windowMin: 0 }) !== null; } catch { return true; }
+  try { const state = b.store.peek(); if (!state) return true; return evaluateDispatchStall(state, { held: b.readHeld(), parallel: b.readParallel(), hosted: true, paused: b.readPause?.() ?? null, lastProgressMs: b.lastProgressMs() ?? now, now, windowMin: 0 }) !== null; } catch { return true; }
 };
 
 /** `sched show` lines: per unfinished batch, its first-hour summary and any dispatch stall. */
@@ -439,7 +450,8 @@ export function summaryLines(root, { now = Date.now() } = {}) {
     try {
       const b = openBatch(root, id);
       if (b.readReport() || b.readCancel()) continue;
-      const fh = readFirstHour(b.dir), h = readHealth(b.dir);
+      const fh = readFirstHour(b.dir), h = readHealth(b.dir), pz = b.readPause?.() ?? null;
+      if (pz) out.push(`  batch ${id}: ${pausedText(pz)}`);
       if (fh?.summary) out.push(`  batch ${id}: ${fh.summary}`);
       if (h?.stall && now - Date.parse(h.stall.at) < 24 * 3600 * 1000 && stallStillHolds(b, now)) out.push(`  batch ${id}: DISPATCH STALLED since ${h.stall.at}: ${h.stall.detail}${h.stall.cause ? ` (${h.stall.cause})` : ""}`);
     } catch { /* an unreadable batch has no line */ }

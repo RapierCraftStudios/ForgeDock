@@ -406,3 +406,38 @@ describe("#5938 stall verdict is re-evaluated: full K, recovery lanes, pool capa
     assert.match(batchVerdict("b1", s, { action: "alert", cause: "no gh" }), /stalled -> no action, needs you \(no gh;/);
   });
 });
+
+describe("#5988: a second restart for the same stall cause is refused", () => {
+  const stall = (ready, gates) => ({ code: "dispatch-stalled", ready, gates, detail: "stalled" });
+  it("a different ready set with the same cause is refused and the diagnosis is recorded", () => {
+    const root = tmpDir("stallcause");
+    mkdirSync(join(root, "b1"), { recursive: true });
+    const batch = { id: "b1", dir: join(root, "b1") };
+    const first = decideStallAction(stall([1, 2], ["base.red"]), { recovery: null, hosted: true });
+    assert.equal(first.action, "restart-daemon");
+    recordStallRecovery(batch, stall([1, 2], ["base.red"]), { action: first.action, sig: first.sig });
+    const rec = readHealth(batch.dir).stallRecovery;
+    assert.equal(rec.cause, "dispatch-stalled[base.red]");
+    assert.deepEqual(rec.gates, ["base.red"]);
+    const again = decideStallAction(stall([3], ["base.red"]), { recovery: rec, hosted: true });
+    assert.equal(again.action, "alert");
+    assert.match(again.cause, /second restart-daemon for the same cause/);
+    assert.equal(decideStallAction(stall([3], []), { recovery: rec, hosted: true }).action, "restart-daemon", "another cause is recovered once");
+  });
+});
+
+describe("#5987 efficiency status line", () => {
+  it("batch status shows the efficiency line with and without breaches; none without a ledger", async () => {
+    const { writeEfficiency } = await import("./efficiency.mjs");
+    const root = tmpDir("bh-eff-");
+    mkdirSync(join(root, "b1"));
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: ["1"], created: new Date().toISOString() });
+    assert.ok(!statusLines(root, { batch: "b1" }).some((l) => /efficiency:/.test(l)));
+    const eff = { v: 1, concurrency: { running: 3, ceiling: 12, achieved: 3 }, limiters: ["sandbox.capacity", "pool.host_load"], breaches: [] };
+    writeEfficiency(b.dir, eff);
+    assert.ok(statusLines(root, { batch: "b1" }).includes("  efficiency: 3/12 lanes (25%) - limiter sandbox.capacity pool.host_load"));
+    writeEfficiency(b.dir, { ...eff, breaches: [{ issue: 6001 }, { issue: 6001 }] });
+    assert.ok(statusLines(root, { batch: "b1" }).includes("  efficiency: 3/12 lanes (25%) - limiter sandbox.capacity pool.host_load; 2 SLO breaches -> FD#6001"));
+  });
+});

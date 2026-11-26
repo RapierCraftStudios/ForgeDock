@@ -17,7 +17,8 @@ date +%s > /cache/.last-used 2>/dev/null || true # #5757: the agent evicts cache
 exec > >(tee -a /csout/lane.log) 2>&1
 
 export HOME=/root
-export UV_CACHE_DIR=/cache/uv npm_config_cache=/cache/npm POETRY_CACHE_DIR=/cache/poetry PIP_CACHE_DIR=/cache/pip
+# #5969: same layout as depcache.mjs env(); the legacy /cache/{uv,npm,pip,poetry} stay swept for old volumes.
+export UV_CACHE_DIR=/cache/forge-depcache/stores/uv-cache npm_config_cache=/cache/forge-depcache/stores/npm-cache POETRY_CACHE_DIR=/cache/forge-depcache/stores/poetry-cache PIP_CACHE_DIR=/cache/forge-depcache/stores/pip-cache
 export TMPDIR=/tmp
 # ForgeDock's dependency cache (its pnpm store and snapshots) and pnpm's own store live in the persistent per-repo
 # cache volume, so a lane installs from a warm store instead of downloading every package (a cold monorepo install
