@@ -26,6 +26,16 @@ import { OUTCOME_CODES, UNCLASSIFIED, normalizeCode, codeForRunnerError, codeFor
 // Exported (forge#2175) so bin/engine-cli.mjs can render "failed N/M attempts"
 // diagnostics without duplicating the retry budget constant.
 export const DEFAULT_MAX_ATTEMPTS = 3;
+/** #5988: an operator hold on more issues than this needs an explicit `--for`/`--ttl`: an open-ended hold idles them for as long as it is forgotten. */
+export const HOLD_TTL_REQUIRED_ABOVE = 10;
+/** #5988: `--hold` on many issues without a TTL is refused; the message names the flag. @returns {string|null} the refusal, or null when allowed */
+export function holdTtlRefusal(issues, forMs) {
+  return issues.length > HOLD_TTL_REQUIRED_ABOVE && !(Number(forMs) > 0) ? `holding ${issues.length} issues (more than ${HOLD_TTL_REQUIRED_ABOVE}) requires an explicit --ttl <4h|30m|1d> (or --for)` : null;
+}
+/** #5988: the plan printed with a hold: when it expires, an alert at T-30 min, and that expiry re-admits at the concurrency controller's pace. */
+export function holdResumePlan(issues, forLabel) {
+  return `resume plan: ${issues.length} issue${issues.length === 1 ? "" : "s"} held${forLabel ? ` for ${forLabel}` : " until released"}; an alert posts 30 min before expiry; on expiry they re-admit through the concurrency controller, not all at once`;
+}
 
 // forge#2239: lease TTL and renewal-interval defaults. Exported/overridable
 // (mirrors DEFAULT_MAX_ATTEMPTS) so tests can exercise "phase outlives the

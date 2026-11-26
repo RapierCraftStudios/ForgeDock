@@ -136,7 +136,8 @@ import { laneSize, SIZES } from "./budget.mjs";
 import { requeueKey, REQUEUABLE } from "./batch.mjs";
 import { makeCapWait } from "./capwait.mjs";
 import { mapLimit } from "./pmap.mjs";
-import { quotaRequeue } from "./rotator.mjs";
+import { quotaRequeue, nextAccountAfterAuthFailure } from "./rotator.mjs";
+import { holdExpiryWarnings } from "./limits.mjs";
 import { joinsDecomposed, addsEpicChildren, selectChildren, edgeText, DEFAULT_POLL_S } from "./autochildren.mjs";
 import { formatOverload } from "./hostload.mjs";
 import { normalizeStacking, planAdmissible, stackAdmissible } from "./stacking.mjs";
@@ -184,6 +185,12 @@ export const ENGINE_ERROR_RELAUNCHES = 1;
 export const AGENT_LOST_MIN = 3;
 export const AGENT_LOST_WINDOW_MS = 60000;
 export const AGENT_LOST_REQUEUE_MS = 60000;
+// #5988: a backend.auth outage is probed every AUTH_PROBE_MS, holds admissions at most AUTH_ESCALATE_MS, then escalates once.
+export const AUTH_PROBE_MS = 5 * 60000;
+export const AUTH_ESCALATE_MS = 30 * 60000;
+export const HOLD_RAMP_STEP_MS = 30000; // #5988: hold-expiry release ramp: one more lane per step
+/** #5988: a cause that belongs to one placement host: errors are counted per (signature, agent), not batch-wide. */
+const hostSignature = (r, detail) => (/\bsandbox\.exited\b/.test(`${r?.code ?? ""} ${detail ?? ""}`) ? "sandbox.exited" : null);
 export const HOST_BUSY_RETRY_S = 60;
 // #4528: a busy host or a full sandbox pool is a wait, not a failure: requeued after its retry-in, never capped.
 // A lane that could not be resolved because gh/git failed (network blip) is the same kind of wait (#4791).
@@ -343,7 +350,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), blockedRefreshMs = 60000, onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, usageRows = null, repoSlug = null, repoOf = null, getAdded = null, getRequeued = null, reconcile = null, select = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000, getClearBreaker = null, consumeClearBreaker = null, ackClearBreaker = null,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null, baseProbe = null,
-  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, heldFacts = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getPause = null, expirePause = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, suspendLane = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
+  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, heldFacts = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getPause = null, expirePause = null, getHoldInfo = null, authProbe = null, onEscalate = null, quarantineAgent = null, reseedCache = null, suspendLane = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
   getChildren = null, autoChildren = null, baseWait = null, rotator = null, stacking = "off", readPrReady = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null, envHold = null, envIssue = null, logicalDeps = null,
   train = null, trainEveryMs = DEFAULT_TRAIN_EVERY_MS, attempts = null }) {
@@ -391,6 +398,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const enqueued = toMap(saved?.enqueued); // #4409: issue -> when it last entered the queue (starvation guard)
   const heads = new Set(saved?.heads ?? []); // #4409: decomposed sub-issues not started yet: the head of their priority band
   let errorTimes = [...(saved?.errorTimes ?? [])];
+  const ceilingK = () => { let k = null; try { k = getParallel?.(); } catch { k = null; } return Number.isInteger(k) && k >= 1 ? k : parallel; }; // #5988: declared early: refreshHeld reads it
+  const holdWarned = new Set(); let holdRamp = null; // #5988: declared early: the hoisted refreshHeld reads them from finish/recovery callbacks
   // #5859: agent restarts of this batch (one record each, shown by `status --batch`) and the lanes already requeued as `sandbox.lost`
   const agentRestarts = [...(saved?.agentRestarts ?? [])];
   const lostOnce = new Set(saved?.lostRequeued ?? []); // a lane lost again after its requeue is an ordinary engine-error
@@ -894,6 +903,51 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #5859: sandboxes of one pool agent ending without a result in a burst (AGENT_LOST_MIN within AGENT_LOST_WINDOW_MS) are an agent/VM
   // restart: `sandbox.lost`, requeued once (after `remote.agentHealthy(agent)` answers, when the provider has it), never counted by the
   // breaker or the engine-error relaunch. Lanes of the burst that settled as engine-errors first are rolled back. One batch event each.
+  // #5988: one backend.auth outage at a time: probed on a clock, rotated, escalated once; `authPass` runs every loop pass.
+  let authOutage = null;
+  const authPass = async () => {
+    const o = authOutage; if (!o) return;
+    const t = now();
+    if (!o.escalated && t - o.since >= AUTH_ESCALATE_MS) {
+      o.escalated = true;
+      const detail = `backend.auth: the claude login has failed for ${Math.round((t - o.since) / 60000)} min (accounts tried: ${[...o.failed].join(", ") || "none"}); admissions no longer held, operator action needed`;
+      try { holds.clear(o.key); } catch { /* fail-open */ }
+      for (const m of o.issues) notBefore.delete(m);
+      for (const f of o.failed) limitedAccounts.delete(f);
+      update({ issue: null, outcome: "auth-escalation", detail });
+      try { await onEscalate?.({ detail, issues: [...o.issues], batch: batchId ?? null }); } catch { /* advisory */ }
+      return;
+    }
+    if (o.escalated || !authProbe || t < o.nextProbe) return;
+    const next = nextAccountAfterAuthFailure(rotator, o.last ? [o.last] : []); // the account after the one that failed last
+    let ok = false; try { ok = Boolean((await authProbe({ account: next, configDir: next ? rotator?.configDir?.(next) ?? null : null }))?.ok); } catch { ok = false; }
+    if (ok) {
+      try { holds.clear(o.key); } catch { /* fail-open */ }
+      for (const m of o.issues) notBefore.delete(m);
+      for (const f of o.failed) limitedAccounts.delete(f);
+      authOutage = null;
+      update({ issue: null, outcome: "auth-resumed", detail: `backend.auth recovered after ${Math.round((t - o.since) / 60000)} min; admissions resumed${next ? ` on account ${next}` : ""}` });
+    } else {
+      if (next) o.last = next;
+      o.nextProbe = t + AUTH_PROBE_MS;
+    }
+  };
+  // #5988: engine-errors with one host-bound signature on one agent are counted per (signature, agent): at the breaker's threshold only that
+  // agent is quarantined (its cache reseeded once); the batch breaker never sees them, so unaffected agents keep admitting.
+  const QUARANTINE_REQUEUES = 3, quarantineRequeues = new Map(), scopedSeen = new Map(), quarantined = new Map(), reseeded = new Set(); // quarantined: key -> until
+  const scopedEngineError = async (agent, sig) => {
+    const t = now(), key = `${sig}|${agent}`, windowMs = breaker.window_min * 60000, win = [...(scopedSeen.get(key) ?? []).filter((x) => t - x < windowMs), t];
+    scopedSeen.set(key, win);
+    if (quarantined.get(key) > t) return { quarantined: true };
+    if (win.length >= breaker.errors) {
+      quarantined.set(key, t + windowMs);
+      if (!reseeded.has(agent)) { reseeded.add(agent); try { await reseedCache?.({ agent, signature: sig }); } catch { /* advisory */ } }
+      try { await quarantineAgent?.({ agent, signature: sig, errors: win.length }); } catch { /* advisory */ }
+      update({ issue: null, outcome: "agent-quarantine", detail: `agent ${agent} quarantined: ${win.length} engine-errors (${sig}) within ${breaker.window_min} min; other agents keep admitting` });
+      return { quarantined: true };
+    }
+    return { quarantined: false };
+  };
   const lostSeen = new Map(); // agent -> [{n, at, err, ee, tr, sig}]: lost lanes settled as ordinary engine-errors in the window
   const openRestart = (agent, t) => agentRestarts.find((g) => g.agent === agent && !g.closed && t - g.last < AGENT_LOST_WINDOW_MS);
   const markLost = (agent, n, row, why) => {
@@ -1127,12 +1181,21 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
             if (!(Number.isFinite(rotAt) && rotAt > now())) rotAt = null;
           }
           // #5203: no account has headroom: the hold lasts until the earliest reset across accounts, not this lane's own reset.
-          const holdMs = usage && rotAt !== null ? rotAt - now() : pol.delayMs;
+          let holdMs = usage && rotAt !== null ? rotAt - now() : pol.delayMs;
+          if (r?.code === "backend.auth") { // #5988: probe every 5 min, never hold past the 30 min escalation, rotate to the next account
+            const t0 = now();
+            if (!authOutage) authOutage = { since: t0, nextProbe: t0 + AUTH_PROBE_MS, failed: new Set(), escalated: false, key: r?.backendId ?? identity(), issues: new Set() };
+            authOutage.issues.add(n);
+            try { const cur = authOutage.escalated ? null : rotator?.current?.(); if (cur) { authOutage.failed.add(cur); authOutage.last = cur; limitedAccounts.set(cur, t0 + AUTH_PROBE_MS); try { rotator.markLimited?.(cur, t0 + AUTH_PROBE_MS); } catch { /* best effort */ } } } catch { /* fail-open */ }
+            holdMs = Math.min(holdMs, AUTH_PROBE_MS);
+            if (t0 - authOutage.since >= AUTH_ESCALATE_MS) { await authPass(); holdMs = 0; }
+          }
           if (rq) {
             delayMs = rq.delayMs;
             // #5095 + #5094: the pool account's own hold (not the host's) still routes hybrid lanes local until its reset.
             try { const pool = remote?.identity?.(); if (!rq.rotated && pool && r?.backendId === pool) holds.set(pool, now() + pol.delayMs, `batch ${batchId ?? "?"} #${n}`); } catch { /* fail-open */ }
-          } else try { holds.set(r?.backendId ?? identity(), rotAt ?? now() + holdMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
+          } else if (holdMs > 0 || r?.code !== "backend.auth") try { holds.set(r?.backendId ?? identity(), rotAt ?? now() + holdMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
+          else delayMs = AUTH_PROBE_MS; // #5988: escalated: no hold; the lane retries as its own probe
           const q = quota.get(n) ?? { cost_usd: 0, minutes: 0, rotations: 0 };
           const resumeAt = usage ? now() + (rq ? rq.delayMs : holdMs) : Math.max(now() + (rq ? rq.delayMs : pol.delayMs), rotAt ?? 0);
           quota.set(n, { cost_usd: Math.round(((Number(q.cost_usd) || 0) + (Number(row.cost_usd) || 0)) * 1e6) / 1e6, minutes: Math.round(((Number(q.minutes) || 0) + (Number(row.minutes) || 0)) * 10) / 10,
@@ -1168,7 +1231,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       lostSeen.set(la, [...win, lostNow]);
     }
     if (row.outcome === "engine-error") {
-      const errAt = noteEngineError(r?.detail);
+      const ag = r?.agent ?? r?.sandbox?.agent ?? null, hs = ag && breaker ? hostSignature(r, row.detail) : null;
+      const sc = hs ? await scopedEngineError(ag, hs) : null;
+      const qn = sc?.quarantined ? (quarantineRequeues.get(n) ?? 0) + 1 : 0; // a lane waits out the quarantine a bounded number of times, then counts as an ordinary engine-error (batch breaker included)
+      if (sc?.quarantined && qn <= QUARANTINE_REQUEUES) { quarantineRequeues.set(n, qn); // #5988: an agent in quarantine: its lane waits and is requeued without a relaunch or breaker count; unaffected agents keep admitting
+        requeue(n, AGENT_LOST_REQUEUE_MS); done(); save();
+        update({ ...row, outcome: "requeued", detail: `requeued: agent ${ag} is quarantined (${hs}); retried in ${Math.round(AGENT_LOST_REQUEUE_MS / 1000)}s` });
+        return;
+      }
+      const errAt = hs && !sc?.quarantined ? undefined : noteEngineError(r?.detail);
       if (lostNow) lostNow.err = errAt;
       // #5161: a transient failure (gateway 5xx, reset) waits out the outage with backoff instead of the single immediate relaunch.
       if (transientMax > 0 && isTransientEngineError(row.detail)) {
@@ -1682,10 +1753,19 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (!getHeld) return;
     if (expireHolds) { // #5469: a hold past its expiry is released here; the diff below then admits it. A dead owner session is an alert.
       let due = []; try { due = expireHolds() ?? []; } catch { due = []; }
+      if (due.length > 1) holdRamp = { at: now() };
+      if (due.length > 1) concEmit({ event: "concurrency", change: "hold-release", k: conc.operating("light"), ceiling: ceilingK(), factor: "hold expiry", inputs: { released: due.length } }); // #5988: the release is paced by K(), never all at once
       for (const e of due) {
         decided({ issue: null, what: `hold on #${e.issue} expired (held by ${e.owner} since ${e.since}${e.reason ? `: ${e.reason}` : ""}); re-admitted`, why: "hold expiry (--hold --for)", alternative: "hold it again" });
         update({ issue: null, outcome: "hold-expired", detail: `#${e.issue} (${e.owner}, since ${e.since})` });
         if (e.ownerGone) update({ issue: null, outcome: "hold-alert", detail: `#${e.issue}: the hold owner session (${e.owner}) is gone; the hold expired and the issue was re-admitted` });
+      }
+    }
+    if (expireHolds) { // #5988: one alert per hold at T-30 min
+      let info = null; try { info = getHoldInfo?.() ?? null; } catch { info = null; }
+      for (const w of holdExpiryWarnings(info, { now: now(), warned: holdWarned })) {
+        holdWarned.add(w.key);
+        update({ issue: null, outcome: "hold-alert", detail: `#${w.issue}: the hold expires at ${w.expiresAt} (in ${Math.round(w.inMs / 60000)} min); release or extend it, or it re-admits through the concurrency controller` });
       }
     }
     let got = [];
@@ -1947,12 +2027,12 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     if (back.size) save();
   };
-  const ceilingK = () => { let k = null; try { k = getParallel?.(); } catch { k = null; } return Number.isInteger(k) && k >= 1 ? k : parallel; };
   // #5985: K is the ceiling; the controller's operating point (and a lower heavy-lane cap) sits under it. A pool with no load/memory data leaves K unchanged.
   // #5985: light/heavy per lane (its repo's recent cpu_avg from usage-history rows, array or getter); heavy lanes have their own concurrent cap
   const laneClassOf = (n) => { let rows = null; try { rows = typeof usageRows === "function" ? usageRows() : usageRows; } catch { rows = null; } let repo = repoSlug; try { repo = repoOf?.(n) ?? repoSlug; } catch { repo = repoSlug; } return rows && repo ? classifyRepo(rows, repo) : "light"; };
   const heavyFull = (n) => { if (laneClassOf(n) !== "heavy") return false; let h = 0; for (const m of running.keys()) if (m !== n && laneClassOf(m) === "heavy") h++; if (h < conc.heavyLimit()) return false; if (!heavyHeldHit) { heavyHeldHit = true; concEmit({ event: "concurrency", change: "heavy-cap", k: conc.operating("light"), ceiling: ceilingK(), factor: "heavy cap", inputs: { heavy_limit: conc.heavyLimit() } }); } return true; };
-  const K = () => { conc.setCeiling(ceilingK()); return conc.operating("light"); };
+  // #5988: a hold expiry releasing several issues re-admits them on a ramp (one more lane per HOLD_RAMP_STEP_MS), as new work ramps, not all at once.
+  const K = () => { conc.setCeiling(ceilingK()); const k = conc.operating("light"); if (!holdRamp) return k; const step = 1 + Math.floor((now() - holdRamp.at) / HOLD_RAMP_STEP_MS); if (step >= k) { holdRamp = null; return k; } return step; };
   // #5836: one train poll (throttled): a merged PR becomes a merged row; a red, conflicting or moved-head PR is handed back as a
   // needs-human row through the normal settle path, so in-batch recovery requeues a fix lane.
   let lastTrainTick = -Infinity;
@@ -2029,6 +2109,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       baseHit.clear();
       refreshHeld();
       refreshPause();
+      await authPass(); // #5988
       await refreshBlocked();
       await refreshBaseWaits();
       checkGates();
