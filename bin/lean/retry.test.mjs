@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pollUntil } from "./retry.mjs";
-import { GH_TRANSIENT_RE as NET_RE } from "./retry.mjs";
+import { pollUntil, GH_TRANSIENT_RE as NET_RE } from "./retry.mjs";
 
 test("pollUntil returns the first truthy probe value, sleeping between tries", async () => {
   let n = 0, t = 0; const sleeps = [];
@@ -16,9 +15,7 @@ test("pollUntil returns null once the timeout passes, probing at least once", as
   assert.equal(await pollUntil(() => null, { timeoutMs: -1, pollMs: 1, sleep: async () => {}, now: () => 0 }), null);
 });
 
-describe("gh network failures are transient (2026-11-26: a dropped connection during gh pr merge became an engine-error)", () => {
-  it("matches gh's network texts and not validation errors", () => {
+test("gh network failures are transient, validation errors are not (2026-11-26: a dropped connection during gh pr merge became an engine-error)", () => {
     for (const t of ["error connecting to api.github.com", "check your internet connection", "dial tcp: lookup api.github.com: no such host", "net/http: TLS handshake timeout", "read tcp: i/o timeout", "connect: connection refused"]) assert.ok(NET_RE.test(t), t);
     for (const t of ["HTTP 422: Validation Failed", "GraphQL: Could not resolve to a PullRequest", "HTTP 404: Not Found"]) assert.ok(!NET_RE.test(t), t);
-  });
 });
