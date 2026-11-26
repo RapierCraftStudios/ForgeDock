@@ -34,7 +34,7 @@
 #   STANDARD/COMPLEX (or unknown band)
 #                  INVESTIGATOR, CONTRACT, FAST_PATH, CONTEXT, ARCHITECT, QUALITY_GATE*
 #   (* waived with --docs-only)
-#   LEAN LANE     CONTRACT + the lean run record (trusted FORGE:STATUS comment with a FORGE:STARTED section); nothing else (#5913)
+#   LEAN LANE     CONTRACT + the lean run record (trusted FORGE:STATE comment, run core_*); nothing else (#5913)
 #   A missing FAST_PATH is itself a failure; the remaining checks then use the
 #   conservative STANDARD requirement set.
 #
@@ -264,9 +264,9 @@ if has '<!-- FORGE:FAST_PATH -->'; then
 fi
 
 # Lean-lane trail (#5913): a lean lane (forgedock run-issue) posts no INVESTIGATOR/FAST_PATH/CONTEXT/ARCHITECT/QUALITY_GATE. Its
-# trail is a trusted FORGE:CONTRACT comment plus the trusted lean run record (the FORGE:STATUS comment carrying a FORGE:STARTED
-# section). Both come from the trusted-author filter above, never the issue body, so an untrusted commenter cannot select this mode.
-if has '<!-- FORGE:CONTRACT -->' && printf '%s\n' "$COMMENTS" | grep -E '^<!-- FORGE:STATUS -->' | grep -F '<!-- FORGE:STARTED -->' >/dev/null; then
+# trail is a trusted FORGE:CONTRACT comment plus the trusted lean run record (a FORGE:STATE comment whose run is `core_*`; the
+# classic engine's STARTED/STATUS markers are shared and never select this mode). Both come from the trusted-author filter above, never the issue body, so an untrusted commenter cannot select this mode.
+if has '<!-- FORGE:CONTRACT -->' && printf '%s\n' "$COMMENTS" | grep -E '^<!-- FORGE:STATE' | grep -E '"run" *: *"core_[A-Za-z0-9_.-]+"' >/dev/null; then
   echo "PHASE_TRAIL: PASS"
   echo "BAND: LEAN"
   echo "NOTE: lean-lane trail (trusted FORGE:CONTRACT + lean run record); classic work-on phases not required"

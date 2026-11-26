@@ -59,7 +59,8 @@ mk() {
       QUOTED) items+=('{"body":"see `<!-- FORGE:CONTRACT -->` `<!-- FORGE:CONTEXT -->` `<!-- FORGE:ARCHITECT -->` `<!-- FORGE:QUALITY_GATE -->` **Result**: PASS"}') ;;
       INV_INVALID) items+=('{"body":"<!-- FORGE:INVESTIGATOR -->\nInvalid\n<!-- INVESTIGATION:INVALID -->"}') ;;
       SR) items+=('{"body":"<!-- FORGE:SELFREVIEW-AGENT:security -->\nTree: abc\n<!-- REVIEW-FINDINGS-START -->\n<!-- REVIEW-FINDINGS-END -->"}' '{"body":"<!-- FORGE:SELFREVIEW -->\n## Self-review\nTree: abc"}') ;;
-      LEAN_STATUS) items+=('{"body":"<!-- FORGE:STATUS -->\n<!-- FORGE:STATUS:SEP -->\n<!-- FORGE:STARTED -->\nStarted work on #1"}') ;;
+      LEAN_STATUS) items+=('{"body":"<!-- FORGE:STATE\n{\"v\":1,\"run\":\"core_1\",\"issue\":1}\n-->"}') ;;
+      CLASSIC_STATUS) items+=('{"body":"<!-- FORGE:STATUS -->\n<!-- FORGE:STARTED -->\nStarted work on #1"}') ;;
       PROSE) items+=('{"body":"I ran the architect and context inline; FORGE:CONTEXT FORGE:ARCHITECT FORGE:QUALITY_GATE done"}') ;;
     esac
   done
@@ -97,6 +98,7 @@ expect_fail "missing ARCHITECT on STANDARD" "$(mk e INV CONTRACT FP_STANDARD CON
 # lean-lane trail (#5913): trusted CONTRACT + lean run record passes with no classic markers; a lone half or an untrusted author does not
 expect_pass "lean lane: trusted CONTRACT + lean run record passes the trail" "$(mk lean1 CONTRACT LEAN_STATUS)"
 expect_fail "lean lane: CONTRACT without the lean run record is still the classic trail" "$(mk lean2 CONTRACT)" INVESTIGATOR
+expect_fail "lean lane: CONTRACT + classic STATUS/STARTED (no core_ run) does not pass" "$(mk lean5 CONTRACT CLASSIC_STATUS)" INVESTIGATOR
 expect_fail "lean lane: run record without CONTRACT does not pass" "$(mk lean3 LEAN_STATUS)" INVESTIGATOR
 jq -c 'map(.author_association="NONE" | .user.type="User")' "$(mk lean4 CONTRACT LEAN_STATUS)" > "$TMP_FX/lean4u.json"
 expect_fail "lean lane: markers from an untrusted author cannot select lean mode" "$TMP_FX/lean4u.json" INVESTIGATOR

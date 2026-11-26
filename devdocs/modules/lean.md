@@ -3631,7 +3631,7 @@ Cite: #5833.
 
 ## Entry 2026-11-24 — Lean lane lands through merge-gate; no circular base.red (#5913)
 
-- `scripts/verify-phase-trail.sh`: a trusted `FORGE:CONTRACT` comment plus the trusted lean run record (the `FORGE:STATUS` comment carrying a `FORGE:STARTED` section) passes the trail (`BAND: LEAN`, NOTE names the lean trail); INVESTIGATOR/FAST_PATH/CONTEXT/ARCHITECT/QUALITY_GATE are waived. Same trusted-author filter as the classic markers, never the issue body; an untrusted or lone marker leaves the classic trail unchanged.
+- `scripts/verify-phase-trail.sh`: a trusted `FORGE:CONTRACT` comment plus the trusted lean run record (a `FORGE:STATE` comment with run `core_*`; the shared STATUS/STARTED markers do not select lean) passes the trail (`BAND: LEAN`, NOTE names the lean trail); INVESTIGATOR/FAST_PATH/CONTEXT/ARCHITECT/QUALITY_GATE are waived. Same trusted-author filter as the classic markers, never the issue body; an untrusted or lone marker leaves the classic trail unchanged.
 - `scripts/review-finalize.sh` `manual_pr_eligibility`: `--owner-requested` now also covers an explicit `--issue` that is a pipeline issue (still refused without it); the trail is skipped (`FORGE:PHASE_TRAIL_SKIPPED`) and every other gate runs.
 - `bin/lean/basered.mjs` `diffTouchesGuard({changed, failed})` (built on `baseRedPaths`); `lean.mjs` `guardRed` does not defer `base.red` when the lane diff (`<base>...HEAD`) touches the failing guard's files AND the guard re-run on the lane tree passes. Otherwise (untouched, or still failing) it defers as before, and the decision and summary name `review-finalize merge-gate --manual-pr --owner-requested`.
 
