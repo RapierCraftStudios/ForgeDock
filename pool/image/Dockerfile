@@ -13,14 +13,17 @@ ARG FORGEDOCK_VERSION
 ARG CLAUDE_CODE_VERSION=2.1.309
 ARG UV_VERSION=0.12.5
 ARG POETRY_VERSION=2.4.3
+ARG YQ_VERSION=4.44.3
+ARG PLAYWRIGHT_VERSION=1.49.1
 
 LABEL org.opencontainers.image.version=$FORGEDOCK_VERSION
 RUN test -n "$FORGEDOCK_VERSION" || { echo "FORGEDOCK_VERSION build arg is required" >&2; exit 1; }
 
-ENV IS_SANDBOX=1 DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 PATH=/opt/cs/bin:/opt/node/bin:/root/.local/bin:$PATH
+ENV IS_SANDBOX=1 DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 PLAYWRIGHT_BROWSERS_PATH=/opt/playwright UV_PYTHON_INSTALL_DIR=/opt/uv-python PATH=/opt/cs/bin:/opt/node/bin:/root/.local/bin:$PATH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git jq xz-utils build-essential python3 python3-venv python3-dev pkg-config libpq-dev \
+      shellcheck xvfb xauth postgresql-client redis-tools \
     && install -d -m 0755 /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli.gpg \
     && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/githubcli.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
@@ -35,7 +38,16 @@ RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-l
     && npm cache clean --force
 
 RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | env UV_INSTALL_DIR=/usr/local/bin sh \
-    && uv tool install "poetry==${POETRY_VERSION}"
+    && uv tool install "poetry==${POETRY_VERSION}" \
+    && uv python install 3.11 3.13 \
+    && ln -s "$(uv python find 3.11)" /usr/local/bin/python3.11 \
+    && ln -s "$(uv python find 3.13)" /usr/local/bin/python3.13
+
+# yq (mikefarah): pinned release binary. Playwright chromium lives at PLAYWRIGHT_BROWSERS_PATH, shared by every lane user.
+RUN curl -fsSL "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64" -o /usr/local/bin/yq \
+    && chmod 0755 /usr/local/bin/yq \
+    && npx --yes "playwright@${PLAYWRIGHT_VERSION}" install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/* /root/.npm
 
 COPY entrypoint.sh /usr/local/bin/cs-entrypoint
 COPY warm-refresh.sh /usr/local/bin/cs-warm-refresh

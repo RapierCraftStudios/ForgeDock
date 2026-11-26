@@ -1698,6 +1698,10 @@ export function runCliBackend({
   // `mkdtempSync` succeeds — before `writeFileSync` runs — so a failure in
   // `writeFileSync` still leaves `tmpDir` set and the already-created
   // directory gets cleaned up.
+  // 2026-11-26: a NUL byte in the prompt (from a file read or tool output) made the spawn throw "args[1] must be a string without null bytes"
+  // (engine-error, lane held); NULs carry no meaning in a prompt, so they are dropped from both the prompt and the system prompt
+  if (typeof userMessage === "string" && userMessage.includes("\0")) userMessage = userMessage.replace(/\0/g, "");
+  if (typeof systemPrompt === "string" && systemPrompt.includes("\0")) systemPrompt = systemPrompt.replace(/\0/g, "");
   let tmpDir = null;
   // forge#4129: a prompt over the argv bound is sent on stdin instead of as the `--print` argument.
   // forge#4763: the other argv (flags, system-prompt file path) counts toward the Windows command-line cap.

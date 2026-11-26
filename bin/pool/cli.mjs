@@ -90,6 +90,7 @@ export function statusTable(agents) {
     const borrow = (b, free) => num(b ?? free);
     const paused = a.owner_paused ? "owner" : a.paused ? (a.pending_resize ? "resize" : "yes") : "no";
     const why = [a.owner_paused ? "paused by owner" : null, a.paused && !a.owner_paused && a.pending_resize ? "draining for resize" : null,
+      Number.isInteger(a.lane_target) ? `lane target ${a.lane_target}/${a.lane_ceiling ?? "-"}` : null, a.draining && !a.owner_paused && !a.pending_resize ? `draining: ${a.draining_reason ?? "yes"}` : null,
       a.idle_gate ? `owner busy: ${a.idle_gate}` : null, a.last_drain ? `last drain ${a.last_drain.sandbox} at ${a.last_drain.at}: ${a.last_drain.reason}` : null].filter(Boolean).join("; ");
     return [name, ...acct, `${num(used(a.cpus_total, a.cpus_free))}/${borrow(a.cpus_borrowable, a.cpus_free)}/${num(a.cpus_total)}`,
       `${num(used(a.mem_total_gb, a.mem_free_gb))}/${borrow(a.mem_borrowable_gb, a.mem_free_gb)}/${num(a.mem_total_gb)}`,

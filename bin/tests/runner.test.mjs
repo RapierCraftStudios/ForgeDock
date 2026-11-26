@@ -1680,6 +1680,14 @@ describe("runCliBackend env scrub (issue #2021)", () => {
 // ---------------------------------------------------------------------------
 
 describe("runCliBackend spawnFn seam (issue #2033)", () => {
+  it("drops NUL bytes from the prompt so the spawn never throws on argv (2026-11-26)", () => {
+    let argv = null, input = null;
+    const spawnFn = (_bin, a, opts) => { argv = a; input = opts?.input ?? null; return { status: 0, stdout: "ok", stderr: "", error: undefined }; };
+    runCliBackend({ spec: loadCommandSpec(COMMANDS_DIR, "work-on"), userMessage: "Issue #1: bad\0byte", args: ["1"], cwd: TMP, logger: { log: () => {} }, bin: "claude", spawnFn });
+    const all = [...(argv ?? []), String(input ?? "")].join(" ");
+    assert.ok(!all.includes("\0"), "no NUL reaches argv or stdin");
+    assert.ok(all.includes("badbyte"));
+  });
   it("uses the injected spawnFn instead of the real spawnSync, and forwards argv/opts", () => {
     let capturedBin, capturedArgv, capturedOpts;
     const spawnFn = (bin, argv, opts) => {

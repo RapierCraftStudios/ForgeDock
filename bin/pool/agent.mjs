@@ -16,6 +16,7 @@ import { makeWarm } from "./warm.mjs";
 import { resolveLaneImage, laneImageNow, laneToolsTag, isLaneToolsTagOf } from "./lane-tools.mjs";
 import { hostDiskFree, hostMemFree, ensureNatPin, netState } from "./health.mjs";
 import { laneDiskUsedGb, planDiskCap, fstrimDue, runFstrim } from "./disk.mjs";
+import { step as laneStep, drainState, pressured } from "./lane-target.mjs";
 import { makeMirrorSeed, dockerRunner } from "./mirror-seed.mjs";
 import { planIdleEviction, CACHE_LABEL, agentLabel } from "./cache-sweep.mjs";
 import { cpuQuotaEnv } from "./docker.mjs";
@@ -421,6 +422,9 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   }
   /** #5886: a router-pushed policy (allowlisted keys, persisted beside the agent config). Its `paused` is separate from the owner's pause: the router can set or clear only its own, never the owner's. */
   let policyPaused = Boolean(cfg.policy_paused);
+  const laneS = { target: null, greenSince: null, busySince: null };
+  const laneTargetOn = () => cfg.lane_autoscale !== false && Number.isInteger(cfg.max_lanes) && cfg.max_lanes >= 1;
+  const laneNow = () => laneS.target ?? Math.min(cfg.max_lanes, cfg.lane_start ?? 1);
   function applyPolicy(body) {
     const p = body && typeof body === "object" ? body : {}, int = (v, lo, hi) => (Number.isInteger(v) && v >= lo && v <= hi);
     if ((p.cpus !== undefined && !int(p.cpus, 1, 256)) || (p.mem_gb !== undefined && !int(p.mem_gb, 1, 1024)) || (p.idle_only !== undefined && typeof p.idle_only !== "boolean") || (p.paused !== undefined && typeof p.paused !== "boolean") || (p.elastic_lanes !== undefined && typeof p.elastic_lanes !== "boolean")
@@ -453,7 +457,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const active = Object.values(sb()).filter((s) => s.state !== "exited").length;
     const e = effectiveCapacity();
     const h = live(cfg);
-    return { host: cfg.name ?? hostname(), usage_summary: usageSummary(Object.values(sb()).filter((r) => r.state !== "exited").map(usageView)), ...running, vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.log && upgrade.state === "failed" ? { upgrade_log: upgrade.log } : {}), ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10, ...(i.depcache_bytes ? { depcache_gb: Object.fromEntries(Object.entries(i.depcache_bytes).map(([k, b]) => [k, Math.round(b / 107374182.4) / 10])) } : {}) }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...throttleView(h), ...diskView(), ...laneDiskView(), ...hostDiskView(active), ...hostMemView(), ...heavyView(), runners: Object.entries(runners()).map(([name, r]) => ({ name, label: r.label })), net: (() => { const rx = netRx(now()); const n = readNet(); return rx ? { ...(n ?? {}), ...rx } : n; })(), paused: Boolean(cfg.paused || ownerPaused || policyPaused), owner_paused: ownerPaused, ...(Number.isFinite(h?.load_per_core) ? { load_per_core: h.load_per_core } : {}), ...(Number.isFinite(h?.mem_available_gb) ? { mem_available_gb: h.mem_available_gb } : {}), live: h, usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
+    return { host: cfg.name ?? hostname(), usage_summary: usageSummary(Object.values(sb()).filter((r) => r.state !== "exited").map(usageView)), ...running, vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.log && upgrade.state === "failed" ? { upgrade_log: upgrade.log } : {}), ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10, ...(i.depcache_bytes ? { depcache_gb: Object.fromEntries(Object.entries(i.depcache_bytes).map(([k, b]) => [k, Math.round(b / 107374182.4) / 10])) } : {}) }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...throttleView(h), ...diskView(), ...laneDiskView(), ...hostDiskView(active), ...hostMemView(), ...heavyView(), runners: Object.entries(runners()).map(([name, r]) => ({ name, label: r.label })), net: (() => { const rx = netRx(now()); const n = readNet(); return rx ? { ...(n ?? {}), ...rx } : n; })(), paused: Boolean(cfg.paused || ownerPaused || policyPaused), owner_paused: ownerPaused, ...laneTargetView(), ...(Number.isFinite(h?.load_per_core) ? { load_per_core: h.load_per_core } : {}), ...(Number.isFinite(h?.mem_available_gb) ? { mem_available_gb: h.mem_available_gb } : {}), live: h, usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
   }
 
   /** The image a spec's lanes run (the per-repo lane_tools tag when tools are listed), without building it. */
@@ -526,6 +530,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const c = capacity();
     const h = live(cfg);
     const adm = admit({ prio, cpus, mem_gb, reservation, h });
+    if (c.draining && !c.paused) return { status: 503, body: { error: `draining: ${c.draining_reason}`, code: "pool.draining", capacity: c }, retryAfter: 60 }; // #6061: finish running lanes, accept none
+    if (laneTargetOn() && !c.paused && c.active >= laneNow()) return { status: 503, body: { error: `lane target ${laneNow()} reached (${c.active} running)`, code: "pool.lane_target", lane_target: laneNow(), capacity: c }, retryAfter: 60 };
     if (c.paused || adm.refuse) {
       const f = adm.refuse ?? {};
       if (f.status === 400) return { status: 400, body: { error: f.error } };
@@ -858,6 +864,25 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     if (!r.ok) log.warn?.(`fstrim: ${r.error}`);
   }
 
+  // #6061: per-worker lane target, evaluated once per reap. Active only with an integer cfg.max_lanes (the ceiling) unless cfg.lane_autoscale is false.
+  // Draining refuses new launches only; running lanes are never stopped here (drainOne stays for idle_only borrowed lanes).
+  function laneDrain() {
+    const paused = Boolean(cfg.paused || ownerPaused || policyPaused);
+    return drainState({ paused, ownerPaused, policyPaused, busyForMs: laneS.busySince === null ? 0 : now() - laneS.busySince, drainAfterMs: (cfg.drain_busy_s ?? 300) * 1000 });
+  }
+  function laneTargetView() {
+    const d = laneDrain();
+    return { draining: d.draining, ...(d.reason ? { draining_reason: d.reason } : {}), accepting: !d.draining, ...(laneTargetOn() ? { lane_target: laneNow(), lane_ceiling: cfg.max_lanes } : {}) };
+  }
+  function laneTick() {
+    const h = live(cfg), t = now();
+    laneS.busySince = pressured(h) ? (laneS.busySince ?? t) : null;
+    if (!laneTargetOn()) { laneS.target = null; return; }
+    const r = laneStep({ target: laneNow(), ceiling: cfg.max_lanes, live: h, now: t, greenSince: laneS.greenSince, holdMs: (cfg.lane_hold_s ?? 60) * 1000 });
+    laneS.target = r.target; laneS.greenSince = r.greenSince;
+    if (r.change) log.info?.(`lane target ${r.change} to ${r.target}/${cfg.max_lanes}`);
+  }
+
   async function reap() {
     const t = now();
     for (const r of Object.values(sb())) {
@@ -872,6 +897,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     await sweepRunners().catch((e) => log.warn?.(`runner sweep: ${e.message}`));
     await sampleUsage();
     await reclaimIdle();
+    laneTick(); // #6061
     await warm.maintain(maxLifeMs);
     if (pendingResize && capacity().active === 0) {
       const r = await resize(pendingResize);
