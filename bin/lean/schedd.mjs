@@ -529,7 +529,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     return closing;
   };
   // #5966: a self-initiated stop (version handover, stall recovery). Under a systemd unit the process exits non-zero after a bounded
-  // drain so `Restart=` starts the successor (a hard timer fires even if close() hangs); without a unit it starts the successor and
+  // drain so `Restart=` starts the successor (a hard bound fires even if close() hangs; path-scoped, see selfStop, #5983); without a unit it starts the successor and
   // waits for it to listen, retrying once, then exits non-zero instead of lingering as an unreachable zombie.
   const defaultProbe = () => new Promise((r) => {
     if (process.platform === "win32") return r(true);
