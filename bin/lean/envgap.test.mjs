@@ -39,4 +39,15 @@ describe("#6094 failures outside the diff", () => {
     assert.equal(failureOutsideDiff("make: *** [lint] Error 1", ["a.js"]), false);
     assert.equal(failureOutsideDiff("FAILED tests/test_api.py::t - x", ["web/app.ts"]), true);
   });
+  it("scans long path-like output in linear time (the old regex backtracked exponentially and froze the lane)", () => {
+    const evil = `${"a/".repeat(20000)}b ${"x.".repeat(20000)}y ${"@-".repeat(20000)}`;
+    const t0 = Date.now();
+    assert.equal(failureOutsideDiff(evil, ["a.js"]), false);
+    assert.equal(failureOutsideDiff(`${evil}\n at /w/src/deep/app.spec.ts:3:1`, ["a.js"]), true);
+    assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0} ms`);
+  });
+  it("names Go/Java/py test files and strips ./ prefixes", () => {
+    assert.equal(failureOutsideDiff("--- FAIL: TestX (0.00s)\n    ./pkg/foo_test.go:12: boom", ["pkg/foo_test.go"]), false);
+    assert.equal(failureOutsideDiff("at src/com/x/FooTest.java:9", ["src/Bar.java"]), true);
+  });
 });
