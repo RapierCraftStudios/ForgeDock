@@ -14,6 +14,7 @@ import { repoRoot, versionOf, laneImageTag, laneBuildArgs } from "./version.mjs"
 import { jsonStore } from "./store.mjs";
 import { makeWarm } from "./warm.mjs";
 import { resolveLaneImage, laneImageNow, laneToolsTag, isLaneToolsTagOf } from "./lane-tools.mjs";
+import { projectLayerTag, projectLayerImageNow, isProjectLayerTagOf } from "./project-layer.mjs";
 import { hostDiskFree, hostMemFree, ensureNatPin, netState } from "./health.mjs";
 import { laneDiskUsedGb, planDiskCap, fstrimDue, runFstrim } from "./disk.mjs";
 import { step as laneStep, drainState, pressured } from "./lane-target.mjs";
@@ -445,7 +446,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   }
 
   /** The image a spec's lanes run (the per-repo lane_tools tag when tools are listed), without building it. */
-  const envImageOf = (spec) => (spec.lane_tools?.length ? laneToolsTag(spec.image ?? image, spec.lane_tools) : (spec.image ?? image));
+  const laneBaseOf = (spec) => (spec.lane_tools?.length ? laneToolsTag(spec.image ?? image, spec.lane_tools) : (spec.image ?? image));
+  const envImageOf = (spec) => (spec.project_deps?.hash ? projectLayerTag(laneBaseOf(spec), spec.project_deps.hash) : laneBaseOf(spec));
   const envEnsured = new Map(); // cache volume -> last ensure start
   /**
    * env.snapshots: start the snapshot helper for the repo, at most once per ENV_ENSURE_GAP_MS and one at a time per cache
@@ -548,6 +550,14 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       if (st.building) return { status: 503, body: { error: `lane image ${st.tag} building`, code: "lane_tools.building" }, retryAfter: LANE_BUILD_RETRY_AFTER_S };
       if (st.failed) return { status: 422, body: { error: st.failed, code: "lane_tools.build_failed" } };
     }
+    // #6038: the project-deps layer builds in the background; a launch never waits for it and runs the lane image meanwhile.
+    let projectImage = null;
+    if (spec.project_deps?.hash) {
+      try {
+        const st = await projectLayerImageNow({ deps: spec.project_deps, baseImage: laneBaseOf(spec), docker });
+        if (st.image && st.image !== laneBaseOf(spec)) projectImage = st.image;
+      } catch (e) { log.warn?.(`project layer: ${String(e.message).slice(0, 200)}`); }
+    }
     // Last refusal point passed: only now stop borrowed lanes (#5897), a launch refused above must not have drained any.
     if (prio === "reserved") {
       for (const r of tiers().act.filter((s) => prioOf(s) === "borrow")) await throttle(r, SHARES().throttled); // throttle every borrower first,
@@ -578,7 +588,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const cacheMount = ["-v", `${rec.cacheVolume}:/cache`];
     try {
       // #5650: a repo's lane_tools select a derived image (built once per tool list); none keeps spec.image ?? image.
-      const laneImage = spec.lane_tools?.length ? await resolveLaneImage({ tools: spec.lane_tools, baseImage: spec.image ?? image, docker }) : (spec.image ?? image);
+      const toolsImage = spec.lane_tools?.length ? await resolveLaneImage({ tools: spec.lane_tools, baseImage: spec.image ?? image, docker }) : (spec.image ?? image);
+      const laneImage = projectImage ?? toolsImage; // #6038: the project layer sits on the tools image, or is skipped (base) while building
       if (withDocker) {
         // Private Docker daemon per sandbox (never the host socket). The lane joins its network namespace, so ports the
         // project's compose stack publishes are on the lane's localhost, and the API listens on loopback only. Both share
@@ -694,7 +705,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       const keepN = Math.max(1, Number(cfg.keep_lane_images ?? 2) || 2);
       const keep = [...bases.slice(0, keepN), laneImageTag(running.version), image, ...alsoKeep];
       for (const t of tags) {
-        if (keep.some((b) => isLaneToolsTagOf(t, b)) || inUse.has(t)) continue;
+        if (keep.some((b) => isLaneToolsTagOf(t, b) || isProjectLayerTagOf(t, b)) || inUse.has(t)) continue;
         try { await docker.removeImage(t); log.info?.(`removed superseded lane image ${t}`); } catch (e) { log.warn?.(`rmi ${t}: ${String(e.stderr || e.message).slice(0, 200)}`); }
       }
     } catch (e) { log.warn?.(`lane image prune: ${String(e.stderr || e.message).slice(0, 200)}`); }
