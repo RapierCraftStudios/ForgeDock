@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { openLimits, laneBackendId, limitsFile } from "./limits.mjs";
+import { openLimits, laneBackendId, limitsFile, holdExpiryWarnings, HOLD_EXPIRY_WARN_MS } from "./limits.mjs";
 import { orchestrate } from "./orchestrate.mjs";
 import { limitsFromCli } from "../engine-cli.mjs";
 
@@ -400,5 +400,19 @@ describe("tokenbaton rotation holds (#5205)", () => {
     await orchestrate({ issues: [1], now, sleep, readBody: async () => "", limits, identity: () => "A",
       runOne: async () => { if (now() < until) { const r = limited("A", until); setImmediate(() => {}); return r; } return { terminalReason: "merged" }; },
       onUpdate: (u) => { if (u.outcome === "paused") assert.equal(limits.holdUntil("A"), until); } });
+  });
+});
+
+describe("#5988: hold expiry warning", () => {
+  const at = (ms) => new Date(ms).toISOString();
+  it("lists a hold within 30 min of expiry once; never an open-ended, expired or distant hold", () => {
+    const now = 1_000_000, warned = new Set();
+    const info = { 1: { expiresAt: at(now + 20 * 60000) }, 2: { expiresAt: at(now + 3 * 3600000) }, 3: { expiresAt: null }, 4: { expiresAt: at(now - 1) } };
+    const w = holdExpiryWarnings(info, { now, warned });
+    assert.deepEqual(w.map((x) => x.issue), [1]);
+    assert.equal(HOLD_EXPIRY_WARN_MS, 30 * 60000);
+    warned.add(w[0].key);
+    assert.deepEqual(holdExpiryWarnings(info, { now, warned }), []);
+    assert.deepEqual(holdExpiryWarnings(null, { now }), []);
   });
 });

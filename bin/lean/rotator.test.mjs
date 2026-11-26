@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { parseLive, openRotator, rotatorRetry, quotaRequeue, rotatorKind, realClaude, accountOfPid, ROTATOR_KINDS, HEADROOM_PCT } from "./rotator.mjs";
+import { parseLive, openRotator, rotatorRetry, quotaRequeue, rotatorKind, nextAccountAfterAuthFailure, realClaude, accountOfPid, ROTATOR_KINDS, HEADROOM_PCT } from "./rotator.mjs";
 import { laneBackendId, openLimits } from "./limits.mjs";
 import { orchestrate, formatTable } from "./orchestrate.mjs";
 import { parseExecution } from "./execution.mjs";
@@ -242,5 +242,15 @@ describe("account rotator: detection, staleness, exclusion, pick (#5205)", () =>
     assert.equal(accountOfPid(13, { procRoot: proc }), null);
     assert.equal(accountOfPid(99, { procRoot: proc }), null);
     assert.equal(accountOfPid(undefined, { procRoot: proc }), null);
+  });
+});
+
+describe("#5988: next account after an auth failure", () => {
+  const fake = (accounts) => ({ pick: ({ exclude }) => { const a = accounts.find((n) => !exclude.has(n)); return a ? { account: a } : { account: null }; } });
+  it("picks an account other than the failed one; null when none is left or there is no rotator", () => {
+    assert.equal(nextAccountAfterAuthFailure(fake([1, 2, 3]), [1]), 2);
+    assert.equal(nextAccountAfterAuthFailure(fake([1, 2]), [1, 2]), null);
+    assert.equal(nextAccountAfterAuthFailure(null, [1]), null);
+    assert.equal(nextAccountAfterAuthFailure({ pick: () => { throw new Error("x"); } }, [1]), null);
   });
 });

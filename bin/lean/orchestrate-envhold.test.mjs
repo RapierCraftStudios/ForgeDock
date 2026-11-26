@@ -292,6 +292,22 @@ describe("#5859 agent restart: correlated sandbox loss is sandbox.lost, not engi
     for (const n of issues) assert.equal(r.byIssue[n].outcome, "merged");
   });
 
+  // #5988: three sandboxes destroyed for max lifetime together are one batch-level event; the breaker stays closed and each lane is requeued.
+  it("3 sandboxes destroyed for max lifetime within 30 s: no breaker trip, lanes requeued, reported once (#5988)", async () => {
+    const MAXLIFE = (n) => ({ ...LOST(n), detail: `sandbox fake-${n} destroyed: max lifetime reached` });
+    const issues = [1, 2, 3], script = Object.fromEntries(issues.map((n) => [n, [MAXLIFE(n), MERGED]]));
+    const store = memStore(), logged = [];
+    store.log = (ev) => logged.push(ev);
+    const r = await harness({ script, issues, parallel: 3, store, envHold: undefined, extra: { envHold: null, breaker: BREAKER, remote: { agentHealthy: async () => true } } });
+    assert.ok(!r.updates.some((u) => u.outcome === "breaker"), "the breaker never trips");
+    for (const n of issues) assert.equal(r.byIssue[n].outcome, "merged", `#${n} requeued and relaunched`);
+    const st = store.load();
+    assert.deepEqual(st.errorTimes, []);
+    assert.equal(st.breaker, null);
+    assert.equal(logged.filter((e) => e.event === "agent.restarted").length, 1, "one batch-level event");
+    assert.equal(st.agentRestarts[0].requeued, 3);
+  });
+
   it("agent restart: failure after healthy is an ordinary engine-error", async () => {
     const store = memStore();
     const r = await harness({ script: { 1: [LOST(1), LOST(1), MERGED], 2: [LOST(2), MERGED], 3: [LOST(3), MERGED] }, issues: [1, 2, 3], parallel: 3, store,
@@ -320,5 +336,36 @@ describe("#5859 agent restart: correlated sandbox loss is sandbox.lost, not engi
     const r = await harness({ script: { 1: [LOST(1), EE("real bug")], 2: [LOST(2, "box2"), EE("real bug 2")] }, issues: [1, 2], parallel: 2,
       envHold: undefined, extra: { envHold: null, breaker: { errors: 2, window_min: 10 } } });
     assert.ok(r.updates.some((u) => u.outcome === "breaker"));
+  });
+});
+
+describe("#5988: breaker scoped by signature and agent", () => {
+  it("12 sandbox.exited engine-errors on one agent quarantine only that agent; other agents keep admitting", async () => {
+    const issues = [...Array.from({ length: 12 }, (_, i) => i + 1), 50], quarantined = [], reseeds = [];
+    const sick = (n) => ({ terminalReason: "engine-error", code: "sandbox.exited", detail: `sandbox.exited before a result (run ${n})`, agent: "vm-a" });
+    const script = Object.fromEntries(issues.slice(0, 12).map((n) => [n, [sick(n), MERGED]]));
+    const r = await harness({ script, issues, parallel: 1, envHold: undefined,
+      extra: { envHold: null, breaker: { errors: 3, window_min: 10 }, quarantineAgent: (q) => quarantined.push(q), reseedCache: (q) => reseeds.push(q) } });
+    assert.deepEqual(quarantined.map((q) => q.agent), ["vm-a"], "that agent only, once");
+    assert.equal(reseeds.length, 1, "the cache is reseeded once");
+    assert.ok(!r.updates.some((u) => u.outcome === "breaker"), "the batch breaker never trips");
+    assert.equal(r.byIssue[50].outcome, "merged", "unaffected work keeps admitting");
+    assert.ok(r.updates.some((u) => u.outcome === "agent-quarantine"));
+  });
+
+  it("without placement callbacks the agent is still quarantined in-batch: its lanes are requeued, the breaker stays closed", async () => {
+    const sick = (n) => ({ terminalReason: "engine-error", code: "sandbox.exited", detail: `sandbox.exited (run ${n})`, agent: "vm-a" });
+    const r = await harness({ script: { 1: [sick(1), MERGED], 2: [sick(2), MERGED], 3: [sick(3), MERGED], 4: [sick(4), MERGED] }, issues: [1, 2, 3, 4, 50], parallel: 1, envHold: undefined,
+      extra: { envHold: null, breaker: { errors: 3, window_min: 10 } } });
+    assert.ok(r.updates.some((u) => u.outcome === "agent-quarantine"));
+    assert.ok(!r.updates.some((u) => u.outcome === "breaker"));
+    assert.equal(r.byIssue[50].outcome, "merged");
+  });
+
+  it("a persistently sick agent without placement callbacks cannot loop forever: the batch breaker counts it after bounded requeues", async () => {
+    const sick = (n) => ({ terminalReason: "engine-error", code: "sandbox.exited", detail: `sandbox.exited (run ${n})`, agent: "vm-a" });
+    const r = await harness({ script: Object.fromEntries([1, 2, 3, 4, 5].map((n) => [n, [sick(n)]])), issues: [1, 2, 3, 4, 5], parallel: 1, envHold: undefined,
+      extra: { envHold: null, breaker: { errors: 3, window_min: 10 } } });
+    assert.ok(r.updates.some((u) => u.outcome === "breaker"), "bounded: the batch breaker trips");
   });
 });
