@@ -16,20 +16,22 @@ import { hostname as osHostname, tmpdir as osTmpdir } from "node:os";
 import { appendEvent } from "../engine/runlog.mjs";
 import { testAdequacyRows, testAdequacyFailures, testAdequacyTelemetry, adequacyCounts, regressionRan } from "./testadequacy.mjs";
 import { readSelfReview, compareSelfReview, firstReviewRecord, selfCheckFailures } from "./selfreview.mjs";
-import { codeForTerminalReason, OUTCOME_CODES, ENV_VALIDATE_TIMEOUT, ENV_VALIDATE_PLACEMENT, ENV_ENGINE_OWNED_CODES } from "../engine/outcome-codes.mjs";
+import { codeForTerminalReason, parkedLabel, OUTCOME_CODES, ENV_VALIDATE_TIMEOUT, ENV_VALIDATE_PLACEMENT, ENV_ENGINE_OWNED_CODES } from "../engine/outcome-codes.mjs";
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency, laneMergedPrs, dependencyOnLane, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { otherLaneOwner } from "./lanelock.mjs";
 import { stampText, checkStamp } from "./stagestamp.mjs";
 import { acquireBranchLock, waitPidsExit } from "./branchlock.mjs";
-import { parseRecurrenceConfig, recurrenceFacts, recursLinks, designLaneNote } from "./recurrence.mjs"; // #5751
+import { parseRecurrenceConfig, recurrenceFacts, recursLinks, designLaneNote, designDemanded } from "./recurrence.mjs"; // #5751
 import { areaOf, acquireHotArea, countCounters } from "./hotarea.mjs"; // #5751
 import { isEnvValidateFailure, outputTail, contractRuleCounts, onlyTestPlanProblems, isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, applyRequirementDecisions, dedupeAddRequirements, loneE2eRows, reproEnvMiss, resolveForgedockPaths, resolvingIo, portableForgedockPaths, FORGEDOCK_CHECKS_VAR, FORGEDOCK_ENTRY_VAR, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment, prodFailureSignal } from "./prefilter.mjs";
 import { validateAmendments } from "./attempts.mjs";
-import { writeStatus, postUpsert, postKeyed, isKeyedPost, isStatusPost, isUpsertPost, hasSection, clearPipelineLabels } from "./statuscomment.mjs";
+import { writeStatus, postUpsert, postKeyed, isKeyedPost, isStatusPost, isUpsertPost, hasSection, clearPipelineLabels, IN_PLACE_MARKERS, commentId } from "./statuscomment.mjs";
+import { decidePost } from "./commentstate.mjs"; // #5979
+import { repeatSignature, countIdentical, shouldPark, summaryComment } from "./failure-stop.mjs"; // #5979
 import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs";
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
@@ -462,6 +464,9 @@ export async function runCore(o) {
     usage.input += u.input_tokens ?? 0; usage.output += u.output_tokens ?? 0;
     usage.cache += (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
   }
+  let iss; // the issue as read at intake; declared early so the comment helpers below can see it
+  const localPosts = []; // #5979: comments this lane created, so a second post in the same run sees them
+  const allComments = () => [...(iss?.comments ?? []), ...localPosts];
   let statusCache = null; // #5592: {id, sections} of this issue's one FORGE:STATUS comment, edited in place
   const post = async (marker, body, on = issue) => {
     if (on === issue && isStatusPost(marker)) { // machine-state markers: a section of the one status comment, not a comment of their own
@@ -480,8 +485,20 @@ export async function runCore(o) {
       return postKeyed({ gh: ghw, repo, issue: on, marker: Array.isArray(marker) ? marker[0] : marker, body, cap: capComment });
     }
     const marks = (Array.isArray(marker) ? marker : [marker]).map((m) => `<!-- ${m} -->`).join("\n");
-    const out = String(await ghw(["issue", "comment", String(on), "-R", repo, "--body", capComment(`${marks}\n${body}`)])).trim();
-    return /https?:\/\/\S+/.exec(out)?.[0] ?? null;
+    const full = capComment(`${marks}\n${body}`);
+    const first = Array.isArray(marker) ? marker[0] : marker;
+    if (on === issue && IN_PLACE_MARKERS.includes(first)) { // #5979: re-post only on a state change; FACTS and DEPENDENCY are edited in place
+      const d = decidePost({ marker: first, body: full, comments: allComments(), trusted: (c) => c?.__mine === true || isTrustedIssueComment(c) });
+      if (d.action === "skip") return d.prior.url ?? null;
+      const id = d.action === "patch" ? commentId(d.prior) : null;
+      if (id) {
+        try { await ghw(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${id}`, "-f", `body=${full}`]); d.prior.body = full; return d.prior.url ?? null; } catch { /* deleted or not ours: a new comment */ }
+      }
+    }
+    const out = String(await ghw(["issue", "comment", String(on), "-R", repo, "--body", full])).trim();
+    const url = /https?:\/\/\S+/.exec(out)?.[0] ?? null;
+    if (on === issue) localPosts.push({ body: full, url, __mine: true });
+    return url;
   };
   /** Best effort; `true` when the transition succeeded (#4337: the decomposed close needs to know). */
   const label = async (state) => { try { await retrying(() => io.transitionLabel(issue, state), { transient: GH_TRANSIENT_RE, attempts: 4, sleep: sleepFn, random }); return true; } catch { /* labels are best effort */ return false; } };
@@ -596,7 +613,7 @@ export async function runCore(o) {
   // #4169: heavy steps take a host semaphore slot (io.heavy); LLM phases are not gated. `heavyEnv` puts the heavy shims on
   // the runner PATH; `waits` ({phase: ms}) and `heavyQueueMax` ride on the lane result for the batch report.
   const heavyCfg = o.heavy ?? {}, heavyOn = Boolean(io.heavy) && heavyCfg.enabled !== false;
-  let heavyEnv = null, heavyWaitsFile = null, heavyQueueMax = 0, stage = "plan", iss;
+  let heavyEnv = null, heavyWaitsFile = null, heavyQueueMax = 0, stage = "plan";
   let seqBuildNote = ""; // #5235: numbers reserved for this lane at build start (prompt paragraph)
   const recCfg = parseRecurrenceConfig(o.recurrenceConfig); // #5751: forge.yaml recurrence: (absent: mode on, threshold 2, no hot areas or counters)
   let recurrence = null, hotLock = null; // #5751: the recurrence detection; the hot-area locks held until teardown
@@ -767,7 +784,7 @@ export async function runCore(o) {
     // either launches the next attempt or relabels in settle.
     if (recoverUnlabelled && recover.final && (reason === "ci-pending" || reason === "budget-exceeded")) { // #4505: budget-exceeded too
       try {
-        await post("FORGE:NEEDS_HUMAN", `## Needs human\n${laneRecoveryEvidence(reason, code, detail)}\n\n_${usageLine()}_`);
+        await post("FORGE:NEEDS_HUMAN", `## Needs human\n${laneRecoveryEvidence(reason, code, detail)}\n\nsig=${repeatSignature(code, detail)}\n\n_${usageLine()}_`);
         await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
       } catch { /* best effort */ }
     }
@@ -844,8 +861,18 @@ export async function runCore(o) {
         if (reg.existing && (!recover || recover.final) && await duplicateAskIssue(reg.existing, [why, askText])) return finish("invalid", `only content is the owner ask of #${reg.existing}; closed as a duplicate`); // #4730
         link = reg.existing ? `Same owner ask as #${reg.existing} (one ask, linked): answering it unblocks this issue too.` : reg.entry ?? "";
       }
+      // #5979: the second identical failure (same code and normalised detail as an earlier NEEDS_HUMAN/PARKED of this issue) parks with one summary, no recovery
+      const sig = repeatSignature(code, why);
+      const stoppable = code !== OUTCOME_CODES.BUILDER_BLOCKED && code !== OUTCOME_CODES.FAILURE_REPEATED && !ENV_ENGINE_OWNED_CODES.includes(code);
+      const identical = stoppable ? countIdentical(allComments(), sig, (c) => c?.__mine === true || isTrustedIssueComment(c)) + 1 : 1;
+      if (shouldPark(identical)) {
+        try { await post("FORGE:PARKED", summaryComment({ attempts: identical, code, detail: why, sig })); } catch (e) { labelFailed("comment", e); }
+        try { await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human", "--add-label", parkedLabel(OUTCOME_CODES.FAILURE_REPEATED)]); } catch (e) { labelFailed("label", e); }
+        T.decisions.push(`Identical failure ${code} (${sig}) seen ${identical}x: parked as ${OUTCOME_CODES.FAILURE_REPEATED}, not relaunched`);
+        return finish("needs-human", why, { code: OUTCOME_CODES.FAILURE_REPEATED, ...extra, ...(recover ? { recovery: true } : {}) }, OUTCOME_CODES.FAILURE_REPEATED);
+      }
       const notes = [premiseAnnotation(predicate), closedEdgeNote(closedDeps), link, askNote].filter(Boolean).join("\n");
-      try { await post("FORGE:NEEDS_HUMAN", `## Needs human\n${why}${notes ? `\n\n${notes}` : ""}${recoverUnlabelled ? `\n\n${laneRecoveryEvidence("needs-human", code, "")}` : ""}\n\n_${usageLine()}_`); }
+      try { await post("FORGE:NEEDS_HUMAN", `## Needs human\n${why}${notes ? `\n\n${notes}` : ""}${recoverUnlabelled ? `\n\n${laneRecoveryEvidence("needs-human", code, "")}` : ""}\n\nsig=${sig}\n\n_${usageLine()}_`); }
       catch (e) { labelFailed("comment", e); }
       // #5423/#5755: an environment gap is the engine's to recover or hold on an env issue, so a first lane leaves the issue visible; a final recovery lane (no seam) still labels
       if (!(!recover && ENV_ENGINE_OWNED_CODES.includes(code))) {
@@ -2437,6 +2464,7 @@ export async function runCore(o) {
       if (recCfg.mode === "on" && !recurrence && (namedPaths(iss.body ?? "").length || recursLinks(iss.body ?? "").length)) { // #5751: 0 LLM calls; an issue naming no path and no Recurs link cannot recur
         recurrence = await recurrenceFacts({ io: { gh: ghc, git: (a) => git(a) }, repo, issue, title: iss.title, body: iss.body ?? "", base, namedPaths: namedPaths(iss.body ?? ""), threshold: recCfg.threshold }).catch(() => null);
         if (recurrence?.recurs) {
+          recurrence.demanded = designDemanded(allComments()); // #5979: the design block is demanded once
           ev({ event: "RECURRENCE", count: recurrence.count, threshold: recurrence.threshold, fixes: recurrence.evidence.map((e) => e.number), reason: recurrence.reason });
           T.decisions.push(`Design lane (#5751): ${recurrence.reason}`);
           try { await post("FORGE:RECURRENCE", `Routed to a design lane: ${recurrence.reason}.\nThe contract must say why the earlier fixes did not hold, whether to delete or replace them, and a measurable outcome; it may decompose into ordinary lanes.`); } catch { /* best effort */ }
@@ -3546,9 +3574,11 @@ export async function runCore(o) {
         domainsLogged = domains.join(",");
         ev({ event: "REVIEW_DOMAINS", domains, enforced: dHits.length ? dHits : undefined, ...(pd === null ? { error: "roster.failed" } : {}) });
       }
-      if (!amendFixed && sessionId && validateAmendments(result?.amendments).length) { // #5089/#5986: one in-lane correction (the shared amendment schema), outside the conformance resume budget; a still-invalid shape is never posted
+      const vIds = [...(frozen?.validate ?? []), ...(frozen?.regression ?? [])].map((v) => v?.id);
+      const amendBad = (am) => [...new Set([...validateAmendments(am), ...amendmentKindProblems(am, vIds)])]; // #5089/#5986: the shared amendment schema, plus #5979's validate-row supersedes hint
+      if (!amendFixed && sessionId && amendBad(result?.amendments).length) { // one in-lane correction, outside the conformance resume budget; a still-invalid shape is never posted
         amendFixed = true;
-        const bad = validateAmendments(result.amendments);
+        const bad = amendBad(result.amendments);
         T.decisions.push(`Amendment kinds invalid (${bad.length}); builder asked to correct ${RESULT_FILE} once`);
         await builder(++attemptN, amendmentCorrectionPrompt(bad), sessionId, false, undefined, { mode: "resume", trigger: "contract_correction" });
         result = (await readResult()) ?? result;

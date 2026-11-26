@@ -50,6 +50,7 @@ import { globToRegex } from "../../scripts/ci-local/lib.mjs";
 import { contractBriefProblems } from "./pagegate.mjs"; // #5428
 import { counterGrowth } from "./hotarea.mjs"; // #5751
 import { designContractFailures } from "./recurrence.mjs"; // #5751
+import { AMEND_KINDS } from "./amendment-schema.mjs"; // #5979
 const C = OUTCOME_CODES;
 
 /** #4789: folds what a builder retyping a quote changes: unicode punctuation, markdown links/markup, escapes, invisible chars. */
@@ -662,7 +663,6 @@ export function validateContract(c, issueText, { repro = false, pages = null, te
 /** forge#4519: a shell pattern as in scripts/hotspots.sh `case` (`*` crosses `/`, `?` one character), anchored. */
 const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
 
-const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "supersedes", "decision", "substitute-validate", "out-of-band"];
 const UNRELATED_CI_KIND = "unrelated-ci-failure";
 const GUARD_ID_RE = /^#?\d+$/;
 const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer", deferred: "defer", deferral: "defer", "scope-deferral": "defer", "verification-substitution": "substitute-validate", "out-of-band-verification": "out-of-band" };
@@ -709,15 +709,19 @@ function splitRequirementRefs(ref) {
 function amendmentProblem(a, tag) {
   const kind = a?.kind;
   const need = kind === "add-deliverable" ? "needs a path" : kind === "add-requirement" ? "needs requirement {id, quote}"
-    : kind === "supersedes" ? "needs guard: \"#N\" (the guarded issue) or mechanism: \"<name>\" (#5752: retires the guards whose tests the lane deletes)" : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)"
+    : kind === "supersedes" ? "needs guard: \"#N\" (the guarded issue) or mechanism: \"<name>\" (#5752: retires the guards whose tests the lane deletes); a validate row id such as G2 is not a guard: use substitute-validate {validate, command, why}" : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)"
       : kind === "substitute-validate" ? "needs validate: \"V#\" and command" : kind === "out-of-band" ? "needs requirement: \"R#\" and evidence (the job or workflow that measures it)"
       : kind === "decision" ? "needs decision {choice, anchors: [paths or globs], symbols?, supersedes?: decision id}" : null;
   const why = need ? `amendment kind '${kind}' ${need}` : `unknown kind '${kind ?? ""}'; valid kinds are ${AMEND_KINDS.join(", ")}`;
   return `unknown or incomplete amendment: ${why}: ${tag}`;
 }
 
+/** #5979: a supersedes whose guard is a frozen validate-row id (G2, V1), not a #N guard issue. */
+const isValidateRowGuard = (a, ids) => !blank(a.guard) && !GUARD_ID_RE.test(String(a.guard).trim()) && (ids ?? []).includes(String(a.guard).trim());
+const validateRowProblem = (id, tag) => `supersedes guard '${String(id).trim()}' is a validate row of the contract, not a guard issue; use {"kind":"substitute-validate","validate":"${String(id).trim()}","command":"<runnable equivalent>","why":"..."}: ${tag}`;
+
 /** #5089: shape-only check of the builder's amendments (unknown kind, missing path or requirement), run before the gate so one in-lane correction can fix them. Returns the rejection strings; [] when valid. */
-export function amendmentKindProblems(amendments) {
+export function amendmentKindProblems(amendments, validateIds = []) {
   const out = [];
   for (const raw of Array.isArray(amendments) ? amendments : []) {
     const a = normalizeAmendment(raw);
@@ -726,7 +730,9 @@ export function amendmentKindProblems(amendments) {
     const known = AMEND_KINDS.includes(a?.kind);
     const missing = a?.kind === "add-deliverable" ? blank(a.path)
       : TRACKED.includes(a?.kind) || a?.kind === "amend-requirement" ? blank(a.requirement) : false;
+    const validateRow = known && a.kind === "supersedes" && isValidateRowGuard(a, validateIds);
     if (!known || missing) out.push(amendmentProblem(a, tag));
+    else if (validateRow) out.push(validateRowProblem(a.guard, tag));
   }
   return out;
 }
@@ -822,6 +828,8 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       c.mechanisms = [...(c.mechanisms ?? []).filter((m) => m.mechanism !== mechanism), { mechanism, why: String(a.why).trim() }];
       applied.push({ kind: a.kind, target: `mechanism ${mechanism}`, why: String(a.why).trim() });
       continue;
+    } else if (a.kind === "supersedes" && isValidateRowGuard(a, [...(c.validate ?? []), ...(c.regression ?? [])].map((v) => v?.id))) {
+      problems.push(validateRowProblem(a.guard, tag)); continue;
     } else if (a.kind === "supersedes" && GUARD_ID_RE.test(String(a.guard ?? "").trim())) {
       // #4693: retires one guard's guard_broken for this lane; the reviewer judges it, the engine tells the guarded issue after merge
       const guard = `#${String(a.guard).trim().replace(/^#/, "")}`;

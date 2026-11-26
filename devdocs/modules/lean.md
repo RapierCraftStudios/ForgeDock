@@ -2291,6 +2291,7 @@ builder once; shadow records it in `CONFORMANCE_SHADOW` `would` (it is not in `S
 The only override is `{"kind":"supersedes","guard":"#X","why":"..."}` in result.json amendments (`applyAmendments` records
 `contract.supersedes`; the reviewer sees it on the effective contract). After the lane merges with the amendment, the engine
 comments on #X and logs `supersedes_accepted`. Events: `guard_run` (with `wall_ms`), `guard_broken`, `supersedes_accepted`.
+#5979: a `supersedes` whose `guard` is a frozen validate/regression row id (`G2`, `V1`) is not a guard issue: `applyAmendments` rejects it (nothing added to `contract.supersedes`) and `amendmentKindProblems(amendments, validateIds)` reports it pre-gate (`lean.mjs` passes the contract ids) with a hint naming `substitute-validate {validate, command, why}`; `#N` and `mechanism` supersedes are unchanged.
 #5752 weak vs strong: `materialize` tags each job with `isWeakGuardTest(body, path)` (`weakguard.mjs`, deterministic, over the base body).
 A weak guard (reads file text, imports no local non-test module, runs no process, every assertion a literal-presence form) that fails is
 excluded from `guardFailures`; `weakGuardNotes` turns it into a trajectory decision and a `guard_weak` event (`guard_run` gains `weak`).
@@ -3693,6 +3694,7 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 - `watchdog` takes `unit` and `emit`: heartbeat down while `unit()` is `active`/`activating` logs `ALERT ...`, emits `schedd.unit-no-daemon` and restarts the unit via `start`, whether or not batches are unfinished.
 - Deferred to the operator/installer layer (no unit file or installer in this repo): `WatchdogSec` heartbeat on the unit, and the installer restarting the unit on `npm i -g` / plugin update.
 - Post-deploy check `schedd-handover-no-gap`.
+- #5979 churn control. `bin/lean/amendment-schema.mjs` is the one list of amendment shapes the builder prompt, the correction prompt and the tests render from (`substitute-validate` documented; `supersedes` takes only `#N` or a mechanism, never a validate-row id). `bin/lean/failure-stop.mjs`: `failureSignature(code, detail)`; the 2nd identical NEEDS_HUMAN/PARKED (`sig=<hash>` in the comment) parks with one PARKED summary, code `failure.repeated` (not recoverable, label `parked:failure.repeated`), no relaunch. Recurrence needs a symptom match, not path overlap alone; a design block missing again after being demanded once parks instead of being demanded again. `bin/lean/commentstate.mjs`: FACTS/DEPENDENCY are PATCHed in place and NEEDS_HUMAN posts anew only when its normalised state changed; an unchanged re-post is skipped. `bin/stats/churn.mjs` adds comments-per-issue and repeated-failure counts to the batch report.
 
 ## Lane overhead share (#5989)
 - `overheadStats(phases, wallMs, modelMs)` in `phaseledger.mjs` returns `{ fixed_overhead_ms, model_share }`: `max(0, wall - model)` and `model / wall` to 3 decimals (0 when wall <= 0). `phases` is unused; queue_wait is already outside `wall_ms`.

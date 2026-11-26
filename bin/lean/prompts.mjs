@@ -10,6 +10,7 @@ import { capText, FIX_CAPS, FIX_PROMPT_MAX, NARROW_CAPS, NARROW_PROMPT_MAX } fro
 import { SPLIT_MIN_FILES, SPLIT_MIN_LINES } from "./decompose.mjs";
 import { relaxationBlock } from "./relaxation.mjs";
 import { visualReviewCheck } from "./ui-quality.mjs";
+import { amendmentPromptLines, AMEND_KINDS } from "./amendment-schema.mjs"; // #5979
 import { stampRule } from "./stagestamp.mjs";
 import { FINDING_PITFALLS, PLANNER_TIGHTENING } from "./selfreview.mjs";
 import { isTrustedIssueComment } from "./prefilter.mjs"; // call-time use only: prefilter.mjs imports this module
@@ -262,12 +263,7 @@ export function builderImplementPrompt(mode = "local", { toolchain = null, spars
 ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}${stampRule(stamp)}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
 
 The contract changes only through typed amendments in ${RESULT_FILE}, each with a why:
-- {"kind":"add-deliverable","path":"<file>","why":""}: a file not listed.
-- {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: a missed requirement.
-- {"kind":"defer|post-deploy","requirement":"R#","why":"","check":"<id>"}: separate work or a post-deploy check, filed as a follow-up. Not "type"; unknown kinds are rejected. One requirement id per row. An impossible deliverable is a defer, not a new kind.
-- {"kind":"amend-requirement","requirement":"R#","text":"<revised wording>","why":""}: reworded.
-- {"kind":"supersedes","guard":"#N","why":""}: overrides a guard_broken failure; {"kind":"supersedes","mechanism":"<name>","why":""} retires every guard whose test this lane deletes.
-- {"kind":"decision","decision":{"choice":"","anchors":["<base path>"],"supersedes":"<id>"},"why":""}: supersedes changes an H-row.
+${amendmentPromptLines()}
 New keys: translate, never copy English; status entries in place.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
 Never name or number migration files by hand; use the generator.
@@ -432,7 +428,7 @@ export function contractCorrectionPrompt(problems) {
 
 /** #5089: the builder's amendments name an unknown kind or miss a field; one correction before the conformance gate. */
 export function amendmentCorrectionPrompt(problems) {
-  return `The amendments in ${RESULT_FILE} are not valid:\n${problems.slice(0, 20).map((p) => `- ${p}`).join("\n")}\n\nRewrite them with a valid kind: add-deliverable, add-requirement, defer, post-deploy, amend-requirement, supersedes, decision, substitute-validate or out-of-band. A deliverable that is impossible on this platform is {"kind":"defer","requirement":"R#","why":""}, not a changed deliverable. Edit only ${RESULT_FILE} (commit nothing else) and stop. Do not push or touch GitHub.`;
+  return `The amendments in ${RESULT_FILE} are not valid:\n${problems.slice(0, 20).map((p) => `- ${p}`).join("\n")}\n\nRewrite them with a valid kind (${AMEND_KINDS.join(", ")}). A validate-row id (G2) is never a supersedes guard: use {"kind":"substitute-validate","validate":"G2","command":"<runnable equivalent>","why":""}. A deliverable that is impossible on this platform is {"kind":"defer","requirement":"R#","why":""}, not a changed deliverable. Edit only ${RESULT_FILE} (commit nothing else) and stop. Do not push or touch GitHub.`;
 }
 
 /** The one bounded correction round, in the builder's own session. */
