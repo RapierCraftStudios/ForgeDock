@@ -2291,6 +2291,7 @@ builder once; shadow records it in `CONFORMANCE_SHADOW` `would` (it is not in `S
 The only override is `{"kind":"supersedes","guard":"#X","why":"..."}` in result.json amendments (`applyAmendments` records
 `contract.supersedes`; the reviewer sees it on the effective contract). After the lane merges with the amendment, the engine
 comments on #X and logs `supersedes_accepted`. Events: `guard_run` (with `wall_ms`), `guard_broken`, `supersedes_accepted`.
+#5979: a `supersedes` whose `guard` is a frozen validate/regression row id (`G2`, `V1`) is not a guard issue: `applyAmendments` rejects it (nothing added to `contract.supersedes`) and `amendmentKindProblems(amendments, validateIds)` reports it pre-gate (`lean.mjs` passes the contract ids) with a hint naming `substitute-validate {validate, command, why}`; `#N` and `mechanism` supersedes are unchanged.
 #5752 weak vs strong: `materialize` tags each job with `isWeakGuardTest(body, path)` (`weakguard.mjs`, deterministic, over the base body).
 A weak guard (reads file text, imports no local non-test module, runs no process, every assertion a literal-presence form) that fails is
 excluded from `guardFailures`; `weakGuardNotes` turns it into a trajectory decision and a `guard_weak` event (`guard_run` gains `weak`).
@@ -3053,6 +3054,8 @@ when none is left; `--force "<reason>"` starts them anyway. Cost: 0 LLM calls.
 ## Base red (#5239)
 
 `bin/lean/basered.mjs` handles a `verify.invariants` guard that still fails. `lean.mjs` `guardRed` runs it once on a detached worktree of the base (`runOnBase`, same pattern as `guardgate.mjs`), `classifyBaseRed` splits base-red from lane-own, `attribute` names the newest base commit touching the files the failure names (`git log -1`) and its issue (`issueOf`), and `reportBaseRed` comments on or reopens that issue (or files one). A base-red guard ends the lane `deferred` with `base.red` (retry 900 s), spending no builder round; a lane-own failure blocks with `ci.red` (`guardFailing`, switch `verify.guard_block`, default on). `postMergeGate` also runs the invariants on the base-synced merged tree and returns the `stuck` ones. Without `invariants` nothing changes.
+
+#5992: `base.red` is the base's wait, not the issue's: it is in `UNCAPPED_DEFERRALS` (never counts toward `max_deferrals`). `basered.mjs` `probeBase` runs the guard once per (repo, base sha) and caches the verdict for `BASE_PROBE_TTL_MS` (10 min; a moved sha misses); `guardRed` records its red verdict there (`recordBaseVerdict`). The dispatcher (`engine-cli.mjs`, only with `verify.invariants`) passes `baseProbe` to `orchestrate`, which each pass holds every admission except the attributed fixer issue while the base is red (one `base.red` preflight row) and releases on a sha change or a green probe.
 Base-red hardening (#5945): `runOnBase` returns `{command, rc, output}` (about 4 KB tail) and sets `BASE_SHA` and `LANE_CHECK_BASE` to the merge-base sha, so diff-scoped guards see an empty diff on the base. `classifyBaseRed` gains an `env` bucket (base output matching ModuleNotFoundError, ImportError, `fail closed`, unknown/bad revision, not a valid ref); `guardRed` records those as `env.base_probe` with the output tail, files nothing and leaves the failure the lane's. An optional injected `io.verifyBaseOnHost({command, base})` that returns rc 0 on the bare base tip also turns a sandbox red into env. `fileBaseRed` dedupes on a `FORGE:BASE_RED_KEY base@sha12` body marker (attributed sha, else base tip): an open match gets a comment, a closed one is reopened only if closed after the attributed commit date, and at most one new issue per base+sha per 24 h. The issue body carries the base output tail. `reportTrainBaseRed` keys on `baseSha`.
 
 ## Entry 2026-11-08 — Checklist close gate and inert-rollout note (#5240)
@@ -3691,8 +3694,79 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 - `watchdog` takes `unit` and `emit`: heartbeat down while `unit()` is `active`/`activating` logs `ALERT ...`, emits `schedd.unit-no-daemon` and restarts the unit via `start`, whether or not batches are unfinished.
 - Deferred to the operator/installer layer (no unit file or installer in this repo): `WatchdogSec` heartbeat on the unit, and the installer restarting the unit on `npm i -g` / plugin update.
 - Post-deploy check `schedd-handover-no-gap`.
+- #5979 churn control. `bin/lean/amendment-schema.mjs` is the one list of amendment shapes the builder prompt, the correction prompt and the tests render from (`substitute-validate` documented; `supersedes` takes only `#N` or a mechanism, never a validate-row id). `bin/lean/failure-stop.mjs`: `failureSignature(code, detail)`; the 2nd identical NEEDS_HUMAN/PARKED (`sig=<hash>` in the comment) parks with one PARKED summary, code `failure.repeated` (not recoverable, label `parked:failure.repeated`), no relaunch. Recurrence needs a symptom match, not path overlap alone; a design block missing again after being demanded once parks instead of being demanded again. `bin/lean/commentstate.mjs`: FACTS/DEPENDENCY are PATCHed in place and NEEDS_HUMAN posts anew only when its normalised state changed; an unchanged re-post is skipped. `bin/stats/churn.mjs` adds comments-per-issue and repeated-failure counts to the batch report.
+
+## Lane overhead share (#5989)
+- `overheadStats(phases, wallMs, modelMs)` in `phaseledger.mjs` returns `{ fixed_overhead_ms, model_share }`: `max(0, wall - model)` and `model / wall` to 3 decimals (0 when wall <= 0). `phases` is unused; queue_wait is already outside `wall_ms`.
+- `RUN_TERMINAL` (run log and `FORGE:TELEMETRY`) carries both fields. Observational only: no gate, conformance or merge decision reads them, and `wall_ms`, `model_ms` and the `flattenPhases` keys are unchanged.
+- Deferred follow-ups: env snapshot as default, recovery reuse, parallel precheck/plan, path-scoped guard.
+
+## Entry 2026-11-25 — standing orders: `orchestrate --select <query>` (#5978)
+
+- `--select` is kept in the plan argv. Every `RECONCILE_MS` the runner (hosted by `schedd`, no watcher process) calls `reconcile.mjs`: matching open issues join through the `--add` seam (same DAG, priority, lane rules), closed or moved ones leave. Batches without a selector are unchanged.
+- Re-admission (`readmitDue`): `deferred` backs off exponentially (cap 2 h); `held`/`engine-error` re-admit on a change of the engine or `FORGE_LANE_IMAGE` version or after a 6 h cooldown; conformance gets one more attempt after the base sha moves, then parks in a "needs decision" digest. `humanCode` (credentials, spend, customer, promotion, product decision) is the only permanent stop.
+- An engine-filed `env.*` issue joins the order; its closure re-admits the waiters (existing path).
+- `clear-breaker.mjs` `decideAutoReset`: a selector batch's breaker closes after a cooldown when the signature is environmental and the pool is healthy, with a FORGE:DECISION. `decideClear` is unchanged.
+- A staging lane closes the issue on merge into the lane branch and comments the `FORGE_POSTDEPLOY_ROLLUP` issue.
+- `batch.mjs` `coverage()` classifies each open match (running, queued, backing-off, waiting on deps, human-blocked, unscheduled); `orchestrate --status <id>` prints it, healthy is 0 unscheduled.
 
 ## Entry 2026-11-25 — scheddFromCli waits for selfStop to settle before exiting (#5984)
 
 - `closed` resolves as soon as `close()` finishes, before `selfStop()` has spawned and probed the successor. `selfStop` now keeps its whole async body (close, spawn, wait for listening, retry, rehost) as one promise, and the `startDaemon` handle gains an additive `settled()` (`selfStopping ?? closed`, so idle and lost-lock closes settle via `closed`).
 - `scheddFromCli` awaits `d.settled?.()` after `d.closed`, and in the rehosted follow loop awaits each `cur.closed` then `cur.settled?.()` before reading `stopCode` and exiting. A unitless handover no longer exits(1) with no daemon. Under a unit the exit path is unchanged.
+
+## Efficiency ledger and SLOs (#5987)
+
+`bin/lean/efficiency.mjs` folds `log.jsonl` + batch state + the schedd's per-pass pool sample into `<batch>/efficiency.json` (`v:1`) every `watchPass`; `bin/lean/slo.mjs` evaluates breaches and files them. Both are advisory (never throw, never change dispatch). `forgedock status --batch <id>` prints `efficiency: 3/12 lanes (25%) - limiter <causes>; N SLO breaches -> FD#NNNN` from the file.
+
+`efficiency.json` keys: `concurrency {achieved, ceiling, ratio, windowMin:15, running, ready, lowSinceMin}` (time-weighted); `idle {slotMinutes, byCause, share}` (causes: capacity, lease-held, base.red, hold, breaker, auth-pause, no-ready); `limiters`; `attemptsPerMerged`, `merged`; `commentsPerIssue {max, issues}` (engine status rows with a `detail`, per issue); `repeats [{signature, count, issues}]`; `interventionsPerDay` (`--add` rows, `run.interrupted` rows, FORGE:DECISION in a row detail, plus the batch files `requeue`, `hold-info` (non-engine owner) and `parallel` mtime); `capacityRefusalsPerHour`; `phases {id: {p50, p90, baselineP90, ratio}}`; `mergedPerHour`; `wastedLaneHours {laterMerged, neverMerged}`; `usdPerMerge`; `samples` (24 h ring); `slo.sigs` (filing state); `breaches`.
+
+| SLO (`orchestrate.slo.*`) | default | code |
+| --- | --- | --- |
+| `concurrency_min` for `concurrency_minutes` while ready>0 | 0.6 / 30 | concurrency |
+| `repeat_max` identical failure signature | 3 | repeat |
+| `attempts_max` per merged issue (24 h) | 2 | attempts |
+| `comments_max` per issue | 20 | comments |
+| `interventions_max` per day | 6 | interventions |
+| `phase_ratio_max` p90 vs baseline | 1.5 | phase |
+| `capacity_refusals_max` per hour | 20 | capacity |
+| `idle_share_max` per cause (not no-ready) | 0.2 | idle-<cause> |
+
+Filing: `file_issues` is **opt-in, default off** (only an explicit `file_issues: true` enables; breaches are always written to efficiency.json). schedd reads the config from the batch repo (`plan.cwd`, falling back to the daemon cwd for old plans), and no local path is ever posted. When on, each signature `slo:<code>:<repo>` gets one `engine-gap` issue in `orchestrate.slo.repo` (default RapierCraftStudios/ForgeDock), found by a `forge-slo` marker so a restart adopts rather than duplicates; a re-breach appends a counter comment at most once per 6 h; 24 h green closes it. `bin/introspect-schedule.mjs` installs the daily introspect timer (only on an explicit `file_issues: true`; otherwise an existing timer is removed). A guard `bypass` applies only when every failed command is base-red; non-guard or lane-broken failures still run a fix round. The execution budget (`execution-budget.json`) now keeps one entry per `<batch>#<sandbox id>` holding its latest cumulative usage.
+
+## Entry 2026-11-25 — closed-loop lane concurrency under K, pool refusal reasons, named-condition capwait (#5985)
+
+- New pure `concurrency.mjs`: `makeController({ceiling})` keeps an operating point `k` under the ceiling (`--parallel`/`getParallel` is now only the ceiling; `orchestrate.mjs` `K()` returns `min(ceiling, operating)`). `observe(cap)` adds 1 while `/agents` reports `mem_available_gb` above floor (4) + headroom (2), `load_per_core` < 1 and no refusal for 5 min; `refused()` halves (floor 1) on a `pool.*` code/reason or load > 1.5/core, one halving per storm. Unknown pool figures leave K unchanged. Each change is a `concurrency` event in `log.jsonl` with its inputs; the post-deploy check `lane-concurrency-achieved-70pct` reads them.
+- `classifyRepo(usageRows, repo)` marks a repo heavy when recent `usage-history.jsonl` `cpu_avg` averages > 1.5; heavy lanes have their own cap (default `ceil(ceiling/3)`) so a wave of test-suite lanes cannot starve light ones.
+- Refusal reason: `bin/pool/agent.mjs` host-busy 503 now carries `code: pool.host_load` with live figures and `/agents` exposes `load_per_core`/`mem_available_gb`. `sandbox-remote.mjs` keeps them as `e.poolCode`/`e.live` and `capacity()` returns the two figures; the `sandbox.capacity` deferral row from `execution.mjs` gains `reason` (`host_load|host_mem|projected_peak|disk`) and `live`.
+- `capwait.mjs`: `refused(issue, reason)` records the reason; `blocked()` holds until the named condition clears (`conditionCleared`: load < 1.0, or free mem > floor), falling back to the slot count when no figure is known. `UNCAPPED_DEFERRALS` is unchanged. A refused lane is also held at most 5 min by the controller.
+- `sched.mjs` `concurrencyLines` prints `concurrency: running/K/ceiling (limiting factor)` from the last controller event in `sched show` (wired in `engine-cli.mjs`).
+
+## Entry 2026-11-25 — per-issue attempts ledger, input-hash admission, escalation, keyed upserts (#5986)
+
+- `bin/lean/attempts.mjs` holds the ledger `{attempts, signatures[], lastInputHash, spend}` per issue: the batch `state.json` `attempts` map (cache) and one hidden `<!-- FORGE:ATTEMPTS {json} -->` comment (register). `releaseHeld`, `--requeue` and `--set-env` never touch it, so it survives `--resume` and a schedd restart.
+- `orchestrate` takes an `attempts` seam (`makeAttemptsSeam`, wired in `engine-cli.mjs`; off under test seams). A final failed lane (`needs-human`, `engine-error`, `budget-exceeded`, `failed`) is recorded with its failure signature; a missing ledger or an unreadable input always admits (a merged-first-try issue sees nothing).
+- Readmission (needs-human label removed, engine/env change) calls `gateAdmit`: the same input hash after a failure is refused with `loop.no_new_input` (one note per hash, the label is put back). The hash covers title+body, labels without needs-human, trusted FORGE:DECISION comments, engine and sandbox major.minor and the contract hash (null today: the contract is frozen inside the lane).
+- Lifetime budget `orchestration.max_attempts_per_issue` (4) and `max_identical_signature` (2, the 3rd identical signature breaches): on breach one `FORGE:ESCALATION` comment (upserted), `needs-human`, dependents held by the existing root hold, no lanes until the hash changes.
+- `statuscomment.postKeyed` upserts FORGE:AMENDMENT/NEEDS_HUMAN/FACTS by (kind, content hash) with an `n=` counter; at 12 trusted engine comments it edits the newest comment of that kind in place and posts nothing new.
+- `validateAmendments` is the shared amendment schema (kind checks plus field types); the lane returns a rejected shape to the builder once and a still-invalid one is never applied or posted.
+- `forgedock stats --attempts` reports lanes per merged issue and engine comments per issue from local batch files.
+
+## Entry 2026-11-25 — Owner-based liveness under the clocks (#5991)
+
+- `bin/lean/liveness.mjs` holds three pure helpers. `holderGone(lease, {liveBatches})` says a lease whose batch no longer owns the issue is takeover-able at once; `lean.mjs` consults it (`o.liveBatches`) beside `holderDead`. A live batch's lease stays `lease-held`, and an unknown liveness (`null`, e.g. inside a sandbox with no batch dir) keeps the 25 min TTL.
+- `classifyTransportLoss` shortens `sandbox.unreachable` to `AGENT_UP_WINDOW_MS` (90 s) only when the pool agent answers (`agentOnline(handle)`, exposed by `sandbox-remote.mjs` from `/agents`); agent down, router error or no probe keeps the 300 s window. The typed deferral and the kept sandbox are unchanged.
+- Budget rows are keyed `sandboxBudgetKey(batchId, sandboxId)` with no `startedAt`; `record` upserts the single row with the larger minutes/cost, so replayed attempts of one sandbox no longer add rows. Host-day dedupe and `KEEP_DAYS` pruning are unchanged.
+- R5/R6 (cache-volume probe and quarantine) deferred to pool work.
+
+## Entry 2026-11-25 — watchdog restarts (not starts) an active unit with no daemon (#5982)
+
+- `systemctl start` is a no-op on an active unit, so the #5966 zombie (unit active, no live daemon) was never recovered. `schedd.restartUnit()` runs `systemctl --user restart --no-block` (best effort, like `startUnit`); `startUnit` and `connect()` are unchanged.
+- `watchdog` takes a separate `restart` dep (wired in `scheddFromCli`). Heartbeat down while `unit()` is `active`/`activating`: ALERT, `schedd.unit-no-daemon`, `restart()`, never `start()`. Only an inactive or absent unit with unfinished batches goes through `start()`.
+- Result gains `restarted`; `started` is `false` (and the failure is logged) when `restart()` throws.
+
+## Lease/hold/pause guard and kept sandboxes (#6008)
+
+- A lane dispatched with a batch id re-reads its FORGE:STATE before every non-delete `git push` and before `gh pr merge` (`suspensionGuard`, `bin/lean/lean.mjs`). A missing or expired lease, a lease of another batch, or the dispatcher's `suspend` marker (`reason` held/paused/kept for adopt) ends the lane `deferred` with `lane.suspended`; the sandbox stays for adopt. No readable state, or no batch id (interactive `run-issue`), is not guarded. `renew()` does not renew under a `suspend` marker.
+- The dispatcher writes the marker (`suspendLane`, `suspendMarker` in `bin/engine-cli.mjs`): when a kept sandbox is recorded (halted, `sandbox.unreachable`, `sandbox.auth`; `providerLanes` `suspendKept`), when a kept issue is held (`--hold`) or its batch paused (`--pause`); cleared on release, unpause and adopt (`resumeKept`). Held/paused batches still admit nothing, including deferred issues whose retry timer fires (`isReady`, launch re-read); `--hold <id> pending` holds every pending and backing-off issue.
+- Kept sandboxes are recorded in `state.kept` (issue, since, phase) and listed by `orchestrate --status` and `pool status` (table section and `kept_sandboxes` in `--json`) via `keptSandboxes` (`bin/lean/batch.mjs`).

@@ -71,16 +71,20 @@ describe("schedd heartbeat and watchdog (#4780)", () => {
 
   it("#5966: a down daemon while the unit is active alerts, emits an event and restarts the unit, even with no unfinished batches", async () => {
     const dir = tmpDir("schedd-wd-unit-"), lines = [], events = [];
-    let starts = 0;
-    const run = (unit) => watchdog({ dir, now: () => 0, alive: () => false, unfinished: () => [], start: async () => { starts++; }, unit, emit: (e) => events.push(e), log: (m) => lines.push(m) });
+    let starts = 0, restarts = 0;
+    const run = (unit, restart = async () => { restarts++; }) => watchdog({ dir, now: () => 0, alive: () => false, unfinished: () => [], start: async () => { starts++; }, restart, unit, emit: (e) => events.push(e), log: (m) => lines.push(m) });
     const r = await run(() => "active");
     assert.equal(r.started, true);
     assert.equal(r.alerted, true);
-    assert.equal(starts, 1);
+    assert.equal(r.restarted, true);
+    assert.deepEqual([restarts, starts], [1, 0], "an active unit is restarted, never started");
     assert.equal(events[0].type, "schedd.unit-no-daemon");
     assert.ok(lines.some((l) => l.includes("ALERT")));
     await run(() => "inactive");
     await run(() => null);
-    assert.equal(starts, 1, "an inactive or absent unit with nothing unfinished is left down");
+    assert.equal(restarts, 1, "an inactive or absent unit with nothing unfinished is left down");
+    const f = await run(() => "active", async () => { throw new Error("denied"); });
+    assert.deepEqual([f.started, f.restarted, f.alerted], [false, false, true]);
+    assert.match(lines.at(-1), /restart failed: denied/);
   });
 });

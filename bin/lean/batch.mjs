@@ -20,6 +20,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { homedir, hostname } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
+import { humanCode } from "./reconcile.mjs";
 import { sanitizeOverride, validateExecutionPatch } from "./live-execution.mjs";
 
 export const RAM_FS = new Set(["tmpfs", "ramfs"]);
@@ -113,6 +114,23 @@ const readAdded = (file) => {
 export const REQUEUABLE = (outcome) => ["needs-human", "engine-error", "held", "invalid", "skipped", "ci-pending", "pr-ready", "budget-exceeded", "lane-refused", "deferred"].includes(outcome) || /^dependency-/.test(String(outcome));
 /** Key of one requeue entry; the runner records the applied keys in state.json `requeueApplied`. */
 /** #5832: the `{dependency, branch, sha}` a stacked build of `issue` was admitted on (batch state `stacked`), or null. Rows carry `stacked`/`stackedOn`. */
+/**
+ * #6008: sandboxes kept for adopt (issue, since, age, phase). `state.kept` records them as the lane returned them; a running
+ * remote record (handle) of a batch whose dispatcher is gone (`live` false) is a kept sandbox too. Newest listing order: by issue.
+ */
+export function keptSandboxes(state, { now = Date.now(), live = false } = {}) {
+  const out = new Map();
+  for (const [k, v] of Object.entries(state?.kept ?? {})) {
+    const issue = Number(k); if (!Number.isSafeInteger(issue) || !v) continue;
+    out.set(issue, { issue, since: v.since ?? null, phase: v.phase ?? null, ...(v.id ? { id: v.id } : {}) });
+  }
+  if (!live) for (const [k, rec] of Object.entries(state?.running ?? {})) {
+    const issue = Number(k);
+    if (!Number.isSafeInteger(issue) || out.has(issue) || !(rec?.handle || rec?.remote)) continue;
+    out.set(issue, { issue, since: rec.startedAt ?? null, phase: rec.phase ?? null, ...(rec.handle?.id ? { id: rec.handle.id } : {}) });
+  }
+  return [...out.values()].sort((a, b) => a.issue - b.issue).map((e) => ({ ...e, ageMs: (() => { const t = typeof e.since === "number" ? e.since : Date.parse(e.since); return Number.isFinite(t) ? Math.max(0, now - t) : null; })() }));
+}
 export const stackedOnOf = (state, issue) => state?.stacked?.[issue] ?? null;
 
 export const requeueKey = (e) => `${e.issue}@${e.at}`;
@@ -184,6 +202,31 @@ export const dispatchOwner = (root, repo, issue, exceptId, opts = {}) => {
   const live = batchesOwning(root, repo, issue, { ...opts, exceptId }).filter((o) => !o.cancelled);
   return (live.find((o) => o.running) ?? live.find((o) => o.id < exceptId))?.id ?? null;
 };
+
+/**
+ * #5978: coverage of a selector batch: every open issue the selector matches is exactly one of running, queued, backing-off (a
+ * deferral or re-admission wait), waiting on deps, human-blocked (the only reason to stay unscheduled), or `unscheduled`
+ * (the unhealthy state: matches but nothing will run it). Shared by `forgedock orchestrate --status`.
+ * @param {{state:object, open:Array<{number:number,labels?:string[]}>, now?:number}} p
+ */
+export function coverage({ state, open, now = Date.now() }) {
+  const st = state ?? {}, pending = new Set(st.pending ?? []), res = st.results ?? {}, readmit = st.readmit ?? {};
+  const out = { running: [], queued: [], backingOff: [], waitingDeps: [], humanBlocked: [], unscheduled: [] };
+  for (const { number: n, labels = [] } of open ?? []) {
+    const row = res[n], deps = (st.deps?.[n] ?? []).filter((d) => res[d]?.outcome !== "merged" && res[d]?.outcome !== "invalid");
+    if (st.running && Object.hasOwn(st.running, String(n))) out.running.push(n);
+    else if (row && humanCode(row, labels)) out.humanBlocked.push(n);
+    else if (!row && labels.some((l) => humanCode(null, [l]))) out.humanBlocked.push(n);
+    else if (pending.has(n) && (st.notBefore?.[n] ?? 0) > now) out.backingOff.push(n);
+    else if (pending.has(n) && deps.length) out.waitingDeps.push(n);
+    else if (pending.has(n)) out.queued.push(n);
+    else if (row && ["deferred", "held", "engine-error"].includes(row.outcome) && readmit[n]) out.backingOff.push(n);
+    else if (row && (row.outcome === "pr-ready" || row.outcome === "ci-pending")) out.queued.push(n); // a PR is on its way to merge
+    else if (row && /^(skipped|held)$/.test(row.outcome) && deps.length) out.waitingDeps.push(n);
+    else out.unscheduled.push(n);
+  }
+  return out;
+}
 
 /** Handle on one batch directory. */
 export function openBatch(root, id) {
@@ -300,6 +343,8 @@ export function openBatch(root, id) {
     readRequeued: () => readRequeueFile(f("requeue")),
     /** Entries the runner has not applied yet (a finished or unhosted batch with a pending requeue). */
     unrunRequeues: () => { const done = new Set(readJson(f("state.json"))?.requeueApplied ?? []); return readRequeueFile(f("requeue")).filter((e) => !done.has(requeueKey(e))); },
+    /** #6008: the kept-sandbox listing of this batch (issue, since, ageMs, phase); `live` = its dispatcher is running. */
+    keptSandboxes: (live = false) => keptSandboxes(readJson(f("state.json")), { live }),
     /** Issues held by `--hold` (#4592): the `hold` file, sorted unique positive integers; [] when missing or invalid. */
     readHeld: () => readAdded(f("hold")),
     /** #4656: gates waiting on issues (`gates` file: [{ name, waitsOn: [n...], since? }], written by the ship/settle pre-flight); [] when missing or invalid. */

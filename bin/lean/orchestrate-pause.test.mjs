@@ -59,3 +59,26 @@ describe("#5975: batch pause", () => {
     assert.deepEqual(r.calls, [1, 2]);
   });
 });
+
+describe("#6008: hold and pause cover deferred retries and kept sandboxes", () => {
+  const CAP = { terminalReason: "deferred", code: "sandbox.capacity", retryInSeconds: 30, detail: "no sandbox capacity" };
+  it("a sandbox.capacity-deferred issue is not dispatched while held, including when its timer fires", async () => {
+    const held = { v: [] };
+    const r = await run({ script: { 1: [CAP, MERGED] }, issues: [1], extra: { getHeld: () => held.v }, onRow: (row) => { if (row.issue === 1 && row.outcome === "deferred") held.v = [1]; } });
+    assert.deepEqual(r.calls, [1], "the retry timer fired (clock advanced) but the held issue was not dispatched");
+    assert.notEqual(r.byIssue[1].outcome, "merged");
+  });
+  it("a sandbox.capacity-deferred issue is not dispatched while the batch is paused, including when its timer fires", async () => {
+    const pause = { v: null };
+    const r = await run({ script: { 1: [CAP, MERGED] }, issues: [1], pause, onRow: (row) => { if (row.issue === 1 && row.outcome === "deferred") pause.v = REC; } });
+    assert.deepEqual(r.calls, [1]);
+    assert.notEqual(r.byIssue[1].outcome, "merged");
+  });
+  it("a paused batch suspends its kept sandboxes; unpause lifts it", async () => {
+    const pause = { v: null }, marks = [];
+    const KEPT = { terminalReason: "deferred", code: "sandbox.unreachable", retryInSeconds: 60, detail: "kept for adopt", kept: { issue: 1, since: 1_000_000, phase: "implement" } };
+    await run({ script: { 1: [KEPT, MERGED] }, issues: [1], pause, extra: { suspendLane: (n, on, why) => marks.push([n, on, why]) },
+      onRow: (row) => { if (row.issue === 1 && row.outcome === "deferred") pause.v = REC; } });
+    assert.deepEqual(marks, [[1, true, "paused"]]);
+  });
+});
