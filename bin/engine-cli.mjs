@@ -2950,6 +2950,44 @@ export async function decisionsFromCli(argv, deps = {}) {
 }
 
 /**
+ * `forgedock audits [--repo OWNER/NAME] [--version X | --since-version X] [--signature S] [--class C] [--active] [--json]` (#6077):
+ * queries the repo's FORGE:LANE_AUDIT comments (trusted authors only). `--active` = active, not fixed_in_later, current version
+ * (highest engine_version seen, or --version), grouped per signature with count and lanes. Read-only.
+ */
+export async function auditsFromCli(argv, deps = {}) {
+  const q = await import("./lean/lane-audit-query.mjs");
+  const { parseAudit, LANE_AUDIT_MARKER } = await import("./lean/lane-audit.mjs");
+  const usage = "usage: forgedock audits [--repo OWNER/NAME] [--version X | --since-version X] [--signature S] [--class C] [--active] [--json]";
+  const valued = new Set(["--repo", "--version", "--since-version", "--signature", "--class"]);
+  const opts = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (valued.has(a)) { if (argv[i + 1] == null || argv[i + 1].startsWith("--")) throw new Error(usage); opts[a] = argv[++i]; }
+    else if (a === "--active" || a === "--json") opts[a] = true;
+    else throw new Error(usage);
+  }
+  const run = deps.exec ?? (async (cmd, args) => String((await pexec(cmd, args, { maxBuffer: 64 * 1024 * 1024, timeout: 60000 })).stdout));
+  const repo = opts["--repo"] ?? String(await run("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"])).trim();
+  const jq = `.[] | select(.body | contains("<!-- ${LANE_AUDIT_MARKER}")) | {body, user, author_association, issue_url} | tojson`;
+  const lines = String(await run("gh", ["api", "--paginate", `repos/${repo}/issues/comments?per_page=100`, "--jq", jq])).split("\n").filter(Boolean);
+  const { isTrustedIssueComment } = await import("./lean/prefilter.mjs");
+  const audits = [];
+  for (const l of lines) {
+    try {
+      const c = JSON.parse(l);
+      if (!isTrustedIssueComment(c)) continue;
+      const a = parseAudit(c.body);
+      if (!a) continue;
+      audits.push({ ...a, issue: Number(/(\d+)$/.exec(c.issue_url ?? "")?.[1]) || a.issue || null });
+    } catch { /* skip a malformed comment */ }
+  }
+  const rows = q.filterAudits(audits, { version: opts["--version"], sinceVersion: opts["--since-version"], signature: opts["--signature"], class: opts["--class"] });
+  const out = opts["--active"] ? q.summarizeActive(rows, { currentVersion: opts["--version"] ?? q.highestVersion(audits) }) : rows;
+  console.log(opts["--json"] ? JSON.stringify(out, null, 2) : q.formatAudits(out, { active: Boolean(opts["--active"]) }));
+  return { rows: out };
+}
+
+/**
  * `forgedock check [--repo DIR] [--base REF] [--json]` (#4364): runs in the lane worktree what the engine runs after the
  * builder: the frozen validate commands (.forge-lean/contract.json) and the change-scoped pre-PR checks, with the plan
  * the engine wrote (.forge-lean/check-plan.json; else this checkout's forge.yaml) and the caller's env (lane TMPDIR,
