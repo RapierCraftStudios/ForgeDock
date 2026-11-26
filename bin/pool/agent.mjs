@@ -357,6 +357,9 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   }
   /** #5886: a router-pushed policy (allowlisted keys, persisted beside the agent config). Its `paused` is separate from the owner's pause: the router can set or clear only its own, never the owner's. */
   let policyPaused = Boolean(cfg.policy_paused);
+  const laneS = { target: null, greenSince: null, busySince: null };
+  const laneTargetOn = () => cfg.lane_autoscale !== false && Number.isInteger(cfg.max_lanes) && cfg.max_lanes >= 1;
+  const laneNow = () => laneS.target ?? Math.min(cfg.max_lanes, cfg.lane_start ?? 1);
   function applyPolicy(body) {
     const p = body && typeof body === "object" ? body : {}, int = (v, lo, hi) => (Number.isInteger(v) && v >= lo && v <= hi);
     if ((p.cpus !== undefined && !int(p.cpus, 1, 256)) || (p.mem_gb !== undefined && !int(p.mem_gb, 1, 1024)) || (p.idle_only !== undefined && typeof p.idle_only !== "boolean") || (p.paused !== undefined && typeof p.paused !== "boolean")
@@ -797,9 +800,6 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
 
   // #6061: per-worker lane target, evaluated once per reap. Active only with an integer cfg.max_lanes (the ceiling) unless cfg.lane_autoscale is false.
   // Draining refuses new launches only; running lanes are never stopped here (drainOne stays for idle_only borrowed lanes).
-  const laneS = { target: null, greenSince: null, busySince: null };
-  const laneTargetOn = () => cfg.lane_autoscale !== false && Number.isInteger(cfg.max_lanes) && cfg.max_lanes >= 1;
-  const laneNow = () => laneS.target ?? Math.min(cfg.max_lanes, cfg.lane_start ?? 1);
   function laneDrain() {
     const paused = Boolean(cfg.paused || ownerPaused || policyPaused);
     return drainState({ paused, ownerPaused, policyPaused, busyForMs: laneS.busySince === null ? 0 : now() - laneS.busySince, drainAfterMs: (cfg.drain_busy_s ?? 300) * 1000 });

@@ -248,6 +248,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   }
   /** #5967: host free memory and the other-VM (vmmem) working sets per agent. */
   const memReport = (c) => Number.isFinite(c.host_mem_free_gb) ? { host_mem_free_gb: c.host_mem_free_gb, ...(Array.isArray(c.vmmem) && c.vmmem.length ? { vmmem: c.vmmem } : {}), ...(c.host_mem_low === true ? { host_mem_low: true } : {}) } : {};
+  const pending = new Map(); // agent -> Set of lane ids reserved by an in-flight launch or claim
+  const dropPending = (name) => { pending.delete(name); }; // #6061: a worker that stopped answering must not hold batch slots
   const reportedTarget = new Map(); // #6061: agent -> lane_target from its last answered /capacity
   async function capacities() {
     const out = [];
@@ -306,8 +308,6 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     const c = configuredCeiling(name), t = reportedTarget.get(name);
     return t === undefined ? c : c === null ? t : Math.min(c, t);
   }
-  const pending = new Map(); // agent -> Set of lane ids reserved by an in-flight launch or claim
-  const dropPending = (name) => { pending.delete(name); }; // #6061: a worker that stopped answering must not hold batch slots
   const lanesOn = (name) => {
     const ids = new Set(pending.get(name) ?? []);
     for (const [id, s] of Object.entries(sbx())) if (s?.agent === name && isLane(id)) ids.add(id);
