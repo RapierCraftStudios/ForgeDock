@@ -118,8 +118,10 @@ export async function recurrenceFacts({ io, repo, issue, title = "", body = "", 
   const notEvidence = new Set();
   for (const r of rows.filter((x) => x?.kind === "PR" && x?.status === "merged").slice(0, MAX_RECURRENCE_ROWS)) {
     try {
-      const m = JSON.parse(String(await io.gh(["api", `repos/${repo}/pulls/${Number(r.number)}`, "--jq", "{head: .head.ref, merged: .merged_at}"])));
-      if (isReleaseHead(m?.head) || (Number.isFinite(created) && Date.parse(m?.merged ?? "") > created)) notEvidence.add(Number(r.number));
+      const m = JSON.parse(String(await io.gh(["api", `repos/${repo}/pulls/${Number(r.number)}`, "--jq", "{head: .head.ref, merged: .merged_at, body: .body}"])));
+      // A later merge that closes this very issue is its earlier fix of a reopened issue: evidence, not a sibling.
+      const closesThis = new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+(?:${repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})?#${Number(issue)}\\b`, "i").test(String(m?.body ?? ""));
+      if (isReleaseHead(m?.head) || (Number.isFinite(created) && Date.parse(m?.merged ?? "") > created && !closesThis)) notEvidence.add(Number(r.number));
     } catch { /* unreadable: keep the row */ }
   }
   rows = rows.filter((r) => !notEvidence.has(Number(r?.number)));
