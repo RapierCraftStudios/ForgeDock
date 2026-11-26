@@ -16,7 +16,9 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { censusIssues, censusBatchRows, renderCensus } from "../bin/lean/failure-census.mjs";
+import { censusIssues, censusBatchRows, censusAudits, renderCensus } from "../bin/lean/failure-census.mjs";
+import { parseAudit, LANE_AUDIT_MARKER } from "../bin/lean/lane-audit.mjs";
+import { isTrustedIssueComment } from "../bin/lean/prefilter.mjs";
 
 const args = process.argv.slice(2);
 const opt = (k, d = null) => { const i = args.indexOf(k); return i >= 0 && args[i + 1] && !args[i + 1].startsWith("--") ? args[i + 1] : d; };
@@ -31,19 +33,25 @@ const gh = (a) => execFileSync("gh", a, { encoding: "utf8", maxBuffer: 256 * 102
 // Issues: comments >= 1, optionally updated since; comments fetched per issue (paginated) with small parallelism.
 const search = ["comments:>=1", since ? `updated:>=${since}` : ""].filter(Boolean).join(" ");
 const list = JSON.parse(gh(["issue", "list", "-R", repo, "--state", state, "--limit", String(limit), "--search", search, "--json", "number,title"]));
-const issues = [];
+const issues = [], audits = [];
 const queue = [...list];
 async function worker() {
   for (let it = queue.shift(); it; it = queue.shift()) {
     try {
-      const raw = gh(["api", `repos/${repo}/issues/${it.number}/comments?per_page=100`, "--paginate", "--jq", ".[] | {body, createdAt: .created_at, author: .user.login}"]);
+      const raw = gh(["api", `repos/${repo}/issues/${it.number}/comments?per_page=100`, "--paginate", "--jq", ".[] | {body, createdAt: .created_at, author: .user.login, user, author_association, issue_url}"]);
       const comments = raw.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+      for (const c of comments) {
+        if (!String(c.body ?? "").includes(`<!-- ${LANE_AUDIT_MARKER}`) || !isTrustedIssueComment(c)) continue;
+        const a = parseAudit(c.body);
+        if (a) audits.push({ ...a, issue: Number(/(\d+)$/.exec(c.issue_url ?? "")?.[1]) || a.issue || it.number });
+      }
       issues.push({ number: it.number, title: it.title, comments });
     } catch (e) { process.stderr.write(`#${it.number}: ${String(e?.message ?? e).split("\n")[0]}\n`); }
   }
 }
 await Promise.all(Array.from({ length: 4 }, worker));
 const ic = censusIssues(issues.sort((a, b) => a.number - b.number));
+const ac = audits.length ? censusAudits(audits) : null;
 
 // Batch logs of this repo (local caches of the register; absent on a fresh host).
 let bc = null;
@@ -63,5 +71,5 @@ if (!has("--no-batches")) {
   bc = rows.length ? censusBatchRows(rows) : null;
 }
 
-if (has("--json")) console.log(JSON.stringify({ repo, since, issues: ic, batches: bc }, null, 2));
-else process.stdout.write(renderCensus({ repo, since, issues: ic, batches: bc }));
+if (has("--json")) console.log(JSON.stringify({ repo, since, issues: ic, batches: bc, audits: ac }, null, 2));
+else process.stdout.write(renderCensus({ repo, since, issues: ic, batches: bc, audits: ac }));

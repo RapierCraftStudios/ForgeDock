@@ -45,3 +45,34 @@ export function formatAudits(rows, { active = false } = {}) {
   if (active) return rows.map((g) => `${g.signature}  [${g.class ?? "-"}]  count=${g.count}  lanes: ${g.lanes.map((n) => `#${n}`).join(", ") || "-"}`).join("\n");
   return rows.map((a) => `#${a.issue ?? "?"}  ${a.signature}  [${a.class ?? "-"}]  ${ver(a) ?? "-"}${a.fixed_in_later ? "  fixed-in-later" : a.active ? "  active" : ""}`).join("\n");
 }
+
+/** Audit counts per engine version: {version: {class: count}}; audits without a version go under "unknown" (#6080). */
+export function groupByVersion(audits) {
+  const out = {};
+  for (const a of audits ?? []) {
+    const v = ver(a) ?? "unknown", c = a?.class ?? "unknown";
+    const g = (out[v] ??= {});
+    g[c] = (g[c] ?? 0) + 1;
+  }
+  return out;
+}
+
+const HAPPY_OUTCOMES = new Set(["merged", "invalid", "decomposed"]);
+
+/** Batch-report lines listing unhappy lanes (#N) per audit class; [] when no unhappy row has an audit (#6080). Pure. */
+export function formatAuditRollup(rows, audits) {
+  const unhappy = new Set((rows ?? []).filter((r) => Number.isInteger(r?.issue) && r.outcome != null && !HAPPY_OUTCOMES.has(r.outcome)).map((r) => r.issue));
+  if (!unhappy.size || !(audits ?? []).length) return [];
+  const by = new Map();
+  for (const a of audits) {
+    if (!unhappy.has(a?.issue)) continue;
+    const c = a.class ?? "unknown";
+    const set = by.get(c) ?? new Set();
+    set.add(a.issue);
+    by.set(c, set);
+  }
+  if (!by.size) return [];
+  const lines = ["unhappy lanes by audit class:"];
+  for (const [c, set] of [...by].sort((x, y) => y[1].size - x[1].size || x[0].localeCompare(y[0]))) lines.push(`  ${c}: ${[...set].sort((x, y) => x - y).map((n) => `#${n}`).join(", ")}`);
+  return lines;
+}

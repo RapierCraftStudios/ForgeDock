@@ -2561,6 +2561,20 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     report.push(...formatEfficiencyLines(await (deps.efficiency ?? batchEfficiency)({ batchDir: batch.dir, runsDir: dir, repo, gh: (a) => leanIo.gh(a), rows })));
   } catch (e) { report.push(`efficiency: n/a (${String(e?.message ?? e).split("\n")[0].slice(0, 160)})`); }
   try { report.push(...await (await import("./stats/churn.mjs")).readChurn({ gh: (a) => leanIo.gh(a), repo, issues: rows.map((r) => r.issue).filter(Number.isInteger) })); } catch { /* #5979: churn lines never fail a batch */ }
+  try { // #6080: unhappy lanes by LANE_AUDIT class (trusted comments only); best effort, never fails a batch
+    const q = await import("./lean/lane-audit-query.mjs");
+    const { parseAudit, LANE_AUDIT_MARKER } = await import("./lean/lane-audit.mjs");
+    const { isTrustedIssueComment } = await import("./lean/prefilter.mjs");
+    const unhappy = [...new Set(rows.filter((r) => Number.isInteger(r.issue) && r.outcome != null && !["merged", "invalid", "decomposed"].includes(r.outcome)).map((r) => r.issue))];
+    const audits = [];
+    for (const n of unhappy) {
+      const raw = await leanIo.gh(["api", "--paginate", `repos/${repo}/issues/${n}/comments?per_page=100`, "--jq", `.[] | select(.body | contains("<!-- ${LANE_AUDIT_MARKER}")) | {body, user, author_association} | tojson`]);
+      for (const l of String(raw).split("\n").filter(Boolean)) {
+        try { const c = JSON.parse(l); const au = isTrustedIssueComment(c) ? parseAudit(c.body) : null; if (au) audits.push({ ...au, issue: n }); } catch { /* skip a malformed comment */ }
+      }
+    }
+    report.push(...q.formatAuditRollup(rows, audits));
+  } catch { /* #6080: the audit roll-up never fails a batch */ }
   report.push(await budgetReportLine({ cwd, repo, gh: (a) => leanIo.gh(a) })); // #5278: month usage, projection and any auto switch to local-first
   const adequacyLine = formatTestAdequacySummary(rows); // #5449
   if (adequacyLine) report.push(adequacyLine);

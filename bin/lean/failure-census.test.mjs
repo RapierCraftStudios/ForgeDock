@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parkBucket, parkRows, normalizeRow, lastAmendments, amendmentWhyClass, baseSyncConflicts, censusIssues, censusBatchRows, renderCensus } from "./failure-census.mjs";
+import { parkBucket, parkRows, normalizeRow, lastAmendments, amendmentWhyClass, baseSyncConflicts, censusIssues, censusBatchRows, censusAudits, renderCensus } from "./failure-census.mjs";
 
 const nh = (rows, prose = "") => `<!-- FORGE:NEEDS_HUMAN -->\n## Needs human\n${prose}\n${rows.map((r) => `- ${r}`).join("\n")}`;
 
@@ -55,5 +55,21 @@ describe("failure census", () => {
     ]);
     assert.equal(b.outcomes.merged, 2); assert.equal(b.deferred["sandbox.capacity"], 1); assert.equal(b.needsHuman["ci.red"], 1);
     assert.equal(b.phases.implement.n, 2); assert.equal(b.phases.ci_wait.median_min, 10);
+  });
+});
+
+describe("LANE_AUDIT census (#6080)", () => {
+  const au = (issue, cls, v, extra = {}) => ({ issue, class: cls, active: true, fixed_in_later: false, stamp: v ? { engine_version: v } : {}, ...extra });
+  it("counts class x version, unversioned and fixed_in_later", () => {
+    const c = censusAudits([au(1, "env", "1.2.0"), au(2, "env", "1.2.0"), au(2, "env", "1.2.0"), au(3, "pool", null), au(4, "env", "1.1.0", { active: false, fixed_in_later: true })]);
+    assert.equal(c.total, 5); assert.equal(c.active, 4); assert.equal(c.fixedInLater, 1);
+    assert.equal(c.cells["env @ 1.2.0"], 3); assert.equal(c.cellIssues["env @ 1.2.0"], 2); assert.equal(c.cells["pool @ unknown"], 1);
+  });
+  it("renders the section only with audits", () => {
+    const base = { repo: "o/r", issues: null, batches: null };
+    assert.ok(!renderCensus({ ...base, audits: censusAudits([]) }).includes("LANE_AUDIT"));
+    assert.ok(!renderCensus(base).includes("LANE_AUDIT"));
+    const out = renderCensus({ ...base, audits: censusAudits([au(1, "env", "1.2.0")]) });
+    assert.match(out, /## LANE_AUDIT by engine version/); assert.match(out, /\| env \| 1\.2\.0 \| 1 \| 1 \|/);
   });
 });

@@ -42,3 +42,17 @@ test("auditsFromCli: json, active, skips malformed and untrusted", async () => {
   } finally { console.log = orig; }
   await assert.rejects(() => auditsFromCli(["--bogus"], { exec }), /usage/);
 });
+
+test("groupByVersion groups classes per version, unversioned under unknown", async () => {
+  const { groupByVersion } = await import("./lane-audit-query.mjs");
+  assert.deepEqual(groupByVersion([...A, { issue: 9, class: "env", stamp: {} }]), { "1.2.0": { pipeline: 3, env: 1 }, "1.1.0": { pipeline: 1 }, unknown: { env: 1 } });
+  assert.deepEqual(groupByVersion([]), {});
+});
+
+test("formatAuditRollup lists unhappy lanes per class; empty without unhappy rows or audits", async () => {
+  const { formatAuditRollup } = await import("./lane-audit-query.mjs");
+  const rows = [{ issue: 1, outcome: "needs-human" }, { issue: 3, outcome: "deferred" }, { issue: 2, outcome: "merged" }, { issue: 7, outcome: "engine-error" }];
+  assert.deepEqual(formatAuditRollup(rows, A), ["unhappy lanes by audit class:", "  env: #3", "  pipeline: #1"]);
+  assert.deepEqual(formatAuditRollup([{ issue: 2, outcome: "merged" }], A), []);
+  assert.deepEqual(formatAuditRollup(rows, []), []);
+});

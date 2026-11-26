@@ -11,6 +11,7 @@
  * - FORGE:BASE_SYNC bodies: conflicted files.
  * Batch log rows (`~/.forge/batches/<id>/log.jsonl`): outcome/code counts and per-phase timing.
  */
+import { groupByVersion } from "./lane-audit-query.mjs";
 
 /** Ordered: the first matching bucket wins. Patterns match the park body (rows and prose). */
 export const PARK_BUCKETS = Object.freeze([
@@ -136,8 +137,24 @@ export function censusBatchRows(rows) {
   return { outcomes, deferred, needsHuman, phases: phaseStats };
 }
 
+/** Census over parsed LANE_AUDIT audits (#6080): class x engine_version counts, issues per cell, active vs fixed_in_later. */
+export function censusAudits(audits) {
+  const out = { total: 0, active: 0, fixedInLater: 0, cells: {}, versions: groupByVersion(audits) };
+  const issues = {};
+  for (const a of audits ?? []) {
+    out.total++;
+    if (a?.fixed_in_later) out.fixedInLater++; else if (a?.active) out.active++;
+    const k = `${a?.class ?? "unknown"} @ ${a?.stamp?.engine_version ?? "unknown"}`;
+    (issues[k] ??= new Set());
+    if (a?.issue != null) issues[k].add(a.issue);
+    inc(out.cells, k);
+  }
+  out.cellIssues = Object.fromEntries(Object.entries(issues).map(([k, s]) => [k, s.size]));
+  return out;
+}
+
 /** Markdown report of both censuses. */
-export function renderCensus({ repo, since, issues, batches }) {
+export function renderCensus({ repo, since, issues, batches, audits }) {
   const L = [`# Failure census: ${repo}${since ? ` (since ${since})` : ""}`, ""];
   if (issues) {
     L.push(`Issues scanned: ${issues.issues}; with parks: ${issues.withParks}; parks (NEEDS_HUMAN/PARKED): ${issues.parks}; identical back-to-back repeats: ${issues.repeats}`, "", "## Parks by class", "", "| class | parks | issues |", "|---|---|---|");
@@ -165,6 +182,10 @@ export function renderCensus({ repo, since, issues, batches }) {
     for (const [k, n] of top(batches.needsHuman, 12)) L.push(`| ${k} | ${n} |`);
     L.push("", "| phase (merged lanes) | n | median min | p90 min |", "|---|---|---|---|");
     for (const [k, v] of Object.entries(batches.phases).sort((a, b) => b[1].median_min - a[1].median_min)) L.push(`| ${k} | ${v.n} | ${v.median_min} | ${v.p90_min} |`);
+  }
+  if (audits?.total) {
+    L.push("", "## LANE_AUDIT by engine version", "", `Audits: ${audits.total}; active: ${audits.active}; fixed in a later engine: ${audits.fixedInLater}`, "", "| class | engine version | audits | issues |", "|---|---|---|---|");
+    for (const [k, n] of top(audits.cells, 40)) { const [c, v] = k.split(" @ "); L.push(`| ${c} | ${v} | ${n} | ${audits.cellIssues[k] ?? 0} |`); }
   }
   return L.join("\n") + "\n";
 }
