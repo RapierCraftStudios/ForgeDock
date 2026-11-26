@@ -148,13 +148,13 @@ export function renderCensus({ repo, since, issues, batches }) {
       for (const d of days) { const row = issues.byDay[d]; const rest = Object.entries(row).filter(([k]) => !cls.includes(k)).reduce((s, [, v]) => s + v, 0); L.push(`| ${d} | ${cls.map((c) => row[c] ?? 0).join(" | ")} | ${rest} |`); }
     }
     L.push("", "## Most frequent failure rows (normalised)", "", "| count | row |", "|---|---|");
-    for (const [r, n] of top(issues.rows, 20)) L.push(`| ${n} | ${r.replace(/\|/g, "\\|")} |`);
+    for (const [r, n] of top(issues.rows, 20)) L.push(`| ${n} | ${r.replace(/\\/g, "\\\\").replace(/\|/g, "\\|")} |`);
     L.push("", "## Amendments (last state per issue): kind :: why class", "", "| amendment | count | issues |", "|---|---|---|");
     for (const [k, n] of top(issues.amendments, 20)) L.push(`| ${k} | ${n} | ${issues.amendmentIssues[k] ?? 0} |`);
     L.push("", `## Base-sync conflict hotspots (${issues.baseSyncs} base syncs)`, "", "| file | conflicts |", "|---|---|");
     for (const [f, n] of top(issues.conflicts, 15)) L.push(`| \`${f}\` | ${n} |`);
     L.push("", "## Most-parked issues", "", "| issue | parks | title |", "|---|---|---|");
-    for (const i of issues.mostParked) L.push(`| #${i.number} | ${i.parks} | ${i.title.replace(/\|/g, "\\|")} |`);
+    for (const i of issues.mostParked) L.push(`| #${i.number} | ${i.parks} | ${i.title.replace(/\\/g, "\\\\").replace(/\|/g, "\\|")} |`);
   }
   if (batches) {
     L.push("", "## Batch logs", "", "| outcome | rows |", "|---|---|");
