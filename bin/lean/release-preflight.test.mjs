@@ -144,6 +144,12 @@ describe("staging-health gate (#6013)", () => {
     assert.match(r.refused, /suite \(runner\)/);
     assert.equal(r.failed.length, 2);
   });
+  it("R3: names failed checks that lane merges do not require as a parity gap", async () => {
+    const io = { ...fakeIo(), gh: async (a) => (a[1].includes("/check-runs") ? JSON.stringify(red) : a[1].includes("required_status_checks") ? JSON.stringify(["suite"]) : `${HEAD}\n`) };
+    const r = await stagingHealthStep(ctxOf(io));
+    assert.deepEqual(r.parityGap, ["black"]);
+    assert.match(r.refused, /parity gap.*black/);
+  });
   it("proceeds on green; refuses pending; override proceeds with a warning", async () => {
     assert.equal((await stagingHealthStep(ctxOf(checks([{ name: "a", status: "completed", conclusion: "success" }])))).ok, true);
     const pend = await stagingHealthStep(ctxOf(checks([{ name: "slow", status: "in_progress", conclusion: null }])));
