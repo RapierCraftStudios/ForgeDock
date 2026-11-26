@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { join } from "node:path";
 import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
 import { createCiEvents, MAX_WAIT_S } from "./ci-events.mjs";
+import { createAutoscaler } from "./ci-autoscale.mjs";
 import { jsonStore } from "./store.mjs";
 import { versionOf } from "./version.mjs";
 
@@ -229,6 +230,9 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   const agentCall = (a, method, path, body, timeoutMs) => a.transport === "poll"
     ? pollCall(a, method, path, body, timeoutMs)
     : call(a.url, method, path, { body, token: a.token, timeoutMs, fetchFn });
+  // #5695: CI runner autoscaler (off unless cfg.ci_autoscale.enabled); webhook demand in, reconcile on the tick.
+  let autoscaler = null;
+  const autoscale = () => (autoscaler ??= createAutoscaler({ cfg, now, log, capacities: () => capacities(), agentCall, githubToken, fetchFn, agents }));
 
   /** #5891: host drive figures per agent, plus a warning when the projected time until the drive is full is under disk_warn_hours (2). */
   const diskWarned = new Map();
@@ -445,6 +449,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       } catch (e) { log.warn?.(`lease ${id} on ${s.agent}: ${e.message}`); }
     }
     store.save();
+    if (cfg.ci_autoscale?.enabled) await autoscale().reconcile().catch((e) => log.warn?.(`ci-autoscale reconcile: ${e.message}`));
   }
 
   function enroll(body) {
@@ -672,6 +677,7 @@ bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TM
       const c = ciQuery(url);
       return c.q ? { status: 200, body: await ciEvents.wait(c.q, c.since, c.waitS) } : c;
     })],
+    [route("POST", "/ci/workflow-job"), { fn: async (_p, body) => ({ status: 202, body: autoscale().ingest(body) }), auth: "ci" }], // #5695
     [route("POST", "/enroll"), { fn: async (_p, body) => enroll(body), auth: "none" }],
     [route("GET", "/install"), { fn: async () => ({ status: 200, body: installScript() }), auth: "none" }], // #5883: script text only, the code comes as --code
     [route("GET", "/bootstrap/install.ps1"), { fn: async (_p, _b, url) => ({ status: 200, body: bootstrapScript(url.searchParams.get("token"), url) }), auth: "enroll" }],
@@ -711,7 +717,7 @@ bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TM
     }
   }
 
-  return { handle, launch, claim, tick, enroll, issueCode, capacities, status, store };
+  return { handle, launch, claim, tick, autoscale, enroll, issueCode, capacities, status, store };
 }
 
 /** tokenbaton's usage dir (#5165): router.json `usage_source`, else `$TOKENBATON_HOME`, else `~/.tokenbaton`. */
