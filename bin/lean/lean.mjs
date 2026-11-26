@@ -35,6 +35,7 @@ import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
+import { loadImageManifest, manifestProvides } from "../pool/image-manifest.mjs";
 import { hasRecipe, installLaneTools, genericInstallCommands, RECIPES } from "../pool/lane-tools.mjs";
 import { testRunnerProblems, hostOnlyProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, manifestDepOwner, collectOnlyCommand, collectImportMiss, contractCommands } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
@@ -2245,7 +2246,7 @@ export async function runCore(o) {
       const local = projectBinDirs(wt, files);
       if (local.length) env.PATH = withLocalBins(env.PATH ?? process.env.PATH ?? "", local);
       if (io.probeCommand) {
-        const { probes, dropped } = preflightProbes(contract, { repoHas: repoTracks(files) });
+        const { probes, dropped } = preflightProbes(contract, { repoHas: repoTracks(files), provided: (t) => manifestProvides(imageManifest, t) });
         if (dropped) T.anomalies.push(`Validate preflight probed ${probes.length} tool(s); ${dropped} more not probed`);
         for (const p of probes) {
           if (p.needs && missing.has(p.needs)) continue;
@@ -2769,7 +2770,7 @@ export async function runCore(o) {
         if (hn.caps.length) return await needsHuman(`Remote sandbox lacks host capability ${hn.caps.join(", ")}, which the frozen contract's validate command(s) ${hn.ids.join(", ")} need.\n\nThe dispatching host has it; the lane is recovered locally with the frozen contract.`, OUTCOME_CODES.ENV_CAPABILITY_REMOTE);
         // #5331: a tool the sandbox itself lacks (probed where the lane runs) ends the lane before the builder implements; the tool-missing recovery places it on the host (orchestrate placeOf)
         const remoteDeps = await depOwnerOf(); // #5683: a tool that is a tracked manifest dependency is prepared in the sandbox, never a lane_tools recipe or a host tool
-        const ownedDep = (t) => t === "forgedock" || remoteDeps.owner(t) !== null, notOwned = (m) => ({ ...m, tools: m.tools.filter((t) => !ownedDep(t)) });
+        const imageManifest = loadImageManifest(), ownedDep = (t) => t === "forgedock" || remoteDeps.owner(t) !== null, notOwned = (m) => ({ ...m, tools: m.tools.filter((t) => !ownedDep(t)) });
         let rawMisses = planMisses ?? await preflightValidates(frozen).catch(() => []);
         let tm0 = toolMisses(rawMisses), tm = notOwned(tm0);
         if (tm0.tools.length && !tm.tools.length) { try { if (io.deps?.prepare) await io.deps.prepare({ wt, repoKey: depcacheNamespace({ repo, fallback: repoKey(cwd) }), env: toolchain?.env ?? undefined }); ev({ event: "REMOTE_PROJECT_DEPS", tools: tm0.tools }); } catch { /* the install gate reports failures */ } }
@@ -2782,7 +2783,10 @@ export async function runCore(o) {
           } catch { /* keep the original miss */ }
         }
         if (tm.tools.length) { // #5652: a recipe-backed tool is installed in this sandbox and re-probed before any host re-placement
-          const withRecipe = tm.tools.filter(hasRecipe), noRecipe = tm.tools.filter((t) => !hasRecipe(t));
+          const inImage = tm.tools.filter((t) => manifestProvides(imageManifest, t)); // #6037: the image ships it; a miss is an image defect, never a recipe or generic install
+          if (inImage.length) ev({ event: "REMOTE_TOOL_IMAGE_DEFECT", tools: inImage });
+          const installable = tm.tools.filter((t) => !inImage.includes(t));
+          const withRecipe = installable.filter(hasRecipe), noRecipe = installable.filter((t) => !hasRecipe(t));
           if (withRecipe.length && io.runCommand) {
             const ins = await installLaneTools(withRecipe, { run: (a) => io.runCommand({ command: a.command, cwd: wt, timeoutMs: a.timeoutMs, env: laneEnv() }), root: process.getuid?.() === 0 });
             ev({ event: "REMOTE_TOOLS_INSTALLED", tools: withRecipe, ok: ins.ok });

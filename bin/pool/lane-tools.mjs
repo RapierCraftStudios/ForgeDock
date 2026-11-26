@@ -4,6 +4,9 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loadImageManifest, manifestProvides } from "./image-manifest.mjs";
+
+const IMAGE = loadImageManifest();
 
 /**
  * Per-repo lane images (#5650): forge.yaml `execution.lane_tools` lists the tools a repo's lanes need (`name` or
@@ -12,6 +15,7 @@ import { join } from "node:path";
  * Dockerfile instructions (Debian/Ubuntu base, building as root) that install it.
  */
 const apt = (...pkgs) => `RUN apt-get update && apt-get install -y --no-install-recommends ${pkgs.join(" ")} && rm -rf /var/lib/apt/lists/*`;
+/** @deprecated Fallback only (#6017, #6037): pool/image/manifest.json is the source of truth for tools the image ships. */
 export const RECIPES = {
   "postgresql-client": { versioned: true, steps: (v) => [apt(v ? `postgresql-client-${v}` : "postgresql-client")] },
   python: { versioned: true, steps: (v) => [apt(v ? `python${v} python${v}-venv` : "python3 python3-venv")] },
@@ -56,14 +60,18 @@ export function recipeFor(tool) {
 }
 
 /** True when `name` has a lane_tools recipe, directly or as a binary one provides (#5652, #5764). */
+/** @deprecated Fallback only; see pool/image/manifest.json (#6017). */
 export function hasRecipe(name) { return recipeFor(name) !== null; }
 
 /**
  * In-sandbox install commands (#5652) for one tool: the recipe's Dockerfile `RUN` steps as shell commands, `sudo` prefixed
- * when the sandbox user is not root. Empty for a tool with no recipe. Pure; the image build keeps using `steps`.
+ * when the sandbox user is not root. Empty for a tool with no recipe or one the image manifest provides (#6037).
+ * @deprecated Fallback only; pool/image/manifest.json replaces it (#6017).
+ * Pure; the image build keeps using `steps`.
  */
 export function installCommands(entry, { root = true } = {}) {
   const { name, version } = parseLaneTool(entry);
+  if (manifestProvides(IMAGE, name)) return [];
   const recipe = recipeFor(name);
   if (!recipe) return [];
   const sh = (s) => s.replace(/^RUN\s+/, "");
@@ -75,7 +83,8 @@ export function installCommands(entry, { root = true } = {}) {
  * Generic install for a tool no recipe covers (2026-11-26 unclog): a missing Python module is pip-installed, a missing
  * Node package npm-installed into the worktree, a missing command apt-installed. Replaces adding one recipe per tool
  * (77 of 215 needs-human parks on open issues were "Remote sandbox lacks X"). `miss`: {kind, tool} from the validate
- * preflight. Returns [] for an unsafe name or a kind nothing can install (environment, forgedock-path).
+ * preflight. Returns [] for an image-manifest tool, an unsafe name or a kind nothing can install (environment, forgedock-path).
+ * @deprecated Fallback only; pool/image/manifest.json replaces it (#6017, #6037).
  */
 const PYPI = { yaml: "PyYAML", PIL: "Pillow", cv2: "opencv-python-headless", bs4: "beautifulsoup4", sklearn: "scikit-learn", dateutil: "python-dateutil", jwt: "PyJWT", dotenv: "python-dotenv", google: "protobuf", attr: "attrs", magic: "python-magic", Crypto: "pycryptodome", OpenSSL: "pyOpenSSL", serial: "pyserial", usb: "pyusb", zmq: "pyzmq", git: "GitPython", jose: "python-jose", multipart: "python-multipart" };
 const SAFE = /^@?[A-Za-z0-9][A-Za-z0-9._/+-]*$/;
@@ -83,7 +92,7 @@ const SAFE = /^@?[A-Za-z0-9][A-Za-z0-9._/+-]*$/;
 const APT_PY = { PIL: "pil", cv2: "opencv", bs4: "bs4", sklearn: "sklearn", dateutil: "dateutil", jwt: "jwt", dotenv: "dotenv", serial: "serial", git: "git", magic: "magic" };
 export function genericInstallCommands(miss, { root = true } = {}) {
   const tool = String(miss?.tool ?? "").trim();
-  if (!tool || !SAFE.test(tool) || tool.includes("..")) return [];
+  if (!tool || !SAFE.test(tool) || tool.includes("..") || (miss.kind === "command" && manifestProvides(IMAGE, tool))) return [];
   const su = (c) => (root ? c : `sudo sh -c ${JSON.stringify(c)}`);
   if (miss.kind === "python-module") {
     const mod = tool.split(".")[0], pkg = PYPI[mod] ?? mod;
@@ -97,6 +106,7 @@ export function genericInstallCommands(miss, { root = true } = {}) {
 }
 
 /**
+ * @deprecated Fallback only; see pool/image/manifest.json (#6017).
  * Installs `tools` in the running sandbox through the injected `run({command, timeoutMs})` -> {rc, stdout, stderr}.
  * Never throws: {ok:true} or {ok:false, tool, stderrTail}.
  */
