@@ -30,10 +30,11 @@ export function parseSelected(text) {
  * Diff the selector result against batch membership.
  * @returns {{join:number[], leave:number[]}} join: open matches not in the batch; leave: pending members (not running, no result row) no longer open/matching
  */
-export function diffSelection({ open, members, pending, running, results }) {
+export function diffSelection({ open, members, pending, running, results, matched = null }) {
   const have = new Set(members), now = new Set(open.map((o) => o.number));
   const join = [...now].filter((n) => !have.has(n)).sort((a, b) => a - b);
-  const leave = pending.filter((n) => !now.has(n) && !running.has(n) && !results.has(n));
+  // #6022: only an issue the selector matched can leave it; env.* issues, children, --add and argv members never did
+  const leave = pending.filter((n) => (!matched || matched.has(n)) && !now.has(n) && !running.has(n) && !results.has(n));
   return { join, leave };
 }
 
