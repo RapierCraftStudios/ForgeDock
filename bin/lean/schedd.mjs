@@ -79,7 +79,7 @@ export function batchVerdicts(root, { now = Date.now(), windowMin = DEFAULT_STAL
       const b = openBatch(root, id);
       if (!b.readPlan()?.daemon || b.isTerminal()) continue;
       const state = b.store.peek(), stall = evaluateDispatchStall(state, { held: b.readHeld(), parallel: b.readParallel(), hosted: false, paused: b.readPause?.() ?? null, lastProgressMs: b.lastProgressMs(), now, windowMin, lanesAliveMs: lanesAlive(b, state) });
-      const decision = stall ? decideStallAction(stall, { recovery: readHealth(b.dir)?.stallRecovery ?? null, hosted: false }) : null;
+      const decision = stall ? decideStallAction(stall, { recovery: readHealth(b.dir)?.stallRecovery ?? null, hosted: false, now, windowMin }) : null;
       out.push(batchVerdict(id, stall, decision));
     } catch { /* one unreadable batch has no verdict */ }
   }
@@ -676,7 +676,8 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
         // ready set is recovered once (health.json stallRecovery survives a daemon restart), a repeat alerts with the probed cause.
         let probe = null;
         try { probe = plan.env ? probeEnv(mergeEnv(process.env, plan.env)) : null; } catch { probe = null; }
-        const decision = decideStallAction(stall, { recovery: readHealth(b.dir)?.stallRecovery ?? null, probe, hosted: isHosted });
+        const decision = decideStallAction(stall, { recovery: readHealth(b.dir)?.stallRecovery ?? null, probe, hosted: isHosted, now, windowMin: stallMin });
+        if (decision.action === "wait") continue; // #6082: a capacity wait or a recovery still inside its backoff
         if (decision.action === "alert") {
           if (recordStallAlert(b, stall, { cause: decision.cause })) log(`schedd: batch ${id} needs you: ${stall.detail}${decision.cause ? `; probed: ${decision.cause}` : ""}`);
           continue;
