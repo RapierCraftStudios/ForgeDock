@@ -129,6 +129,13 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const stateDir = cfg.state_dir;
   const store = jsonStore(join(stateDir, "state.json"), { sandboxes: {} });
   const sb = () => store.data.sandboxes;
+  const usageView = (r) => {
+    const u = r.usage; const f = (x) => Math.round(x * 100) / 100;
+    return u?.samples ? { reserved: { cpus: r.cpus, mem_gb: r.mem_gb }, cpu_avg: f(u.cpu_sum / u.samples), cpu_peak: f(u.cpu_peak), mem_avg_gb: f(u.mem_sum / u.samples), mem_peak_gb: f(u.mem_peak), samples: u.samples } : null;
+  };
+  let pendingResize = null;
+  const view = (r) => ({ id: r.id, state: r.state, issue: r.issue, cpus: r.cpus, mem_gb: r.mem_gb, started_at: new Date(r.startedAt).toISOString(), ...(r.error ? { error: r.error } : {}), ...(r.diskPaused ? { status_detail: "paused (disk)" } : {}), ...(r.memPaused ? { status_detail: "paused (host memory)" } : {}), ...(r.diskPressure ? { code: "sandbox.disk_pressure", status_detail: "stopped (disk pressure): worktree kept for resume" } : {}) });
+  let warm; // assigned below once launch/destroy exist
   const activeRecs = () => Object.values(sb()).filter((s) => s.state !== "exited");
   // Sandbox ids come from requests: read own keys only, so "__proto__" or "constructor" never resolves to an inherited member (#4566).
   const own = (id) => (typeof id === "string" && Object.hasOwn(sb(), id) ? sb()[id] : warm.byAlias(id)); // #4912: a claimed warm sandbox also answers to its lane id
@@ -578,9 +585,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     return { status: 201, body: view(rec) };
   }
 
-  const view = (r) => ({ id: r.id, state: r.state, issue: r.issue, cpus: r.cpus, mem_gb: r.mem_gb, started_at: new Date(r.startedAt).toISOString(), ...(r.error ? { error: r.error } : {}), ...(r.diskPaused ? { status_detail: "paused (disk)" } : {}), ...(r.memPaused ? { status_detail: "paused (host memory)" } : {}), ...(r.diskPressure ? { code: "sandbox.disk_pressure", status_detail: "stopped (disk pressure): worktree kept for resume" } : {}) });
 
-  const warm = makeWarm({ store, sb, own, now, launch, destroy: (id, why) => destroy(id, why), view, log });
+  warm = makeWarm({ store, sb, own, now, launch, destroy: (id, why) => destroy(id, why), view, log });
 
   async function refresh(r) {
     if (r.state === "exited") return r;
@@ -943,11 +949,6 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     }
     store.save();
   }
-  const usageView = (r) => {
-    const u = r.usage; const f = (x) => Math.round(x * 100) / 100;
-    return u?.samples ? { reserved: { cpus: r.cpus, mem_gb: r.mem_gb }, cpu_avg: f(u.cpu_sum / u.samples), cpu_peak: f(u.cpu_peak), mem_avg_gb: f(u.mem_sum / u.samples), mem_peak_gb: f(u.mem_peak), samples: u.samples } : null;
-  };
-  let pendingResize = null;
   async function resize(body) {
     const int = (v, lo, hi) => (Number.isInteger(v) && v >= lo && v <= hi ? v : null);
     const cpus = int(body.cpus, 1, 256), mem = int(body.mem_gb, 1, 1024), vmCpus = int(body.vm_cpus ?? body.cpus, 1, 256), vmMem = int(body.vm_mem_gb ?? (body.mem_gb + 2), 2, 1024);
