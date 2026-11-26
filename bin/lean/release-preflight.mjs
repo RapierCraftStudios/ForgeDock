@@ -7,6 +7,7 @@
  * retries. With no command set every function here is a no-op. No model call. Effects go through `ctx.io`.
  */
 import { fileBlocker, tail } from "./release-rehearsal.mjs";
+import { classifyFailure } from "./release-flakes.mjs";
 import { fenced } from "./release-fence.mjs";
 
 export const PREFLIGHT_TIMEOUT_MS = 20 * 60_000;
@@ -60,6 +61,33 @@ export async function hostPreflightStep(ctx) {
   const head = String(await ctx.io.gh(["api", `repos/${ctx.repo}/commits/${ctx.staging}`, "--jq", ".sha"])).trim();
   const r = await runHostPreflight(ctx, { head });
   return !r.ok && r.blocking ? stopOf(r) : r;
+}
+
+const BAD = new Set(["failure", "timed_out", "cancelled", "action_required", "startup_failure"]);
+
+/**
+ * Staging-health gate (#6013): before a snapshot is cut, every check-run of the staging head must be finished and green. Names ALL
+ * failed checks of the run (class: regression|runner via classifyFailure; a flake is a failure a rerun cleared, recorded by the
+ * round ledger) and pending ones (staging is behind). `config.allowRedStaging` proceeds with a recorded warning. No model call.
+ * Failed checks that the staging branch protection does not require are reported as `parityGap` (lane-check parity).
+ * @returns {{ok: true, head, warning?: string, failed?: object[]}|{refused: string, head, failed: object[], pending: string[]}}
+ */
+export async function stagingHealthStep(ctx) {
+  const { io, repo, staging, config } = ctx;
+  const head = String(await io.gh(["api", `repos/${repo}/commits/${staging}`, "--jq", ".sha"])).trim();
+  const runs = await io.gh(["api", `repos/${repo}/commits/${head}/check-runs?per_page=100`, "--jq", "[.check_runs[]|{name,status,conclusion,text:((.output.title//\"\")+\" \"+(.output.summary//\"\"))}]"]).then((t) => { try { const v = json(t); return Array.isArray(v) ? v.filter((c) => c && typeof c.status === "string") : []; } catch { return []; } }, () => []);
+  const failed = (runs ?? []).filter((c) => c.status === "completed" && BAD.has(c.conclusion))
+    .map((c) => ({ name: c.name, conclusion: c.conclusion, cause: classifyFailure(c.text).class === "infra" ? "runner" : "regression" }))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const pending = (runs ?? []).filter((c) => c.status !== "completed").map((c) => c.name).sort();
+  if (!failed.length && !pending.length) return { ok: true, head };
+  // Lane-check parity (R3): a check red on staging that lane merges do not require is a gap the lane gate let through.
+  const req = await io.gh(["api", `repos/${repo}/branches/${staging}/protection/required_status_checks`, "--jq", "[.contexts[]?, .checks[]?.context]"]).then((t) => { try { const v = json(t); return Array.isArray(v) ? v : null; } catch { return null; } }, () => null);
+  const parityGap = req ? failed.map((f) => f.name).filter((n) => !req.includes(n)) : [];
+  const what = [failed.length ? `failed: ${failed.map((f) => `${f.name} (${f.cause})`).join(", ")}` : "", pending.length ? `pending: ${pending.join(", ")}` : ""].filter(Boolean).join("; ");
+  const gap = parityGap.length ? ` lane-check parity gap (not required for lane merges): ${parityGap.join(", ")}` : "";
+  if (config?.allowRedStaging) return { ok: true, head, failed, parityGap, warning: `staging ${staging}@${head} is not green (${what}); release.allow_red_staging is set` };
+  return { refused: `staging ${staging}@${head} is not green (${what}); fix every failure against ${staging} in one batch, then resume.${gap}`, head, failed, pending, parityGap };
 }
 
 /** Step after `fixes`: preflight on the final head, then mark the draft release PR ready so Actions CI runs once on it. */

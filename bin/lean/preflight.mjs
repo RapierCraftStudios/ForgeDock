@@ -365,7 +365,32 @@ function trackedDirs(files) {
   return out;
 }
 
-const PYTEST_CMD_RE = /^(\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:(?:poetry|uv)\s+(?:-\S+\s+)*run(?:\s+--?[\w-]+(?:[ =][^\s-]\S*)?)*\s+)?(?:\S*\/)?(?:\.venv\/bin\/)?(?:(?:python3?(?:\.\d+)?\s+-m\s+)?pytest))(?=\s|$)/;
+/** The prefix of one command segment up to its pytest invocation (bare, path/.venv, `python[3[.x]] -m pytest`, after
+ * `poetry|uv [flags] run [flags]` and env assignments), or null. A linear token scan: no backtracking (CodeQL js/redos). */
+function pytestPrefix(segment) {
+  const toks = [...String(segment).matchAll(/\S+/g)].map((m) => ({ t: m[0], end: m.index + m[0].length }));
+  let i = 0;
+  while (i < toks.length && /^[A-Za-z_]\w*=/.test(toks[i].t)) i++;
+  const base = (t) => t.split("/").pop();
+  const isPy = (t) => /^python3?(?:\.\d+)?$/.test(base(t));
+  const isPytest = (t) => base(t) === "pytest";
+  if (i < toks.length && (toks[i].t === "poetry" || toks[i].t === "uv")) {
+    i++;
+    while (i < toks.length && toks[i].t.startsWith("-")) i++;
+    if (toks[i]?.t !== "run") return null;
+    i++;
+    while (i < toks.length && toks[i].t.startsWith("-")) {
+      const flag = toks[i].t; i++;
+      const next = toks[i]?.t;
+      if (!flag.includes("=") && next && !next.startsWith("-") && !isPy(next) && !isPytest(next) && toks[i + 1]) i++;
+    }
+  }
+  const t = toks[i]?.t;
+  if (!t) return null;
+  if (isPytest(t)) return segment.slice(0, toks[i].end);
+  if (isPy(t) && toks[i + 1]?.t === "-m" && toks[i + 2]?.t === "pytest") return segment.slice(0, toks[i + 2].end);
+  return null;
+}
 /**
  * #5753: the contract command with `--collect-only -q` after its first pytest invocation (bare, `.venv/bin/python -m`,
  * `poetry run`, `uv run`): one cheap run imports the test modules, so an import error shows at freeze, not in the builder.
@@ -374,10 +399,10 @@ const PYTEST_CMD_RE = /^(\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:(?:poetry|uv)\s+(?:-\S+\s
 export function collectOnlyCommand(command) {
   const parts = String(command ?? "").split(/(&&|\|\||;|\||\n)/);
   for (let i = 0; i < parts.length; i += 2) {
-    const m = PYTEST_CMD_RE.exec(parts[i]);
-    if (!m) continue;
+    const pre = pytestPrefix(parts[i]);
+    if (pre === null) continue;
     if (/(?:^|\s)--collect-only\b/.test(parts[i])) return null;
-    parts[i] = `${m[1]} --collect-only -q${parts[i].slice(m[1].length)}`;
+    parts[i] = `${pre} --collect-only -q${parts[i].slice(pre.length)}`;
     return parts.slice(0, i + 1).join(""); // later segments (`| tail`, `&& echo`) would hide the collect exit
   }
   return null;

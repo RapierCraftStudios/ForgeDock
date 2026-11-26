@@ -488,6 +488,22 @@ orchestration:
 
 ---
 
+## `orchestrate.lane_audit` (OPTIONAL)
+
+Engine-gap filing of the lane audit (#6078). When a lane ends needs-human or engine-error on an active pipeline/env/pool signature, the audit can file an issue in the engine repo.
+
+```yaml
+orchestrate:
+  lane_audit:
+    file_gaps: false              # default false; only the string true enables
+    repo: RapierCraftStudios/ForgeDock   # optional: engine repo to file in
+    label: engine-gap             # optional
+```
+
+One issue per signature: it is found by the `<!-- forge-gap: SIGNATURE -->` marker among open issues with the label; a further lane with the same signature updates its occurrence count and affected-lane list (`#N`, a lane is counted once). Nothing is filed for `fixed_in_later` signatures or genuine/spec classes. Redaction: the body holds only the signature, class, owner, action, engine version, count and lane issue numbers; any text in it has the lane's repo name, `owner/name` patterns and absolute paths replaced by `<repo>`/`<path>`. Filing failures are ignored and never change how the lane ends.
+
+---
+
 ## `orchestrate.health` and `notify` (OPTIONAL)
 
 Early batch health (#5167). `forgedock orchestrate` checks each batch at T+15 and T+60 minutes after it was created (`plan.json` `created`), and once more when the batch ends. When the batch starts, it prints the schedule: `health checks: T+15 14:05Z, T+60 14:50Z, and at batch end; forgedock status --batch <id>`. The first unhealthy check raises one `BATCH UNHEALTHY <id>` alert, which lists the top causes and the exact recovery commands (`--requeue`, a relaunch, `--resume`, `--cancel`). `health.json` in the batch dir records the checkpoints already done and the alert, so a daemon restart arms only the remaining checks and a batch never alerts twice. Checks and alerts never fail, delay or change the batch.
@@ -851,6 +867,7 @@ The forge.yaml reader handles two levels, so the rehearsal block is written as t
 | `publish_workflow` | string | No | Workflow file post-merge looks for (and dispatches when no run appears) for the merge commit. Default: `publish.yml`. |
 
 | `preflight_command` | string | No | Shell command run on the host (not as Actions minutes) in the repo checkout on the staging head **before** the release PR is opened (#5277), again after each fix round, and once more on the final head before the PR is marked ready. Put the repo's own suites here, e.g. `preflight_command: npm test`. Setting it also opens the release PR as a **draft** and marks it ready only after review and a passing preflight, so Actions CI runs once on the final head. Unset: no preflight, the PR is opened ready as before. |
+| `allow_red_staging` | bool | No | Staging-health gate (#6013): before a release is cut, every check-run of the staging head must be finished and green; otherwise the preflight step refuses and names **all** failed checks (classified regression or runner) and pending ones, so the fixes go out together and the next snapshot is cut once. `allow_red_staging: true` proceeds with a recorded warning. Default `false`. The ledger records each round (`rounds`: pr, head, outcome, cause, times) and `forgedock stats --release-ledger` trends snapshot rounds per release. |
 | `preflight_timeout` | integer | No | Seconds before the command is killed (counts as a failure). Default: `1200`. |
 | `preflight_blocking` | boolean | No | `true` (default): a failure files one `release-blocker` issue per head (a re-run comments on it) and stops the job before the PR is opened or marked ready; fix it and `--resume <id>`. `false`: the failure is recorded and the release goes on. |
 | `rehearsal_command` | string | No | Shell command run on the host (not as Actions minutes) in the repo checkout, on the release-PR head after review and before promotion (#5253). Wire the project's deploy dry-run here: bundle build, env load and the trusted-runtime closure check, e.g. `rehearsal_command: ./scripts/deploy-dry-run.sh` where the script builds the release bundle, loads the production env file in check mode and verifies the trusted-runtime closure, exiting non-zero on the first failure. Unset: no rehearsal, release behavior is unchanged. |

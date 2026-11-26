@@ -108,6 +108,7 @@ export const LEDGER_METRICS = Object.freeze([
   { key: "queue_s_p90", label: "Queue time (p90)", unit: "s", phase1: 30, end: 30 },
   { key: "failed_minute_share", label: "CI minutes in failed jobs", unit: "pct" },
   { key: "cancelled_minute_share", label: "CI minutes in cancelled jobs", unit: "pct" },
+  { key: "snapshot_rounds_per_release_p50", label: "Snapshot rounds per release (p50)", unit: "n", phase1: 3, end: 2 },
   { key: "ci_round_fail_rate", label: "CI rounds that fail", unit: "pct" },
   { key: "deploy_live_rate", label: "Deploy attempts that reached live", unit: "pct", higherBetter: true },
 ]);
@@ -209,6 +210,12 @@ export function computeReleaseLedger(data, cfg = {}) {
   m.ci_round_job_min_p50 = round1(p50(judged.map((r) => r.jobMin)));
   m.ci_round_fail_rate = judged.length ? round1(judged.filter((r) => r.outcome === "fail").length / judged.length, 3) : null;
   n.rounds = judged.length;
+  // ledger rounds (#6013): snapshots per release, wall time and cause of each round
+  const led = (data.ledger ?? []).filter((l) => l.snapshots > 0);
+  m.snapshot_rounds_per_release_p50 = round1(p50(led.map((l) => l.snapshots)));
+  m.snapshot_rounds_per_release_max = led.length ? Math.max(...led.map((l) => l.snapshots)) : null;
+  m.snapshot_wall_min_total = round1(led.reduce((a, l) => a + (l.wallMin || 0), 0));
+  for (const c of ["regression", "flake", "runner"]) m[`snapshot_rounds_${c}`] = led.reduce((a, l) => a + (l.causes?.[c] || 0), 0);
   m.pushes_per_release_pr_p50 = round1(p50(pushes.map((x) => x.pushes))); m.pushes_per_release_pr_max = pushes.length ? Math.max(...pushes.map((x) => x.pushes)) : null;
   n.release_prs = plan.releases.length; n.release_prs_with_ci = pushes.length;
 
