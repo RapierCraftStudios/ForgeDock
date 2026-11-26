@@ -101,6 +101,9 @@ export function detectRecurrence({ rows = [], mergedPrFiles = {}, body = "", nam
   return { recurs, count, threshold: t, evidence, reason };
 }
 
+/** #6016: a staging->default release PR head (`release/...`). */
+export const isReleaseHead = (ref) => /^release\//.test(String(ref ?? ""));
+
 /**
  * The engine-side gather: subjectHistory rows plus one file-list read per merged row (capped). `io`: {gh, git}. Never
  * throws: a failed source contributes nothing and lands in `errors`.
@@ -132,9 +135,6 @@ export async function recurrenceFacts({ io, repo, issue, title = "", body = "", 
   }
   return { ...detectRecurrence({ rows, mergedPrFiles, body, namedPaths, threshold }), errors };
 }
-
-/** #6016: a staging->default release PR head (`release/...`). */
-export const isReleaseHead = (ref) => /^release\//.test(String(ref ?? ""));
 
 /** The design lane's plan instruction (#5751): why the earlier fixes failed, delete or replace, a measurable outcome. */
 export function designLaneNote(detection) {
