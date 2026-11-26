@@ -3795,3 +3795,9 @@ erroring agent (or a wait past `max_wait_s`) fails open. Without it the local `h
 installs, validate commands and prechecks, so those lane steps take a token with no lane-level wiring. `quotaCores` (`admission.mjs`) reads
 cgroup v2 `cpu.max` / v1 `cfs_quota_us`/`cfs_period_us` (fallback `CS_CPU_QUOTA` from the pool) and returns min(VM cores, quota);
 `verifyParallelism` and the heavy shim use it for `FORGE_HOST_PARALLELISM`.
+
+## Entry 2026-11-26 — scorecard section in the release PR (#6084)
+`snapshotPrStep` and `releasePrStep` (`bin/lean/release.mjs`) append `scorecardBody` to the release PR body: the per-release scorecard of
+`bin/stats/scorecard.mjs` (`gatherScorecard` over the injected `io.gh`, or `io.scorecard`) rendered as a table with a `Regressions vs <prev>: ...`
+line. It is best effort: any error yields an empty section and the PR is still created. PR reuse, title, bundle and exemption sections are unchanged.
+`forgedock scorecard --repo R --release vX` prints the same table (no LLM); LANE_AUDIT-dependent metrics are n/a when that source is absent.
