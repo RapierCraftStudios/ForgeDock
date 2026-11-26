@@ -11,6 +11,7 @@ import { startRouter } from "./router.mjs";
 import { dockerCli } from "./docker.mjs";
 import { readSecret } from "./store.mjs";
 import { call as httpCall } from "./http.mjs";
+import { agentsLeftBehind, leftBehindLine } from "./version.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const loadJson = (p) => JSON.parse(readFileSync(p, "utf8"));
@@ -63,11 +64,12 @@ const num = (x) => (Number.isFinite(x) ? String(Math.round(x * 10) / 10) : "-");
 /** #5885: one row per host: used/borrowable/total cpus and memory, lane counts, pause state and why lanes are throttled or drained. */
 export function statusTable(agents) {
   const withAccount = agents.some((a) => a.account); // #5886: the column appears only when an agent has an account
-  const head = ["HOST", ...(withAccount ? ["ACCOUNT"] : []), "CPUS used/borrow/total", "MEM GB used/borrow/total", "ACTIVE", "THROTTLED", "PAUSED", "REASON"];
+  const withEngine = agents.some((a) => a.engine_version); // the ENGINE column appears only when an agent reports its lane engine
+  const head = ["HOST", ...(withAccount ? ["ACCOUNT"] : []), "CPUS used/borrow/total", "MEM GB used/borrow/total", "ACTIVE", "THROTTLED", "PAUSED", ...(withEngine ? ["ENGINE"] : []), "REASON"];
   const rows = agents.map((a) => {
     const name = a.name ?? a.host ?? "?";
     const acct = withAccount ? [a.account ?? "-"] : [];
-    if (a.ok === false) return [name, ...acct, "-", "-", "-", "-", "-", `unreachable${a.error ? `: ${a.error}` : ""}`];
+    if (a.ok === false) return [name, ...acct, "-", "-", "-", "-", ...(withEngine ? ["-"] : []), "-", `unreachable${a.error ? `: ${a.error}` : ""}`];
     const used = (tot, free) => (Number.isFinite(tot) && Number.isFinite(free) ? tot - Math.max(0, free) : null);
     const borrow = (b, free) => num(b ?? free);
     const paused = a.owner_paused ? "owner" : a.paused ? (a.pending_resize ? "resize" : "yes") : "no";
@@ -75,7 +77,7 @@ export function statusTable(agents) {
       a.idle_gate ? `owner busy: ${a.idle_gate}` : null, a.last_drain ? `last drain ${a.last_drain.sandbox} at ${a.last_drain.at}: ${a.last_drain.reason}` : null].filter(Boolean).join("; ");
     return [name, ...acct, `${num(used(a.cpus_total, a.cpus_free))}/${borrow(a.cpus_borrowable, a.cpus_free)}/${num(a.cpus_total)}`,
       `${num(used(a.mem_total_gb, a.mem_free_gb))}/${borrow(a.mem_borrowable_gb, a.mem_free_gb)}/${num(a.mem_total_gb)}`,
-      String(a.active ?? "-"), String(a.throttled ?? 0), paused, why || "-"];
+      String(a.active ?? "-"), String(a.throttled ?? 0), paused, ...(withEngine ? [a.engine_version ? `${a.engine_version}${a.engine_skew ? " SKEW" : ""}` : "-"] : []), why || "-"];
   });
   const w = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
   return [head, ...rows].map((r) => r.map((c, i) => (i === r.length - 1 ? c : c.padEnd(w[i]))).join("  ")).join("\n");
@@ -292,6 +294,10 @@ export async function runPoolCli(argv, deps = {}) {
         if (r.status === 409) throw new Error(`${a.name}: ${r.data?.active ?? "some"} active sandbox(es); not upgraded (HTTP 409)`);
         console.log(`${a.name}: HTTP ${r.status} ${JSON.stringify(r.data)}`);
       }
+      // R5: name the agents still on an older engine once the pushes are done (an agent restarts asynchronously, so this can lag briefly).
+      const target = (await call(base, "GET", "/version", { token: cfg.forgedock_token }).catch(() => null))?.data?.version;
+      const behind = agentsLeftBehind((await call(base, "GET", "/status", { token: cfg.forgedock_token }).catch(() => null))?.data?.agents, target);
+      if (behind.length) console.log(leftBehindLine(behind, target));
       break;
     }
     case "remove": {
