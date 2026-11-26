@@ -56,6 +56,16 @@ describe("orchestrate stacking (#5831)", () => {
     await h.run();
     assert.deepEqual(h.updates.filter((u) => u.issue === 2).map((u) => u.outcome), ["plan-failed", "merged"]);
   });
+  for (const reason of ["invalid", "needs-human", "decomposed", "budget-exceeded"]) {
+    it(`plan (#5909): a ${reason} plan end settles the issue; no build lane, no plan-failed`, async () => {
+      const h = harness({ planResult: { terminalReason: reason, detail: "verdict" } });
+      await h.run();
+      assert.equal(h.calls.filter((c) => c.n === 2 && !c.ctx.plan).length, 0, "no build lane");
+      const outs = h.updates.filter((u) => u.issue === 2).map((u) => u.outcome);
+      assert.equal(outs.includes("plan-failed"), false);
+      assert.equal(outs.at(-1), reason);
+    });
+  }
   it("plan: planned/planTried are persisted for --resume", async () => {
     let saved = null;
     const store = { load: () => null, save: (s) => { if (s.planTried) saved = s; }, log: () => {} };

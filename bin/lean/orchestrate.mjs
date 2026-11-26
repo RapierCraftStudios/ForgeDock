@@ -147,6 +147,7 @@ import { admitInput, breach, recordFailure, markEscalated, NO_NEW_INPUT } from "
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
+const PLAN_VERDICT = new Set(["invalid", "needs-human", "decomposed", "budget-exceeded"]); // #5909: plan-lane ends that settle the issue
 const DEFAULT_TRAIN_EVERY_MS = 30000; // #5836: merge-train poll period
 // #5836: a lane that ended pr-ready is waiting on the merge train, not failed: its dependents wait
 const WAITING_ON_TRAIN = (row) => row?.outcome === "pr-ready";
@@ -992,7 +993,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       results.set(n, row); done(); save(); update(row);
       return;
     }
-    if (rec?.plan) {
+    const planVerdict = rec?.plan && r?.terminalReason !== "planned" && PLAN_VERDICT.has(row.outcome);
+    if (planVerdict) { // #5909: a verdict end (invalid, needs-human, ...) is the issue's answer: it settles as a final row below, no build lane
+      planMs.set(n, (planMs.get(n) ?? 0) + Math.max(0, now() - rec.startedAt));
+      store?.log?.({ event: "STACK_PLAN_FAILED", issue: n, reason: row.outcome });
+    } else if (rec?.plan) {
       // #5831: a plan lane ends `planned` or `plan-failed` and goes back to pending for its build lane. It is never a final row and
       // never counts toward the breaker, the engine-error relaunch, the deferral or the requeue budgets (it returns before them).
       done();
