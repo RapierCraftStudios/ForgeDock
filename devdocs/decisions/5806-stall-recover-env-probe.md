@@ -20,3 +20,7 @@ A daemon batch sat in `phase: setup` (0/4 issues read) for half an hour. Its pin
 ## Consequences
 
 A stall is acted on within about 4 min (3 min window plus the 60 s scan). A hosted runner started less than a window ago is never restarted. A legitimately long admission hold with free lanes costs one daemon restart, then alerts. Recovery cannot loop: one per ready set, at most three per batch.
+
+## Amendment (#6082): self-heal repeats, capacity waits are not stalls
+
+`decideStallAction` no longer alerts on a repeat stall. A `pool-capacity` stall returns `wait` (no restart, no alert). Otherwise a stall that persists after a recovery is recovered again once a backoff has passed (one window, doubling per recovery, capped at 60 min; `health.json` `stallRecovery.at`/`count`); inside the backoff it returns `wait`. The alert (with the probed cause, naming `stall.code`) is raised only for a broken batch env or after `MAX_STALL_RECOVERIES` (6) recoveries. Supersedes "a repeat alerts" above.
