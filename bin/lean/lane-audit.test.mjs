@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { runLaneAudit, buildEvidence, buildStamp, classify, parseAudit, compareVersions, LANE_AUDIT_MARKER } from "./lane-audit.mjs";
+import { runLaneAudit, buildEvidence, buildStamp, classifyAudit, parseAudit, compareAuditVersions, LANE_AUDIT_MARKER } from "./lane-audit.mjs";
 import { SIGNATURES } from "./lane-audit-signatures.mjs";
 import { auditGap } from "./lane-audit-gap.mjs";
 import { classifyWithLlm } from "./lane-audit-llm.mjs";
@@ -29,7 +29,7 @@ describe("lane audit signatures", () => {
   for (const s of SIGNATURES) {
     it(`classifies ${s.id} from recorded evidence without an LLM`, () => {
       assert.ok(FIXTURES[s.id], "fixture exists");
-      const c = classify(ev(FIXTURES[s.id]));
+      const c = classifyAudit(ev(FIXTURES[s.id]));
       assert.equal(c.signature, s.id);
       assert.equal(c.class, s.class);
       assert.equal(c.active, true);
@@ -37,7 +37,7 @@ describe("lane audit signatures", () => {
   }
   it("covers every seeded class and does not match unrelated text", () => {
     assert.deepEqual([...new Set(SIGNATURES.map((s) => s.class))].sort(), ["env", "genuine", "pipeline", "pool", "spec"]);
-    for (const n of NEGATIVES) assert.equal(classify(ev(n)), null, n);
+    for (const n of NEGATIVES) assert.equal(classifyAudit(ev(n)), null, n);
   });
 });
 
@@ -91,7 +91,7 @@ describe("lane audit run", () => {
     assert.equal((await runLaneAudit()).posted, false);
   });
   it("compares versions", () => {
-    assert.equal(compareVersions("1.2.0", "2.0.0"), -1);
-    assert.equal(compareVersions("1.2.0", null), null);
+    assert.equal(compareAuditVersions("1.2.0", "2.0.0"), -1);
+    assert.equal(compareAuditVersions("1.2.0", null), null);
   });
 });

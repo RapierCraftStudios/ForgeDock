@@ -14,7 +14,7 @@ const ACTIVE_CLASSES = ["pipeline", "env", "pool"]; // classes whose active find
 
 const semver = (v) => { const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(String(v ?? "")); return m ? [+m[1], +m[2], +m[3]] : null; };
 /** -1 | 0 | 1, or null when either side is not a version. */
-export function compareVersions(a, b) {
+export function compareAuditVersions(a, b) {
   const x = semver(a), y = semver(b);
   if (!x || !y) return null;
   for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1;
@@ -55,12 +55,12 @@ export function buildEvidence({ issue, reason, code = null, detail = "", comment
  * Classify against the table. A match whose fixed_in is later than the engine that ran is `fixed_in_later` (not active).
  * @returns {{signature, class, owner, action, active, fixed_in_later}|null}
  */
-export function classify(evidence, table = SIGNATURES) {
+export function classifyAudit(evidence, table = SIGNATURES) {
   for (const s of table) {
     let hit = false;
     try { hit = Boolean(s.match(evidence)); } catch { hit = false; }
     if (!hit) continue;
-    const later = s.fixed_in != null && compareVersions(evidence.stamp?.engine_version, s.fixed_in) === -1;
+    const later = s.fixed_in != null && compareAuditVersions(evidence.stamp?.engine_version, s.fixed_in) === -1;
     return { signature: s.id, class: s.class, owner: s.owner, action: s.action, introduced_in: s.introduced_in ?? null, fixed_in: s.fixed_in ?? null, fixed_in_later: later, active: !later };
   }
   return null;
@@ -93,7 +93,7 @@ export async function runLaneAudit(o = {}) {
     const { post, trusted = () => true, table = SIGNATURES, gap = auditGap, llm = classifyWithLlm } = o;
     if (typeof post !== "function") return { posted: false, skipped: "no-post" };
     const ev = buildEvidence(o);
-    let c = classify(ev, table);
+    let c = classifyAudit(ev, table);
     let gapFinding = null, llmFinding = null;
     if (c && c.active && ACTIVE_CLASSES.includes(c.class)) gapFinding = await gap(ev, c);
     if (!c) { llmFinding = await llm(ev); c = llmFinding && typeof llmFinding === "object" ? { signature: llmFinding.signature ?? "llm", class: llmFinding.class ?? "unclassified", owner: llmFinding.owner ?? null, action: llmFinding.action ?? null, introduced_in: null, fixed_in: null, fixed_in_later: false, active: true } : null; }
