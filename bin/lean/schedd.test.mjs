@@ -582,7 +582,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await d.close(); }
   });
 
-  it("#5806: a hosted runner wedged in setup restarts the daemon once (decision logged); the same stall again alerts and never loops", async () => {
+  it("#5806: a hosted runner wedged in setup restarts the daemon (decision logged); the same stall again is healed again after the backoff, no alert (#6082)", async () => {
     const dir = tmpDir("schedd-stall-setup-"), root = join(dir, "batches"), id = "b20261121-000000-5806";
     const b = openBatch(root, id);
     b.writePlan({ daemon: true, repo: "o/r", created: new Date().toISOString() });
@@ -598,10 +598,9 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
       assert.ok(lines.some((l) => /FORGE:DECISION batch .+ stall-recovery: restart the hosting schedd/.test(l)), lines.join("\n"));
       assert.equal(JSON.parse(readFileSync(join(b.dir, "health.json"), "utf8")).stallRecovery.action, "restart-daemon");
       utimesSync(join(b.dir, "state.json"), old, old);
-      await until(() => readFileSync(join(b.dir, "health.json"), "utf8").includes("stalled again after auto-recovery"), 8000);
-      await new Promise((r) => setTimeout(r, 300));
-      assert.equal(restarts.length, 1, "recovered once, then alerted");
-      assert.match(readFileSync(join(b.dir, "batch.log"), "utf8"), /BATCH UNHEALTHY .*\(stuck in setup, 0\/2 issues read\).*probed: stalled again after auto-recovery/);
+      await until(() => restarts.length >= 2, 8000);
+      assert.equal(JSON.parse(readFileSync(join(b.dir, "health.json"), "utf8")).stallRecovery.count >= 2, true, "a second recovery is recorded");
+      assert.doesNotMatch(readFileSync(join(b.dir, "batch.log"), "utf8"), /BATCH UNHEALTHY/, "no operator alert while self-heal has attempts left");
     } finally { await d.close(); }
   });
 
