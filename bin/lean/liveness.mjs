@@ -28,7 +28,10 @@ export function classifyTransportLoss({ agentOnline = null, waitedMs = 0, window
   return waitedMs >= limit ? "unreachable" : "wait";
 }
 
-/** One budget row per sandbox lifetime: the key has no per-attempt value. */
-export function sandboxBudgetKey(batchId, sandboxId) {
-  return `${batchId}#${sandboxId}`;
+/**
+ * One budget row per sandbox lifetime. #6023: a pool reuses the sandbox id across an issue's attempts, so the attempt's
+ * start time is part of the key; a replay of the same attempt keeps its key (the record keeps the larger usage).
+ */
+export function sandboxBudgetKey(batchId, sandboxId, startedAt = null) {
+  return `${batchId}#${sandboxId}${startedAt != null && startedAt !== "" ? `#${startedAt}` : ""}`;
 }
