@@ -5,7 +5,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const ps = readFileSync(new URL("../../pool/install/install-agent.ps1", import.meta.url), "utf8");
+const ps = readFileSync(
+  new URL("../../pool/install/install-agent.ps1", import.meta.url),
+  "utf8",
+);
 
 test("tailscale IP resolution is null-safe and falls back to the adapter", () => {
   assert.doesNotMatch(ps, /ip -4 \| Select-Object -First 1\)\.Trim\(\)/);
@@ -18,4 +21,13 @@ test("-KeepaliveAtStartup registers a startup trigger with an S4U principal", ()
   assert.match(ps, /\[switch\] \$KeepaliveAtStartup/);
   assert.match(ps, /New-ScheduledTaskTrigger -AtStartup/);
   assert.match(ps, /'S4U'/);
+});
+
+test("default keep-alive stays AtLogOn + Interactive without the switch", () => {
+  assert.match(ps, /else \{ New-ScheduledTaskTrigger -AtLogOn -User/);
+  assert.match(
+    ps,
+    /\$logonType = if \(\$KeepaliveAtStartup\) \{ 'S4U' \} else \{ 'Interactive' \}/,
+  );
+  assert.match(ps, /-LogonType \$logonType -RunLevel Highest/);
 });
