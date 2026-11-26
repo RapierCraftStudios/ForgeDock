@@ -54,8 +54,8 @@ export function detectSameShaFlip(runs) {
 }
 
 /** One `flakes.json` entry. */
-export const flakeEntry = ({ check, test = null, signature = null, kind, sha = null, runIds = [], at, rerun = false }) =>
-  ({ check, test, signature, signature_hash: signatureHash(check, test, signature), kind, sha, run_ids: runIds, at, ...(rerun ? { rerun: true } : {}) });
+export const flakeEntry = ({ check, test = null, signature = null, kind, sha = null, runIds = [], at, rerun = false, attempt = null, reuseForfeited = false }) =>
+  ({ check, test, signature, signature_hash: signatureHash(check, test, signature), kind, sha, run_ids: runIds, at, ...(rerun ? { rerun: true } : {}), ...(attempt != null ? { attempt } : {}), ...(reuseForfeited ? { reuse_forfeited: "deploy test reuse forfeited" } : {}) });
 
 /** Append entries to `flakes.json` and the `_active` `flakes` key in one commit. */
 export async function recordFlakes(lctx, entries, now = Date.now()) {
@@ -67,6 +67,17 @@ export async function recordFlakes(lctx, entries, now = Date.now()) {
   return r.ok ? { ok: true, recorded: entries.length } : { ok: false, error: r.refused ?? "lost the race recording flakes" };
 }
 
+/** #6014: a release-PR CI run is rerun at most this many times (Actions run_attempt 1 is the first run, so attempt 3 is the last allowed). */
+export const RERUN_ATTEMPT_CAP = 2;
+
+/** @param {{attempt?: number|null, cap?: number}} p @returns {{allow: boolean, why: string}} refuse once `attempt - 1` reruns have already happened. */
+export function attemptGuard({ attempt, cap = RERUN_ATTEMPT_CAP }) {
+  const n = Number(attempt);
+  if (!Number.isFinite(n) || n < 1) return { allow: true, why: "attempt unknown" };
+  if (n - 1 >= cap) return { allow: false, why: `run is on attempt ${n}: already rerun ${n - 1} times (cap ${cap}); needs a recorded classification and a filed issue for the failing job` };
+  return { allow: true, why: `attempt ${n}, ${n - 1} of ${cap} reruns used` };
+}
+
 /**
  * Which failed jobs to `rerun --failed`: infra class only, once per job (`done` = keys of jobs already rerun), and only while the
  * minutes already spent stay inside `ci.rerun_budget_min`. Every job gets a decision, so a skipped rerun is never silent.
@@ -76,6 +87,7 @@ export function planRerun({ jobs, done = [], spentMin = 0, budgetMin }) {
   const seen = new Set(done);
   let spent = spentMin;
   return jobs.map((j) => {
+    if (j.attempt != null) { const g = attemptGuard({ attempt: j.attempt }); if (!g.allow) return { ...j, rerun: false, capped: true, why: g.why }; }
     if (j.class !== "infra") return { ...j, rerun: false, why: "not an infra flake" };
     if (seen.has(j.key)) return { ...j, rerun: false, why: "already rerun once" };
     const cost = j.minutes ?? 0;
