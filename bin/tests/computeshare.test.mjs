@@ -744,7 +744,10 @@ test("transport.stop through router and agent signals the lane; it exits interru
   mkdirSync(join(sb.dir, "result"), { recursive: true });
   writeFileSync(join(sb.dir, "result", "1.json"), JSON.stringify({ outcome: "deferred", reason: "run.interrupted", checkpoint: "kept" }));
   assert.equal(await transport.status("i1"), "exited");
-  assert.deepEqual(await transport.result("i1"), { outcome: "deferred", reason: "run.interrupted", checkpoint: "kept" });
+  const res = await transport.result("i1"); // #6091: the placed agent's lane engine is recorded on the result
+  assert.equal(typeof res.engineVersion, "string");
+  delete res.engineVersion;
+  assert.deepEqual(res, { outcome: "deferred", reason: "run.interrupted", checkpoint: "kept" });
   assert.ok(agent.store.data.sandboxes.i1, "stop keeps the sandbox (checkpoint) until the dispatcher destroys it");
   assert.equal(await transport.destroy("i1"), true);
 });

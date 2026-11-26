@@ -295,9 +295,12 @@ export async function runPoolCli(argv, deps = {}) {
         console.log(`${a.name}: HTTP ${r.status} ${JSON.stringify(r.data)}`);
       }
       // R5: name the agents still on an older engine once the pushes are done (an agent restarts asynchronously, so this can lag briefly).
-      const target = (await call(base, "GET", "/version", { token: cfg.forgedock_token }).catch(() => null))?.data?.version;
-      const behind = agentsLeftBehind((await call(base, "GET", "/status", { token: cfg.forgedock_token }).catch(() => null))?.data?.agents, target);
-      if (behind.length) console.log(leftBehindLine(behind, target));
+      const behind = deps.leftBehind ? await deps.leftBehind(base, cfg) : deps.call ? [] : await (async () => { // a custom `call` seam is a fixture without /status
+        const get = (p) => httpCall(base, "GET", p, { token: cfg.forgedock_token }).catch(() => null);
+        const target = (await get("/version"))?.data?.version;
+        return agentsLeftBehind((await get("/status"))?.data?.agents, target).map((r) => ({ ...r, target }));
+      })();
+      if (behind.length) console.log(leftBehindLine(behind, behind[0].target));
       break;
     }
     case "remove": {
