@@ -695,6 +695,8 @@ stores; install/repair commands get the lane's toolchain env (#4347: a pm only t
 resolves; no pin, no shim or a failed toolchain step means the host PATH); `forgedock gc --deps` reaps; `FORGE_DEPCACHE=0` opts out. See `decisions/4220-shared-dep-cache.md`.
 
 #5651: for a Python project with a declared range, `pythonFor` returns the in-range interpreter (poetry runs under it as `<py> -m poetry env use|install`, so its resolver never runs on the host default python; poetry missing from that interpreter is `env.tool_missing`; uv uses `uv venv --python`) or, when none is found, `prepare` stops with a failed row coded `env.tool_missing` naming the range, the interpreters probed and how to provide one; the out-of-range default python3 is never used silently. `depInstallFailures` blocks on that code regardless of changed files.
+#5731: `pythonFor` prefers the repo's own pin (`.python-version`, else the first CI `python-version`; `pyHint`) over an in-range default `python3`, also for projects whose pyproject declares no range; a hinted minor missing from PATH and `uv python find` is provisioned with `uv python install`. `prepareOne` retries an install that fails with a build/wheel incompatibility (`PY_BUILD_RE`) once per remaining in-range interpreter (at most 3 tried); the failed reason names the interpreters tried. keyOf is unchanged when no hint exists. A failed python install is reported `env.setup_failed`, naming the interpreters used and the in-range alternatives not tried. A build-incompatibility install failure is cached as a negative result per (lock hash, interpreter) key (`<eco>-<key>.failed.json`, 6h), so a later prepare skips that failing install.
+
 
 `depcache.mjs` `linkOrCopy` (#4909) copies a file when the hardlink fails with EXDEV, so a cache on another filesystem is still a `hit`. `capwait.mjs` holds a lane refused for capacity (`sandbox.capacity`) until the pool reports `free > 0` and banks the wait as `waits.queue`.
 
@@ -3789,6 +3791,11 @@ Filing: `file_issues` is **opt-in, default off** (only an explicit `file_issues:
 - The dispatcher writes the marker (`suspendLane`, `suspendMarker` in `bin/engine-cli.mjs`): when a kept sandbox is recorded (halted, `sandbox.unreachable`, `sandbox.auth`; `providerLanes` `suspendKept`), when a kept issue is held (`--hold`) or its batch paused (`--pause`); cleared on release, unpause and adopt (`resumeKept`). Held/paused batches still admit nothing, including deferred issues whose retry timer fires (`isReady`, launch re-read); `--hold <id> pending` holds every pending and backing-off issue.
 - Kept sandboxes are recorded in `state.kept` (issue, since, phase) and listed by `orchestrate --status` and `pool status` (table section and `kept_sandboxes` in `--json`) via `keptSandboxes` (`bin/lean/batch.mjs`).
 
+## Release-branch lane checks (#6049)
+
+- The pre-PR CI precheck (`bin/lean/ci-precheck.mjs`) also reads the required checks of the release branch (the first default branch, skipped when it equals the lane base) and passes it to `scripts/ci-local` as `--release-branch`. The github-actions adapter then counts a workflow with `pull_request` to, or `push` on, that branch as a gate, so release-only formatter and suite-wiring jobs are selected with the why `required check "X" on release branch`. Without a release branch the plan is unchanged.
+- `CI_PRECHECK_PARITY` lists the required release checks the lane cannot run (no job maps, or the job is heavy, excluded or unrunnable). The first round files one issue per gap, deduped by the hidden marker `FORGE:PARITY_GAP <context>` (`reportParityGaps` in `bin/lean/basered.mjs`). It never blocks the PR.
+
 ## Lane audit at unhappy terminals (#6076)
 
 - `finish()` in `bin/lean/lean.mjs` calls `runLaneAudit` (`bin/lean/lane-audit.mjs`) once at needs-human (including PARKED), engine-error and a final budget/ci-pending terminal, after the terminal post. The call is wrapped in try/catch and `runLaneAudit` never throws, so an audit cannot change the terminal reason or code.
@@ -3803,3 +3810,9 @@ erroring agent (or a wait past `max_wait_s`) fails open. Without it the local `h
 installs, validate commands and prechecks, so those lane steps take a token with no lane-level wiring. `quotaCores` (`admission.mjs`) reads
 cgroup v2 `cpu.max` / v1 `cfs_quota_us`/`cfs_period_us` (fallback `CS_CPU_QUOTA` from the pool) and returns min(VM cores, quota);
 `verifyParallelism` and the heavy shim use it for `FORGE_HOST_PARALLELISM`.
+
+## Entry 2026-11-26 — scorecard section in the release PR (#6084)
+`snapshotPrStep` and `releasePrStep` (`bin/lean/release.mjs`) append `scorecardBody` to the release PR body: the per-release scorecard of
+`bin/stats/scorecard.mjs` (`gatherScorecard` over the injected `io.gh`, or `io.scorecard`) rendered as a table with a `Regressions vs <prev>: ...`
+line. It is best effort: any error yields an empty section and the PR is still created. PR reuse, title, bundle and exemption sections are unchanged.
+`forgedock scorecard --repo R --release vX` prints the same table (no LLM); LANE_AUDIT-dependent metrics are n/a when that source is absent.

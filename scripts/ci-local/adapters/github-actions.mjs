@@ -53,7 +53,15 @@ function branchOk(cfg, branch) {
 }
 
 // Does this workflow gate a pull request into the base branch? Returns '' when yes, else the reason it does not.
+// With a release branch (a.releaseBranch, #6049) a workflow that gates a pull request into it, or runs on a push to it, also counts.
 function gateReason(ev, a) {
+  const why = gateReasonLane(ev, a);
+  if (!why || !a.releaseBranch || a.releaseBranch === a.baseBranch) return why;
+  if (ev.pull_request && branchOk(ev.pull_request, a.releaseBranch) && pathsOk(ev.pull_request, a.changed)) return '';
+  if (ev.push && !(Array.isArray(ev.push.tags) && !Array.isArray(ev.push.branches) && !Array.isArray(ev.push['branches-ignore'])) && branchOk(ev.push, a.releaseBranch) && pathsOk(ev.push, a.changed)) return '';
+  return why;
+}
+function gateReasonLane(ev, a) {
   const names = Object.keys(ev);
   if (ev.pull_request) {
     const c = ev.pull_request;

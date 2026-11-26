@@ -10220,6 +10220,30 @@ describe("#5820 required CI checks run in the lane before the PR opens", () => {
     assert.match(p2.unrunnable[0].reason, /CI check plan unavailable: yq not found/);
   });
 
+  it("#6049 a release-only required formatter fails the precheck before the PR; a required context with no job is a parity gap filed once", async () => {
+    const fmt = ciJob("fmt", "Format check", "black --check .");
+    const plan = { version: 1, repo: WT, jobs: [ciJob("lint", "Lint", "pnpm lint"), fmt] };
+    let broken = true; const asked = [];
+    const w = ciWorld({ plan: async (a) => { asked.push(a.releaseBranch ?? ""); return plan; }, ciRun: (c) => (broken ? { rc: 1, output: "would reformat a.py\nCI_LOCAL_FAIL: gha:ci:fmt | step: black --check . | exit 1" } : { rc: 0, output: "CI_LOCAL_RESULT: PASS" }) });
+    const byBranch = []; w.io.requiredChecks = async (b) => { byBranch.push(b); return b === "main" ? ["Format check", "Wiring audit"] : ["Lint"]; };
+    const inner = w.io.runner;
+    w.io.runner = async (c) => { if (/declared check commands failed/.test(c.prompt)) broken = false; return inner(c); };
+    const issues = []; const gh = w.io.gh;
+    w.io.gh = async (args, ...x) => { if (args[0] === "issue" && args[1] === "list") return JSON.stringify(issues.map((i) => ({ ...i, number: 77, state: "OPEN", body: i.body }))); if (args[0] === "issue" && args[1] === "create") { issues.push({ body: args[args.indexOf("--body") + 1] }); return "https://github.com/o/r/issues/77"; } return gh(args, ...x); };
+    const dir = tmpDir("core-");
+    await run(w, { dir });
+    assert.ok(byBranch.includes("main"), `the release branch's required checks are read (read: ${byBranch})`);
+    const log = readLog(dir, 7);
+    const p = log.find((e) => e.event === "CI_PRECHECK_PLAN");
+    assert.ok(p.commands.some((c) => c.job === "gha:ci:fmt" && /on release branch/.test(c.why)));
+    assert.ok(log.filter((e) => e.event === "CI_PRECHECK_RESULT")[0].results.some((x) => x.status === "fail"));
+    assert.ok(w.seq.indexOf("ci-precheck") < w.seq.indexOf("pr"));
+    const par = log.filter((e) => e.event === "CI_PRECHECK_PARITY");
+    assert.deepEqual(par[0].gaps.map((g) => g.context), ["Wiring audit"]);
+    assert.equal(issues.length, 1, "one issue per gap, not re-filed on the fix round");
+    assert.match(issues[0].body, /FORGE:PARITY_GAP Wiring audit/);
+  });
+
   it("lean.ci_precheck off runs nothing and logs no plan", async () => {
     const w = ciWorld(); const dir = tmpDir("core-");
     await run(w, { dir, precheck: { ci: { mode: "off", include: [], exclude: [], maxJobs: 8 } } });

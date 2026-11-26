@@ -114,6 +114,39 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.equal(other.saves.map((s) => s.breaker).find(Boolean)?.transport, undefined);
   });
 
+  it("breaker trip with pending issues keeps the batch open and dispatches after the cooldown (#6042)", async () => {
+    const run = async (detail, clearAt = null) => {
+      let t = 0; const launched = []; let req = null;
+      const rows = await orchestrate({ issues: [1, 2, 3, 4], parallel: 1, readBody: async () => "", now: () => t, maxDeferrals: 3, breaker: { errors: 3, window_min: 30 }, pollMs: 1000,
+        sleep: async (ms) => { t += ms; if (clearAt !== null && t >= clearAt) req = t; },
+        getClearBreaker: clearAt === null ? null : () => req, consumeClearBreaker: () => { req = null; },
+        store: { load: () => null, save: () => {} },
+        runOne: async (n) => { launched.push(n); t += 1000; return n <= 3 && launched.filter((x) => x === n).length === 1 && launched.length <= 3 ? { terminalReason: "engine-error", detail } : { terminalReason: "merged", pr: 5 }; } });
+      return { rows, launched };
+    };
+    const env = await run("VM restart: sandbox.lost");
+    assert.ok(env.launched.length > 3, "the environmental trip auto-clears after the cooldown and dispatch resumes");
+    const hosted = await run("boom", 60000);
+    assert.ok(hosted.launched.length > 3, "a hosted clear request resumes dispatch without a --resume");
+  });
+
+  it("a sandbox-gone burst from one pool agent (VM restart) does not trip the breaker (#6042, #5859)", async () => {
+    const updates = []; const seen = new Set();
+    const rows = await orchestrate({ issues: [1, 2, 3, 4, 5], parallel: 5, readBody: async () => "", maxDeferrals: 3, breaker: { errors: 3, window_min: 10 }, onUpdate: (r) => updates.push(r),
+      store: { load: () => null, save: () => {} },
+      runOne: async (n) => { if (!seen.has(n)) { seen.add(n); return { terminalReason: "engine-error", detail: `sandbox fake-${n} exited without a result`, lostWithoutResult: true, agent: "legion" }; } return { terminalReason: "merged", pr: 5 }; } });
+    assert.ok(!updates.some((u) => u.outcome === "breaker"), "the breaker never trips");
+    assert.ok(rows.filter((r) => r.outcome === "merged").length === 5);
+  });
+
+  it("a non-environmental breaker with no clear channel still ends the run with issues pending (#6042 P1)", async () => {
+    let t = 0; const launched = [];
+    await orchestrate({ issues: [1, 2, 3, 4], parallel: 1, readBody: async () => "", now: () => t, sleep: async (ms) => { t += ms; }, maxDeferrals: 3, breaker: { errors: 3, window_min: 30 },
+      store: { load: () => null, save: () => {} },
+      runOne: async (n) => { launched.push(n); t += 1000; return { terminalReason: "engine-error", detail: "boom" }; } });
+    assert.ok(!launched.includes(4));
+  });
+
   it("gh.unavailable deferrals (forge#4157) are requeued, never relaunched as engine-error, and never trip the breaker", async () => {
     const { now, sleep } = fakeClock();
     const updates = [];
@@ -1757,7 +1790,7 @@ describe("#5161 transient engine-error retries", () => {
     const rows = await orchestrate({ issues: [1, 2], parallel: 1, readBody: async () => "", now, sleep, breaker: { errors: 2, window_min: 30 },
       store: { load: () => null, save: (st) => saves.push(st) }, runOne: async () => { throw new Error(CURL_502); } });
     assert.equal(saves.map((st) => st.breaker).find(Boolean)?.transport, true);
-    assert.ok(rows.some((r) => r.outcome === "held"));
+    assert.ok(!rows.some((r) => r.outcome === "held"), "#6042: a transport trip pauses admission and the batch stays open instead of ending held");
   });
 });
 
