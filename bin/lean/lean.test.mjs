@@ -1106,7 +1106,13 @@ describe("core work-on", () => {
     // #4685: a missing tool is never a credential block on a remote lane; local lanes and real credential needs stay human.
     assert.equal(await rb("validate V1 needs promtool via docker; no docker daemon in this sandbox", remote), "env.tool_missing");
     assert.equal(await rb("ModuleNotFoundError: No module named 'yaml'", remote), "env.tool_missing");
-    assert.equal(await rb("promtool: command not found", { ...remote, placement: { where: "local", reason: "x" } }), "builder.blocked");
+    assert.equal(await rb("promtool: command not found", { ...remote, placement: { where: "local", reason: "x" } }), "env.tool_missing"); // #6106: a missing tool is env on any placement
+    // #6106: the two real block texts are env gaps whatever reason the builder typed; a genuine human reason stays human
+    const pd = (summary) => code(world({ result: { status: "blocked", summary, block: { kind: "human", why: "product-decision" } } }));
+    assert.equal(await pd("the yaml lane-tools recipe lives in the engine, so the lane cannot install it"), "env.tool_missing");
+    assert.equal(await rb("no Python 3.11 interpreter in the sandbox (only 3.12.3)"), "env.tool_missing");
+    assert.equal(await pd("needs Stripe approval before the pricing change ships"), "builder.blocked");
+    assert.equal(await rb("needs the production API key and credentials from the owner"), "builder.blocked");
     assert.equal(await rb("this lane has no sops/age key", { ...remote, hostCaps: undefined }), "builder.blocked");
     assert.equal(await rb("this lane has no sops/age key", { ...remote, placement: { where: "local", reason: "x" } }), "builder.blocked");
     assert.equal(await code(world({ changed: [] })), "builder.no_commit");
@@ -10278,6 +10284,31 @@ describe("#5749 freeze-time runnability: host-only commands, recipes, check tail
     const installs = []; w.io.runCommand = async ({ command }) => { installs.push(command); return { rc: 0, output: "" }; };
     const r = await run(w, { dir: tmpDir("lean-5749c-"), ...remote });
     assert.equal(r.terminalReason, "merged"); assert.ok(!installs.some((c) => /apt-get/.test(c)));
+  });
+  it("#6106 a check that fails on a pass-through wrapper with no real binary is env.tool_missing after one dependency preparation, not ci.red", async () => {
+    const w = world(); const prepared = [];
+    w.io.deps = { prepare: async () => { prepared.push(1); return []; } };
+    w.io.runCommand = async () => ({ rc: 127, output: "forgedock heavy: eslint at /w/web/node_modules/.bin/eslint is a PATH pass-through wrapper with no real binary behind it" });
+    const r = await atIdleLoad(() => run(w, { precheck: { commands: ["make lint"] }, verify: { ...parseVerify({}), precheckBlock: true } }));
+    assert.equal(r.code, "env.tool_missing"); assert.equal(r.terminalReason, "needs-human");
+    assert.ok(prepared.length >= 2, "deps prepared at setup and once more after the missing tool");
+    assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 0, "no builder resume");
+  });
+  it("#6094 a check that fails in a test file the diff does not touch is rerun once: green on rerun is no fix round; red twice stays ci.red", async () => {
+    const out = "not ok 3 - ten concurrent\n  location: '/w/bin/tests/mirror-script.test.mjs:48:3'";
+    const w = world(); let n = 0;
+    w.io.runCommand = async () => (++n === 1 ? { rc: 1, output: out } : { rc: 0, output: "" });
+    const r = await atIdleLoad(() => run(w, { precheck: { commands: ["make test"] }, verify: { ...parseVerify({}), precheckBlock: true } }));
+    assert.equal(r.terminalReason, "merged"); assert.equal(n, 2);
+    assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 0);
+    const w2 = world(), dir2 = tmpDir("lean-6094-");
+    w2.io.runCommand = async () => ({ rc: 1, output: out });
+    const r2 = await atIdleLoad(() => run(w2, { dir: dir2, precheck: { commands: ["make test"] }, verify: { ...parseVerify({}), precheckBlock: true } }));
+    assert.equal(r2.code, "ci.red"); assert.equal(readLog(dir2, 7).filter((e) => e.event === "PRECHECK_FLAKE_RERUN").length, 1, "exactly one rerun");
+    const w3 = world(), dir3 = tmpDir("lean-6094b-"); // a failure in a test the diff touches is the lane's: no rerun
+    w3.io.runCommand = async () => ({ rc: 1, output: "not ok 1 - x\n  location: 'test/foo.test.js:4:1'" });
+    await atIdleLoad(() => run(w3, { dir: dir3, precheck: { commands: ["make test"] }, verify: { ...parseVerify({}), precheckBlock: true } }));
+    assert.equal(readLog(dir3, 7).filter((e) => e.event === "PRECHECK_FLAKE_RERUN").length, 0);
   });
   it("#5749 precheck_block detail carries the failing check tail", async () => {
     const w = world();

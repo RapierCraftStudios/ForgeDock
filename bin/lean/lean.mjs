@@ -55,6 +55,7 @@ import { renderInvestigation, renderImplementation, renderReview, renderPrBody, 
 import { parseVerifierConfig, pickVerifierModel, changedSymbols, callersOf, verifierBudget, verifierPrompt, parseVerifierFindings, findingsToFailures, renderVerifierNote, VERIFIER_SYSTEM } from "./verifier.mjs";
 import { computeTrigger, riskPathHits, TRIGGER_MODES, pathDomains, parseEnforceDomains } from "./review-trigger.mjs";
 import { hostCapabilityBlock, contractHostNeeds } from "./execution.mjs";
+import { envGapBlockCode, toolGapFailures, packageDirsMissingDeps, failureOutsideDiff } from "./envgap.mjs"; // #6106
 
 const MISSING_TOOL_RE = /command not found|not found in PATH|no such file or directory.*\b(?:docker|promtool)\b|\b(?:docker|promtool)\b[^\n]{0,80}(?:not (?:installed|found|available)|no such file|cannot connect|daemon)|cannot connect to the docker daemon|no docker daemon|no module named|ModuleNotFoundError|\bENOENT\b[^\n]{0,60}spawn/i;
 /** #4685: true when a builder's block summary names a missing tool or module (environment), not a credential. */
@@ -1491,6 +1492,10 @@ export async function runCore(o) {
     if (b.kind === "human" && b.why === "credentials" && o.placement?.where === "remote" && missingToolBlock(s)) {
       // #4685: a tool the sandbox lacks (docker, promtool, a Python module) is an environment gap the host recovers, never a credential.
       return await needsHuman(`Remote sandbox lacks a validate tool (Builder is blocked (credentials)): ${s}\n\nNot a credential: the lane is recovered where the tool exists.`, OUTCOME_CODES.ENV_TOOL_MISSING);
+    }
+    if (b.kind === "human") { // #6106: a missing tool/interpreter/recipe/package/sandbox capability is an env gap that recovers, whatever reason the builder typed; genuine human reasons stay human
+      const envCode = envGapBlockCode(b.why, s);
+      if (envCode) { T.decisions.push(`Builder block (${b.why}) reclassified to ${envCode}: it names an environment gap, not a human decision`); return await needsHuman(`Environment gap, not a human decision (Builder reported blocked (${b.why})): ${s}\n\nThe lane is recovered where the tool, interpreter or capability exists.`, envCode); }
     }
     if (b.kind === "human") {
       // #4730: the agent-doable remainder is re-queued as its own lane; only the owner step keeps needs-human.
@@ -2933,6 +2938,17 @@ export async function runCore(o) {
     if (picked.source !== "learned") T.decisions.push(`Pre-PR checks selected from ${TEST_MAP_FILE}: ${picked.selected} of ${testMap.entries.length} entries${learnedCommands.length ? `, plus ${learnedCommands.length - picked.dropped.length} learned` : ""}${picked.dropped.length ? `; ${picked.dropped.length} mapped learned command(s) not matching the changed files left to CI` : ""}`);
     if (picked.commands.length && io.runCommand) {
       precheckRan = true;
+      // #6106: dependencies for every package the checks touch are prepared before the checks run; a missing tool afterwards is env, not ci.red
+      let depsReprovisioned = false;
+      const flakeReran = new Set();
+      const reprovisionDeps = async (why) => {
+        if (depsReprovisioned || !io.deps?.prepare) return false;
+        depsReprovisioned = true;
+        try { const rp = await io.deps.prepare({ wt, repoKey: depcacheNamespace({ repo, fallback: repoKey(cwd) }), env: toolchain?.env ?? undefined }); depResults = Array.isArray(rp) ? rp : depResults; } catch { /* the check result below says what is still missing */ }
+        ev({ event: "PRECHECK_DEPS_PREPARED", why });
+        return true;
+      };
+      { const unprepared = packageDirsMissingDeps(picked.commands, (rel) => existsSync(join(wt, rel))); if (unprepared.length) await reprovisionDeps(`no node_modules in ${unprepared.join(", ")}`); }
       for (let round = 0; ; round++) {
         await renew();
         if (round) { ciCommands = await ciPrecheckPlan(round); picked = pickChecks(); }
@@ -2971,6 +2987,24 @@ export async function runCore(o) {
         const names = failed.map((f) => `\`${f.command}\` (exit ${f.rc})`).join(", ");
         const failTail = (fs) => fs.map((f) => `\n\n\`${f.command}\` output tail:\n${quietFailure(f.output, { maxChars: 2000 })}`).join(""); // #5749: the recovery lane starts from the failing check's output, not only its name
         if (isSplit) return await needsHuman(`Declared check command(s) fail on the refactor:split move (no builder edits a split); nothing merged: ${names}`, OUTCOME_CODES.CI_RED);
+        { // #6106: every failed check died on a missing tool/binary (not on its own assertion): prepare dependencies once and rerun, then it is env.tool_missing
+          const gap = toolGapFailures(failed);
+          if (gap.length && gap.length === failed.length) {
+            if (await reprovisionDeps("check failed on a missing tool")) { round--; continue; }
+            ev({ event: "PRECHECK_TOOL_MISSING", commands: gap.map((f) => f.command) });
+            return await needsHuman(`Environment error (not a check failure): declared check command(s) could not run because a tool or binary is missing, even after the dependencies were prepared; nothing merged: ${names}${failTail(gap)}`, OUTCOME_CODES.ENV_TOOL_MISSING);
+          }
+        }
+        { // #6094: a failure in a test the diff does not touch gets one rerun before it can be ci.red or spend a builder round
+          const dirty = await changedFiles();
+          const todo = failed.filter((f) => !flakeReran.has(f.command) && failureOutsideDiff(f.output, dirty));
+          if (todo.length && todo.length === failed.length) {
+            for (const f of todo) flakeReran.add(f.command);
+            const reruns = await heavyStep("precheck", async () => { const out = []; for (const f of todo) { try { out.push(await io.runCommand({ command: f.command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() })); } catch { out.push({ rc: 1 }); } } return out; });
+            ev({ event: "PRECHECK_FLAKE_RERUN", round, commands: todo.map((f) => f.command), results: reruns.map((r) => r?.rc ?? null) });
+            if (reruns.every((r) => r?.rc === 0)) { T.decisions.push(`Declared check(s) ${todo.map((f) => `\`${f.command}\``).join(", ")} failed in test file(s) the diff does not touch and passed on one rerun (flake); no fix round spent`); checkCommandsFailing = false; await gatePassed("precheck"); break; }
+          }
+        }
         checkCommandsFailing = true;
         { const red = await guardRed(failed, { bypass: vcfg.guardBypass === true }); if (red === "bypass") { checkCommandsFailing = false; break; } if (red) return red; } // #5239: a guard that also fails on the base defers the lane; #5992: unless the lane is clear of the guarded surface
         if (round >= vcfg.maxRounds || !sessionId) { if (vcfg.precheckBlock || guardFailing(failed)) return await needsHuman(`Declared check command(s) still failing before the PR (verify.precheck_block); nothing merged: ${names}${failTail(failed)}`, OUTCOME_CODES.CI_RED); T.anomalies.push(`Declared check command(s) still failing before the PR: ${names}`); break; }

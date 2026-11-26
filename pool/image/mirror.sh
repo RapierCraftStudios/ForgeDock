@@ -13,7 +13,7 @@ mirror_valid() {
   local m="$1"
   [ -d "$m/objects" ] || return 1
   [ -n "$(git -C "$m" for-each-ref --count=1 2>/dev/null)" ] || return 1
-  [ -z "$(find "$m/objects" -type f -size 0 -print -quit 2>/dev/null)" ] || return 1
+  [ -z "$(find "$m/objects" -type f -size 0 ! -name 'tmp_*' ! -name '*.lock' -print -quit 2>/dev/null)" ] || return 1 # git's own in-flight temp/lock files are empty by design (#6094)
   if [ "${MIRROR_FSCK:-}" = "1" ]; then git -C "$m" fsck --connectivity-only --no-dangling >/dev/null 2>&1 || return 1; fi
   return 0
 }
@@ -40,11 +40,20 @@ mirror_build() {
   return 1
 }
 
+# #6094: a mirror is judged corrupt only by someone who holds the per-repo lock. A lock held elsewhere means a build or fetch is
+# writing into it (transiently "invalid"), so the caller queues behind it instead of quarantining a healthy mirror.
+mirror_corrupt() {
+  local m="$1" lock="$1.lock"
+  [ -d "$m" ] || return 1
+  mirror_valid "$m" && return 1
+  ( flock -n 9 || exit 1; ! mirror_valid "$m" ) 9>"$lock"
+}
+
 mirror_prepare() {
   local url="$1" m="$2" lock
   mkdir -p "$(dirname "$m")" 2>/dev/null
   lock="$m.lock"
-  if [ -d "$m" ] && ! mirror_valid "$m"; then
+  if mirror_corrupt "$m"; then
     # Bad mirror: set it aside for everyone, rebuild once in the background, this lane clones directly.
     ( flock -w "${MIRROR_LOCK_WAIT:-900}" 9 || exit 0
       if [ -d "$m" ] && ! mirror_valid "$m"; then mirror_quarantine "$m"; fi
