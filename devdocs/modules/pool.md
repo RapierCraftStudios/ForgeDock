@@ -10,6 +10,14 @@ last_compacted: "2026-11-15"
 
 Rolling per-module knowledge log. Hard cap: 150 lines.
 
+## Entry 2026-11-26 — project-deps image layer (#6038)
+`bin/pool/project-layer.mjs`. `deriveProjectDeps(worktree, fs)` returns `{ecosystems, lockfiles, node, python, files, hash}`: lockfiles come from depcache `detect`
+(pnpm/npm/yarn/uv/poetry, nested service dirs), runtimes from `.nvmrc`, `.tool-versions`, `.python-version` and CI `setup-node`/`setup-python`; `hash` covers lockfile+manifest
+contents, runtimes and arch (null when nothing to install). A launch spec carrying `project_deps` {hash, lockfiles, files, node, python} runs on the layer
+`<lane image>-p<12 hex>` (FROM the lane image, i.e. the `-t` lane_tools tag when tools are listed; the `-t` and `-p` tags never collide). Deps install under
+`/opt/project-deps[/<dir>]` from the frozen-install commands of depcache `depCommands`. The build is single-flight and runs in the background: a launch never waits, it runs the
+lane image while the layer builds or after a failed build (failure memo 10 min). `isProjectLayerTagOf` marks `-p` tags as owned in the image prune. Specs without `project_deps` use the same image as before.
+
 ## Entry 2026-11-26 — light lanes + heavy-phase tokens (#6047)
 Default-off `cfg.elastic_lanes` (pushed through the router `/policy` allowlist). On: a lane is admitted on its base reservation, and each
 heavy step leases a token from the agent: `POST /sandboxes/:id/heavy/acquire|release|renew` (sandbox credential, like `creds`/`relay`;

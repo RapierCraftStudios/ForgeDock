@@ -17,7 +17,7 @@ import { cmpVersion, versionOf } from "./version.mjs";
  * What the router ships to pool agents (self-update and bootstrap). Every module the agent can load statically from
  * bin/pool/agent.mjs must live under these paths; bin/tests/pool-agent-bundle.test.mjs enforces it.
  */
-export const AGENT_BUNDLE_PATHS = Object.freeze(["package.json", "bin/pool", "bin/lean/concurrency.mjs", "pool"]); // concurrency.mjs: thresholds imported by pool/lane-target.mjs (#6061); it has no imports
+export const AGENT_BUNDLE_PATHS = Object.freeze(["package.json", "bin/pool", "bin/lean/concurrency.mjs", "bin/lean/depcache.mjs", "bin/lean/ledger.mjs", "pool"]); // depcache.mjs+ledger.mjs: pool/project-layer.mjs (#6038); concurrency.mjs: thresholds imported by pool/lane-target.mjs (#6061); it has no imports
 
 const run = promisify(execFile);
 

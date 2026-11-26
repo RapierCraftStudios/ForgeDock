@@ -175,6 +175,8 @@ export function pySatisfies(spec, v) {
 }
 /** Full frozen install on a miss, and the warm no-op repair pass on a hit (null: nothing path-dependent to repair). */
 export { commands as depCommands };
+/** #6038: lockfile detection and the repo's Python pin, reused to derive project deps for an image layer. */
+export { detect, pyHint };
 /** The files a component's key hashes, relative to its own dir (lockfile, manifests, package-manager config). */
 const keyFiles = (d, pkgs) => (JS.has(d.eco) ? [d.lock, ...pkgs, "pnpm-workspace.yaml", ".npmrc", ".yarnrc.yml"] : [d.lock, "pyproject.toml", ".python-version"]);
 const expectedTrees = (d, pkgs) => (JS.has(d.eco) ? [...new Set(pkgs.map((p) => (dirname(p) === "." ? "node_modules" : `${dirname(p)}/node_modules`)))] : [".venv"]);
