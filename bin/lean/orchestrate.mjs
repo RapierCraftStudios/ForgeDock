@@ -1467,7 +1467,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // the `getAdded` path below; closed or moved pending issues leave; ended deferred/held/engine-error/conformance rows are requeued
   // through `drainRequeues` by policy (reconcile.mjs). Same DAG, priority and lane rules as an operator `--add`/`--requeue`.
   let nextReconcile = 0, parkedDigest = "";
-  const selFresh = [], autoRequeues = [];
+  const selFresh = [], autoRequeues = [], selMatched = new Set(); // #6022: issues the selector has matched in this run
   const reconcileTick = async () => {
     if (!reconcile) return;
     const t = now();
@@ -1477,7 +1477,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     try { open = await reconcile.list(); } catch { open = null; } // a failed read never makes anything leave
     const labels = new Map((open ?? []).map((o) => [o.number, o.labels ?? []]));
     if (open) {
-      const { join, leave } = diffSelection({ open, members: [...set], pending, running, results });
+      const { join, leave } = diffSelection({ open, members: [...set], pending, running, results, matched: selMatched });
+      for (const o of open) selMatched.add(o.number);
       selFresh.push(...join);
       for (const n of leave) {
         pending.splice(pending.indexOf(n), 1);

@@ -26,5 +26,8 @@ describe("#5991 liveness helpers", () => {
   it("sandboxBudgetKey is stable per sandbox lifetime", () => {
     assert.equal(sandboxBudgetKey("b1", "fdrsbx-9"), sandboxBudgetKey("b1", "fdrsbx-9"));
     assert.notEqual(sandboxBudgetKey("b1", "fdrsbx-9"), sandboxBudgetKey("b2", "fdrsbx-9"));
+    // #6023: a reused sandbox id on a later attempt is a new row; the same attempt replayed is the same row
+    assert.notEqual(sandboxBudgetKey("b1", "fdrsbx-9", 1000), sandboxBudgetKey("b1", "fdrsbx-9", 2000));
+    assert.equal(sandboxBudgetKey("b1", "fdrsbx-9", 1000), sandboxBudgetKey("b1", "fdrsbx-9", 1000));
   });
 });

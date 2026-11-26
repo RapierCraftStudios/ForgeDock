@@ -151,6 +151,9 @@ describe("providerLanes: an unreachable provider is retried, then deferred witho
     assert.deepEqual(rows, ["b1#fdrsbx-9"]);
     assert.ok(Math.abs(b.dayTotals().minutes - 120) / 120 <= 0.05);
     assert.equal(b.record(sandboxBudgetKey("b1", "fdrsbx-9"), { minutes: 10 }), false); // a smaller replay changes nothing
+    const before = b.dayTotals().minutes;
+    b.record(sandboxBudgetKey("b1", "fdrsbx-9", 99), { minutes: 7 }); // #6023: a rerun reusing the sandbox id adds its own usage
+    assert.equal(b.dayTotals().minutes, before + 7);
   });
 
   it("#5053 a 401 on status/result of a launched sandbox is retried, then ends sandbox.auth (capped), never engine-error", async () => {
