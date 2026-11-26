@@ -7,7 +7,6 @@
  * Nothing here clears the ledger: releaseHeld, --requeue and --set-env leave it alone. A missing ledger always admits.
  */
 import { createHash } from "node:crypto";
-import { amendmentKindProblems } from "./conformance.mjs";
 import { parseContractComment } from "./render.mjs";
 import { postUpsert, findLeading, engineCommentCount } from "./statuscomment.mjs";
 
@@ -108,28 +107,6 @@ export function parseAttempts(body) {
   const m = new RegExp(`^\\s*<!--\\s*${ATTEMPTS_MARKER}\\s+(\\{.*\\})\\s*-->`, "s").exec(String(body ?? ""));
   if (!m) return null;
   try { return normalizeLedger(JSON.parse(m[1])); } catch { return null; }
-}
-
-const ID_RE = /^#?\d+$/;
-/**
- * The shared amendment schema (#5986, extends #5979 past guard ids): kind/path/requirement presence plus field types. Returns the
- * rejection strings, [] when valid; the lane returns them to the builder once and never posts a rejected shape.
- */
-export function validateAmendments(amendments) {
-  if (amendments !== undefined && amendments !== null && !Array.isArray(amendments)) return ["amendments must be an array"];
-  const out = [...amendmentKindProblems(amendments)];
-  for (const a of amendments ?? []) {
-    if (!a || typeof a !== "object") { out.push(`amendment must be an object: ${JSON.stringify(a ?? null).slice(0, 120)}`); continue; }
-    const tag = JSON.stringify(a).slice(0, 200);
-    if (a.why !== undefined && typeof a.why !== "string") out.push(`amendment 'why' must be a string: ${tag}`);
-    if (a.path !== undefined && typeof a.path !== "string") out.push(`amendment 'path' must be a string: ${tag}`);
-    if (a.kind === "supersedes" && a.guard !== undefined && !ID_RE.test(String(a.guard))) out.push(`supersedes 'guard' must be an issue id like #123: ${tag}`);
-    if (a.kind === "decision") {
-      const d = a.decision;
-      if (!d || typeof d !== "object" || typeof d.choice !== "string" || !d.choice.trim() || (d.anchors !== undefined && !Array.isArray(d.anchors))) out.push(`decision needs {choice: string, anchors: [paths]}: ${tag}`);
-    }
-  }
-  return [...new Set(out)];
 }
 
 /** Hash of the last trusted, parseable FORGE:CONTRACT comment (the frozen contract), or null. */
