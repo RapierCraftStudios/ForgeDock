@@ -4238,6 +4238,16 @@ describe("base-sync (#4100)", () => {
     noRebaseNoForce(w);
   });
 
+  it("#5898 a failed FORGE:BASE_SYNC comment after a resolved base-sync is an anomaly, not an engine-error: the lane merges", async () => {
+    const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], reviews: [ok(), ok()] });
+    const post = w.io.gh;
+    w.io.gh = async (a) => (a[0] === "issue" && a[1] === "comment" && a[a.indexOf("--body") + 1].includes("FORGE:BASE_SYNC") ? Promise.reject(new Error("HTTP 502: unexpected EOF")) : post(a));
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.merges.length, 1);
+    assert.match(traj(w).join("\n"), /FORGE:BASE_SYNC comment not posted: HTTP 502/);
+  });
+
   it("#5583 follow-up: a builder-resolved base-sync with only documentation conflicts and an unchanged code diff skips the re-review", async () => {
     const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["devdocs/modules/lean.md"], reviews: [ok(), ok()] });
     const git = w.io.git;
