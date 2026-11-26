@@ -7070,7 +7070,7 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
   it("pre-PR: declared commands run in the lane worktree; a failing one goes back to the builder before PR_OPENED", async () => {
     const w = world(); const ran = [];
     let rc = 1;
-    w.io.runCommand = async ({ command, cwd, timeoutMs }) => { ran.push([command, cwd, timeoutMs]); w.seq.push(`check:${rc}`); const r = { rc, output: "check-test-tmp-cleanup: mkdtempSync in x.test.mjs" }; return r; };
+    w.io.runCommand = async ({ command, cwd, timeoutMs }) => { ran.push([command, cwd, timeoutMs]); w.seq.push(`check:${rc}`); const r = { rc, output: "check-test-tmp-cleanup: mkdtempSync in test/foo.test.js" }; return r; };
     const inner = w.io.runner;
     w.io.runner = async (c) => { if (/declared check commands failed/.test(c.prompt)) rc = 0; return inner(c); };
     const dir = tmpDir("core-");
@@ -7079,7 +7079,7 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     assert.deepEqual(ran.map((x) => x.slice(0, 2)), [["bash scripts/check-test-tmp-cleanup.sh", WT], ["bash scripts/check-test-tmp-cleanup.sh", WT]]);
     assert.equal(ran[0][2], 300000);
     const fix = builders(w).filter((b) => /declared check commands failed/.test(b[4]));
-    assert.equal(fix.length, 1); assert.equal(fix[0][2], null); assert.match(fix[0][4], /mkdtempSync in x\.test\.mjs/); assert.match(fix[0][4], /exit 1/);
+    assert.equal(fix.length, 1); assert.equal(fix[0][2], null); assert.match(fix[0][4], /mkdtempSync in test\/foo\.test\.js/); assert.match(fix[0][4], /exit 1/);
     assert.ok(w.seq.indexOf("builder", w.seq.indexOf("check:1")) < w.seq.indexOf("pr"), "the fix runs before the PR is opened");
     const log = readLog(dir, 7);
     const pre = log.filter((e) => e.event === "PRECHECK_COMMANDS");
