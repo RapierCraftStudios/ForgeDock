@@ -259,15 +259,24 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     return out;
   }
 
+  const repoCfg = (spec) => cfg.repos?.[spec?.repo?.slug] ?? {};
+  /** #5886: a spec naming an account is placed only on that account's agents; without one, any enrolled agent (as before). */
+  const inAccount = (c, spec) => typeof spec?.account !== "string" || own(agents(), c.name)?.account === spec.account;
+  /** #6041: per-repo placement. `repos.<slug>.agents` (honoured only when a non-empty string array) is an allowlist; `exclude_agents` subtracts from it. Unset = any agent, as before. */
+  const names = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
+  const placeable = (c, spec) => {
+    if (!inAccount(c, spec)) return false;
+    const rc = repoCfg(spec), allow = names(rc.agents);
+    return (!allow.length || allow.includes(c.name)) && !names(rc.exclude_agents).includes(c.name);
+  };
   /** Agent liveness for the scheduler (#4547): an agent is online when it answers and is not paused. */
-  async function status() {
-    const caps = await capacities();
+  async function status(repo) {
+    const caps = (await capacities()).filter((c) => placeable(c, repo ? { repo: { slug: repo } } : null));
     const agentsView = caps.map((c) => ({ name: c.name, ok: c.ok, paused: Boolean(c.paused), transport: c.transport ?? "direct", ...diskReport(c), ...memReport(c) }));
     return { online: agentsView.filter((a) => a.ok && !a.paused).length, total: agentsView.length, agents: agentsView };
   }
 
   /** Per-repo extras: the gitignored forge.yaml, and a private Docker daemon (with a bigger reservation) when enabled. */
-  const repoCfg = (spec) => cfg.repos?.[spec?.repo?.slug] ?? {};
   // Placement counts the (small) reservation; `limit` is each container's hard burst cap (burst model, when configured).
   const sizeFor = (spec) => {
     const docker = Boolean(repoCfg(spec).docker), dind = cfg.dind ?? { cpus: 1, mem_gb: 2 };
@@ -340,27 +349,26 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   // when it is known, else the best-fitting one) and remembered, so launch() prefers it and the seeded mirror is the one the lane uses.
   const seedPick = new Map(); // sandbox id -> {agent, at}
   const SEED_CHUNK_B64_MAX = 768 * 1024;
-  async function seedAgent(id) {
+  async function seedAgent(id, slug) {
     const known = own(sbx(), id);
     if (known && own(agents(), known.agent)) return known.agent;
     const hit = seedPick.get(id);
     if (hit && own(agents(), hit.agent) && now() - hit.at < 30 * 60000) return hit.agent;
     for (const [k, v] of seedPick) if (now() - v.at >= 30 * 60000) seedPick.delete(k);
-    const fits = (await capacities()).filter((c) => c.ok && !c.paused && c.host_disk_low !== true && c.disk_capped !== true).sort((a, b) => b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
+    const spec = slug ? { repo: { slug } } : null; // the repo is known from the seed request when it names one
+    const fits = (await capacities()).filter((c) => c.ok && !c.paused && placeable(c, spec) && c.host_disk_low !== true && c.disk_capped !== true).sort((a, b) => b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
     if (!fits.length) return null;
     seedPick.set(id, { agent: fits[0].name, at: now() });
     return fits[0].name;
   }
-  async function seedForward(id, method, path, body) {
+  async function seedForward(id, method, path, body, slug) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)) return { status: 400, body: { error: "bad sandbox id" } };
     if (typeof body?.data_b64 === "string" && body.data_b64.length > SEED_CHUNK_B64_MAX) return { status: 413, body: { error: "chunk too large" } };
-    const name = await seedAgent(id), a = name && own(agents(), name);
+    const name = await seedAgent(id, typeof slug === "string" ? slug : undefined), a = name && own(agents(), name);
     if (!a) return { status: 503, body: { error: "no agent available to seed" }, retryAfter: cfg.retry_after_s ?? 60 };
     try { const r = await agentCall(a, method, path, body, 120000); return { status: r.status, body: agentBody(r, name) }; }
     catch (e) { return { status: 502, body: { error: `agent ${name} unreachable: ${e.message}` } }; }
   }
-  /** #5886: a spec naming an account is placed only on that account's agents; without one, any enrolled agent (as before). */
-  const inAccount = (c, spec) => typeof spec?.account !== "string" || own(agents(), c.name)?.account === spec.account;
   async function launch(spec) {
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id)) return { status: 400, body: { error: "spec.id required ([A-Za-z0-9._-], max 128)" } };
     const known = own(sbx(), spec.id);
@@ -372,7 +380,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       delete sbx()[spec.id]; store.save();
     }
     const size = sizeFor(spec);
-    const sized = (await capacities()).filter((c) => c.ok && !c.paused && inAccount(c, spec) && fitsPriority(c, spec, size));
+    const sized = (await capacities()).filter((c) => c.ok && !c.paused && placeable(c, spec) && fitsPriority(c, spec, size));
     const diskLow = sized.filter((c) => c.host_disk_low === true).map((c) => c.name); // #5733: never POST to a host whose drive is short
     const capped = sized.filter((c) => c.disk_capped === true && c.host_disk_low !== true).map((c) => c.name); // #5884: lane disk at its hard cap
     const memLow = sized.filter((c) => c.host_mem_low === true && c.host_disk_low !== true && c.disk_capped !== true).map((c) => c.name); // #5967: host memory under the floor
@@ -405,7 +413,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     if (own(sbx(), spec.id)) return launch(spec); // already placed: the same idempotent path
     const size = sizeFor(spec);
     const laneId = isLane(spec.id);
-    for (const c of (await capacities()).filter((x) => x.ok && !x.paused && inAccount(x, spec))) {
+    for (const c of (await capacities()).filter((x) => x.ok && !x.paused && placeable(x, spec))) {
       if (laneId && atCeiling(c.name)) continue; // #5735: the 404 makes the caller cold-launch, which gets the ceiling 503
       if (laneId) reserve(c.name, spec.id);
       try {
@@ -613,8 +621,8 @@ bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TM
     [route("GET", "/health"), { fn: async () => ({ status: 200, body: { ok: true, agents: Object.keys(agents()).length, sandboxes: Object.keys(sbx()).length } }), auth: "none" }],
     [route("POST", "/sandboxes"), fd(async (_p, body) => launch(body))],
     [route("POST", "/sandboxes/claim"), fd(async (_p, body) => claim(body))],
-    [route("GET", "/sandboxes/:id/mirrors"), fd(async ({ id }, _b, url) => seedForward(id, "GET", `/mirrors?${new URLSearchParams([...url.searchParams].filter(([k]) => ["slug", "cache_key", "upload"].includes(k)))}`))], // #5949
-    [route("POST", "/sandboxes/:id/seed"), fd(async ({ id }, body) => seedForward(id, "POST", "/mirrors/seed", body))],
+    [route("GET", "/sandboxes/:id/mirrors"), fd(async ({ id }, _b, url) => seedForward(id, "GET", `/mirrors?${new URLSearchParams([...url.searchParams].filter(([k]) => ["slug", "cache_key", "upload"].includes(k)))}`, undefined, url.searchParams.get("slug")))], // #5949
+    [route("POST", "/sandboxes/:id/seed"), fd(async ({ id }, body) => seedForward(id, "POST", "/mirrors/seed", body, body?.slug))],
     [route("GET", "/sandboxes/:id"), fd(async ({ id }) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}`))],
     [route("GET", "/sandboxes/:id/logs"), fd(async ({ id }, _b, url) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/logs?cursor=${encodeURIComponent(url.searchParams.get("cursor") ?? "0")}`))],
     [route("GET", "/sandboxes/:id/result"), fd(async ({ id }) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/result`))],
@@ -626,11 +634,12 @@ bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TM
     [route("POST", "/sandboxes/:id/relay/:rid"), fd(async (p, body) => relayAnswer(p, body))],
     [route("POST", "/sandboxes/:id/stop"), fd(async ({ id }) => forward(id, "POST", `/sandboxes/${encodeURIComponent(id)}/stop`))], // #5274
     [route("DELETE", "/sandboxes/:id"), fd(async ({ id }) => forward(id, "DELETE", `/sandboxes/${encodeURIComponent(id)}`, DESTROY_TIMEOUT_MS))],
-    [route("GET", "/status"), fd(async () => ({ status: 200, body: await status() }))],
+    [route("GET", "/status"), fd(async (_p, _b, url) => ({ status: 200, body: await status(url.searchParams.get("repo") ?? undefined) }))],
     [route("GET", "/agents"), fd(async (_p, _b, url) => { // #5535: each sandbox carries disk_used_mb from its agent's sandbox_disk_mb when the agent reports it
       const acct = url.searchParams.get("account"); // #5886: ?account= is the per-account view; `account` and `policy` ride on enrolled records that have them
-      const caps = (await capacities()).filter((c) => acct === null || own(agents(), c.name)?.account === acct).map((c) => { const a = own(agents(), c.name); return { ...c, ...(a?.account ? { account: a.account } : {}), ...(a?.policy ? { policy: a.policy } : {}) }; }), byName = new Map(caps.map((c) => [c.name, c])), out = {};
-      for (const [id, s] of Object.entries(sbx())) { if (acct !== null && !byName.has(s?.agent)) continue; const mb = byName.get(s?.agent)?.sandbox_disk_mb?.[id]; out[id] = Number.isFinite(mb) ? { ...s, disk_used_mb: mb } : s; }
+      const repo = url.searchParams.get("repo"), view = repo ? { repo: { slug: repo } } : null; // #6041: ?repo= is the per-repo view (allowlist and exclude list)
+      const caps = (await capacities()).filter((c) => (acct === null || own(agents(), c.name)?.account === acct) && placeable(c, view)).map((c) => { const a = own(agents(), c.name); return { ...c, ...(a?.account ? { account: a.account } : {}), ...(a?.policy ? { policy: a.policy } : {}) }; }), byName = new Map(caps.map((c) => [c.name, c])), out = {};
+      for (const [id, s] of Object.entries(sbx())) { if ((acct !== null || repo) && !byName.has(s?.agent)) continue; const mb = byName.get(s?.agent)?.sandbox_disk_mb?.[id]; out[id] = Number.isFinite(mb) ? { ...s, disk_used_mb: mb } : s; }
       const remote_lanes = Object.keys(sbx()).filter(isLane).length; // #5735: lane sandboxes across all batches and agents
       return { status: 200, body: { agents: caps.map((c) => ({ ...c, lanes: laneView(c.name), ...diskReport(c) })), sandboxes: out, remote_lanes } };
     })],
