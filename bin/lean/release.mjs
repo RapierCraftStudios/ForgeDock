@@ -33,7 +33,7 @@ import { parseFlakeConfig, classifyFailure, planRerun, flakeEntry, recordFlakes,
 import { readActive } from "./release-ledger.mjs";
 import { statusFromCli, policyFromYaml } from "./release-status.mjs";
 import { parseFixConfig } from "./release-fixloop.mjs";
-import { hostPreflightStep, markReadyStep, parsePreflightConfig } from "./release-preflight.mjs";
+import { hostPreflightStep, markReadyStep, stagingHealthStep, parsePreflightConfig } from "./release-preflight.mjs";
 import { roleRefusal } from "./release-credentials.mjs";
 import { mergeGuard } from "./release-gate.mjs";
 
@@ -130,7 +130,7 @@ const snapshotKeys = (r) => {
 export const isSnapshot = (config) => config?.mode === "snapshot";
 
 /** `{rehearsal}` / `{preflight}` only when configured, so the config of a repo without them keeps its shape. */
-const optKeys = (r) => { const rehearsal = parseRehearsalConfig(r), preflight = parsePreflightConfig(r); return { ...(rehearsal ? { rehearsal } : {}), ...(preflight ? { preflight } : {}) }; };
+const optKeys = (r) => { const rehearsal = parseRehearsalConfig(r), preflight = parsePreflightConfig(r); return { ...(r?.allow_red_staging === true || String(r?.allow_red_staging).toLowerCase() === "true" ? { allowRedStaging: true } : {}), ...(rehearsal ? { rehearsal } : {}), ...(preflight ? { preflight } : {}) }; };
 
 const json = (s) => JSON.parse(String(s || "null"));
 
@@ -146,7 +146,10 @@ const bundleBody = (list) => `## Release bundle\n\n${list.length ? list.map((p) 
 async function preflightStep(ctx) {
   const { io, repo, state, staging } = ctx;
   // Snapshot mode: lanes keep merging to staging; the release is cut from a fixed SHA, so nothing is refused or held (#5276).
-  if (isSnapshot(ctx.config)) return { snapshot: true, held: 0 };
+  const health = await stagingHealthStep(ctx);
+  if (health.refused) { state.knownFailures = health.failed; ctx.save(); return { refused: health.refused, failed: health.failed }; }
+  const warn = health.warning ? { warning: health.warning } : {};
+  if (isSnapshot(ctx.config)) return { snapshot: true, held: 0, ...warn };
   const lanes = await io.runningLanes(repo);
   if (lanes.length) return { refused: `lanes of ${repo} are running (${lanes.map((l) => `${l.batch}#${l.issue}`).join(", ")}); wait or cancel them` };
   const open = json(await io.gh(["pr", "list", "--repo", repo, "--base", staging, "--state", "open", "--json", "number"])) ?? [];
@@ -159,7 +162,7 @@ async function preflightStep(ctx) {
     ctx.save();
     await io.setParallel(b.id, 1);
   }
-  return { held: state.held.length };
+  return { held: state.held.length, ...warn };
 }
 
 /** Restore every held batch to its recorded K; best effort, recorded as it goes. */

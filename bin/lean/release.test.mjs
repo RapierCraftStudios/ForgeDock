@@ -594,3 +594,17 @@ describe("release start|go routing (#5571)", () => {
     await assert.rejects(releaseFromCli(["start", "--wave", "x"], opts([], [])), /--wave/);
   });
 });
+
+describe("preflight staging-health gate (#6013)", () => {
+  const snap = { mode: "snapshot" };
+  const world = (runs) => ({ pm: (a) => (a[0] === "api" && /check-runs/.test(a[1]) ? JSON.stringify(runs) : undefined) });
+  it("refuses a snapshot cut on a red staging head and proceeds when green", async () => {
+    const mod = await import("./release.mjs");
+    const base = (io) => ({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts: {}, config: snap, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ "release-pr": ok, review: ok, fixes: ok, promotion: ok, "post-merge": ok }) });
+    const reds = await mod.runRelease(base(fakeIo(world([{ name: "black", status: "completed", conclusion: "failure", text: "" }]))));
+    assert.equal(reds.status, "refused");
+    assert.match(JSON.stringify(reds), /black/);
+    const green = await mod.runRelease(base(fakeIo(world([{ name: "black", status: "completed", conclusion: "success", text: "" }]))));
+    assert.notEqual(green.status, "refused");
+  });
+});
