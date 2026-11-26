@@ -2212,10 +2212,10 @@ export async function runCore(o) {
       return d.contract;
     }
     async function preflightValidates(contract) {
+      for (const d of hostEnvDefects()) { T.anomalies.push(`Host environment defect (${d.code}): ${d.detail}`); ev({ event: "HOST_ENV_DEFECT", code: d.code, detail: d.detail }); } // #5917: an env defect, never a miss that blames the contract
       if ((!io.probeCommand && !io.preflightRun) || !contract || typeof contract !== "object") return [];
       const files = String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean);
       const env = laneEnv(), missing = new Set(), misses = []; // #4325: the env the validate commands run with
-      for (const d of hostEnvDefects()) { T.anomalies.push(`Host environment defect (${d.code}): ${d.detail}`); ev({ event: "HOST_ENV_DEFECT", code: d.code, detail: d.detail }); } // #5917: an env defect, never a miss that blames the contract
       // #5592: tools resolve where the lane runs them from: project-local .venv/bin and node_modules/.bin (as the heavy shims do)
       const local = projectBinDirs(wt, files);
       if (local.length) env.PATH = withLocalBins(env.PATH ?? process.env.PATH ?? "", local);
