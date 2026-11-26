@@ -330,8 +330,9 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       const r = c.reservations.find((x) => x.name === spec.reservation) ?? (spec.reservation ? null : c.reservations.length === 1 ? c.reservations[0] : null);
       return Boolean(r) && r.cpus_free >= size.cpus && r.mem_free_gb >= size.mem_gb;
     }
-    const cpusFree = prio === "normal" && Number.isFinite(c.cpus_free_unreserved) ? c.cpus_free_unreserved : c.cpus_free;
-    const memFree = prio === "normal" && Number.isFinite(c.mem_free_unreserved_gb) ? c.mem_free_unreserved_gb : c.mem_free_gb;
+    const elastic = c.elastic_lanes === true && Number.isFinite(c.cpus_free_elastic) && Number.isFinite(c.mem_free_gb_elastic); // #6047: base reservations plus held heavy tokens
+    const cpusFree = prio === "normal" && Number.isFinite(c.cpus_free_unreserved) ? c.cpus_free_unreserved : elastic ? c.cpus_free_elastic : c.cpus_free;
+    const memFree = prio === "normal" && Number.isFinite(c.mem_free_unreserved_gb) ? c.mem_free_unreserved_gb : elastic ? c.mem_free_gb_elastic : c.mem_free_gb;
     return cpusFree >= size.cpus && memFree >= size.mem_gb;
   };
   const headroom = (c, spec) => (spec?.priority === "borrow" && Number.isFinite(c.cpus_free_unreserved) ? c.cpus_free_unreserved : 0);
@@ -384,7 +385,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       if (laneId && atCeiling(c.name)) { laneCapped.push({ name: c.name, ...laneView(c.name) }); continue; }
       if (laneId) reserve(c.name, spec.id);
       try {
-        const r = await agentCall(own(agents(), c.name), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...size }, 120000);
+        const r = await agentCall(own(agents(), c.name), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...size, ...(ceilingOf(c.name) !== null ? { max_lanes: ceilingOf(c.name) } : {}) }, 120000);
         if (r.status === 503) { busy = { r, name: c.name }; continue; } // raced with another launch, or still building; try the next host
         if (r.ok) { sbx()[spec.id] = { agent: c.name, issue: spec.issue ?? null, batch: spec.batch ?? null, createdAt: now(), touched: now() }; store.save(); }
         return { status: r.status, body: { ...agentBody(r, c.name), agent: c.name } };
@@ -473,12 +474,13 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   /** #5886: per-box policy, allowlisted keys only; pushed to the agent's /admin/policy (the agent keeps its owner pause). */
   function validPolicy(b) {
     if (!b || typeof b !== "object" || Array.isArray(b)) return "policy must be an object";
-    const bad = Object.keys(b).filter((k) => !["cpus", "mem_gb", "idle_only", "paused", "floors"].includes(k));
+    const bad = Object.keys(b).filter((k) => !["cpus", "mem_gb", "idle_only", "paused", "floors", "elastic_lanes"].includes(k));
     if (bad.length) return `unknown policy key: ${bad[0]}`;
     const int = (v, hi) => Number.isInteger(v) && v >= 1 && v <= hi;
     if ("cpus" in b && !int(b.cpus, 256)) return "cpus must be an integer 1-256";
     if ("mem_gb" in b && !int(b.mem_gb, 1024)) return "mem_gb must be an integer 1-1024";
     if (("idle_only" in b && typeof b.idle_only !== "boolean") || ("paused" in b && typeof b.paused !== "boolean")) return "idle_only and paused must be booleans";
+    if ("elastic_lanes" in b && typeof b.elastic_lanes !== "boolean") return "elastic_lanes must be a boolean";
     if ("floors" in b && !(b.floors && typeof b.floors === "object" && Object.keys(b.floors).every((k) => k === "host_disk_gb" && Number.isFinite(b.floors[k]) && b.floors[k] >= 0))) return "floors accepts only host_disk_gb >= 0";
     return null;
   }

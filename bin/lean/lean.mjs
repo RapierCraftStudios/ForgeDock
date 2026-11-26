@@ -26,7 +26,7 @@ import { acquireBranchLock, waitPidsExit } from "./branchlock.mjs";
 import { parseRecurrenceConfig, recurrenceFacts, recursLinks, designLaneNote, designDemanded } from "./recurrence.mjs"; // #5751
 import { areaOf, acquireHotArea, countCounters } from "./hotarea.mjs"; // #5751
 import { isEnvValidateFailure, outputTail, contractRuleCounts, onlyTestPlanProblems, isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, applyRequirementDecisions, dedupeAddRequirements, loneE2eRows, reproEnvMiss, resolveForgedockPaths, resolvingIo, portableForgedockPaths, FORGEDOCK_CHECKS_VAR, FORGEDOCK_ENTRY_VAR, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, splitAdvisory, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
-import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
+import { checkAdmission, hostParallelism, quotaCores, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment, prodFailureSignal } from "./prefilter.mjs";
 import { validateAmendments } from "./attempts.mjs";
 import { writeStatus, postUpsert, postKeyed, isKeyedPost, isStatusPost, isUpsertPost, hasSection, clearPipelineLabels, IN_PLACE_MARKERS, commentId } from "./statuscomment.mjs";
@@ -968,7 +968,7 @@ export async function runCore(o) {
     const set = String(process.env.FORGE_HOST_PARALLELISM ?? "").trim();
     if (/^\d+$/.test(set) && Number(set) > 0) return set;
     if (!io.host?.cores) return null;
-    try { return String(hostParallelism({ cores: io.host.cores(), lanes: io.host.activeLanes?.() })); } catch { return null; }
+    try { return String(hostParallelism({ cores: quotaCores({ cores: io.host.cores(), read: (f) => readFileSync(f, "utf8"), env: process.env }), lanes: io.host.activeLanes?.() })); } catch { return null; }
   }
   /**
    * #4325: the lane env every engine-run command shares with the builder: shared package-manager stores (#4220), the run
