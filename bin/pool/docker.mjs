@@ -79,6 +79,7 @@ export const dockerCli = {
     return out ? out.split("\n").filter(Boolean) : [];
   },
   async pull(image) { return docker(["pull", "-q", image], { timeoutMs: 30 * 60000 }); },
+  async tag(src, dst) { return docker(["tag", src, dst], { timeoutMs: 30000 }); },
   async load(file) { return docker(["load", "-q", "-i", file], { timeoutMs: 30 * 60000 }); },
   async hasImage(ref) { try { await docker(["image", "inspect", ref], { timeoutMs: 20000 }); return true; } catch { return false; } },
   /** {name: {cpu (cores), mem_gb}} for running containers with the label. */

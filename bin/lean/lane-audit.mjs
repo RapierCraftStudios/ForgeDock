@@ -27,11 +27,12 @@ export function forgeYamlHash(dir) {
 }
 
 /** The version stamp: engine version + build sha, agent version, image tag, forge.yaml hash, batch id, attempt. */
-export function buildStamp({ engineVersion = null, buildSha = null, agentVersion = null, imageTag = null, forgeYamlHash: fy = null, batchId = null, attempt = null, env = process.env } = {}) {
+export function buildStamp({ engineVersion = null, buildSha = null, agentVersion = null, imageTag = null, imageVersion = null, forgeYamlHash: fy = null, batchId = null, attempt = null, env = process.env } = {}) {
   return {
     engine_version: engineVersion ?? null,
     build_sha: buildSha ?? env.FORGE_BUILD_SHA ?? null,
     agent_version: agentVersion ?? env.FORGE_AGENT_VERSION ?? null,
+    image_version: imageVersion ?? null,
     image_tag: imageTag ?? env.FORGE_IMAGE_TAG ?? null,
     forge_yaml_hash: fy ?? null,
     batch_id: batchId ?? null,

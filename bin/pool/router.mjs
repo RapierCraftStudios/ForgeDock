@@ -286,7 +286,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   /** Agent liveness for the scheduler (#4547): an agent is online when it answers and is not paused. */
   async function status(repo) {
     const caps = (await capacities()).filter((c) => placeable(c, repo ? { repo: { slug: repo } } : null));
-    const agentsView = caps.map((c) => ({ name: c.name, ok: c.ok, paused: Boolean(c.paused), transport: c.transport ?? "direct", ...(engineOf(c) ? { engine_version: engineOf(c), engine_skew: engineBelow(c, targetVersion()) } : {}), ...diskReport(c), ...memReport(c) }));
+    const agentsView = caps.map((c) => ({ name: c.name, ok: c.ok, paused: Boolean(c.paused), transport: c.transport ?? "direct", ...(engineOf(c) ? { engine_version: engineOf(c), engine_skew: engineBelow(c, targetVersion()) } : {}), ...(typeof c.image_version === "string" ? { image_version: c.image_version } : {}), ...diskReport(c), ...memReport(c) }));
     return { online: agentsView.filter((a) => a.ok && !a.paused).length, total: agentsView.length, agents: agentsView };
   }
 
@@ -425,7 +425,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
         const r = await agentCall(own(agents(), c.name), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...size, ...(ceilingOf(c.name) !== null ? { max_lanes: ceilingOf(c.name) } : {}) }, 120000);
         if (r.status === 503) { busy = { r, name: c.name }; continue; } // raced with another launch, or still building; try the next host
         if (r.ok) { sbx()[spec.id] = { agent: c.name, issue: spec.issue ?? null, batch: spec.batch ?? null, createdAt: now(), touched: now() }; store.save(); }
-        return { status: r.status, body: { ...agentBody(r, c.name), agent: c.name, ...(engineOf(c) ? { engine_version: engineOf(c) } : {}) } };
+        return { status: r.status, body: { ...agentBody(r, c.name), agent: c.name, ...(engineOf(c) ? { engine_version: engineOf(c) } : {}), ...(typeof c.image_version === "string" ? { image_version: c.image_version } : {}) } };
       } finally { if (laneId) release(c.name, spec.id); }
     }
     if (laneCapped.length && !busy) return { status: 503, body: { error: "pool.host_lane_ceiling", code: "pool.host_lane_ceiling", agents: laneCapped }, retryAfter: cfg.retry_after_s ?? 60 };

@@ -25,6 +25,9 @@ export function versionOf(root = repoRoot) {
 
 /** The lane image is tagged and built from the ForgeDock package version (no separate pin). */
 export const laneImageTag = (version) => `forgedock-lane:${version}`;
+/** The registry ref the release workflow pushes (GHCR, tagged with the npm version); FORGEDOCK_LANE_REPO overrides the repository. */
+export const DEFAULT_LANE_REPO = "ghcr.io/rapiercraftstudios/forgedock-lane";
+export const lanePublishedRef = (version, repo = process.env.FORGEDOCK_LANE_REPO || DEFAULT_LANE_REPO) => `${repo}:${version}`;
 export const laneBuildArgs = (version) => ({ FORGEDOCK_VERSION: version });
 
 /** Numeric dotted-version compare (1.10 > 1.9): negative, 0 or positive; null when either side is not a version. */

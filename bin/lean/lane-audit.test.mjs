@@ -51,8 +51,10 @@ describe("lane audit run", () => {
     const a = parseAudit(`<!-- ${LANE_AUDIT_MARKER} -->\n${w.posts[0][1]}`);
     assert.equal(a.status, "proposed");
     assert.equal(a.signature, "gh-network-text");
-    assert.deepEqual(Object.keys(a.stamp).sort(), ["agent_version", "attempt", "batch_id", "build_sha", "engine_version", "forge_yaml_hash", "image_tag"]);
+    assert.deepEqual(Object.keys(a.stamp).sort(), ["agent_version", "attempt", "batch_id", "build_sha", "engine_version", "forge_yaml_hash", "image_tag", "image_version"]);
     assert.equal(a.stamp.batch_id, "b1");
+    assert.equal(a.stamp.image_version, null);
+    assert.equal(buildStamp({ imageVersion: "1.2.0" }).image_version, "1.2.0");
     const again = await runLaneAudit({ ...w.o, detail: FIXTURES["gh-network-text"] });
     assert.equal(again.posted, false);
     assert.equal(w.posts.length, 1);

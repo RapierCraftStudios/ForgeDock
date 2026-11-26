@@ -10,7 +10,7 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSyn
 import { basename, dirname, join } from "node:path";
 import { cpus, hostname } from "node:os";
 import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
-import { repoRoot, versionOf, laneImageTag, laneBuildArgs } from "./version.mjs";
+import { repoRoot, versionOf, laneImageTag, laneBuildArgs, lanePublishedRef } from "./version.mjs";
 import { jsonStore } from "./store.mjs";
 import { makeWarm } from "./warm.mjs";
 import { resolveLaneImage, laneImageNow, laneToolsTag, isLaneToolsTagOf } from "./lane-tools.mjs";
@@ -132,6 +132,20 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const running = versionOf(cfg.code_root ?? repoRoot);
   // The lane image tracks the installed ForgeDock version; only an explicit non-legacy cfg.image overrides it.
   const image = cfg.image && cfg.image !== "computeshare-lane:1" ? cfg.image : laneImageTag(running.version);
+  const imageInfo = { version: running.version, source: null }; // R3: which lane image this host runs and where it came from (present|pulled|built)
+  /** Make the local lane tag exist: already present, else pull the published tag and retag it, else build. A pull failure never blocks. */
+  async function ensureLaneImage(ref, dir, version, { retry = false } = {}) {
+    if (await docker.hasImage?.(ref)) return "present";
+    if (!(cfg.image && cfg.image !== "computeshare-lane:1") && docker.pull && docker.tag) {
+      const pub = lanePublishedRef(version);
+      try { await docker.pull(pub); await docker.tag(pub, ref); log.info?.(`pulled ${pub} as ${ref}`); return "pulled"; }
+      catch (e) { log.warn?.(`pull ${pub} failed (${String(e.stderr || e.message).slice(0, 160)}); building locally`); }
+    }
+    log.info?.(`building ${ref}`);
+    const build = () => docker.build(dir, ref, laneBuildArgs(version));
+    if (retry) await buildWithRetry(build, { log }); else await build(); // #5919
+    return "built";
+  }
   const upgrade = { state: "idle", error: null };
   const prepull = { error: null };
   const dindImage = cfg.dind_image ?? "docker:27.5.1-dind";
@@ -441,7 +455,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const active = Object.values(sb()).filter((s) => s.state !== "exited").length;
     const e = effectiveCapacity();
     const h = live(cfg);
-    return { host: cfg.name ?? hostname(), ...running, vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.log && upgrade.state === "failed" ? { upgrade_log: upgrade.log } : {}), ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10, ...(i.depcache_bytes ? { depcache_gb: Object.fromEntries(Object.entries(i.depcache_bytes).map(([k, b]) => [k, Math.round(b / 107374182.4) / 10])) } : {}) }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...throttleView(h), ...diskView(), ...laneDiskView(), ...hostDiskView(active), ...hostMemView(), ...heavyView(), runners: Object.entries(runners()).map(([name, r]) => ({ name, label: r.label })), net: (() => { const rx = netRx(now()); const n = readNet(); return rx ? { ...(n ?? {}), ...rx } : n; })(), paused: Boolean(cfg.paused || ownerPaused || policyPaused), owner_paused: ownerPaused, ...laneTargetView(), ...(Number.isFinite(h?.load_per_core) ? { load_per_core: h.load_per_core } : {}), ...(Number.isFinite(h?.mem_available_gb) ? { mem_available_gb: h.mem_available_gb } : {}), live: h, usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
+    return { host: cfg.name ?? hostname(), ...running, image_version: imageInfo.version, ...(imageInfo.source ? { image_source: imageInfo.source } : {}), vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.log && upgrade.state === "failed" ? { upgrade_log: upgrade.log } : {}), ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10, ...(i.depcache_bytes ? { depcache_gb: Object.fromEntries(Object.entries(i.depcache_bytes).map(([k, b]) => [k, Math.round(b / 107374182.4) / 10])) } : {}) }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...throttleView(h), ...diskView(), ...laneDiskView(), ...hostDiskView(active), ...hostMemView(), ...heavyView(), runners: Object.entries(runners()).map(([name, r]) => ({ name, label: r.label })), net: (() => { const rx = netRx(now()); const n = readNet(); return rx ? { ...(n ?? {}), ...rx } : n; })(), paused: Boolean(cfg.paused || ownerPaused || policyPaused), owner_paused: ownerPaused, ...laneTargetView(), ...(Number.isFinite(h?.load_per_core) ? { load_per_core: h.load_per_core } : {}), ...(Number.isFinite(h?.mem_available_gb) ? { mem_available_gb: h.mem_available_gb } : {}), live: h, usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
   }
 
   /** The image a spec's lanes run (the per-repo lane_tools tag when tools are listed), without building it. */
@@ -626,7 +640,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     return { status: 201, body: view(rec) };
   }
 
-  const view = (r) => ({ id: r.id, state: r.state, issue: r.issue, cpus: r.cpus, mem_gb: r.mem_gb, started_at: new Date(r.startedAt).toISOString(), ...(r.error ? { error: r.error } : {}), ...(r.diskPaused ? { status_detail: "paused (disk)" } : {}), ...(r.memPaused ? { status_detail: "paused (host memory)" } : {}), ...(r.diskPressure ? { code: "sandbox.disk_pressure", status_detail: "stopped (disk pressure): worktree kept for resume" } : {}) });
+  const view = (r) => ({ id: r.id, state: r.state, issue: r.issue, cpus: r.cpus, mem_gb: r.mem_gb, started_at: new Date(r.startedAt).toISOString(), image_version: imageInfo.version, ...(imageInfo.source ? { image_source: imageInfo.source } : {}), ...(r.error ? { error: r.error } : {}), ...(r.diskPaused ? { status_detail: "paused (disk)" } : {}), ...(r.memPaused ? { status_detail: "paused (host memory)" } : {}), ...(r.diskPressure ? { code: "sandbox.disk_pressure", status_detail: "stopped (disk pressure): worktree kept for resume" } : {}) });
 
   const warm = makeWarm({ store, sb, own, now, launch, destroy: (id, why) => destroy(id, why), view, log });
 
@@ -968,8 +982,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
         log.info?.(`rebuilding ${nextImage} (${running.version}/${running.image} -> ${want.version}/${want.image})`);
         // 2026-11-26: a host pre-seeded with the image (docker load from another host) skips the build: on a slow or memory-tight
         // host the build itself is the risk (an upgrade build coincided with a host crash)
-        if (await docker.hasImage?.(nextImage)) log.info?.(`${nextImage} already present; no build`);
-        else await buildWithRetry(() => docker.build(join(next, "pool", "image"), nextImage, laneBuildArgs(want.version)), { log }); // #5919
+        const src = await ensureLaneImage(nextImage, join(next, "pool", "image"), want.version, { retry: true });
+        if (src === "present") log.info?.(`${nextImage} already present; no build`);
       }
       await pruneLaneImages([laneImageTag(want.version)]);
       await prepullImages();
@@ -1142,13 +1156,11 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
 
   /** Build the lane image for the running ForgeDock version when this host does not have it yet. */
   async function ensureImage() {
-    if (await docker.hasImage?.(image)) { await pruneLaneImages(); return; }
-    log.info?.(`building ${image}`);
-    await docker.build(join(cfg.code_root ?? repoRoot, "pool", "image"), image, laneBuildArgs(running.version));
+    imageInfo.source = await ensureLaneImage(image, join(cfg.code_root ?? repoRoot, "pool", "image"), running.version);
     await pruneLaneImages();
   }
 
-  return { handle, launch, warm, reap, destroy, capacity, refresh, store, prepullImages, ensureImage };
+  return { handle, launch, warm, reap, destroy, capacity, refresh, store, prepullImages, ensureImage, ensureLaneImage, imageInfo };
 }
 
 /**

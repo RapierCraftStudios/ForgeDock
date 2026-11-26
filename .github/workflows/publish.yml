@@ -191,6 +191,22 @@ jobs:
         if: always() && env.SKIP_PUBLISH != 'true'
         run: mv package.json.orig package.json
 
+      # Lane image (pool/image) tagged with the npm version; hosts pull it before building locally.
+      # Runs after the npm publish steps and never fails the release (hosts fall back to a local build).
+      - name: Build and push lane image
+        if: env.SKIP_PUBLISH != 'true'
+        continue-on-error: true
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LANE_IMAGE_REPO: ${{ vars.LANE_IMAGE_REPO }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          REPO="${LANE_IMAGE_REPO:-ghcr.io/$(echo "$REPO_OWNER" | tr '[:upper:]' '[:lower:]')/forgedock-lane}"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker build --build-arg FORGEDOCK_VERSION="$VERSION" -t "$REPO:$VERSION" -t "$REPO:latest" pool/image
+          docker push "$REPO:$VERSION"
+          docker push "$REPO:latest"
+
       - name: Sync plugin.json version
         if: env.SKIP_PUBLISH != 'true'
         run: |
