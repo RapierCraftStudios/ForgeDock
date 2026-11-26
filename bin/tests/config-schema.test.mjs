@@ -93,4 +93,19 @@ describe("list-not-array warning (#5504)", () => {
     assert.deepEqual(f.map((x) => `${x.level}:${x.code}:${x.key}`), ["warn:list-not-array:gate"]);
     assert.ok(validateForgeYaml(BASE + "gate:\n  required_checks: CI\n").some((x) => x.code === "list-not-array"));
   });
+  it("types orchestration.merge_train as off|on (#5836)", () => {
+    assert.deepEqual(validateForgeYaml(BASE + "orchestration:\n  merge_train: on\n"), []);
+    assert.deepEqual(validateForgeYaml(BASE + "orchestration:\n  merge_train: off\n"), []);
+    assert.deepEqual(codes(BASE + "orchestration:\n  merge_train: maybe\n"), ["wrong-type:orchestration.merge_train"]);
+  });
+
+  it("types orchestration.merge_train_batch as an integer >= 1 (#5837)", () => {
+    assert.deepEqual(validateForgeYaml(BASE + "orchestration:\n  merge_train_batch: 4\n"), []);
+    for (const v of ["0", "-2", "1.5", "many"]) assert.deepEqual(codes(BASE + `orchestration:\n  merge_train_batch: ${v}\n`), ["wrong-type:orchestration.merge_train_batch"], v);
+  });
+
+  it("orchestration.stacking (#5831) accepts off|plan|full and rejects another value", () => {
+    for (const v of ["off", "plan", "full"]) assert.deepEqual(validateForgeYaml(BASE + `orchestration:\n  stacking: ${v}\n`), [], v);
+    assert.ok(codes(BASE + "orchestration:\n  stacking: yes\n").length > 0);
+  });
 });

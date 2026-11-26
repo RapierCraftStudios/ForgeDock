@@ -41,7 +41,8 @@ function closeParen(src, open) {
   return -1;
 }
 
-const PRESENCE_ARG_RE = /^\s*!?\s*(?:[\w$.[\]"'`]+(?:\([^()]*\))?)\.includes\s*\(|^\s*!?\s*\/(?:\\.|[^/\n])+\/[a-z]*\.test\s*\(/;
+// A regex literal body is escapes or non-`/`, non-`\` chars: `\` must not match both branches (CodeQL js/redos, exponential backtracking).
+const PRESENCE_ARG_RE = /^\s*!?\s*(?:[\w$.[\]"'`]+(?:\([^()]*\))?)\.includes\s*\(|^\s*!?\s*\/(?:\\.|[^/\\\n])+\/[a-z]*\.test\s*\(/;
 
 /** JS/TS: every assertion's literal-presence verdict, or null when the file has none. */
 function jsAssertions(src) {

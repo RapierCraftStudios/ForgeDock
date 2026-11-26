@@ -11,6 +11,8 @@ import { fileURLToPath } from "node:url";
 import { createAgent } from "../pool/agent.mjs";
 import { createRouter } from "../pool/router.mjs";
 import { tmpDir } from "./_tmp.mjs";
+// Windows hosts: these tests exercise POSIX-only behaviour (file modes, tmpfs, systemd units, sh/bash scripts, file-URL paths); Linux CI runs them.
+const POSIX_ONLY = process.platform === "win32" && "POSIX-only behaviour";
 
 const IMG = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "pool", "image");
 const quiet = { info() {}, warn() {}, error() {} };
@@ -29,7 +31,7 @@ function fixture() {
   let t = 1_000_000;
   const docker = fakeDocker();
   const dir = tmpDir("cs-warm-");
-  const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: dir, allow_cpus: 8, allow_mem_gb: 16, lease_ttl_s: 600, token: "t" }, { docker, now: () => t, log: quiet, live: () => ({ ok: true }) });
+  const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: dir, allow_cpus: 8, allow_mem_gb: 16, lease_ttl_s: 600, token: "t" }, { docker, now: () => t, log: quiet, live: () => ({ ok: true }), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
   const markReady = () => { for (const r of Object.values(agent.store.data.sandboxes)) if (r.warm) { mkdirSync(join(r.dir, "out"), { recursive: true }); writeFileSync(join(r.dir, "out", "warm-ready"), ""); } };
   return { agent, docker, dir, markReady, advance: (ms) => { t += ms; } };
 }
@@ -49,7 +51,7 @@ test("warm 0 or absent: a launch starts no warm sandbox and mounts no claim dir"
   assert.ok(docker.runs.every((a) => !a.some((x) => String(x).endsWith(":/claim"))));
 });
 
-test("spec.warm N: the agent keeps N warm sandboxes; a ready one is claimed, its lane written 0600, and the pool refills", async () => {
+test("spec.warm N: the agent keeps N warm sandboxes; a ready one is claimed, its lane written 0600, and the pool refills", { skip: POSIX_ONLY }, async () => {
   const { agent, docker, markReady } = fixture();
   await agent.launch({ spec: spec("lane-1", { warm: 2 }), ...SIZE });
   await agent.warm.replenish();
@@ -147,7 +149,7 @@ test("#4935 relay from a warm-claimed sandbox is queued under the lane id, an un
   await new Promise((r) => stub.listen(0, "127.0.0.1", r));
   let now = 1_000_000;
   const docker = fakeDocker();
-  const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 0 }, router_url: `http://127.0.0.1:${stub.address().port}`, state_dir: tmpDir("cs-warm-relay-"), allow_cpus: 8, allow_mem_gb: 16, lease_ttl_s: 600, token: "t" }, { docker, now: () => now, log: quiet, live: () => ({ ok: true }) });
+  const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 0 }, router_url: `http://127.0.0.1:${stub.address().port}`, state_dir: tmpDir("cs-warm-relay-"), allow_cpus: 8, allow_mem_gb: 16, lease_ttl_s: 600, token: "t" }, { docker, now: () => now, log: quiet, live: () => ({ ok: true }), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
   const srv = createServer(agent.handle);
   await new Promise((r) => srv.listen(0, "127.0.0.1", r));
   t.after(() => { srv.close(); stub.close(); });
