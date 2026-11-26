@@ -1024,11 +1024,11 @@ describe("core work-on", () => {
       assert.notEqual(r.code, "env.tool_missing");
       assert.notEqual(r.terminalReason, "needs-human");
     });
-    it("#5764 a python3 miss maps to the python recipe: installed in the sandbox and re-probed, no needs-human", async () => {
-      const w = world({ contract: withTool("python3") }); let ok = false; const cmds = [];
+    it("#5764 a pip3 miss maps to the python recipe: installed in the sandbox and re-probed, no needs-human", async () => {
+      const w = world({ contract: withTool("pip3") }); let ok = false; const cmds = [];
       const base = w.io.runCommand;
       w.io.runCommand = async (a) => { if (/apt-get install/.test(a.command) && /python3 python3-venv/.test(a.command)) { cmds.push(a.command); ok = true; return { rc: 0 }; } return base(a); };
-      probing(w, "python3", () => ok);
+      probing(w, "pip3", () => ok);
       const r = await run(w, { dir: tmpDir("lean-5764a-"), ...remote });
       assert.equal(cmds.length, 1);
       assert.notEqual(r.code, "env.tool_missing");
@@ -2232,17 +2232,18 @@ describe("conformance shadow mode (the default)", () => {
     assert.ok(traj(s).some((t) => /Validate preflight: the host lacks yaml after the contract correction/.test(t)));
     // every tool present: no correction, no event
     const dir3 = tmpDir("preflight-");
-    const ok = world({ contract: uvC, validation: [{ id: "V1", command: uvC.validate[0].command, exit: 0 }] }); const ran3 = probe(ok);
+    const rgC = { ...CONTRACT, validate: [{ id: "V1", command: "ripgrep foo" }] };
+    const ok = world({ contract: rgC, validation: [{ id: "V1", command: rgC.validate[0].command, exit: 0 }] }); const ran3 = probe(ok);
     assert.equal((await run(ok, { dir: dir3 })).terminalReason, "merged"); assert.equal(builders(ok).length, 2);
-    assert.deepEqual(ran3.map((a) => a.command), ["command -v -- 'uv' >/dev/null 2>&1"]);
+    assert.deepEqual(ran3.map((a) => a.command), ["command -v -- 'ripgrep' >/dev/null 2>&1"]);
     assert.equal(readLog(dir3, 7).filter((e) => e.event === "VALIDATE_PREFLIGHT").length, 0);
   });
   it("#4328 an invalid contract and a preflight miss share one correction; still invalid is contract.invalid as before", async () => {
-    const bad = { ...CONTRACT, requirements: [{ id: "R1", quote: "make foo nicer", disposition: "deliver" }], validate: [{ id: "V1", command: "jq . a.json" }] };
+    const bad = { ...CONTRACT, requirements: [{ id: "R1", quote: "make foo nicer", disposition: "deliver" }], validate: [{ id: "V1", command: "ripgrep . a.json" }] };
     const w = world({ contract: bad, fixedContract: bad });
     w.io.probeCommand = async () => ({ rc: 1, output: "" });
     assert.equal((await run(w)).code, "contract.invalid"); assert.equal(builders(w).length, 2, "plan + one correction");
-    assert.match(builders(w)[1][4], /R1: quote is not verbatim[\s\S]*V1: needs command 'jq'/);
+    assert.match(builders(w)[1][4], /R1: quote is not verbatim[\s\S]*V1: needs command 'ripgrep'/);
   });
   it("#4393 replaying the AlterLab#36619 contract flags V4 at preflight, before the builder starts", async () => {
     const V4 = "uv run --no-project --python 3.12 python -m shared.detection.corpus.tools.check_manifest";
@@ -5568,12 +5569,12 @@ describe("batch robustness (#4112-#4115)", () => {
 
   it("#5653 a validate command freeze preflight finds unrunnable is rewritten from the CI-derived catalogue before any builder correction", async () => {
     const d = tmpDir("lean-5653-"); const src = join(d, "ci.yml"); writeFileSync(src, "run: uv run --with-requirements r.txt pytest tests\n");
-    const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "poetry run pytest t.py" }] };
-    const w = world({ contract }); w.io.probeCommand = async (a) => ({ rc: /poetry/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
-    const r = await run(w, { dir: d, validateCatalogSources: [`../..${src.replace(/^[A-Za-z]:/, "").split("\\").join("/")}`] }); // #5753: drive-less posix path on Windows
+    const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "pipenv run pytest t.py" }] };
+    const w = world({ contract }); w.io.probeCommand = async (a) => ({ rc: /pipenv/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
+    const r = await run(w, { dir: d, validateRecipes: [{ match: "\\bpipenv run pytest\\b", replace: "uv run --with-requirements r.txt pytest" }], validateCatalogSources: [`../..${src.replace(/^[A-Za-z]:/, "").split("\\").join("/")}`] }); // #5753: drive-less posix path on Windows
     assert.notEqual(r.code, "env.tool_missing");
     assert.ok(w.comments.some((c) => c.includes("FORGE:CONTRACT") && c.includes("uv run --with-requirements r.txt pytest t.py")));
-    assert.ok(!w.comments.some((c) => c.includes("FORGE:CONTRACT") && c.includes("poetry run pytest")));
+    assert.ok(!w.comments.some((c) => c.includes("FORGE:CONTRACT") && c.includes("pipenv run pytest")));
   });
 
   // ---- #4112 ----
@@ -10191,9 +10192,9 @@ describe("#5749 freeze-time runnability: host-only commands, recipes, check tail
   });
   it("#5749 remote probe installs a recipe tool or re-places before the builder", async () => {
     const installed = []; let ok = false;
-    const w = world({ contract: V2("shellcheck scripts/x.sh") });
+    const w = world({ contract: V2("pg_dump x") });
     w.io.runCommand = async ({ command }) => { if (/apt-get/.test(command)) { installed.push(command); ok = true; } return { rc: 0, output: "" }; };
-    w.io.probeCommand = async (a) => ({ rc: /shellcheck/.test(JSON.stringify(a)) && !ok ? 127 : 0, output: "" });
+    w.io.probeCommand = async (a) => ({ rc: /pg_dump/.test(JSON.stringify(a)) && !ok ? 127 : 0, output: "" });
     assert.notEqual((await run(w, { dir: tmpDir("lean-5749b-"), ...remote })).code, "env.tool_missing");
     assert.equal(installed.length, 1);
     const n = world({ contract: V2("nopetool-5749 x") }); n.io.probeCommand = async (a) => ({ rc: /nopetool-5749/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
