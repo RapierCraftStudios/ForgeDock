@@ -2372,6 +2372,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const envHold = deps.envHold !== undefined ? deps.envHold : testDeps ? null : {
     version: () => scheddMod.readInstalledVersion() ?? ENGINE_VERSION,
     envFingerprint: () => batchMod.envFingerprint(batch.readPlan()?.env),
+    envValues: () => batch.readPlan()?.env ?? null, // #5931
     missingTools: async (tools) => { const p = batch.readPlan()?.env, e = p ? scheddMod.mergeEnv(process.env, p) : env; return hostMissingTools(tools, { path: e.PATH ?? e.Path ?? "" }); },
   };
   // #4785: decisions and the frozen contract's validate commands too. #5824: one view per issue; the plan pass's view is

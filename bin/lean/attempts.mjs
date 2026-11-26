@@ -151,13 +151,15 @@ export function frozenContractHash(comments, trusted) {
 export function makeAttemptsSeam({ gh, repo, engineVersion = null, hostVersion = null, sandboxVersion = null, cfg = {}, trusted = null, contractHash = null }) {
   const view = async (n) => JSON.parse(String(await gh(["issue", "view", String(n), "-R", repo, "--json", "title,body,labels,comments"])));
   const isTrusted = async () => trusted ?? (await import("./prefilter.mjs")).isTrustedIssueComment;
+  let seenSandbox = sandboxVersion;
   return {
+    noteSandboxVersion(v) { if (v) seenSandbox = v; },
     cfg,
     async hash(n) {
       try {
         const v = await view(n), t = await isTrusted();
         const decisions = (v.comments ?? []).filter((c) => /^\s*<!--\s*FORGE:DECISION\b/.test(c?.body ?? "") && t(c)).map((c) => c.body);
-        return computeInputHash({ title: v.title, body: v.body, labels: v.labels, decisions, engineVersion, sandboxVersion: sandboxVersion ?? hostVersion, // the version the lane ran; the host's only when none is known
+        return computeInputHash({ title: v.title, body: v.body, labels: v.labels, decisions, engineVersion, sandboxVersion: seenSandbox ?? hostVersion, // the version the lane ran; the host's only when none is known
            contractHash: contractHash ? await contractHash(n) : frozenContractHash(v.comments, t) });
       } catch { return null; }
     },

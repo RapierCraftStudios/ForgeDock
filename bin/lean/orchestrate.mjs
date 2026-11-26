@@ -392,6 +392,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const ehMaxMs = Number(envHold?.maxMs) > 0 ? Number(envHold.maxMs) : ENV_HOLD_MAX_MS;
   const ehWatchMs = Number(envHold?.watchMs) > 0 ? Number(envHold.watchMs) : ENV_WATCH_MS;
   const curVersion = () => { try { return envHold?.version?.() ?? version ?? null; } catch { return version ?? null; } };
+  const curEnvValues = () => { try { return envHold?.envValues?.() ?? null; } catch { return null; } }; // #5931
   const curEnv = () => { try { return envHold?.envFingerprint?.() ?? null; } catch { return null; } };
   const missingTools = async (tools) => { if (typeof envHold?.missingTools !== "function") return null; try { const m = await envHold.missingTools(tools); return Array.isArray(m) ? m : null; } catch { return null; } };
   const checked = toMap(saved?.prefilter); // issue -> pre-filter result
@@ -991,10 +992,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #5986: a failed lane lands in the issue's ledger; a lifetime-budget breach escalates once (FORGE:ESCALATION, needs-human) and parks the row.
   const recordAttempt = async (n, row, r) => {
     try {
+      if (row.placement?.where === "remote" && r?.engineVersion) attempts.noteSandboxVersion?.(r.engineVersion); // #5931: the version the lane ran feeds the input hash
       const hash = (await attempts.hash?.(n)) ?? null;
       let l = ledgers.get(n) ?? (await attempts.load?.(n)) ?? null;
       l = recordFailure(l, { signature: failureSignature(row.code ?? r?.code, row.detail), hash, spend: Number(row.cost_usd) || 0, run: r?.runUrl ?? null,
-        blocker: blockerSignature({ code: row.code ?? r?.code, detail: row.detail, contractHash: r?.contractHash ?? null, engineVersion: r?.engineVersion ?? curVersion(), placement: row.placement?.where ?? null }) });
+        blocker: blockerSignature({ code: row.code ?? r?.code, detail: row.detail, contractHash: r?.contractHash ?? null, engineVersion: r?.engineVersion ?? (row.placement?.where === "remote" ? null : curVersion()), placement: row.placement?.where ?? null, env: curEnvValues() }) });
       const b = breach(l, attempts.cfg);
       if (b && !l.escalated) {
         l = markEscalated(l);
@@ -1896,7 +1898,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       let l = ledgers.get(n) ?? null;
       if (!l) { l = (await attempts.load?.(n)) ?? null; if (l) ledgers.set(n, l); }
       if (!l) return true;
-      const hash = (await attempts.hash?.(n)) ?? null, a = admitInput(l, hash, attempts.cfg, { engineVersion: curVersion(), placement: placeOf(n)?.where ?? null });
+      const hash = (await attempts.hash?.(n)) ?? null, a = admitInput(l, hash, attempts.cfg, { engineVersion: curVersion(), placement: placeOf(n)?.where ?? null, env: curEnvValues() });
       if (a.ok) { if (a.reason) update({ issue: n, event: "readmit.signature_changed", detail: `readmitted: ${a.reason}`, batch: batchId ?? null }); return true; }
       const key = `${n}|${hash}|${a.code}`;
       if (!refusedNoted.has(key)) {
