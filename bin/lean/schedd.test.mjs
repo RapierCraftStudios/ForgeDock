@@ -855,6 +855,44 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     assert.deepEqual(exits2, [1]);
   });
 
+  it("#5983: unitless with exit injected, a successor wait longer than hardExitMs still re-hosts and never exits; hung close and hung re-host still exit", async () => {
+    const mk = async (extra) => {
+      const dir = tmpDir("schedd-5983-"), lines = [], exits = [];
+      let version = "1.51.0";
+      const d = await startDaemon({ dir, root: join(dir, "batches"), log: (m) => lines.push(m), resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => "inactive",
+        exit: (c) => exits.push(c), respawn: () => {}, probe: async () => false, successorMs: 150, successorPollMs: 10, hardExitMs: 100, stopMs: 1500, runBatch: async () => ({}), ...extra });
+      return { d, lines, exits, bump: () => { version = "1.52.0"; } };
+    };
+    const a = await mk({});
+    a.bump();
+    await until(() => a.d.rehosted());
+    try {
+      assert.equal(a.d.rehosted().running, true);
+      assert.deepEqual(a.exits, [], a.lines.join("\n"));
+    } finally { await a.d.rehosted().close(); }
+    // hung re-host: the last-resort timer exits
+    const b = await mk({ rehost: () => new Promise(() => {}) });
+    b.bump();
+    await until(() => b.exits.length > 0);
+    assert.deepEqual(b.exits, [1]);
+    assert.ok(b.lines.some((l) => l.includes("successor handover did not finish")), b.lines.join("\n"));
+  });
+
+  it("#5983: unitless hung close exits within hardExitMs", async () => {
+    const dir = tmpDir("schedd-5983h-"), lines = [], exits = [];
+    let version = "1.51.0";
+    await startDaemon({ dir, root: join(dir, "batches"), log: (m) => lines.push(m), resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => null,
+      exit: (c) => exits.push(c), respawn: () => {}, probe: async () => false, successorMs: 5000, successorPollMs: 10, hardExitMs: 150, stopMs: 1500,
+      runBatch: ({ sink }) => { sink.batch({ id: "x", dir }); return new Promise(() => {}); } });
+    const { connectDaemon: cd } = { connectDaemon };
+    request(await cd({ dir, spawnDaemon: null }), { op: "submit", argv: ["x"], cwd: dir, env: {} }).catch(() => {});
+    await until(() => lines.some((l) => l.includes("listening")));
+    version = "1.52.0";
+    await until(() => exits.length > 0);
+    assert.deepEqual(exits, [1]);
+    assert.ok(lines.some((l) => l.includes("stop did not finish within 150")), lines.join("\n"));
+  });
+
   it("#5984 handover: settled() outlives closed until the successor is spawned and probed (CLI exits only after it)", async () => {
     const dir = tmpDir("schedd-settled-"), order = [];
     let version = "1.51.0";
