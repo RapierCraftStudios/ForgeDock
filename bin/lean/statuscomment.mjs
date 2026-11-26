@@ -27,7 +27,10 @@ export const ENTRY_SEP = "\n\n---\n\n";
 /** Markers posted once and edited in place (the marker leads the comment body, so anchored readers still match). */
 export const UPSERT_MARKERS = Object.freeze(["FORGE:INVESTIGATION", "FORGE:IMPLEMENTATION", "FORGE:PARKED"]);
 /** #5979: markers re-derived on every pass; a repeat of the same state posts nothing (FACTS and DEPENDENCY are edited in place, NEEDS_HUMAN stays a new comment when it changed). */
-export const IN_PLACE_MARKERS = Object.freeze(["FORGE:FACTS", "FORGE:DEPENDENCY", "FORGE:NEEDS_HUMAN"]);
+export const IN_PLACE_MARKERS = Object.freeze(["FORGE:FACTS", "FORGE:DEPENDENCY", "FORGE:NEEDS_HUMAN", "FORGE:AMENDMENT-STATE"]);
+/** #5931: the hidden tag that keys an in-place comment to its issue's contract hash: one comment per (marker, hash), edited in place while the hash holds. */
+export const contractKey = (hash) => (hash ? `<!-- forge-contract hash=${String(hash).replace(/[^\w]/g, "")} -->` : "");
+export const contractKeyOf = (body) => /<!-- forge-contract hash=(\w+) -->/.exec(String(body ?? ""))?.[1] ?? null;
 
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const markLine = (m) => `<!-- ${m} -->`;

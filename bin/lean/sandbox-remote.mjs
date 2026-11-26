@@ -57,7 +57,7 @@ export function isActionsEndpoint(endpoint) {
  * `GET /agents -> {sandboxes}` is the router's live sandbox list (#5422, `inventory()`; malformed or any error throws).
  * Optional relay (#4778): `GET /sandboxes/:id/relay -> {requests: [{rid, argv}]}` lists a sandbox's pending read-only capability
  * requests (404/405 or malformed = none, an older router) and `POST /sandboxes/:id/relay/:rid` `{rc, stdout, stderr}` answers one.
- * Optional `GET /status -> {free: N, online?, total?}` is the pool's free slots (#4540); without `online` the agents of `GET /agents` give it (#4788). Anything else (404, error, malformed) is unknown (null).
+ * Optional `GET /status[?repo=<slug>] -> {free: N, online?, total?}` is the pool's free slots (#4540); `?repo=` (#6041) limits `/status` and `/agents` to the agents the repo may use (router.json `repos.<slug>.agents` / `exclude_agents`); without `online` the agents of `GET /agents` give it (#4788). Anything else (404, error, malformed) is unknown (null).
  */
 export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fetch }) {
   const root = String(endpoint ?? "").replace(/\/+$/, "");
@@ -100,7 +100,7 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
       return s === "running" || s === "pending" || s === "starting" || s === "paused" ? "running" : s === "gone" ? "gone" : "exited";
     },
     async logs(id, cursor = 0) { const r = await call("GET", `${p(id)}/logs?cursor=${encodeURIComponent(cursor)}`); return r.ok ? { text: String(r.data?.text ?? ""), cursor: r.data?.cursor ?? cursor } : { text: "", cursor }; },
-    async result(id) { const r = await call("GET", `${p(id)}/result`); if (r.status === 401) throw Object.assign(fail("result", r), { transient: true }); if (r.ok && r.data?.disk_pressure === true) return { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_DISK_PRESSURE, retryInSeconds: 120, cost_usd: 0, detail: `sandbox ${id} was stopped to save the host drive (disk pressure); worktree and volume kept, requeued to resume` }; /* #5891 */ if (r.ok && r.data?.drained === true) return { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, retryInSeconds: 60, cost_usd: 0, detail: `sandbox ${id} was drained to free capacity for reserved work (${String(r.data.reason ?? "").slice(0, 120)}); rescheduled` }; /* #5856 */ return r.ok && r.data && typeof r.data === "object" ? r.data : null; },
+    async result(id) { const r = await call("GET", `${p(id)}/result`); if (r.status === 401) throw Object.assign(fail("result", r), { transient: true }); if (r.ok && r.data?.disk_pressure === true) return { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_DISK_PRESSURE, retryInSeconds: 120, cost_usd: 0, detail: `sandbox ${id} was stopped to save the host drive (disk pressure); worktree and volume kept, requeued to resume` }; /* #5891 */ if (r.ok && r.data?.drained === true) return { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, retryInSeconds: 60, cost_usd: 0, detail: `sandbox ${id} was drained to free capacity for reserved work (${String(r.data.reason ?? "").slice(0, 120)}); rescheduled` }; /* #5856 */ if (r.ok && r.data && typeof r.data === "object") { const v = r.data.engineVersion ?? r.data.engine_version ?? r.data.forge_version ?? /ForgeDock\s*[·-]\s*v?(\d+\.\d+(?:\.\d+)?)/.exec(String(r.data.banner ?? r.data.log ?? ""))?.[1]; return v && !r.data.engineVersion ? { ...r.data, engineVersion: String(v) } : r.data; } return null; }, /* #5931 */
     async usage(id) { const r = await call("GET", `${p(id)}/usage`); return r.ok && Number.isFinite(Number(r.data?.minutes)) ? { minutes: Number(r.data.minutes), ...(typeof r.data.agent === "string" && r.data.agent ? { agent: r.data.agent } : {}) } : null; }, // agent: #4549, optional
     async stop(id) { const r = await call("POST", `${p(id)}/stop`); if (r.ok) return true; if (r.status === 404 || r.status === 405) return false; throw fail("stop", r); },
     async destroy(id) { const r = await call("DELETE", p(id)); if (r.ok || r.status === 404) return true; throw fail("destroy", r); },
@@ -161,19 +161,20 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
       if (!list) throw fail("agents", r);
       return list.some((a) => a?.ok === true && !a.paused && (!agent || a.name === agent));
     },
-    async capacity() {
+    async capacity({ repo } = {}) {
+      const q = typeof repo === "string" && repo ? `?repo=${encodeURIComponent(repo)}` : ""; // #6041: only the repo's allowed agents count
       // `free` (#4540) and agent liveness `online`/`total` (#4547) are each optional; none valid is unknown.
       const ok = (v) => Number.isInteger(v) && v >= 0;
       let out = {}, reached = false, lastErr = null;
       try {
-        const r = await call("GET", "/status");
+        const r = await call("GET", `/status${q}`);
         reached = true;
         if (r.ok) { const { free, online, total } = r.data ?? {}; out = { ...(ok(free) ? { free } : {}), ...(ok(online) ? { online } : {}), ...(ok(total) ? { total } : {}) }; }
       } catch (e) { out = {}; lastErr = e; }
       if (out.online === undefined || out.load_per_core === undefined) {
         // #4788: a router without /status liveness: online = agents answering and not paused, as bin/pool/router.mjs status() does.
         try {
-          const r = await call("GET", "/agents");
+          const r = await call("GET", `/agents${q}`);
           reached = true;
           const list = r.ok && Array.isArray(r.data?.agents) ? r.data.agents : null;
           if (list && out.online === undefined) out = { ...out, online: list.filter((a) => a?.ok === true && !a.paused).length, total: list.length };
@@ -334,7 +335,7 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
     async capacity() {
       // #5048: no capacity() is unknown (null); a transport error propagates, so the caller can report the pool down
       if (typeof transport.capacity !== "function") return null;
-      return (await transport.capacity()) ?? null;
+      return (await transport.capacity({ repo })) ?? null;
     },
     /** #5985: the pool's usage-history rows; null when the transport has none. */
     async usageHistory() { return typeof transport.usageHistory === "function" ? (await transport.usageHistory()) ?? null : null; },

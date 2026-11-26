@@ -3787,3 +3787,11 @@ Filing: `file_issues` is **opt-in, default off** (only an explicit `file_issues:
 - A lane dispatched with a batch id re-reads its FORGE:STATE before every non-delete `git push` and before `gh pr merge` (`suspensionGuard`, `bin/lean/lean.mjs`). A missing or expired lease, a lease of another batch, or the dispatcher's `suspend` marker (`reason` held/paused/kept for adopt) ends the lane `deferred` with `lane.suspended`; the sandbox stays for adopt. No readable state, or no batch id (interactive `run-issue`), is not guarded. `renew()` does not renew under a `suspend` marker.
 - The dispatcher writes the marker (`suspendLane`, `suspendMarker` in `bin/engine-cli.mjs`): when a kept sandbox is recorded (halted, `sandbox.unreachable`, `sandbox.auth`; `providerLanes` `suspendKept`), when a kept issue is held (`--hold`) or its batch paused (`--pause`); cleared on release, unpause and adopt (`resumeKept`). Held/paused batches still admit nothing, including deferred issues whose retry timer fires (`isReady`, launch re-read); `--hold <id> pending` holds every pending and backing-off issue.
 - Kept sandboxes are recorded in `state.kept` (issue, since, phase) and listed by `orchestrate --status` and `pool status` (table section and `kept_sandboxes` in `--json`) via `keptSandboxes` (`bin/lean/batch.mjs`).
+
+## Entry 2026-11-26 — remote heavy backend, quota-aware workers (#6047)
+`heavy.mjs` `runWrapped` uses `acquireRemote` when `CS_HEAVY_BASE` is set (the pool agent's per-sandbox token route; only set when the
+agent runs with `elastic_lanes`): acquire polls while denied, a timer renews the lease, release is best effort, and an unreachable or
+erroring agent (or a wait past `max_wait_s`) fails open. Without it the local `heavy.json` semaphore is used as before. The shims wrap
+installs, validate commands and prechecks, so those lane steps take a token with no lane-level wiring. `quotaCores` (`admission.mjs`) reads
+cgroup v2 `cpu.max` / v1 `cfs_quota_us`/`cfs_period_us` (fallback `CS_CPU_QUOTA` from the pool) and returns min(VM cores, quota);
+`verifyParallelism` and the heavy shim use it for `FORGE_HOST_PARALLELISM`.

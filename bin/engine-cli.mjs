@@ -2372,6 +2372,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const envHold = deps.envHold !== undefined ? deps.envHold : testDeps ? null : {
     version: () => scheddMod.readInstalledVersion() ?? ENGINE_VERSION,
     envFingerprint: () => batchMod.envFingerprint(batch.readPlan()?.env),
+    envValues: () => batch.readPlan()?.env ?? null, // #5931
     missingTools: async (tools) => { const p = batch.readPlan()?.env, e = p ? scheddMod.mergeEnv(process.env, p) : env; return hostMissingTools(tools, { path: e.PATH ?? e.Path ?? "" }); },
   };
   // #4785: decisions and the frozen contract's validate commands too. #5824: one view per issue; the plan pass's view is
@@ -2482,7 +2483,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         return { removedAt: Math.max(...ev.map(t), -Infinity), blockedAt: last ? t(last.createdAt) : NaN, askKey: ask ? (/FORGE:ASK key=([^\s>]+)/.exec(String(ask.body))?.[1] ?? "") : "" };
       }),
       // #5986: per-issue attempts ledger and input-hash admission (off under the test seams)
-      ...((deps.attempts !== undefined ? deps.attempts : testDeps ? null : true) ? { attempts: deps.attempts !== undefined ? deps.attempts : makeAttemptsSeam({ gh: (a) => leanIo.gh(a), repo, engineVersion: ENGINE_VERSION, sandboxVersion: scheddMod.readInstalledVersion?.() ?? null, cfg: { maxAttempts: orch.maxAttemptsPerIssue, maxIdentical: orch.maxIdenticalSignature } }) } : {}),
+      ...((deps.attempts !== undefined ? deps.attempts : testDeps ? null : true) ? { attempts: deps.attempts !== undefined ? deps.attempts : makeAttemptsSeam({ gh: (a) => leanIo.gh(a), repo, engineVersion: ENGINE_VERSION, hostVersion: scheddMod.readInstalledVersion?.() ?? null, sandboxVersion: deps.sandboxVersion ?? null, cfg: { maxAttempts: orch.maxAttemptsPerIssue, maxIdentical: orch.maxIdenticalSignature } }) } : {}),
       // #4725: a closed (completed) dependency is satisfied even when it still carries a stale needs-human label
       // #5152: a NOT_PLANNED close labelled workflow:merged, or a decomposition whose sub-issues all closed, is delivered: CLOSED
       issueState: async (n) => {

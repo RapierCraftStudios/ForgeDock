@@ -29,6 +29,7 @@ import { APP_SLUG } from "../init-repo.mjs";
 import { noComments } from "./render.mjs";
 import { listAssociations } from "./gh-assoc.mjs";
 import { verifyMerge, verifyComment } from "./issuewatch-verify.mjs";
+import { percentile } from "./efficiency.mjs";
 import { DEFAULT_SKIP_LABELS, isPullRequest, searchesPullRequests, skipLabelHit, closingPrIssues, releaseInFlight, watchLiveness, alertDeadWatches, resolveOnPath } from "./issuewatch-parity.mjs";
 
 const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup", "threshold", "immediate", "max_release_issues", "theme_map", "tracker", "sweep_needs_human", "max_launches", "trust_app", "trust_app_labels", "skip_labels", "release_pause", "max_remediations", "triage.max_per_hour", "triage"];
@@ -39,7 +40,16 @@ const readFile = (f) => readFileSync(f, "utf8");
 const JUDGE_TIMEOUT_MS = 120_000; // a hung `claude --print` must not stall the watch round
 const CLAUDE_MAX_BUFFER = 8 * 1024 * 1024;
 const PENDING_START_MS = 10 * 60000; // #5425: how long a slow `orchestrate` start may take to create its batch before the claims are released
-const VERIFY_WAIT_MS = 60 * 60000; // how long a merge commit's CI may stay pending before verification fails
+const VERIFY_WAIT_MS = 60 * 60000; // floor and fallback of how long a merge commit's CI may stay pending before verification fails
+const VERIFY_WAIT_CAP_MS = 6 * 60 * 60000;
+const VERIFY_WAIT_FACTOR = 3; // window = p90 of recent CI run minutes x this
+
+/** Verify window (ms) from recent CI run durations in minutes: p90 x 3, floored at 60 min, capped at 6 h; no history = 60 min. */
+export function verifyWindowMs(minutes) {
+  const sorted = (Array.isArray(minutes) ? minutes : []).map(Number).filter((m) => Number.isFinite(m) && m > 0).sort((a, b) => a - b);
+  const p90 = percentile(sorted, 0.9);
+  return p90 === null ? VERIFY_WAIT_MS : Math.min(VERIFY_WAIT_CAP_MS, Math.max(VERIFY_WAIT_MS, Math.round(p90 * VERIFY_WAIT_FACTOR * 60000)));
+}
 const readJson = (f) => { try { return JSON.parse(readFileSync(f, "utf8")); } catch { return null; } };
 
 // ── config ───────────────────────────────────────────────────────────────────────────────────────────────────
@@ -288,15 +298,18 @@ export function claimIssue(rdir, issue, name) {
   } finally { rmdirSync(lock); }
 }
 
-/** Verify closed issue `n` (see tick); a pending result waits up to VERIFY_WAIT_MS from the first attempt. */
+/** Verify closed issue `n` (see tick); a pending result waits up to the CI-derived window (verifyWindowMs) from the first attempt. */
 async function verifyClosed({ n, repo, io, state, now, lane }) {
   const comments = JSON.parse(String(await io.gh(["issue", "view", String(n), "-R", repo, "--json", "comments"]))).comments ?? [];
   let r = await verifyMerge({ gh: io.gh, repo, lane, issue: n, comments, ...(io.requiredChecks ? { requiredChecks: io.requiredChecks } : {}) });
   state.verifyFrom = { ...(state.verifyFrom ?? {}) };
   state.verifyFrom[n] ??= now;
   if (r.status === "pending") {
-    if (now - state.verifyFrom[n] < VERIFY_WAIT_MS) return;
-    r = { ...r, status: "failed", evidence: [...r.evidence, `FAIL: still unverified after ${VERIFY_WAIT_MS / 60000} min`] };
+    let minutes = null;
+    try { minutes = (await io.ciDurations?.(repo, lane)) ?? null; } catch { minutes = null; } // best effort: unreadable = the 60 min floor
+    const wait = verifyWindowMs(minutes);
+    if (now - state.verifyFrom[n] < wait) return;
+    r = { ...r, status: "failed", evidence: [...r.evidence, `FAIL: still unverified after ${Math.round(wait / 60000)} min${wait === VERIFY_WAIT_MS ? "" : " (window from recent CI run p90)"}`] };
   }
   // Side effects first, state last: a failed gh call throws with the issue still closed and in pendingVerify, so the next tick
   // resumes (state.escalation records the finished steps). Reopen is last because only closed issues are revisited.
@@ -631,6 +644,10 @@ function realIo(repo, env = process.env) {
   const gh = ghRunner(execFileSync, (l) => console.error(l));
   const root = batchRoot(env), findNew = (before) => listBatches(root).find((b) => !before.includes(b)) ?? null;
   return { env, gh, now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    ciDurations: async (r, lane) => { // minutes of the lane's recent completed Actions runs, for the verify window
+      const out = String(await gh(["api", `repos/${r}/actions/runs?per_page=100&status=completed&branch=${encodeURIComponent(lane)}`, "--jq", ".workflow_runs[] | [.run_started_at // .created_at, .updated_at] | @tsv"]));
+      return out.split("\n").filter(Boolean).map((l) => { const [a, b] = l.split("\t"); return (Date.parse(b) - Date.parse(a)) / 60000; }).filter((m) => m > 0);
+    },
     classify: (issues, themes) => { // the one LLM judgment of release mode: issues no theme_map rule classifies
       const prompt = `Classify each GitHub issue into exactly one theme of [${themes.join(", ")}], or "general" when none fits. Reply with only a JSON object {"<number>": "<theme>"}.\n\n${issues.map((i) => `#${i.number} ${i.title}\n${String(i.body ?? "").slice(0, 600)}`).join("\n---\n")}`;
       return JSON.parse(/\{[\s\S]*\}/.exec(execFileSync("claude", ["--print"], { input: prompt, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 }))[0]);
