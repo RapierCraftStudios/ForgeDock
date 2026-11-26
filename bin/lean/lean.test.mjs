@@ -10161,6 +10161,47 @@ describe("#5820 required CI checks run in the lane before the PR opens", () => {
   });
 });
 
+describe("#5844 a busy host is not an absent CLI", () => {
+  const base = { role: "builder", issue: 5844, cwd: "/tmp/x", model: "m", prompt: "p", system: "s" };
+  it("probe timeout does not spawn a bare name", async () => {
+    const { makeLeanRunner } = await import("./effects.mjs");
+    let spawned = 0;
+    const runner = makeLeanRunner({ runCli: async () => { spawned++; return {}; }, probe: () => false, resolveBin: () => null, probeTimedOut: () => true });
+    await assert.rejects(runner(base), (e) => e.deferCode === OUTCOME_CODES.HOST_BUSY && e.retryInSeconds > 0 && e.spawnDeterministic !== true);
+    assert.equal(spawned, 0);
+  });
+  it("a probe that answered absent still spawns, so the deterministic path stays reachable", async () => {
+    const { makeLeanRunner } = await import("./effects.mjs");
+    let spawned = 0;
+    const runner = makeLeanRunner({ runCli: async () => { spawned++; return {}; }, probe: () => false, resolveBin: () => null, probeTimedOut: () => false });
+    await runner(base);
+    assert.equal(spawned, 1);
+  });
+  it("win32 bare name unresolved while the CLI is present defers host.busy, nothing spawned", async () => {
+    const { makeLeanRunner } = await import("./effects.mjs");
+    let spawned = 0;
+    const runner = makeLeanRunner({ runCli: async () => { spawned++; return {}; }, probe: () => false, resolveBin: () => null, probeTimedOut: () => false, platform: "win32", binMissing: () => false });
+    await assert.rejects(runner(base), (e) => e.deferCode === OUTCOME_CODES.HOST_BUSY && e.spawnDeterministic !== true);
+    assert.equal(spawned, 0);
+    const absent = makeLeanRunner({ runCli: async () => { spawned++; return {}; }, probe: () => false, resolveBin: () => null, probeTimedOut: () => false, platform: "win32", binMissing: () => true });
+    await absent(base);
+    assert.equal(spawned, 1, "proven absence still spawns so cli.spawn_failed stays reachable");
+  });
+  it("ENOENT with the CLI present is not cli.spawn_failed", async () => {
+    const { runCliBackend } = await import("../runner.mjs");
+    const dir = tmpDir("core-5844-");
+    writeFileSync(join(dir, "claude"), "");
+    const prev = process.env.PATH; process.env.PATH = dir;
+    let err;
+    try { runCliBackend({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: tmpDir("core-5844-"), bin: "claude", logger: { log() {} }, spawnFn: () => ({ status: null, error: Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }) }) }); } catch (e) { err = e; } finally { process.env.PATH = prev; }
+    assert.equal(err.spawnDeterministic, undefined);
+    assert.notEqual(err.code, "CLI_SPAWN_FAILED");
+    const w = world(); w.io.runner = async () => { throw err; };
+    const res = await run(w);
+    assert.notEqual(res.code, OUTCOME_CODES.CLI_SPAWN_FAILED);
+  });
+});
+
 describe("#5753 frozen pytest commands run in the env CI runs them in", () => {
   const saved = {}; // #5753: a host ~/.forge/guards/o_r.json (another run's leftovers) must not add H-rows to these runs
   before(() => { for (const k of ["HOME", "USERPROFILE"]) saved[k] = process.env[k]; process.env.HOME = process.env.USERPROFILE = tmpDir("lean-5753-home-"); });
