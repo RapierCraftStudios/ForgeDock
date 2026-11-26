@@ -231,28 +231,9 @@ export function makeRunTmp({ root = runTmpRoot(), now = () => Date.now(), alive 
 }
 
 /**
- * SIGTERM to a ledger-registered pid's process group (#4179) and every descendant pid (#5746). Only when the pid is alive and, where /proc exists, its
+ * SIGTERM to a ledger-registered pid's process group (#4179). Only when the pid is alive and, where /proc exists, its
  * command line still names `marker`, so a reused pid is never signalled. Returns true when the pid is gone or signalled.
  */
-/** #5746: every descendant pid of `pid` from `/proc/<n>/stat` ppids, children before none; includes ones that left the group (setsid). */
-export function descendantPids(pid, { procDir = "/proc" } = {}) {
-  const kids = new Map();
-  let names = [];
-  try { names = readdirSync(procDir); } catch { return []; }
-  for (const d of names) {
-    if (!/^\d+$/.test(d)) continue;
-    let st = "";
-    try { st = readFileSync(join(procDir, d, "stat"), "utf8"); } catch { continue; }
-    const ppid = Number(st.slice(st.lastIndexOf(")") + 2).split(" ")[1]); // fields after comm: state ppid ...
-    if (!Number.isSafeInteger(ppid)) continue;
-    if (!kids.has(ppid)) kids.set(ppid, []);
-    kids.get(ppid).push(Number(d));
-  }
-  const out = [], seen = new Set([Number(pid)]), queue = [Number(pid)];
-  while (queue.length) for (const c of kids.get(queue.shift()) ?? []) if (!seen.has(c)) { seen.add(c); out.push(c); queue.push(c); }
-  return out;
-}
-
 export function killLedgerPid(pid, marker, { kill = process.kill.bind(process), procDir = "/proc" } = {}) {
   const n = Number(pid);
   if (!Number.isSafeInteger(n) || n <= 1) return false;
@@ -262,12 +243,7 @@ export function killLedgerPid(pid, marker, { kill = process.kill.bind(process), 
     try { cmd = readFileSync(join(procDir, String(n), "cmdline"), "utf8"); } catch { return true; } // exited meanwhile
     if (!cmd.includes(String(marker))) return true; // pid reused by something else: not ours any more
   }
-  // #5746: stopping a lane stops its whole process tree; a builder that left the lane's process group (setsid) is signalled by pid
-  const tree = existsSync(procDir) ? descendantPids(n, { procDir }) : [];
-  let ok;
-  try { kill(-n, "SIGTERM"); ok = true; } catch { try { kill(n, "SIGTERM"); ok = true; } catch (e) { ok = e?.code === "ESRCH"; } }
-  for (const c of tree) { try { kill(c, "SIGTERM"); } catch { /* gone */ } }
-  return ok;
+  try { kill(-n, "SIGTERM"); return true; } catch { try { kill(n, "SIGTERM"); return true; } catch (e) { return e?.code === "ESRCH"; } }
 }
 
 /**
