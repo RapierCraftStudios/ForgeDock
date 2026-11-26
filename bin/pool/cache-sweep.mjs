@@ -60,6 +60,12 @@ const num = (p) => { try { const n = Number(readFileSync(p, "utf8").trim()); ret
 const mtimeOf = (p) => { try { return statSync(p).mtimeMs; } catch { return null; } };
 /** #5898: a snapshot is in use while its `<snap>.lock` is younger than LOCK_LIVE_MS (the container cannot check pids). */
 const lockLive = (p, now) => { const m = mtimeOf(`${p}.lock`); return m !== null && now - m < LOCK_LIVE_MS; };
+/** Last use of a depcache snapshot: its `last-used` file (epoch ms, written on every hit), else the directory mtime. */
+const snapLastUsed = (k) => {
+  let created = null;
+  try { created = Number(JSON.parse(readFileSync(join(k.path, "manifest.json"), "utf8")).created) || null; } catch { /* no manifest */ }
+  return num(join(k.path, "last-used")) ?? created ?? k.mtimeMs;
+};
 /** Every depcache snapshot as {path, lastUsedMs, live}; last use falls back to manifest `created`, then mtime. */
 function depcacheSnaps(dc, now) {
   const out = [];
@@ -72,12 +78,6 @@ function depcacheSnaps(dc, now) {
   }
   return out;
 }
-/** Last use of a depcache snapshot: its `last-used` file (epoch ms, written on every hit), else the directory mtime. */
-const snapLastUsed = (k) => {
-  let created = null;
-  try { created = Number(JSON.parse(readFileSync(join(k.path, "manifest.json"), "utf8")).created) || null; } catch { /* no manifest */ }
-  return num(join(k.path, "last-used")) ?? created ?? k.mtimeMs;
-};
 
 /**
  * #5901: depcache is `<dc>/<repoKey>/<eco>-<key>/`. Each snapshot (not the repo dir, whose mtime moves with every new
