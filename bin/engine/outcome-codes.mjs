@@ -101,6 +101,7 @@ export const OUTCOME_CODES = Object.freeze({
   CONFORMANCE_UNIMPLEMENTED: "conformance.unimplemented",
   CONFORMANCE_E2E_UNVERIFIED: "conformance.e2e_unverified",
   CONFORMANCE_SCOPE_CREEP: "conformance.scope_creep",
+  FAILURE_REPEATED: "failure.repeated", // #5979: the same failure twice; parked, never recovered (kept out of RECOVERABLE_CODES)
   CONFORMANCE_UNTRACKED_DEFERRAL: "conformance.untracked_deferral",
   CONFORMANCE_UNJUSTIFIED_DEFERRAL: "conformance.unjustified_deferral",
   CONFORMANCE_PRESERVE_VIOLATED: "conformance.preserve_violated",

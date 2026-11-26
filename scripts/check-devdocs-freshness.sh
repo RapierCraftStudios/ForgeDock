@@ -118,8 +118,8 @@ echo "ERROR: behaviour changed under bin/lean/ or scripts/ without a docs update
 printf '%s' "$MISSING" | sed 's/^/  - /'
 echo ""
 echo "Fix with one of:"
+echo "  - add devdocs/decisions/<issue>-<slug>.md (preferred: a new file never conflicts with parallel PRs)"
 echo "  - edit the matching dossier (devdocs/index.yaml modules: glob -> devdocs/modules/*.md)"
 echo "  - update NORTHSTAR.md § Runtime map"
-echo "  - add devdocs/decisions/<issue>-<slug>.md"
 echo "  - or add a line 'docs-not-needed: <reason>' to the PR body"
 exit 1

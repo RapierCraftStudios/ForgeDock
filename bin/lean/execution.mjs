@@ -142,6 +142,7 @@ export function parseExecution(sec = {}) {
     onBudget: str(s.on_budget) === "local" ? "local" : "stop", costPerMinute: cpm ?? 0 };
   const capList = (v) => (Array.isArray(v) ? v : str(v) ? str(v).split(",") : []).map((x) => str(x).toLowerCase()).filter((x) => CAPABILITY_RE.test(x));
   const hostCapabilities = [...new Set(capList(s.host_capabilities))];
+  const offloadWrappers = [...new Set(capList(s.offload_wrappers))]; // unclog: host commands that only send work elsewhere (e.g. a remote-run wrapper); a sandbox runs their argument directly
   const patRaw = Array.isArray(s.host_capability_patterns) ? s.host_capability_patterns : str(s.host_capability_patterns) ? str(s.host_capability_patterns).split(",") : [];
   const hostCapabilityPatterns = patRaw.map((x) => { const t = str(x), i = t.indexOf(":"); return { name: t.slice(0, i).trim().toLowerCase(), pattern: t.slice(i + 1).trim() }; })
     .filter((x) => CAPABILITY_RE.test(x.name) && x.pattern && safeRegExp(x.pattern));
@@ -162,7 +163,7 @@ export function parseExecution(sec = {}) {
   const plan = ["free", "pro", "team", "enterprise"].includes(str(s.plan).toLowerCase()) ? str(s.plan).toLowerCase() : null;
   const publicDefault = str(s.public_default).toLowerCase() === "actions" ? "actions" : null; // #5900: opt-in only
   const dispatcher = /^[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?$/.test(str(s.dispatcher)) ? str(s.dispatcher) : null;
-  return { mode, maxRemote, provider, image, secrets, budget, ...(jobLimit ? { jobLimit } : {}), ...(ciReserve !== null ? { ciReserve } : {}), ...(plan ? { plan } : {}), ...(publicDefault ? { publicDefault } : {}), ...(dispatcher ? { dispatcher } : {}), ...(hostFallback !== null ? { hostFallback } : {}), ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(repoSource ? { repoSource } : {}), ...(accountRotator ? { accountRotator } : {}), ...(lt.tools.length ? { laneTools: lt.tools } : {}), ...(lt.errors.length ? { laneToolsErrors: lt.errors } : {}) };
+  return { mode, maxRemote, provider, image, secrets, budget, ...(jobLimit ? { jobLimit } : {}), ...(ciReserve !== null ? { ciReserve } : {}), ...(plan ? { plan } : {}), ...(publicDefault ? { publicDefault } : {}), ...(dispatcher ? { dispatcher } : {}), ...(hostFallback !== null ? { hostFallback } : {}), ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(offloadWrappers.length ? { offloadWrappers } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(repoSource ? { repoSource } : {}), ...(accountRotator ? { accountRotator } : {}), ...(lt.tools.length ? { laneTools: lt.tools } : {}), ...(lt.errors.length ? { laneToolsErrors: lt.errors } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -179,7 +180,7 @@ const KEEP_DAYS = 7;
 
 /**
  * The execution budget (#4255). `record(key, {minutes, cost_usd})` adds one lane attempt to today's host total; the key
- * (`<batch>#<sandbox id>#<startedAt>`) makes a repeated record a no-op. `admit({minutes, cost_usd, running})` gets the
+ * (`<batch>#<sandbox id>`) holds one entry per sandbox with its latest cumulative usage (#5987); an identical repeat is a no-op. `admit({minutes, cost_usd, running})` gets the
  * batch's settled + running usage (`running` the running part alone) and refuses once a batch cap, or a day cap with
  * today's host total plus this batch's running usage, is reached. A corrupt or unreadable day file refuses while a day
  * cap is set (a hard cap fails closed) and is ignored otherwise; it is never overwritten.

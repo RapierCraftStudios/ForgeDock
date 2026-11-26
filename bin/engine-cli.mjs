@@ -499,10 +499,11 @@ export function readVerify(cwd = process.cwd()) {
     return coerceCiVerify(parseVerify({ ...sec, ...(invariants ? { invariants } : {}), ...(flaky ? { flaky } : {}), ...(guard_command ? { guard_command } : {}), ...(baselines ? { baselines } : {}), ...(sandboxes ? { sandboxes } : {}) }), { cwd }); // #5278: local-first never pushes for paid CI before review
   } catch { return undefined; }
 }
-/** #4542: forge.yaml `execution.host_capabilities` (+ patterns) for a lane's remote-block mapping; undefined when none are declared. */
+/** #4542: forge.yaml `execution.host_capabilities` (+ patterns) for a lane's remote-block mapping, plus `offload_wrappers`; undefined when none are declared. */
 export function readHostCaps(cwd = process.cwd()) {
   const e = readExecution(cwd);
-  return e?.hostCapabilities?.length ? { hostCapabilities: e.hostCapabilities, ...(e.hostCapabilityPatterns ? { hostCapabilityPatterns: e.hostCapabilityPatterns } : {}) } : undefined;
+  if (!e?.hostCapabilities?.length && !e?.offloadWrappers?.length) return undefined;
+  return { hostCapabilities: e.hostCapabilities ?? [], ...(e.hostCapabilityPatterns ? { hostCapabilityPatterns: e.hostCapabilityPatterns } : {}), ...(e.offloadWrappers ? { offloadWrappers: e.offloadWrappers } : {}) };
 }
 /** #4778: the capabilities the dispatching host relays to this sandbox lane (`CS_RELAY_CAPS`, set by the remote provider); `{}` when none. */
 export function readRelayCaps(env = process.env) {
@@ -2200,7 +2201,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         hostFallback: readHostFallback(), capacity, isRemote: () => true, identity: () => holdId, ...(exec.fallbackLocal ? { offlineFallback: true, headroom: hostHeadroom, ...(exec.capacityFallbackAfter ? { capacityFallbackAfter: exec.capacityFallbackAfter } : {}) } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
         admit: (u) => execBudget.admit(u),
         onUsage: (n, sb, rec) => {
-          try { execBudget.record(sandboxBudgetKey(batch.id, sb.id ?? n), sb); } catch { /* the batch total still counts it */ }
+          try { execBudget.record(sandboxBudgetKey(batch.id, sb.id ?? n, rec?.handle?.startedAt ?? rec?.startedAt ?? null), sb); } catch { /* the batch total still counts it */ }
           Promise.resolve(emitSbx({ event: "SANDBOX_USAGE", issue: n, provider: sb.provider, sandbox_id: sb.id, minutes: sb.minutes, cost_usd: sb.cost_usd, batch: batch.id })).catch(() => {});
         },
       }, { exec, readOverride: batch.readExecution, place, onChange: (e) => sink.line(`execution: live placement ${e.mode}, max_remote ${e.maxRemote}`) });
@@ -2526,6 +2527,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { batchEfficiency, formatEfficiencyLines } = await import("./stats/efficiency.mjs");
     report.push(...formatEfficiencyLines(await (deps.efficiency ?? batchEfficiency)({ batchDir: batch.dir, runsDir: dir, repo, gh: (a) => leanIo.gh(a), rows })));
   } catch (e) { report.push(`efficiency: n/a (${String(e?.message ?? e).split("\n")[0].slice(0, 160)})`); }
+  try { report.push(...await (await import("./stats/churn.mjs")).readChurn({ gh: (a) => leanIo.gh(a), repo, issues: rows.map((r) => r.issue).filter(Number.isInteger) })); } catch { /* #5979: churn lines never fail a batch */ }
   report.push(await budgetReportLine({ cwd, repo, gh: (a) => leanIo.gh(a) })); // #5278: month usage, projection and any auto switch to local-first
   const adequacyLine = formatTestAdequacySummary(rows); // #5449
   if (adequacyLine) report.push(adequacyLine);
@@ -2835,7 +2837,7 @@ export async function scheddFromCli(argv, deps = {}) {
   if (argv.length) throw new Error("usage: forgedock schedd [status | watchdog [--stall-sec N]]");
   (deps.renice ?? (await import("./lean/schedd-health.mjs")).bestEffortRenice)(); // #4780: lanes must not starve the scheduler
   process.title = "forgedock-schedd"; // distinctive name for OOM-killer avoid lists and ps (#4673)
-  const d = await schedd.startDaemon({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }), exit: deps.exit ?? ((c) => process.exit(c)), ...(deps.due !== undefined ? { due: deps.due } : { due: scheddDue }),
+  const d = await (deps.startDaemon ?? schedd.startDaemon)({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }), exit: deps.exit ?? ((c) => process.exit(c)), ...(deps.due !== undefined ? { due: deps.due } : { due: scheddDue }),
     ...(deps.daemonPreflight !== undefined ? { preflight: deps.daemonPreflight } : deps.batchDeps ? {} : { preflight: async () => { const lc = await import("./lean/lanecheck.mjs"); return (await lc.runLaneChecks({ exec: readExecution(process.cwd()), io: await lc.hostLaneIo() })).filter((c) => !c.ok); } }) });
   if (!d.running) {
     // #4775: under systemd, exiting here (code 0) makes `Restart=always` loop while another daemon holds the lock: stand by, take over when it dies

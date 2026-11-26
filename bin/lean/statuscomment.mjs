@@ -26,6 +26,8 @@ export const APPEND_SECTIONS = Object.freeze({ "FORGE:DECISION": 5 });
 export const ENTRY_SEP = "\n\n---\n\n";
 /** Markers posted once and edited in place (the marker leads the comment body, so anchored readers still match). */
 export const UPSERT_MARKERS = Object.freeze(["FORGE:INVESTIGATION", "FORGE:IMPLEMENTATION", "FORGE:PARKED"]);
+/** #5979: markers re-derived on every pass; a repeat of the same state posts nothing (FACTS and DEPENDENCY are edited in place, NEEDS_HUMAN stays a new comment when it changed). */
+export const IN_PLACE_MARKERS = Object.freeze(["FORGE:FACTS", "FORGE:DEPENDENCY", "FORGE:NEEDS_HUMAN"]);
 
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const markLine = (m) => `<!-- ${m} -->`;
