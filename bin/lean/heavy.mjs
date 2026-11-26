@@ -25,7 +25,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { writeAtomic } from "./batch.mjs";
 import { schedDir, pidAlive, DEFAULT_PRIORITY } from "./sched.mjs";
 import { which } from "./toolchain.mjs";
-import { hostParallelism } from "./admission.mjs";
+import { hostParallelism, quotaCores } from "./admission.mjs";
 import { lowerPriority } from "./hostload.mjs";
 
 export const HEAVY_DEFAULTS = Object.freeze({ enabled: true, max: null, step_mem_mb: 2048, reserve_mb: 1024, ramp_s: 60, max_wait_s: 1800 });
@@ -253,6 +253,33 @@ export async function acquireHeavy(h, entry = {}, { pollMs = HEAVY_POLL_MS, slee
   }
 }
 
+/**
+ * #6047: remote-token backend, chosen when CS_HEAVY_BASE (the pool agent's per-sandbox /heavy route) is set. Acquire polls
+ * while the agent denies, renews the lease on a timer, release is best effort; an unreachable or erroring agent, or a wait past
+ * `maxWaitMs`, fails open (the step runs, `failOpen: true`). `fetchFn` returns {status, json()}.
+ */
+export async function acquireRemote({ base, credToken = "", fetchFn = (u, o) => fetch(u, o), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now(), pollMs = 5000, renewMs = 60000, maxWaitMs = HEAVY_DEFAULTS.max_wait_s * 1000, setTimer = setInterval, clearTimer = clearInterval } = {}) {
+  const call = async (action, body) => {
+    const r = await fetchFn(`${base}/${action}`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${credToken}` }, body: JSON.stringify(body ?? {}), signal: AbortSignal.timeout(10000) });
+    if (r.status !== 200) throw new Error(`heavy ${action}: HTTP ${r.status}`);
+    return r.json();
+  };
+  const t0 = now(), open = { waitMs: 0, queued: 0, holders: 1, release: () => {} };
+  for (;;) {
+    let r;
+    try { r = await call("acquire"); } catch { return { ...open, waitMs: now() - t0, failOpen: true }; }
+    if (r?.granted && r.token) {
+      const token = r.token, timer = setTimer(() => { call("renew", { token }).catch(() => {}); }, renewMs);
+      timer?.unref?.();
+      let released = false;
+      return { ...open, waitMs: now() - t0, token, release: () => { if (released) return; released = true; clearTimer(timer); call("release", { token }).catch(() => {}); } };
+    }
+    if (now() - t0 >= maxWaitMs) return { ...open, waitMs: now() - t0, failOpen: true, timedOut: true };
+    await sleep(Math.min(pollMs, Math.max(1, Number(r?.retry_after_s) * 1000 || pollMs)));
+  }
+}
+const cgroupRead = (f) => readFileSync(f, "utf8");
+
 /** Default lane effect: `acquire(entry, cfg)` → {waitMs, queued, release()} (cfg = the lane's forge.yaml heavy keys); `stats()`; `lane(pids)` (#4405). */
 export function makeHeavyIo({ dir = schedDir(), env = process.env, host } = {}) {
   const open = (cfg) => openHeavy(dir, { cfg, env, ...(host ? { host } : {}) });
@@ -385,7 +412,7 @@ export function labelDockerArgs(name, args, env = {}) {
  * CLI body: `run --name <n> -- <real> args...`. Pass-through when FORGE_HEAVY_HELD is set or the step is llm; else
  * acquire, run with FORGE_HEAVY_HELD=1 and FORGE_HOST_PARALLELISM from live holders, release, propagate the exit.
  */
-export async function runWrapped(argv, { env: env0 = process.env, open = openHeavy, run = spawnInherit, host } = {}) {
+export async function runWrapped(argv, { env: env0 = process.env, open = openHeavy, run = spawnInherit, host, remote = acquireRemote, read = cgroupRead } = {}) {
   let env = env0;
   const sep = argv.indexOf("--");
   if (argv[0] !== "run" || sep < 0 || !argv[sep + 1]) throw new Error("usage: heavy.mjs run --name <name> -- <command> [args...]");
@@ -398,12 +425,14 @@ export async function runWrapped(argv, { env: env0 = process.env, open = openHea
   cmd = g0.cmd; env = g0.env; args = labelDockerArgs(name, args, env);
   if (env.FORGE_HEAVY_HELD || env.FORGE_HEAVY_DISABLED === "1" || classifyStep(name, args) === "llm") return run(cmd, args, env);
   const hostP = host ?? defaultHost();
-  const h = open(env.FORGEDOCK_SCHED_DIR || schedDir(env), { env, host: hostP });
   const priority = Number.isFinite(Number(env.FORGE_LANE_PRIORITY)) && String(env.FORGE_LANE_PRIORITY).trim() !== "" ? Number(env.FORGE_LANE_PRIORITY) : DEFAULT_PRIORITY;
   const phase = env.FORGE_LANE_PHASE || "step";
-  const g = await acquireHeavy(h, { issue: Number(env.FORGE_LANE_ISSUE) || null, phase, priority, mb: c.step_mem_mb });
+  const useRemote = Boolean(env.CS_HEAVY_BASE); // #6047: the pool agent's token semaphore; fail-open, else the local file semaphore
+  const g = useRemote ? await remote({ base: env.CS_HEAVY_BASE, credToken: env.CS_CRED_TOKEN ?? "", maxWaitMs: c.max_wait_s * 1000 })
+    : await acquireHeavy(open(env.FORGEDOCK_SCHED_DIR || schedDir(env), { env, host: hostP }), { issue: Number(env.FORGE_LANE_ISSUE) || null, phase, priority, mb: c.step_mem_mb });
   if (env.FORGE_HEAVY_WAITS) { try { appendFileSync(env.FORGE_HEAVY_WAITS, JSON.stringify({ phase, name, waitMs: g.waitMs, queued: g.queued }) + "\n"); } catch { /* metrics are best effort */ } }
   let cores = 1; try { cores = hostP.cores() || 1; } catch { /* 1 */ }
+  cores = quotaCores({ cores, read, env }); // #6047: the container's CPU quota, never the VM
   const childEnv = { ...env, FORGE_HEAVY_HELD: "1",
     ...(env.FORGE_HEAVY_PARALLELISM_PINNED === "1" ? {} : { FORGE_HOST_PARALLELISM: String(hostParallelism({ cores, lanes: g.holders })) }) };
   // #5174: a gated step runs at nice 10 / ionice idle so local test runners and installs do not starve the schedd event loop.

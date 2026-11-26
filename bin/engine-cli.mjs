@@ -23,7 +23,7 @@ import { localLaneCap, ADMISSION_DEFAULTS } from "./lean/admission.mjs";
 import { memAvailableMb } from "./lean/heavy.mjs";
 import { liveOverload, formatOverload, formatHostLoad } from "./lean/hostload.mjs";
 import { join, resolve as resolvePath } from "node:path";
-import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost, ENGINE_VERSION } from "./engine.mjs";
+import { holdResumePlan, holdTtlRefusal, runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost, ENGINE_VERSION } from "./engine.mjs";
 import { sandboxBudgetKey } from "./lean/liveness.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { decomposedSubissues, isDecomposedRecord, isTrustedActor, parseDependsOn } from "./engine/phases.mjs";
@@ -534,7 +534,8 @@ export function readRelayCaps(env = process.env) {
 export function readHostFallback(cwd = process.cwd()) {
   let hostRole = null;
   try { hostRole = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.host?.role ?? null; } catch { /* unreadable: role unset */ }
-  return hostFallbackAllowed({ hostFallback: readExecution(cwd)?.hostFallback ?? null, hostRole });
+  const exec = readExecution(cwd);
+  return hostFallbackAllowed({ hostFallback: exec?.hostFallback ?? null, hostRole, mode: exec?.mode ?? null });
 }
 export function readExecution(cwd = process.cwd()) {
   try {
@@ -1415,7 +1416,7 @@ async function envBatch({ argv, root, print = (l) => console.log(l) }) {
 }
 
 const ORCH_USAGE = "usage: forgedock orchestrate <issue...> | --select <query> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] [--auto-children off|decomposed|epic|all] [--epic N] | --resume <id> [issue...] | --set-parallel <id> <K> | --set-max-remote <id> <N> | --set-placement <id> remote|hybrid|local | --clear-breaker <id> | --status <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> --all [--for 2h] [--reason T] (sugar for --pause) | --hold <id> <issue...> [--for <4h|30m|1d>] [--reason <text>] | --pause <id> [--for <4h|30m|1d>] --reason <text> | --unpause <id> | --gc-orphans | --adopt <issue> [--repo owner/repo] [--lane L] | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
-const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force", "--auto-children", "--epic", "--for", "--select"];
+const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force", "--auto-children", "--epic", "--for", "--ttl", "--select"];
 const issuesOf = (argv) => {
   const issues = [];
   for (let i = 0; i < argv.length; i++) {
@@ -1592,7 +1593,7 @@ function parseHoldFor(v) {
 }
 /** #5469: the hold's owner (the operator session: the CLI's parent pid on this host), expiry (`--for`) and `--reason`. */
 function holdMeta(argv) {
-  const forLabel = flag(argv, "--for"), reason = flag(argv, "--reason");
+  const forLabel = flag(argv, "--for") ?? flag(argv, "--ttl"), reason = flag(argv, "--reason");
   return { owner: process.env.FORGE_HOLD_OWNER || `${process.env.USER || process.env.USERNAME || "operator"}@${hostname()}`, ownerPid: process.ppid, ownerHost: hostname(), forMs: parseHoldFor(forLabel), forLabel, reason: reason && !reason.startsWith("--") ? reason : null };
 }
 
@@ -1645,6 +1646,8 @@ async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = nu
     try { const st = (await import("./lean/batch.mjs")).openBatch(root, id).store.load(); for (const n of st?.pending ?? []) if (!issues.includes(n)) issues.push(n); for (const n of Object.keys(st?.notBefore ?? {})) if (!issues.includes(Number(n))) issues.push(Number(n)); } catch { /* unreadable: the explicit list stands */ }
   }
   if (!id || String(id).startsWith("--") || !issues.length) throw new Error(ORCH_USAGE);
+  const refusal = op === "hold" ? holdTtlRefusal(issues, meta?.forMs) : null; // #5988
+  if (refusal) throw new Error(refusal);
   let res = viaDaemon ? await viaDaemon(op, issues, meta) : null;
   if (!res) {
     const b = (await import("./lean/batch.mjs")).openBatch(root, id);
@@ -1665,6 +1668,7 @@ async function holdBatch({ op, id, tokens, root, viaDaemon = null, takeover = nu
   const list = (res.changed ?? []).map((n) => `#${n}`).join(" ") || "(none)";
   print(op === "hold" ? `batch ${id}: held ${list}${meta?.forMs ? ` for ${meta.forLabel}` : ""}; forgedock orchestrate --release ${id} <issue...> (or --resume ${id} <issue...>) re-admits them`
     : `batch ${id}: released ${list}`);
+  if (op === "hold" && issues.length > 1) print(holdResumePlan(res.changed?.length ? res.changed : issues, meta?.forLabel)); // #5988
   return { ok: true, batch: id, changed: res.changed ?? [] };
 }
 
@@ -2214,7 +2218,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
           try { execBudget.record(sandboxBudgetKey(batch.id, sb.id ?? n, rec?.handle?.startedAt ?? rec?.startedAt ?? null), sb); } catch { /* the batch total still counts it */ }
           Promise.resolve(emitSbx({ event: "SANDBOX_USAGE", issue: n, provider: sb.provider, sandbox_id: sb.id, minutes: sb.minutes, cost_usd: sb.cost_usd, batch: batch.id })).catch(() => {});
         },
-      }, { exec, readOverride: batch.readExecution, place, onChange: (e) => sink.line(`execution: live placement ${e.mode}, max_remote ${e.maxRemote}`) });
+      }, { exec, readOverride: batch.readExecution, place, onChange: (e) => sink.line(`execution: live placement ${e.mode}, max_remote ${e.maxRemote}`),
+        // #5746: a live max_remote left below the pinned value is announced once after FORGEDOCK_MAX_REMOTE_WARN_HOURS (default 6)
+        belowPinnedHours: Number(process.env.FORGEDOCK_MAX_REMOTE_WARN_HOURS) || undefined,
+        onBelowPinned: (w) => sink.line(`WARNING: execution: live max_remote ${w.maxRemote} has been below the pinned ${w.pinned} for over ${w.hours}h (forgedock orchestrate --set-max-remote ${batch.id} ${w.pinned} restores it)`) });
       sink.line(`execution: ${hybrid ? "hybrid" : "remote"} via ${provider.name}, max_remote ${exec.maxRemote}`);
     } else {
       lanes = withPlacement(batchMod.detachedLanes({ batch, cwd, env: laneEnv, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs, spawnFn: laneSpawn }));
@@ -2252,8 +2259,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const schedMod = await import("./lean/sched.mjs");
   const registry = deps.sched !== undefined ? deps.sched : schedMod.openSched(schedMod.schedDir());
   const overload = deps.overload !== undefined ? deps.overload : registry ? liveOverload(readAdmission(cwd)) : null; // #5174
-  const labelNames = async (n) => {
-    if (!labelsOf.has(n)) labelsOf.set(n, (JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "labels"])).labels ?? []).map((x) => x.name));
+  const labelNames = async (n, { fresh = false } = {}) => { // #5893: `fresh` re-reads (the readmit decision); the cache serves placement
+    if (fresh || !labelsOf.has(n)) labelsOf.set(n, (JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "labels"])).labels ?? []).map((x) => x.name));
     return labelsOf.get(n);
   };
   let budget = {};
@@ -2378,6 +2385,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const envHold = deps.envHold !== undefined ? deps.envHold : testDeps ? null : {
     version: () => scheddMod.readInstalledVersion() ?? ENGINE_VERSION,
     envFingerprint: () => batchMod.envFingerprint(batch.readPlan()?.env),
+    envValues: () => batch.readPlan()?.env ?? null, // #5931
     missingTools: async (tools) => { const p = batch.readPlan()?.env, e = p ? scheddMod.mergeEnv(process.env, p) : env; return hostMissingTools(tools, { path: e.PATH ?? e.Path ?? "" }); },
   };
   // #4785: decisions and the frozen contract's validate commands too. #5824: one view per issue; the plan pass's view is
@@ -2407,6 +2415,12 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       batch.writePlan({ ...batch.readPlan(), dag: { edges: dag.edges, overlaps: dag.overlaps } });
     } catch (e) { sink.line(`plan: n/a (${String(e?.message ?? e).split("\n")[0].slice(0, 160)})`); }
   }
+  // #5988: the cheap login probe (`claude auth status`, no model call) on the account the rotator names; ok on exit 0.
+  const authProbeOf = () => async ({ configDir = null } = {}) => {
+    const { spawnSync } = await import("node:child_process");
+    const r = spawnSync("claude", ["auth", "status"], { timeout: 15000, stdio: "ignore", env: { ...process.env, ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}) } });
+    return { ok: !r.error && r.status === 0 };
+  };
   let rows, childFields = null; // #4965: the host gh's accepted `issue list --json` fields, read once from its help
   const healthCheck = (checkpoint) => batchHealth.runCheck({ batch, checkpoint, config: healthConf, repo, now: healthNow,
     resolve: (cands) => batchHealth.resolvedOnGithub(cands, (a) => leanIo.gh(a), repo),
@@ -2434,7 +2448,13 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       autoChildren,
       ...(autoMod.addsEpicChildren(autoChildren.mode) ? { getChildren: async () => ({ list: await autoMod.readChildList({ gh: (a) => leanIo.gh(a), repo, fields: childFields ??= await autoMod.hostListFields((a) => leanIo.gh(a)) }), elsewhere: autoMod.liveElsewhere({ batchMod, root, self: batch.id, repo }) }) } : {}),
       ...(select ? { select, reconcile: await makeReconcile({ select, repo, leanIo, orch, lane, argv }) } : {}),
-      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getClearBreaker: batch.peekClearBreaker, consumeClearBreaker: batch.readClearBreaker, ackClearBreaker: batch.ackClearBreaker, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, expireHolds: batch.expireHolds, getPause: batch.readPause, expirePause: batch.expirePause, getHoldInfo: batch.readHoldInfo, getGates: batch.readGates, baseWait: baseWaits.size ? baseWaitOf(baseWaits, { io, leanIo, cwd }) : null, ...lanes,
+      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getClearBreaker: batch.peekClearBreaker, consumeClearBreaker: batch.readClearBreaker, ackClearBreaker: batch.ackClearBreaker, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, expireHolds: batch.expireHolds, getPause: batch.readPause, expirePause: batch.expirePause, getHoldInfo: batch.readHoldInfo, authProbe: authProbeOf(), onEscalate: async ({ detail, issues: affected }) => { // #5988: the 30 min backend.auth escalation: notify + one issue comment
+        const text = `BATCH AUTH OUTAGE ${batch.id}\n  ${detail}\n  recovery: forgedock orchestrate --resume ${batch.id}`;
+        await batchHealth.deliverAlert({ text, batchId: batch.id, health: null, sink, gh: (a) => leanIo.gh(a), repo, config: { ...healthConf, issue: null }, epics: [], ...(deps.notify ? { notify: deps.notify } : {}) });
+        const n = [...affected].sort((x, y) => x - y)[0];
+        if (Number.isInteger(n) && repo) { try { await leanIo.gh(["issue", "comment", String(n), "-R", repo, "--body", `<!-- FORGE:AUTH-OUTAGE batch=${batch.id} -->\n${text}`]); } catch { /* best effort */ } }
+      },
+      ...(typeof remote?.quarantineAgent === "function" ? { quarantineAgent: (q) => remote.quarantineAgent(q) } : {}), ...(typeof remote?.reseedCache === "function" ? { reseedCache: (q) => remote.reseedCache(q) } : {}), getGates: batch.readGates, baseWait: baseWaits.size ? baseWaitOf(baseWaits, { io, leanIo, cwd }) : null, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(Number.isInteger(orch.transientRetries) ? { transientRetries: orch.transientRetries } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, rotator, batchId: batch.id, drift, lifecycle, integration,
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null, { cfg: readAdmission(cwd), host: { cores: () => cpus().length, memAvailableMb, rampingMb: rampProbe.rampingMb } }), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       // #5174: hold new local admissions while loadavg/cores is above engine.overload_load_per_core (host-wide batches only)
@@ -2465,8 +2485,18 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       onInterrupted: deps.onInterrupted ?? (async (n) => leanIo.gh(["issue", "edit", String(n), "-R", repo, "--remove-label", "workflow:building"]).catch(() => {})),
       // #4387: an out-of-set dependency labelled needs-human is not pulled into the batch
       issueLabels: labelNames,
+      // #5893: a held needs-human root is released only when the label's removal event post-dates the newest FORGE:NEEDS_HUMAN comment
+      heldFacts: deps.heldFacts ?? (async (n) => {
+        const ev = JSON.parse(await leanIo.gh(["api", `repos/${repo}/issues/${n}/events`, "--paginate", "--jq", "[.[] | select(.event==\"unlabeled\" and .label.name==\"needs-human\") | .created_at]"]).then((o) => `[${String(o).replace(/\]\s*\[/g, ",").replace(/^\s*\[|\]\s*$/g, "")}]`));
+        const cs = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "comments"])).comments ?? [];
+        const blk = cs.filter((c) => String(c.body ?? "").includes("<!-- FORGE:NEEDS_HUMAN"));
+        const last = blk[blk.length - 1];
+        const ask = cs.filter((c) => /FORGE:ASK key=/.test(String(c.body ?? ""))).pop();
+        const t = (x) => Date.parse(x);
+        return { removedAt: Math.max(...ev.map(t), -Infinity), blockedAt: last ? t(last.createdAt) : NaN, askKey: ask ? (/FORGE:ASK key=([^\s>]+)/.exec(String(ask.body))?.[1] ?? "") : "" };
+      }),
       // #5986: per-issue attempts ledger and input-hash admission (off under the test seams)
-      ...((deps.attempts !== undefined ? deps.attempts : testDeps ? null : true) ? { attempts: deps.attempts !== undefined ? deps.attempts : makeAttemptsSeam({ gh: (a) => leanIo.gh(a), repo, engineVersion: ENGINE_VERSION, sandboxVersion: scheddMod.readInstalledVersion?.() ?? null, cfg: { maxAttempts: orch.maxAttemptsPerIssue, maxIdentical: orch.maxIdenticalSignature } }) } : {}),
+      ...((deps.attempts !== undefined ? deps.attempts : testDeps ? null : true) ? { attempts: deps.attempts !== undefined ? deps.attempts : makeAttemptsSeam({ gh: (a) => leanIo.gh(a), repo, engineVersion: ENGINE_VERSION, hostVersion: scheddMod.readInstalledVersion?.() ?? null, sandboxVersion: deps.sandboxVersion ?? null, cfg: { maxAttempts: orch.maxAttemptsPerIssue, maxIdentical: orch.maxIdenticalSignature } }) } : {}),
       // #4725: a closed (completed) dependency is satisfied even when it still carries a stale needs-human label
       // #5152: a NOT_PLANNED close labelled workflow:merged, or a decomposition whose sub-issues all closed, is delivered: CLOSED
       issueState: async (n) => {

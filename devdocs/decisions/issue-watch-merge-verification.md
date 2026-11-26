@@ -26,6 +26,12 @@ created: 2026-10-31
   - `pending`: a read failed or merge-commit CI is still running. It is retried each pass and fails after 60 minutes.
 - A draining watch is not done while a merge is mid-verification.
 
+## Amendment (#6055): attribution, review record, window
+
+- **Base-red.** A check red on the merge commit counts against the PR only when it was green or absent on the first parent (`gh api commits/<sha>` `parents[0]`, then its check states). Red on both is base-red: noted in the evidence, the merge verifies, no reopen. Green or absent on the parent, or an unreadable parent, still fails. Only the first parent is read, not a deeper history walk.
+- **Review record.** With no trusted FORGE:REVIEW on the issue, the PR's own comments are read (best effort), which carries the `review.trigger` skip note. An enforced NONCONFORMING/BLOCK/FAIL there still fails; no record anywhere still fails.
+- **Window.** A pending merge-commit CI waits p90 of the lane's recent completed Actions run durations x 3, floored at 60 min, capped at 6 h (`io.ciDurations`, best effort). Unreadable history keeps the 60 min fail; the failure evidence states the window used.
+
 ## Rejected
 
 - **Auto-revert on a failed verification.** Revert, fix forward or accept is a product decision.

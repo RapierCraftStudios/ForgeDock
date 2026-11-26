@@ -26,10 +26,10 @@ import { acquireBranchLock, waitPidsExit } from "./branchlock.mjs";
 import { parseRecurrenceConfig, recurrenceFacts, recursLinks, designLaneNote, designDemanded } from "./recurrence.mjs"; // #5751
 import { areaOf, acquireHotArea, countCounters } from "./hotarea.mjs"; // #5751
 import { isEnvValidateFailure, outputTail, contractRuleCounts, onlyTestPlanProblems, isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, applyRequirementDecisions, dedupeAddRequirements, loneE2eRows, reproEnvMiss, resolveForgedockPaths, resolvingIo, portableForgedockPaths, FORGEDOCK_CHECKS_VAR, FORGEDOCK_ENTRY_VAR, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, splitAdvisory, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, amendmentKindProblems, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables, convertDelivered } from "./conformance.mjs";
-import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
+import { checkAdmission, hostParallelism, quotaCores, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment, prodFailureSignal } from "./prefilter.mjs";
 import { validateAmendments } from "./attempts.mjs";
-import { writeStatus, postUpsert, postKeyed, isKeyedPost, isStatusPost, isUpsertPost, hasSection, clearPipelineLabels, IN_PLACE_MARKERS, commentId } from "./statuscomment.mjs";
+import { writeStatus, postUpsert, postKeyed, isKeyedPost, isStatusPost, isUpsertPost, hasSection, clearPipelineLabels, IN_PLACE_MARKERS, commentId, contractKey } from "./statuscomment.mjs";
 import { decidePost } from "./commentstate.mjs"; // #5979
 import { repeatSignature, countIdentical, shouldPark, summaryComment } from "./failure-stop.mjs"; // #5979
 import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs";
@@ -70,7 +70,7 @@ import { reserveForBuild, revalidate } from "./seqreserve.mjs";
 import { patchEcho, mutationsOf, runReproMutations, classifyRepro } from "./reproquality.mjs";
 import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, contractCorrectionApiPrompt, CONTRACT_CORRECTION_SYSTEM, apiEditPrompt, API_EDIT_SYSTEM, conformanceResumePrompt, amendmentCorrectionPrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, docsPlanNote, pagePlanNote, contextPackNote, buildOpeningNote, sequenceBuildRule, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, routeDigestPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
-import { classifyBaseRed, attribute as attributeBaseRed, runOnBase, reportBaseRed, recordBaseVerdict, bypassesGuard } from "./basered.mjs"; // #5239
+import { classifyBaseRed, diffTouchesGuard, attribute as attributeBaseRed, runOnBase, reportBaseRed, recordBaseVerdict, bypassesGuard } from "./basered.mjs"; // #5239
 import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
 import { parseProdParity, prodParityFailures as prodParityOf } from "./prodparity.mjs";
 import { routePathsFromFiles, routeReachabilityFailures } from "./routecheck.mjs";
@@ -468,6 +468,7 @@ export async function runCore(o) {
   const localPosts = []; // #5979: comments this lane created, so a second post in the same run sees them
   const allComments = () => [...(iss?.comments ?? []), ...localPosts];
   let statusCache = null; // #5592: {id, sections} of this issue's one FORGE:STATUS comment, edited in place
+  let postContractHash = null; // #5931: the frozen contract hash once known; in-place comments are keyed to it
   const post = async (marker, body, on = issue) => {
     if (on === issue && isStatusPost(marker)) { // machine-state markers: a section of the one status comment, not a comment of their own
       try {
@@ -481,14 +482,15 @@ export async function runCore(o) {
     if (on === issue && isUpsertPost(marker)) { // one comment edited in place across requeues (the marker still leads the body)
       return postUpsert({ gh: ghw, repo, issue: on, markers: marker, body, comments: iss?.comments, cap: capComment });
     }
-    if (on === issue && isKeyedPost(marker)) { // #5986: one comment per (kind, content hash) with a repeat counter; at 12 engine comments edit in place only
+    if (on === issue && isKeyedPost(marker) && !(postContractHash && IN_PLACE_MARKERS.includes(Array.isArray(marker) ? marker[0] : marker))) { // #5986: one comment per (kind, content hash) with a repeat counter; at 12 engine comments edit in place only
       return postKeyed({ gh: ghw, repo, issue: on, marker: Array.isArray(marker) ? marker[0] : marker, body, cap: capComment });
     }
     const marks = (Array.isArray(marker) ? marker : [marker]).map((m) => `<!-- ${m} -->`).join("\n");
-    const full = capComment(`${marks}\n${body}`);
     const first = Array.isArray(marker) ? marker[0] : marker;
-    if (on === issue && IN_PLACE_MARKERS.includes(first)) { // #5979: re-post only on a state change; FACTS and DEPENDENCY are edited in place
-      const d = decidePost({ marker: first, body: full, comments: allComments(), trusted: (c) => c?.__mine === true || isTrustedIssueComment(c) });
+    const keyed = on === issue && !!postContractHash && IN_PLACE_MARKERS.includes(first);
+    const full = capComment(`${marks}\n${body}${keyed ? `\n${contractKey(postContractHash)}` : ""}`);
+    if (on === issue && IN_PLACE_MARKERS.includes(first)) { // #5979: re-post only on a state change; FACTS and DEPENDENCY are edited in place; #5931: all of them per contract hash once frozen
+      const d = decidePost({ marker: first, body: full, contractHash: keyed ? postContractHash : null, comments: allComments(), trusted: (c) => c?.__mine === true || isTrustedIssueComment(c) });
       if (d.action === "skip") return d.prior.url ?? null;
       const id = d.action === "patch" ? commentId(d.prior) : null;
       if (id) {
@@ -805,7 +807,7 @@ export async function runCore(o) {
     if (deferTail) postRun.add("teardown", () => teardown(reason, extra)); // last: the structure delta and guard read the worktree
     if (reason === "merged" || reason === "invalid") await clearPipelineLabels({ gh: ghc, repo, issue, onFail: (n, e) => T.anomalies.push(`pipeline labels not cleared${n.length ? `: ${n.join(", ")}` : ""} (${String(e?.message ?? e).slice(0, 120)})`) }); // #5592/#5759: a merged or closed issue keeps no needs-human / parked:* / remediation-queue
     await releaseLease(reason, code, extra.mergedTo ?? null);
-    done = { terminalReason: reason, detail, branch, worktree: wt, ...(cascadeLog.kinds.length ? { cascade: cascadeLog.kinds[cascadeLog.kinds.length - 1], cascades: [...cascadeLog.kinds], cascade_cost_usd: Math.round(cascadeLog.costUsd * 1e6) / 1e6, cascade_minutes: Math.round(cascadeLog.ms / 6000) / 10 } : {}), cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0, model_ms: modelMs, phases: phaseLedger.snapshot(),
+    done = { terminalReason: reason, detail, branch, worktree: wt, engineVersion: ENGINE_VERSION, ...(postContractHash ? { contractHash: postContractHash } : {}), ...(cascadeLog.kinds.length ? { cascade: cascadeLog.kinds[cascadeLog.kinds.length - 1], cascades: [...cascadeLog.kinds], cascade_cost_usd: Math.round(cascadeLog.costUsd * 1e6) / 1e6, cascade_minutes: Math.round(cascadeLog.ms / 6000) / 10 } : {}), cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0, model_ms: modelMs, phases: phaseLedger.snapshot(),
       ...(laneHead && reason !== "merged" ? { laneHead: { ...laneHead } } : {}), light, ...(lightVerdict ? { light_eligibility: lightVerdict } : {}), ...(lightUpgrade ? { light_upgrade: lightUpgrade } : {}), // #4453
       ...(Object.keys(waits).length ? { waits: { ...waits } } : {}), ...(followupsFiled.length ? { followups: followupsFiled.map((f) => ({ ...f })) } : {}), ...(pendingRecord().length ? { pendingFollowups: pendingRecord() } : {}), ...(heavyQueueMax ? { heavyQueueMax } : {}), ...(precheckRan ? { precheckMs, precheckDeferred } : {}),
       ...(firstPassOf(builderTriggers) != null ? { firstPass: firstPassOf(builderTriggers) } : {}), ...(tb.record() ? { turns: tb.record() } : {}), context: { ...ctxStats, cost_usd: impl.cost }, // #4392, #5829
@@ -968,7 +970,7 @@ export async function runCore(o) {
     const set = String(process.env.FORGE_HOST_PARALLELISM ?? "").trim();
     if (/^\d+$/.test(set) && Number(set) > 0) return set;
     if (!io.host?.cores) return null;
-    try { return String(hostParallelism({ cores: io.host.cores(), lanes: io.host.activeLanes?.() })); } catch { return null; }
+    try { return String(hostParallelism({ cores: quotaCores({ cores: io.host.cores(), read: (f) => readFileSync(f, "utf8"), env: process.env }), lanes: io.host.activeLanes?.() })); } catch { return null; }
   }
   /**
    * #4325: the lane env every engine-run command shares with the builder: shared package-manager stores (#4220), the run
@@ -2257,19 +2259,20 @@ export async function runCore(o) {
       let out = "";
       try { out = String(await ghc(["api", "--paginate", `repos/${repo}/issues/${issue}/comments`, "--jq", ".[] | {body, author_association, user: {type: .user.type, login: .user.login}}"])); } catch { return null; }
       let found = null;
-      const amendLog = []; // #4899: trusted FORGE:AMENDMENT payloads in order, bound to a contract hash
+      const amendLog = [], rewritePosted = []; // #4899: trusted FORGE:AMENDMENT payloads in order, bound to a contract hash
       for (const l of out.split("\n")) {
         let c; try { c = JSON.parse(l); } catch { continue; }
         if (!isTrustedComment(c)) continue;
         const b = String(c?.body ?? "");
         const am = parseAmendmentsComment(b);
         if (am) amendLog.push(am);
+        if (b.includes("rewrite-validate")) rewritePosted.push(b); // #5920: audit comments already posted
         if (!b.startsWith("<!-- FORGE:CONTRACT -->")) { if (found && b.trim() && !b.trimStart().startsWith("<!-- FORGE:")) found.humanAfter = true; continue; }
         const fc = parseContractComment(b);
         if (fc && contractHash(fc.text) === fc.hash) found = { ...fc, humanAfter: false };
       }
       if (found) {
-        const seen = new Set(); found.amendments = [];
+        const seen = new Set(); found.amendments = []; found.rewritePosted = rewritePosted;
         for (const st of amendLog) if (st.contract === found.hash) for (const a of st.amendments) { const k = JSON.stringify(a); if (!seen.has(k)) { seen.add(k); found.amendments.push(a); } }
       }
       return found;
@@ -2445,7 +2448,7 @@ export async function runCore(o) {
       { const f = await gateSetup(); if (f) return f; }
       files = await changedFiles();
       frozen = { requirements: [], deliverables: files.map((path, i) => ({ id: `D${i + 1}`, path, change: `adopted from PR #${adoptPr.number}: reviewed as built`, requirements: [] })), preserve: [], validate: [] };
-      hash = contractHash(contractJson(frozen));
+      hash = contractHash(contractJson(frozen)); postContractHash = hash;
       T.decisions.push(`Adopted PR #${adoptPr.number}: ${files.length} changed file(s) go to review as built`);
     } else if (isSplit) {
       // ---- 3'. refactor:split (#4211): deterministic move + proof replaces the builder; no builder session exists ----
@@ -2472,7 +2475,22 @@ export async function runCore(o) {
             T.decisions.push(`Rerun: frozen contract ${fc.hash} is stale (${stale}); re-planning`);
           } else {
             frozen = fc.contract; hash = fc.hash; priorAmendments = fc.amendments ?? []; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`);
-            ev({ event: "CONTRACT_REUSED", hash, recover: recover?.code ?? null, resumed: Boolean(resumed) }); // #5811: no pre-contract session; routing is next
+            postContractHash = hash; ev({ event: "CONTRACT_REUSED", hash, recover: recover?.code ?? null, resumed: Boolean(resumed) }); // #5811: no pre-contract session; routing is next
+            freezeTracked = (await depOwnerOf()).files;
+            const rw = freezeRewrites(structuredClone(frozen)); // #5920: the freeze-time rewrites (validate.recipes, venv, CI env) apply to a reused contract too; only commands are adopted
+            const swaps = [];
+            const swap = (id, o, n) => { if (o && typeof o.command === "string" && typeof n?.command === "string" && n.command !== o.command) { swaps.push({ id, from: o.command, to: n.command }); o.command = n.command; } };
+            frozen = structuredClone(frozen);
+            for (const v of Array.isArray(frozen.validate) ? frozen.validate : []) swap(v?.id, v, (rw.validate ?? []).find((x) => x?.id === v?.id));
+            swap("repro_test", frozen.repro_test, rw.repro_test);
+            if (swaps.length) { // audit-only comment (no AMENDMENT-STATE, so a later reuse never replays it); the rewrite is deterministic and re-derived each reuse
+              const why = `rewrite of frozen contract ${hash} on reuse (#5920)`;
+              const body = renderAmendments(swaps.map((x) => ({ kind: "rewrite-validate", target: x.id, why: `${why}: \`${x.from}\` -> \`${x.to}\`` })));
+              T.decisions.push(`Reused contract ${hash}: ${swaps.map((x) => x.id).join(", ")} rewritten at reuse`);
+              if (!(fc.rewritePosted ?? []).some((c) => c.includes(body))) {
+                try { await post("FORGE:AMENDMENT", body); } catch (e) { T.anomalies.push(`FORGE:AMENDMENT comment not posted: ${String(e?.message ?? e).slice(0, 160)}`); }
+              }
+            }
             const ad = applyRequirementDecisions(frozen, trustedComments); // #5547: a structured operator decision amends the frozen row
             if (ad.applied.length) { frozen = deferChecklessPostDeploy(ad.contract).contract; T.decisions.push(`FORGE:DECISION applied to the frozen contract: ${ad.applied.join(", ")} tracked post-deploy`); }
           }
@@ -2567,6 +2585,7 @@ export async function runCore(o) {
         stage = "plan"; liveKeys = ["investigation"]; result = (await readResult()) ?? result;
         if (!lr.upgrade) {
           lightDone = true; light = true; frozen = historyRows(lr.contract); hash = contractHash(contractJson(frozen));
+          postContractHash = hash;
           let body = renderContract(frozen, hash, { scope: scopeHash, base: lane });
           if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true, scope: scopeHash, base: lane });
           await post(["FORGE:CONTRACT", "FORGE:PLAN"], body);
@@ -3245,6 +3264,12 @@ export async function runCore(o) {
         if (ok.length) { T.decisions.push(`env.base_probe: guard command(s) ${ok.map((f) => `\`${f.command}\``).join(", ")} pass on the bare ${base} tip at the host; the sandbox base failure is environment, no issue filed`); baseRed = baseRed.filter((f) => !ok.includes(f)); }
       }
       if (!baseRed.length) return null;
+      // #5913: a lane whose own diff touches the failing guard's files may be the base fix; deferring it behind the red it repairs is circular. Skip the deferral only when the guard re-run on the lane tree passes.
+      const changedNow = String(await git(["diff", "--name-only", `${base}...HEAD`]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean);
+      if (diffTouchesGuard({ changed: changedNow, failed: baseRed })) {
+        const reruns = await heavyStep("precheck", async () => { const out = []; for (const f of baseRed) { try { out.push(await io.runCommand({ command: f.command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() })); } catch { out.push({ rc: 1 }); } } return out; });
+        if (reruns.every((r) => r?.rc === 0)) { T.decisions.push(`Guard command(s) ${baseRed.map((f) => `\`${f.command}\``).join(", ")} fail on ${base} but pass on this lane's tree (the lane changes the files the failure names); not deferred (base.red)`); return null; }
+      }
       const att = await attributeBaseRed({ failed: baseRed, git, base });
       if (bypass && baseRed.length === failed.length) { // R2: bypass only when every failed command is base-red; non-guard or lane-broken failures stay the lane's. #5992: a lane clear of the guarded surface goes on; the guard is re-run on the merged tree at merge (the base-sync post-merge gate)
         let laneFiles = [];
@@ -3260,10 +3285,10 @@ export async function runCore(o) {
       try { if (att?.sha) commitDate = String(await git(["show", "-s", "--format=%cI", att.sha])).trim(); } catch { /* no reopen */ }
       const cmds = baseRed.map((f) => f.command), outputs = Object.fromEntries(cmds.map((c) => [c, tailOf(c)]));
       const n = await reportBaseRed({ ghc: ghw, repo, base, att, laneIssue: issue, commands: cmds, outputs, baseSha, commitDate });
-      T.decisions.push(`Guard command(s) ${cmds.map((c) => `\`${c}\``).join(", ")} also fail on ${base}${att ? ` (last change ${att.sha.slice(0, 12)}${att.issue ? `, #${att.issue}` : ""})` : ""}; lane deferred behind ${n ? `#${n}` : "the base fix"}`);
+      T.decisions.push(`Guard command(s) ${cmds.map((c) => `\`${c}\``).join(", ")} also fail on ${base}${att ? ` (last change ${att.sha.slice(0, 12)}${att.issue ? `, #${att.issue}` : ""})` : ""}; lane deferred behind ${n ? `#${n}` : "the base fix"}; if this lane fixes it, change the guard's files or land it through review-finalize merge-gate --manual-pr --owner-requested`);
       recordBaseVerdict({ repo, base, sha: baseSha, red: true, att, commands: cmds, outputs }); // #5992: later lanes and the dispatcher's probe reuse this verdict
       ev({ event: "BASE_RED", commands: cmds, output: cmds.map((c) => tailOf(c).slice(-500)), sha: att?.sha ?? null, issue: att?.issue ?? null, tracked: n });
-      return await finish("deferred", `base ${base} is red on guard command(s) ${cmds.join(", ")}; deferred behind ${n ? `#${n}` : "the base fix"}`, { code: OUTCOME_CODES.BASE_RED, retryInSeconds: 900 }, OUTCOME_CODES.BASE_RED);
+      return await finish("deferred", `base ${base} is red on guard command(s) ${cmds.join(", ")}; deferred behind ${n ? `#${n}` : "the base fix"} (owner escape: review-finalize merge-gate --manual-pr --owner-requested)`, { code: OUTCOME_CODES.BASE_RED, retryInSeconds: 900 }, OUTCOME_CODES.BASE_RED);
     }
     const structureLine = structureNote(structure);
 
@@ -4198,7 +4223,8 @@ export async function runCore(o) {
       await reportVerify();
       syncRow.push(`${trigger}: ${clean ? "clean" : "conflicts"} (${baseSha})`);
       T.baseSync = [`${syncs} sync(s)`, syncRow.join("; ")];
-      await post("FORGE:BASE_SYNC", `## Base Sync\n**Trigger:** ${trigger}\n**Base merged:** \`${base}\` at \`${baseSha}\`\n**Result:** ${clean ? "clean merge" : `conflicts in ${files.map((f) => `\`${f}\``).join(", ") || "unknown files"}`}\n**Resolution:** ${how}\n**Tests run:** ${tests}\n**Re-review:** ${rereview}\n**New head:** \`${localHead.slice(0, 12)}\``);
+      try { await post("FORGE:BASE_SYNC", `## Base Sync\n**Trigger:** ${trigger}\n**Base merged:** \`${base}\` at \`${baseSha}\`\n**Result:** ${clean ? "clean merge" : `conflicts in ${files.map((f) => `\`${f}\``).join(", ") || "unknown files"}`}\n**Resolution:** ${how}\n**Tests run:** ${tests}\n**Re-review:** ${rereview}\n**New head:** \`${localHead.slice(0, 12)}\``); } // #5898: the merge is done; a failed status comment is an anomaly, never an engine-error (as #5020 for FORGE:AMENDMENT)
+      catch (e) { T.anomalies.push(`FORGE:BASE_SYNC comment not posted: ${String(e?.message ?? e).slice(0, 160)}`); }
       return null;
     }
     const NR_TESTS = "not reported";

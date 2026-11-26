@@ -15,7 +15,7 @@ import { call as httpCall } from "./http.mjs";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const loadJson = (p) => JSON.parse(readFileSync(p, "utf8"));
 
-const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB --agent-url URL | --outbound | --one-liner] | status [--json] [--account A] | link <user_code> [--account A] | policy <agent> [--cpus N --mem GB --idle-only --pause --resume-policy] | limit <agent> --lanes N|none | pause | resume | uninstall [--yes] | upgrade [agent] | remove <agent>  [--config path]";
+const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB --agent-url URL | --outbound | --one-liner] | status [--json] [--account A] | link <user_code> [--account A] | policy <agent> [--cpus N --mem GB --idle-only --pause --resume-policy] | limit <agent> --lanes N|none | pause | resume | uninstall [--yes] | upgrade [agent] [--wait [--timeout S] | --now] | remove <agent>  [--config path]";
 const HELP_FLAGS = ["--help", "-h"];
 // Flags each verb accepts: `value` flags consume the next token, `bool` flags stand alone. Anything else dash-prefixed is rejected (#5008).
 const VERB_FLAGS = {
@@ -27,7 +27,7 @@ const VERB_FLAGS = {
   pause: { value: ["--config"], bool: [] },
   resume: { value: ["--config"], bool: [] },
   uninstall: { value: [], bool: ["--yes"] },
-  upgrade: { value: ["--config"], bool: [] },
+  upgrade: { value: ["--config", "--timeout"], bool: ["--now", "--wait"] },
   remove: { value: ["--config"], bool: [] },
   limit: { value: ["--config", "--lanes"], bool: [] },
   enroll: { value: ["--config", "--cpus", "--mem", "--agent-url"], bool: ["--outbound", "--one-liner"] },
@@ -267,10 +267,29 @@ export async function runPoolCli(argv, deps = {}) {
       // Push the current code (and lane image, when its recipe changed) to one agent or all of them.
       const cfg = routerConfig();
       const base = `http://${cfg.listen.host}:${cfg.listen.port}`;
-      const only = rest.find((x) => !x.startsWith("--") && x !== flag("config"));
-      const list = (await call(base, "GET", "/agents", { token: cfg.forgedock_token })).data?.agents ?? [];
+      const only = rest.find((x) => !x.startsWith("--") && x !== flag("config") && x !== flag("timeout"));
+      const now = rest.includes("--now"), wait = rest.includes("--wait");
+      const timeoutS = flag("timeout") === undefined ? 1800 : Number(flag("timeout"));
+      if (!Number.isFinite(timeoutS) || timeoutS < 0) throw new Error("usage: --timeout takes a number of seconds");
+      const sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+      const clock = deps.now ?? Date.now;
+      const agentsNow = async () => (await call(base, "GET", "/agents", { token: cfg.forgedock_token })).data?.agents ?? [];
+      const list = await agentsNow();
       for (const a of list.filter((x) => !only || x.name === only)) {
-        const r = await call(base, "POST", `/agents/${encodeURIComponent(a.name)}/upgrade`, { token: cfg.forgedock_token, timeoutMs: 30000 });
+        // The pool host is shared: upgrading restarts the agent under live sandboxes, so refuse unless asked (--wait drains, --now forces).
+        let active = a.active;
+        if (Number(active) > 0 && wait && !now) {
+          const deadline = clock() + timeoutS * 1000;
+          while (Number(active) > 0) {
+            if (clock() >= deadline) throw new Error(`${a.name}: still ${active} active sandbox(es) after ${timeoutS}s; not upgraded`);
+            await sleep(deps.pollMs ?? 10000);
+            active = (await agentsNow()).find((x) => x.name === a.name)?.active;
+          }
+        } else if (Number(active) > 0 && !now) {
+          throw new Error(`${a.name}: ${active} active sandbox(es) on this shared host; not upgraded. Use --wait to wait for idle, or --now to force.`);
+        }
+        const r = await call(base, "POST", `/agents/${encodeURIComponent(a.name)}/upgrade`, { body: now ? { force: true } : undefined, token: cfg.forgedock_token, timeoutMs: 30000 });
+        if (r.status === 409) throw new Error(`${a.name}: ${r.data?.active ?? "some"} active sandbox(es); not upgraded (HTTP 409)`);
         console.log(`${a.name}: HTTP ${r.status} ${JSON.stringify(r.data)}`);
       }
       break;

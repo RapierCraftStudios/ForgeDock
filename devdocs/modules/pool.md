@@ -10,6 +10,20 @@ last_compacted: "2026-11-15"
 
 Rolling per-module knowledge log. Hard cap: 150 lines.
 
+## Entry 2026-11-26 — light lanes + heavy-phase tokens (#6047)
+Default-off `cfg.elastic_lanes` (pushed through the router `/policy` allowlist). On: a lane is admitted on its base reservation, and each
+heavy step leases a token from the agent: `POST /sandboxes/:id/heavy/acquire|release|renew` (sandbox credential, like `creds`/`relay`;
+agent-local, reached by the lane at `CS_HEAVY_BASE` via host.docker.internal, so no production ingress rule is involved, as in the relay
+entry above). Weight = max(`heavy_weight`, p90 repo history - base) from `estimateFor`, so docker lanes take a token sized from their own
+history. A grant needs base reservations + held tokens + weight within effective capacity and live MemAvailable; denied returns
+`{granted:false, retry_after_s}` and the client polls; the first holder is always granted. Tokens live in `store.data.heavy`, are refcounted
+per sandbox and expire with `heavy_ttl_s` (renewed by the client), on sandbox exit and on destroy. `projectedUse` becomes base + held
+tokens, `/capacity` adds `elastic_lanes`, `heavy_tokens`, `heavy_held`, `cpus_free_elastic`, `mem_free_gb_elastic` (the router places on
+these) and `lanes_ceiling_derived`. With no explicit ceiling (the router passes its `max_lanes` in the launch body) the agent refuses at the
+derived ceiling = default-weight tokens the host holds x `elastic_lane_factor` (3); an explicit `pool limit` or router.json `max_lanes` wins.
+Waiting phases hold no token so they already count only the base. Promotion of the flag (R13) needs the live measurement: >=2x lanes at the
+same peak memory, no rise in OOM kills or lane wall time. The lane env also gets `CS_CPU_QUOTA` (its `--cpus`).
+
 ## Entry 2026-11-24 — dispatcher-seeded repo mirrors (#5949)
 
 - A lane no longer depends on the pool host's own GitHub link. Agent `GET /mirrors?slug=&cache_key=[&upload=]` returns `{mirrors: {<slug>: {<ref>: <sha>} | "absent"}, upload_offset?}` (`bin/pool/agent.mjs`); `POST /mirrors/seed` takes a base64 chunk `{slug, cache_key, upload (bundle sha256), offset, data_b64, sha256}` (a wrong offset is 409 with the resume `offset`) or `{finish: {size}}`.
@@ -98,6 +112,16 @@ The router ships agents only `AGENT_BUNDLE_PATHS` (`package.json`, `bin/pool`, `
 
 - `bin/pool/health.mjs` `hostDiskFree` (WSL only: osrelease /microsoft/i; Lxss BasePath drive via reg.exe over the interop socket, else /mnt/c) feeds `host_disk_free_gb`/`host_disk_low` in agent `capacity()`; `launch` answers 503 `pool.disk_low` under `min_host_disk_free_gb` (25) or after `sandbox_disk_growth_gb` (3.5) × (active + 1), and the router skips `host_disk_low` agents with its own 503 `pool.disk_low`. It is a capacity deferral (lane `SANDBOX_CAPACITY`), never a failure; unreadable means no field and no gate.
 
+## Entry 2026-11-22 — CI runner autoscaler (#5695)
+
+- `bin/pool/ci-autoscale.mjs`: pure `admitRunner`, `planScale`, `runnerPriority`, `decisionRecord`, plus `createAutoscaler` (router side). Off unless router config `ci_autoscale.enabled`; with it off, lane sizing and placement are untouched.
+- Demand: `POST /ci/workflow-job` (auth class `ci`, same tokens as `/ci/events`; the router is reached directly on :7710, so no ingress rule) takes a GitHub `workflow_job` payload (queued, in_progress, completed), keyed by the label in `ci_autoscale.labels`. A jobs-API poll (`ci_autoscale.repo`, every `poll_s`, default 300) is the fallback; queued entries the API no longer lists, and any entry over 6 h old, are dropped.
+- Reconcile runs at the end of the router `tick` on the agent with the most MemAvailable. It plans starts and stops per label (`min` warm, `max` cap, size from `labels.<l>.size`, default 1 cpu / 2 GB), admitted in priority order deploy > release CI > lane > PR CI. A waiting lane holds ordinary PR CI. Start = `generate-jitconfig` then agent `POST /runners`; stop = agent `DELETE /runners/:name` for an idle runner above `max(min, queued)`.
+- Floors (`ci_autoscale.floors`): `mem_available_gb` 3, `load_per_cpu` 0.8, `net_rx_mbps_max` (unset = off; deploy is exempt), and `lane_floor` `{cpus, mem_gb}` (default 2 / 3) of pool `cpus_free`/`mem_free_gb` that CI never takes. `windows: [{from,to,why}]` (ISO) are maintenance windows: no starts and no stops.
+- `dry_run: true` logs every decision (`ci-autoscale {...}` with `inputs`) and starts nothing; the last 200 are kept on `router.autoscale().decisions`.
+- Agent: `POST /runners` starts one `--ephemeral` runner container from a JIT config (`--rm`, 2 GB cap, label `computeshare.runner=1`, not `computeshare=1`, so the orphan reaper ignores it; the config goes in a 0600 env file, never argv). Runners count in `cpus_free`/`mem_free_gb` like a lane. `capacity()` adds `runners` and `net.rx_mbps` (host RX since the last call). Exited runners are forgotten by the reaper sweep.
+- Deferred: per-job measured sizes and result reporting (need the AlterLab #40991 dataset endpoint), live acceptance numbers (queue wait, 14-day OOM, before/after CI wall time), and promotion of the flag (first cohort `alterlab-ci` only, 3 days of `dry_run` first).
+
 ## Entry 2026-11-22 — cache volume hygiene (#5757)
 
 - `bin/pool/cache-sweep.mjs`: pure `planCacheCap` (oldest-first, live work dirs never chosen) and `planIdleEviction` (last use known, idle, unreferenced, not never-evict); `sweepVolume` runs in a lane-image container (`docker.sweepCache`, 10 min timeout, source passed via env) and ages out uv/npm/pip/poetry, forge-depcache, env entries, prunes pnpm, `git gc --auto`.
@@ -130,3 +154,9 @@ The router ships agents only `AGENT_BUNDLE_PATHS` (`package.json`, `bin/pool`, `
 ## Entry 2026-11-24 — package cache layout pinned to entrypoint (#5969)
 
 - `pool/image/entrypoint.sh` points `UV_CACHE_DIR`, `npm_config_cache`, `POETRY_CACHE_DIR` and `PIP_CACHE_DIR` at `/cache/forge-depcache/stores/*`, the same layout as `depcache.mjs` `env()`. `cache-sweep.mjs` `PACKAGE_STORES` still includes `LEGACY_STORES` (`uv`, `npm`, `pip`, `poetry`) so old volumes and old images stay swept, capped and pruned. `pool-cache.test.mjs` pins every `/cache/...` path exported by the entrypoint to a `PACKAGE_STORES` entry.
+
+## Entry 2026-11-26 — per-repo agent affinity (#6041)
+
+- `router.json` `repos.<slug>.agents` (allowlist) and `exclude_agents` pin a repo to hosts. `placeable(c, spec)` in `router.mjs` is the one eligibility rule: account (#5886) AND allowlist AND not excluded. `launch()`, `claim()` and `seedAgent()` all use it, so no placement path bypasses it. A repo whose allowed agents are all busy gets the usual 503 capacity deferral, never another host.
+- `agents` counts only when a non-empty array of strings; empty or any other type is unset (any agent), so unset config behaves exactly as before. `exclude_agents` subtracts from the allowlist. Seed picks use the slug of the `/sandboxes/:id/mirrors` query or `/seed` body.
+- `GET /status?repo=<slug>` and `GET /agents?repo=<slug>` return only the repo's placeable agents (and their sandboxes); `httpTransport.capacity({repo})` sends it, so the dispatcher admits against capacity the repo can use. No `?repo=` = unchanged. Tests: `bin/pool/affinity.test.mjs`.

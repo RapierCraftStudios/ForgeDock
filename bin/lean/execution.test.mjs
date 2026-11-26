@@ -1409,6 +1409,18 @@ describe("providerLanes: a halted batch keeps its sandbox for adopt (#5669)", ()
   });
 });
 
+describe("#5746 remote-mode host fallback and max_remote 0", () => {
+  it("hostFallbackAllowed: remote unset false, hybrid true, explicit true wins", () => {
+    assert.equal(hostFallbackAllowed({ mode: "remote" }), false);
+    assert.equal(hostFallbackAllowed({ mode: "hybrid" }), true);
+    assert.equal(hostFallbackAllowed({ mode: "remote", hostFallback: true }), true);
+  });
+  it("placeLane: remote mode with max_remote 0 stays remote (#5933 pauses starts, never the host)", () => {
+    assert.equal(placeLane({ exec: { mode: "remote", maxRemote: 0 } }).where, "remote");
+    assert.equal(placeLane({ exec: { mode: "remote", maxRemote: 2 } }).reason, "mode remote");
+  });
+});
+
 describe("public-repo default placement (#5748)", () => {
   const OPT = parseExecution({ public_default: "actions" }); // #5900: the actions default is opt-in
   it("actions is a known provider; plan, job_limit, ci_reserve and dispatcher parse", () => {

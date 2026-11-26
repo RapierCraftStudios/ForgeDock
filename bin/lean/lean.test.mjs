@@ -15,6 +15,7 @@ import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 import { syncBuiltinESMExports } from "node:module";
+import { diffTouchesGuard } from "./basered.mjs";
 import { runCore, contractHash, isProtectedLaneBranch, classifyBlock, builderFixable } from "./lean.mjs";
 import { parseFactsComment, normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { makeLedger } from "./ledger.mjs";
@@ -4238,6 +4239,16 @@ describe("base-sync (#4100)", () => {
     noRebaseNoForce(w);
   });
 
+  it("#5898 a failed FORGE:BASE_SYNC comment after a resolved base-sync is an anomaly, not an engine-error: the lane merges", async () => {
+    const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], reviews: [ok(), ok()] });
+    const post = w.io.gh;
+    w.io.gh = async (a) => (a[0] === "issue" && a[1] === "comment" && a[a.indexOf("--body") + 1].includes("FORGE:BASE_SYNC") ? Promise.reject(new Error("HTTP 502: unexpected EOF")) : post(a));
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.merges.length, 1);
+    assert.match(traj(w).join("\n"), /FORGE:BASE_SYNC comment not posted: HTTP 502/);
+  });
+
   it("#5583 follow-up: a builder-resolved base-sync with only documentation conflicts and an unchanged code diff skips the re-review", async () => {
     const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["devdocs/modules/lean.md"], reviews: [ok(), ok()] });
     const git = w.io.git;
@@ -5771,6 +5782,23 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.ok(!w.comments.some((c) => c.includes("FORGE:CONTRACT")), "not re-posted");
     assert.match(traj(w)[0], /frozen contract [0-9a-f]{12} recovered from the issue/);
   });
+  it("#5920 a reused frozen contract gets the validate.recipes rewrite and an audit amendment, once", async () => {
+    const recipes = [{ match: "^node --test ", replace: "node --test --test-reporter=dot " }];
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", lastSubject: "wip(forge): checkpoint after idle timeout", issueComments: [frozenComment()] });
+    const r = await run(w, { validateRecipes: recipes });
+    assert.equal(r.terminalReason, "merged");
+    assert.match(w.files[`${WT}/.forge-lean/contract.json`], /node --test --test-reporter=dot test\/foo\.test\.js/, "the rewritten command is the one the lane runs");
+    const am = w.comments.filter((c) => c.includes("FORGE:AMENDMENT") && c.includes("rewrite-validate"));
+    assert.equal(am.length, 1);
+    assert.match(am[0], new RegExp(`frozen contract ${contractHash(contractJson(CONTRACT))}`));
+    assert.ok(!am[0].includes("AMENDMENT-STATE"), "audit only: never replayed as an amendment");
+    const w2 = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", lastSubject: "wip(forge): checkpoint after idle timeout", issueComments: [frozenComment(), { body: am[0], author_association: "OWNER", user: { type: "User", login: "op" } }] });
+    await run(w2, { validateRecipes: recipes });
+    assert.equal(w2.comments.filter((c) => c.includes("rewrite-validate")).length, 0, "a second reuse posts nothing new");
+    const w3 = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", lastSubject: "wip(forge): checkpoint after idle timeout", issueComments: [frozenComment()] });
+    await run(w3);
+    assert.ok(!w3.comments.some((c) => c.includes("rewrite-validate")), "no recipe, no amendment");
+  });
   it("recovery lane replays accepted supersedes amendment (#4899)", async () => {
     const sup = { kind: "supersedes", guard: "#4785", why: "behaviour changed on purpose" };
     const state = { contract: contractHash(contractJson(CONTRACT)), amendments: [sup] };
@@ -7057,6 +7085,28 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     assert.equal(w.merges.length, 0);
     assert.equal(comments.length, 1); assert.match(comments[0], /FORGE:BASE_RED/);
     assert.equal(builders(w).length, 2, "no builder fix round spent on a base failure");
+  });
+
+  it("#5913 a lane whose diff touches the failing guard's files and makes it pass on the lane tree is not deferred on base.red", async () => {
+    const w = world({ changed: ["app/routers/listing_feeds.py", "test/foo.test.js"] }); let laneRuns = 0;
+    w.io.runCommand = async ({ cwd }) => (/basered-/.test(cwd) ? { rc: 1, output: "bare 429 at app/routers/listing_feeds.py" } : ++laneRuns === 1 ? { rc: 1, output: "bare 429 at app/routers/listing_feeds.py" } : { rc: 0, output: "" });
+    const r = await run(w, { verify: { invariants: ["bash scripts/guard.sh"] } });
+    assert.notEqual(r.code, "base.red"); assert.ok(laneRuns >= 2, "the guard was re-run on the lane tree");
+  });
+
+  it("#5913 a lane that touches the guard's files but still fails it is deferred on base.red and names the owner escape", async () => {
+    const w = world({ changed: ["app/routers/listing_feeds.py"] });
+    w.io.runCommand = async () => ({ rc: 1, output: "bare 429 at app/routers/listing_feeds.py" });
+    const r = await run(w, { verify: { invariants: ["bash scripts/guard.sh"] } });
+    assert.equal(r.code, "base.red"); assert.equal(w.merges.length, 0);
+    assert.match(JSON.stringify(r), /--owner-requested/);
+  });
+
+  it("#5913 diffTouchesGuard is true only when a changed file is named by the failing guard", () => {
+    const failed = [{ command: "bash scripts/guard.sh", output: "bare 429 at app/routers/listing_feeds.py" }];
+    assert.equal(diffTouchesGuard({ changed: ["./app/routers/listing_feeds.py"], failed }), true);
+    assert.equal(diffTouchesGuard({ changed: ["src/foo.js"], failed }), false);
+    assert.equal(diffTouchesGuard({ changed: [], failed }), false);
   });
 
   it("#5945 an env-signature base failure is not base.red and files nothing; a host verify pass skips filing", async () => {
@@ -10240,6 +10290,47 @@ describe("#5821 contract correction through the API route", () => {
     assert.equal(r.terminalReason, "merged");
     assert.ok(seen.some((c) => c.role === "contract_correction"));
     assert.ok(seen.some((c) => c.role === "builder" && c.resume), "the builder resumed to correct the contract");
+  });
+});
+
+describe("#5844 a busy host is not an absent CLI", () => {
+  const base = { role: "builder", issue: 5844, cwd: "/tmp/x", model: "m", prompt: "p", system: "s" };
+  it("probe timeout does not spawn a bare name", async () => {
+    const { makeLeanRunner } = await import("./effects.mjs");
+    let spawned = 0;
+    const runner = makeLeanRunner({ runCli: async () => { spawned++; return {}; }, probe: () => false, resolveBin: () => null, probeTimedOut: () => true });
+    await assert.rejects(runner(base), (e) => e.deferCode === OUTCOME_CODES.HOST_BUSY && e.retryInSeconds > 0 && e.spawnDeterministic !== true);
+    assert.equal(spawned, 0);
+  });
+  it("a probe that answered absent still spawns, so the deterministic path stays reachable", async () => {
+    const { makeLeanRunner } = await import("./effects.mjs");
+    let spawned = 0;
+    const runner = makeLeanRunner({ runCli: async () => { spawned++; return {}; }, probe: () => false, resolveBin: () => null, probeTimedOut: () => false });
+    await runner(base);
+    assert.equal(spawned, 1);
+  });
+  it("win32 bare name unresolved while the CLI is present defers host.busy, nothing spawned", async () => {
+    const { makeLeanRunner } = await import("./effects.mjs");
+    let spawned = 0;
+    const runner = makeLeanRunner({ runCli: async () => { spawned++; return {}; }, probe: () => false, resolveBin: () => null, probeTimedOut: () => false, platform: "win32", binMissing: () => false });
+    await assert.rejects(runner(base), (e) => e.deferCode === OUTCOME_CODES.HOST_BUSY && e.spawnDeterministic !== true);
+    assert.equal(spawned, 0);
+    const absent = makeLeanRunner({ runCli: async () => { spawned++; return {}; }, probe: () => false, resolveBin: () => null, probeTimedOut: () => false, platform: "win32", binMissing: () => true });
+    await absent(base);
+    assert.equal(spawned, 1, "proven absence still spawns so cli.spawn_failed stays reachable");
+  });
+  it("ENOENT with the CLI present is not cli.spawn_failed", async () => {
+    const { runCliBackend } = await import("../runner.mjs");
+    const dir = tmpDir("core-5844-");
+    writeFileSync(join(dir, "claude"), "");
+    const prev = process.env.PATH; process.env.PATH = dir;
+    let err;
+    try { runCliBackend({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: tmpDir("core-5844-"), bin: "claude", logger: { log() {} }, spawnFn: () => ({ status: null, error: Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }) }) }); } catch (e) { err = e; } finally { process.env.PATH = prev; }
+    assert.equal(err.spawnDeterministic, undefined);
+    assert.notEqual(err.code, "CLI_SPAWN_FAILED");
+    const w = world(); w.io.runner = async () => { throw err; };
+    const res = await run(w);
+    assert.notEqual(res.code, OUTCOME_CODES.CLI_SPAWN_FAILED);
   });
 });
 

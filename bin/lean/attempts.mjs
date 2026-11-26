@@ -31,18 +31,28 @@ export const emptyLedger = () => ({ attempts: 0, signatures: [], lastInputHash: 
 export function normalizeLedger(x) {
   if (!x || typeof x !== "object") return emptyLedger();
   return { attempts: Number.isInteger(x.attempts) && x.attempts > 0 ? x.attempts : 0, signatures: Array.isArray(x.signatures) ? x.signatures.map((s) => ({ ...s, sig: String(s?.sig ?? "") })) : [],
-    lastInputHash: typeof x.lastInputHash === "string" ? x.lastInputHash : null, spend: Number(x.spend) > 0 ? Number(x.spend) : 0, ...(Number.isInteger(x.comments) && x.comments >= 0 ? { comments: x.comments } : {}), ...(x.escalated ? { escalated: x.escalated } : {}) };
+    lastInputHash: typeof x.lastInputHash === "string" ? x.lastInputHash : null, spend: Number(x.spend) > 0 ? Number(x.spend) : 0, ...(Number.isInteger(x.comments) && x.comments >= 0 ? { comments: x.comments } : {}), ...(x.escalated ? { escalated: x.escalated } : {}), ...(x.hostPin ? { hostPin: true } : {}) };
 }
 
 /** `{maxAttempts, maxIdentical}` from the orchestration config (posint, else the defaults 4 and 2). */
 export const budgets = (cfg) => ({ maxAttempts: Number(cfg?.maxAttempts) >= 1 ? Math.floor(cfg.maxAttempts) : DEFAULT_ISSUE_ATTEMPTS, maxIdentical: Number(cfg?.maxIdentical) >= 1 ? Math.floor(cfg.maxIdentical) : DEFAULT_MAX_IDENTICAL });
 
 /** The ledger after one failed lane (a new object): attempts+1, the signature with its run link, the hash it ran under, spend added. */
-export function recordFailure(ledger, { signature, hash = null, spend = 0, run = null }) {
+const normDetail = (d) => String(d ?? "").replace(/https?:\/\/\S+/g, "").replace(/\b[0-9a-f]{7,40}\b/g, "").replace(/\d+/g, "#").replace(/\s+/g, " ").trim().slice(0, 200);
+/** #5931: what blocked a lane: code, normalized detail, contract hash, the engine version the lane ran, placement, and the env keys the detail names. */
+export function blockerSignature({ code = null, detail = "", contractHash = null, engineVersion = null, placement = null, env = null } = {}) {
+  const envKeys = [...new Set(String(detail ?? "").match(/\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b/g) ?? [])].sort();
+  return { code: code ?? null, detail: normDetail(detail), contractHash: contractHash ?? null, engineVersion: engineVersion ? majorMinor(engineVersion) || String(engineVersion) : null, placement: placement ?? null, ...(envKeys.length ? { envKeys, env: Object.fromEntries(envKeys.map((k) => [k, env?.[k] == null ? null : sha(env[k])])) } : {}) };
+}
+/** A credentials block naming ops_credentials is pinned to the host on readmit. */
+export const isCredentialsBlock = (detail) => /ops_credentials/i.test(String(detail ?? "")) && /credential/i.test(String(detail ?? ""));
+
+export function recordFailure(ledger, { signature, hash = null, spend = 0, run = null, blocker = null }) {
   const l = normalizeLedger(ledger);
   const changed = hash && l.lastInputHash && hash !== l.lastInputHash; // a new input starts a new escalation window, the lifetime counters stay
-  const { escalated, ...rest } = l; // `comments` (the engine comment count seen at the last mirror) rides along
-  return { ...rest, ...(escalated && !changed ? { escalated } : {}), attempts: l.attempts + 1, signatures: [...l.signatures, { sig: String(signature ?? ""), ...(hash ? { hash } : {}), ...(run ? { run } : {}) }], lastInputHash: hash ?? l.lastInputHash, spend: Math.round((l.spend + (Number(spend) || 0)) * 1e6) / 1e6 };
+  const { escalated, ...rest } = l;
+  const pin = l.hostPin || (blocker && isCredentialsBlock(blocker.detail)); // `comments` (the engine comment count seen at the last mirror) rides along
+  return { ...rest, ...(pin ? { hostPin: true } : {}), ...(escalated && !changed ? { escalated } : {}), attempts: l.attempts + 1, signatures: [...l.signatures, { sig: String(signature ?? ""), ...(hash ? { hash } : {}), ...(run ? { run } : {}), ...(blocker ? { blocker } : {}) }], lastInputHash: hash ?? l.lastInputHash, spend: Math.round((l.spend + (Number(spend) || 0)) * 1e6) / 1e6 };
 }
 
 /** The breach of the lifetime budget, or null: attempts reached the cap, or one signature exceeded `maxIdentical` failures. */
@@ -51,7 +61,7 @@ export function breach(ledger, cfg) {
   const counts = new Map();
   for (const s of l.signatures) counts.set(s.sig, (counts.get(s.sig) ?? 0) + 1);
   const worst = [...counts].sort((a, b) => b[1] - a[1])[0];
-  if (worst && worst[1] > maxIdentical) return { kind: "identical", detail: `failure signature \`${worst[0]}\` repeated ${worst[1]} times (max_identical_signature ${maxIdentical})` };
+  if (worst && worst[1] >= maxIdentical) return { kind: "identical", detail: `failure signature \`${worst[0]}\` repeated ${worst[1]} times (max_identical_signature ${maxIdentical})` };
   if (l.attempts >= maxAttempts) return { kind: "attempts", detail: `${l.attempts} lanes ran (max_attempts_per_issue ${maxAttempts})` };
   return null;
 }
@@ -60,13 +70,26 @@ export function breach(ledger, cfg) {
  * Admission of a re-run. `hash` null (unreadable input) fails open. Returns {ok:true} or {ok:false, code, reason}: `escalate` (a budget
  * breach not yet escalated), or `loop.no_new_input` (the same input after a failure).
  */
-export function admitInput(ledger, hash, cfg) {
+export function admitInput(ledger, hash, cfg, cur = null) {
   const l = normalizeLedger(ledger);
   if (!hash || !l.attempts || !l.lastInputHash || hash !== l.lastInputHash) return { ok: true };
+  const why = changedSince(l.signatures[l.signatures.length - 1]?.blocker, cur); // #5931: the hash omits placement and env values
+  if (why) return { ok: true, reason: why };
   const b = breach(l, cfg);
   if (b && !l.escalated) return { ok: false, code: "escalate", reason: b.detail };
   const last = l.signatures[l.signatures.length - 1]?.sig;
   return { ok: false, code: NO_NEW_INPUT, reason: `input unchanged since the last failure${last ? ` (\`${last}\`)` : ""}${b ? `; ${b.detail}` : ""}` };
+}
+
+/** What relevant thing changed since the blocker (engine version, placement, contract hash, a referenced env key), or null. */
+export function changedSince(b, cur) {
+  if (!b || !cur) return null;
+  const diff = (a, c) => a != null && c != null && String(a) !== String(c);
+  if (diff(b.engineVersion, cur.engineVersion ? majorMinor(cur.engineVersion) || cur.engineVersion : null)) return `engine version changed ${b.engineVersion} -> ${cur.engineVersion}`;
+  if (diff(b.placement, cur.placement)) return `placement changed ${b.placement} -> ${cur.placement}`;
+  if (diff(b.contractHash, cur.contractHash)) return "contract hash changed";
+  const keys = (b.envKeys ?? []).filter((k) => cur.env && cur.env[k] !== undefined && (b.env?.[k] ?? null) !== (cur.env[k] == null ? null : sha(cur.env[k])));
+  return keys.length ? `env key changed: ${keys.join(", ")}` : null;
 }
 
 export const markEscalated = (ledger, at) => ({ ...normalizeLedger(ledger), escalated: at ?? true });
@@ -125,16 +148,19 @@ export function frozenContractHash(comments, trusted) {
  * The orchestrate seam, bound to GitHub: `hash(n)` reads the issue and computes the input hash (null on any read failure: fail open),
  * `load(n)` reads the FORGE:ATTEMPTS comment, `mirror(n, ledger)` upserts it, `notify(...)` posts the one escalation or the no-new-input note.
  */
-export function makeAttemptsSeam({ gh, repo, engineVersion = null, sandboxVersion = null, cfg = {}, trusted = null, contractHash = null }) {
+export function makeAttemptsSeam({ gh, repo, engineVersion = null, hostVersion = null, sandboxVersion = null, cfg = {}, trusted = null, contractHash = null }) {
   const view = async (n) => JSON.parse(String(await gh(["issue", "view", String(n), "-R", repo, "--json", "title,body,labels,comments"])));
   const isTrusted = async () => trusted ?? (await import("./prefilter.mjs")).isTrustedIssueComment;
+  let seenSandbox = sandboxVersion;
   return {
+    noteSandboxVersion(v) { if (v) seenSandbox = v; },
     cfg,
     async hash(n) {
       try {
         const v = await view(n), t = await isTrusted();
         const decisions = (v.comments ?? []).filter((c) => /^\s*<!--\s*FORGE:DECISION\b/.test(c?.body ?? "") && t(c)).map((c) => c.body);
-        return computeInputHash({ title: v.title, body: v.body, labels: v.labels, decisions, engineVersion, sandboxVersion, contractHash: contractHash ? await contractHash(n) : frozenContractHash(v.comments, t) });
+        return computeInputHash({ title: v.title, body: v.body, labels: v.labels, decisions, engineVersion, sandboxVersion: seenSandbox ?? hostVersion, // the version the lane ran; the host's only when none is known
+           contractHash: contractHash ? await contractHash(n) : frozenContractHash(v.comments, t) });
       } catch { return null; }
     },
     async load(n) {

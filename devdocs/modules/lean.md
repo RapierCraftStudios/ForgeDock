@@ -3620,6 +3620,8 @@ Default placement is opt-in (#5900, 1.62.1): `engine-cli.mjs` `withPublicDefault
 
 Security: the workflow is `workflow_dispatch` only (never `pull_request*`), `permissions` are contents/issues/pull-requests write, the Claude credential is the `CLAUDE_CODE_OAUTH_TOKEN` secret of the `forgedock-lane` environment, a pre-push hook limits pushes to `feat/*` (client-side only, so #5899 adds a server-side precondition: the job's first step after input validation checks that the default branch and the base lane branch each have a ruleset with `pull_request`, `update` or `required_status_checks`, or classic required status checks with at least one context; otherwise, or when protection is unreadable, the lane posts a `needs-human` `sandbox.start_failed` result naming the branches and no later step runs), inputs reach shell only through env vars, and run-issue output goes to /dev/null (logs are public). Dispatch carries no secrets (inputs are visible); `execution.dispatcher` restricts the dispatching identity. Owner setup per repo (not automated): create the `forgedock-lane` environment with its secret and a deployment-branch rule, and protect the default and base lane branches server-side (a ruleset requiring pull requests is the simplest).
 
+Claude CLI probe under load (#5844): `isClaudeCliAvailable` (`bin/runner.mjs`) retries a timed-out probe once at 3x the bound and never caches a timeout as "unavailable"; `cliProbeTimedOut(cwd)` tells busy from absent. `makeLeanRunner` (`bin/lean/effects.mjs`) then defers `host.busy` instead of spawning a bare name, and on win32 also when `resolveSpawn` leaves `claude` bare while it is on PATH (absence not proven). A spawn ENOENT is `spawnDeterministic` (needs-human `cli.spawn_failed`) only when `spawnTargetMissing` finds the binary on no PATH entry; otherwise it is `CLI_SPAWN_TRANSIENT` and relaunched.
+
 ## Entry 2026-11-22 — Lane sandboxes request `borrow` priority (#5856)
 
 - `bin/lean/sandbox-remote.mjs` `remoteProvider` now sends `spec.priority: "borrow"` on every lane sandbox spec. A pool agent without `reservations`/`idle_only` ignores it (flat admission as before); with them, lanes run on leftover capacity at a low `cpu.shares` weight and are throttled, then drained, when a reserved workload arrives.
@@ -3636,6 +3638,12 @@ Security: the workflow is `workflow_dispatch` only (never `pull_request*`), `per
 
 A stacked lane (`stackedOn`) no longer only polls for the dependency's merge. Each poll reads the dependency's PRs (`depInfo`: merged | open+head | closed) and `cascadeDecision` (`bin/lean/stacking.mjs`) picks the reaction, emitted as `STACK_CASCADE`: head moved and `git merge --no-commit` of `origin/<dependency branch>` clean -> `baseSync`, a review delta, `stackedOn.sha`/`prReady` updated in FORGE:STATE (`reverify`); conflict -> PR closed, branch deleted, result `deferred` code `stack.restart` (`restart`); closed without a merge -> same drop, code `stack.replan` (`replan`). After the dependency merged: retarget, `base` becomes `origin/<lane>`, and `postMergeGate` runs only `invalidatedChecks` for the diff `<stacked sha>..origin/<lane>` (`rebase`). The result carries `cascade`, `cascades`, `cascade_cost_usd`, `cascade_minutes`. `merge.stacked_base` is unchanged and still the last gate.
 Cite: #5833.
+
+## Entry 2026-11-24 — Lean lane lands through merge-gate; no circular base.red (#5913)
+
+- `scripts/verify-phase-trail.sh`: a trusted `FORGE:CONTRACT` comment plus the trusted lean run record (a `FORGE:STATE` comment with run `core_*`; the shared STATUS/STARTED markers do not select lean) passes the trail (`BAND: LEAN`, NOTE names the lean trail); INVESTIGATOR/FAST_PATH/CONTEXT/ARCHITECT/QUALITY_GATE are waived. Same trusted-author filter as the classic markers, never the issue body; an untrusted or lone marker leaves the classic trail unchanged.
+- `scripts/review-finalize.sh` `manual_pr_eligibility`: `--owner-requested` now also covers an explicit `--issue` that is a pipeline issue (still refused without it); the trail is skipped (`FORGE:PHASE_TRAIL_SKIPPED`) and every other gate runs.
+- `bin/lean/basered.mjs` `diffTouchesGuard({changed, failed})` (built on `baseRedPaths`); `lean.mjs` `guardRed` does not defer `base.red` when the lane diff (`<base>...HEAD`) touches the failing guard's files AND the guard re-run on the lane tree passes. Otherwise (untouched, or still failing) it defers as before, and the decision and summary name `review-finalize merge-gate --manual-pr --owner-requested`.
 
 ## Entry 2026-11-23 — Chain wall-time and cascade rework metrics (#5834, epic #5822)
 
@@ -3716,6 +3724,7 @@ The 7 s ack window of #5947 dropped the request before a slow runner pass reache
 
 - `--select` is kept in the plan argv. Every `RECONCILE_MS` the runner (hosted by `schedd`, no watcher process) calls `reconcile.mjs`: matching open issues join through the `--add` seam (same DAG, priority, lane rules), closed or moved ones leave. Batches without a selector are unchanged.
 - Re-admission (`readmitDue`): `deferred` backs off exponentially (cap 2 h); `held`/`engine-error` re-admit on a change of the engine or `FORGE_LANE_IMAGE` version or after a 6 h cooldown; conformance gets one more attempt after the base sha moves, then parks in a "needs decision" digest. `humanCode` (credentials, spend, customer, promotion, product decision) is the only permanent stop.
+- `selMatched` (issues the selector has matched, the #6022 leave gate) is persisted in `state.json` and restored on resume, so a matched member closed during downtime still leaves (#6029); old state without it restores an empty set.
 - An engine-filed `env.*` issue joins the order; its closure re-admits the waiters (existing path).
 - `clear-breaker.mjs` `decideAutoReset`: a selector batch's breaker closes after a cooldown when the signature is environmental and the pool is healthy, with a FORGE:DECISION. `decideClear` is unchanged.
 - A staging lane closes the issue on merge into the lane branch and comments the `FORGE_POSTDEPLOY_ROLLUP` issue.
@@ -3776,8 +3785,23 @@ Filing: `file_issues` is **opt-in, default off** (only an explicit `file_issues:
 - `watchdog` takes a separate `restart` dep (wired in `scheddFromCli`). Heartbeat down while `unit()` is `active`/`activating`: ALERT, `schedd.unit-no-daemon`, `restart()`, never `start()`. Only an inactive or absent unit with unfinished batches goes through `start()`.
 - Result gains `restarted`; `started` is `false` (and the failure is logged) when `restart()` throws.
 
+## Entry 2026-11-25 — per-resource halts instead of batch halts (#5988)
+
+- `backend.auth`: `orchestrate` probes the login every `AUTH_PROBE_MS` (5 min) through an injectable `authProbe`, resumes at once on success, and on failure tries the next rotator account (`rotator.nextAccountAfterAuthFailure`, tried first on resume). After `AUTH_ESCALATE_MS` (30 min) it escalates once (`auth-escalation` row, `onEscalate` notify + one issue comment). The pause no longer runs to the quoted reset; rate_limited/quota.exhausted holds keep their known-reset delay.
+- Holds: `limits.holdExpiryWarnings` lists hold-info entries within `HOLD_EXPIRY_WARN_MS` (T-30 min) of `expiresAt`, once per expiry; `refreshHeld` posts one `hold-alert` each and releases expired holds through the concurrency controller, so expiry re-admits at its pace. `--hold` on more than 10 issues needs `--ttl`/`--for` (`engine.holdTtlRefusal`) and prints `holdResumePlan`.
+- Breaker: engine-errors are keyed by signature plus agent (generalising the `lostSeen` window of #5859). A tripped key quarantines only that agent (`quarantineAgent`) and reseeds the cache once (`reseedCache`), emits `agent-quarantine`, and keeps admitting other work; the batch breaker and `--clear-breaker` are unchanged.
+- Stall recovery: `recordStallRecovery` stores the `dispatch-stalled` cause plus gates (`stallCause`); `decideStallAction` refuses a second restart for the same cause and alerts instead.
+
 ## Lease/hold/pause guard and kept sandboxes (#6008)
 
 - A lane dispatched with a batch id re-reads its FORGE:STATE before every non-delete `git push` and before `gh pr merge` (`suspensionGuard`, `bin/lean/lean.mjs`). A missing or expired lease, a lease of another batch, or the dispatcher's `suspend` marker (`reason` held/paused/kept for adopt) ends the lane `deferred` with `lane.suspended`; the sandbox stays for adopt. No readable state, or no batch id (interactive `run-issue`), is not guarded. `renew()` does not renew under a `suspend` marker.
 - The dispatcher writes the marker (`suspendLane`, `suspendMarker` in `bin/engine-cli.mjs`): when a kept sandbox is recorded (halted, `sandbox.unreachable`, `sandbox.auth`; `providerLanes` `suspendKept`), when a kept issue is held (`--hold`) or its batch paused (`--pause`); cleared on release, unpause and adopt (`resumeKept`). Held/paused batches still admit nothing, including deferred issues whose retry timer fires (`isReady`, launch re-read); `--hold <id> pending` holds every pending and backing-off issue.
 - Kept sandboxes are recorded in `state.kept` (issue, since, phase) and listed by `orchestrate --status` and `pool status` (table section and `kept_sandboxes` in `--json`) via `keptSandboxes` (`bin/lean/batch.mjs`).
+
+## Entry 2026-11-26 — remote heavy backend, quota-aware workers (#6047)
+`heavy.mjs` `runWrapped` uses `acquireRemote` when `CS_HEAVY_BASE` is set (the pool agent's per-sandbox token route; only set when the
+agent runs with `elastic_lanes`): acquire polls while denied, a timer renews the lease, release is best effort, and an unreachable or
+erroring agent (or a wait past `max_wait_s`) fails open. Without it the local `heavy.json` semaphore is used as before. The shims wrap
+installs, validate commands and prechecks, so those lane steps take a token with no lane-level wiring. `quotaCores` (`admission.mjs`) reads
+cgroup v2 `cpu.max` / v1 `cfs_quota_us`/`cfs_period_us` (fallback `CS_CPU_QUOTA` from the pool) and returns min(VM cores, quota);
+`verifyParallelism` and the heavy shim use it for `FORGE_HOST_PARALLELISM`.

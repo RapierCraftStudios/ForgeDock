@@ -6,12 +6,13 @@ import { spawnSync } from "node:child_process";
 import { writeFileSync, readFileSync, mkdirSync, chmodSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { guardChain, isPassThroughWrapper, SHIM_LOOP_MAX, SHIM_DEPTH_MAX, classifyStep, heavyConfig, openHeavy, acquireHeavy, writeHeavyShims, heavyShimScript, sumWaits, runWrapped, HEAVY_BINS, isHeavyProcess } from "./heavy.mjs";
+import { guardChain, isPassThroughWrapper, SHIM_LOOP_MAX, SHIM_DEPTH_MAX, classifyStep, heavyConfig, openHeavy, acquireHeavy, writeHeavyShims, heavyShimScript, sumWaits, runWrapped, acquireRemote, HEAVY_BINS, isHeavyProcess } from "./heavy.mjs";
 import { checkAdmission, ADMISSION_DEFAULTS, localLaneCap } from "./admission.mjs";
 import { formatAlertLines, formatWaitSummary } from "./orchestrate.mjs";
 import { readHeavy, readAdmission, liveLaneCap } from "../engine-cli.mjs";
 import { makeRampStore } from "./effects.mjs";
 
+const noCgroup = () => { throw new Error("no cgroup"); }; // #6047: the test host's own CPU quota must not change expected worker counts
 // Injected pids, clock and host: `live` is the set of pids the registry sees as alive; `mem` the MemAvailable in MB.
 const world = ({ mem = 12000, cores = 4, swapFree = 0 } = {}) => {
   const live = new Set(), clock = { t: 1_000_000 }, h = { mem, cores, swapFree };
@@ -208,16 +209,16 @@ describe("heavy shims and the run wrapper (#4169)", () => {
     const open = (dir, o) => { w.live.add(process.pid); return openHeavy(dir, { ...o, alive: (p) => w.live.has(p) }); };
     const host = { memAvailableMb: () => 64000, cores: () => 8 };
     const run = async (cmd, args, e) => { calls.push({ cmd, args, held: e.FORGE_HEAVY_HELD, par: e.FORGE_HOST_PARALLELISM, holders: openHeavy(w.dir, { host }).stats().holders }); return { code: 3, signal: null }; };
-    assert.deepEqual(await runWrapped(["run", "--name", "tsc", "--", "/r/tsc", "--noEmit"], { env, open, run, host }), { code: 3, signal: null });
+    assert.deepEqual(await runWrapped(["run", "--name", "tsc", "--", "/r/tsc", "--noEmit"], { env, open, run, host, read: noCgroup }), { code: 3, signal: null });
     assert.deepEqual(calls[0], { cmd: "/r/tsc", args: ["--noEmit"], held: "1", par: "8", holders: 1 });
     assert.equal(openHeavy(w.dir, { host }).stats().holders, 0, "released after the step");
     assert.deepEqual(sumWaits(readFileSync(waitsFile, "utf8")), { waits: { implement: JSON.parse(readFileSync(waitsFile, "utf8")).waitMs }, queueMax: 1 });
-    await runWrapped(["run", "--name", "tsc", "--", "/r/tsc", "--version"], { env, open, run, host });
-    await runWrapped(["run", "--name", "pnpm", "--", "/r/pnpm", "install"], { env: { ...env, FORGE_HEAVY_HELD: "1" }, open, run, host });
+    await runWrapped(["run", "--name", "tsc", "--", "/r/tsc", "--version"], { env, open, run, host, read: noCgroup });
+    await runWrapped(["run", "--name", "pnpm", "--", "/r/pnpm", "install"], { env: { ...env, FORGE_HEAVY_HELD: "1" }, open, run, host, read: noCgroup });
     assert.deepEqual(calls.slice(1).map((c) => [c.held, c.holders]), [[undefined, 0], ["1", 0]], "llm and nested calls take no slot");
-    await runWrapped(["run", "--name", "tsc", "--", "/r/tsc"], { env: { ...env, FORGE_HOST_PARALLELISM: "2", FORGE_HEAVY_PARALLELISM_PINNED: "1" }, open, run, host });
+    await runWrapped(["run", "--name", "tsc", "--", "/r/tsc"], { env: { ...env, FORGE_HOST_PARALLELISM: "2", FORGE_HEAVY_PARALLELISM_PINNED: "1" }, open, run, host, read: noCgroup });
     assert.equal(calls.at(-1).par, "2", "an operator-set FORGE_HOST_PARALLELISM wins");
-    await assert.rejects(runWrapped(["run", "--name", "x"], { env, open, run, host }), /usage/);
+    await assert.rejects(runWrapped(["run", "--name", "x"], { env, open, run, host, read: noCgroup }), /usage/);
   });
 
   it("sumWaits sums per phase and ignores bad lines; formatWaitSummary renders the batch-report line", () => {
@@ -486,5 +487,36 @@ describe("admission ramp (#5845)", () => {
     assert.equal(localLaneCap({ cfg: {}, cores: 16, memAvailableMb: 16384 }), 7);
     assert.equal(localLaneCap({ cfg: {}, cores: 16, memAvailableMb: 16384, rampingMb: 6144 }), 4, "ramping memory lowers the live cap");
     assert.equal(makeRampStore({ dir: join(tmpDir("ramp-"), "none", "x") }).rampingMb(60), null, "an unreadable stamp dir is unknown, not zero");
+  });
+});
+
+describe("remote token backend (#6047)", () => {
+  const resp = (status, body) => ({ status, json: async () => body });
+  const opts = (calls, replies) => ({ base: "http://h/sandboxes/l1/heavy", credToken: "tok", pollMs: 1, sleep: async () => {}, setTimer: () => ({ unref() {} }), clearTimer: () => {},
+    fetchFn: async (u, o) => { calls.push(u.split("/heavy/")[1]); const r = replies.shift(); if (r instanceof Error) throw r; return r ?? resp(200, { ok: true }); } });
+  it("grant: acquires, then release posts the token back", async () => {
+    const calls = [], g = await acquireRemote(opts(calls, [resp(200, { granted: true, token: "t1" })]));
+    assert.equal(g.token, "t1"); g.release(); g.release();
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(calls, ["acquire", "release"]);
+  });
+  it("deny then poll until granted", async () => {
+    const calls = [], g = await acquireRemote(opts(calls, [resp(200, { granted: false, retry_after_s: 1 }), resp(200, { granted: false }), resp(200, { granted: true, token: "t2" })]));
+    assert.equal(g.token, "t2"); assert.equal(calls.filter((c) => c === "acquire").length, 3);
+  });
+  it("fails open when the agent is unreachable or errors", async () => {
+    assert.equal((await acquireRemote(opts([], [new Error("ECONNREFUSED")]))).failOpen, true);
+    assert.equal((await acquireRemote(opts([], [resp(500, {})]))).failOpen, true);
+  });
+  it("runWrapped uses the remote backend only when CS_HEAVY_BASE is set; otherwise the local file semaphore", async () => {
+    const ran = [], run = async (cmd, args, env) => { ran.push(env); return { code: 0, signal: null }; };
+    let remoteCalls = 0, localOpens = 0;
+    const remote = async () => { remoteCalls++; return { waitMs: 0, holders: 1, release() {} }; };
+    const dir = tmpDir("heavy-rw-"), host = { memAvailableMb: () => 12000, cores: () => 4 };
+    await runWrapped(["run", "--name", "pnpm", "--", "pnpm", "install"], { env: { CS_HEAVY_BASE: "http://h/x", FORGEDOCK_SCHED_DIR: dir }, run, remote, host, read: () => { throw new Error("none"); } });
+    assert.equal(remoteCalls, 1);
+    await runWrapped(["run", "--name", "pnpm", "--", "pnpm", "install"], { env: { FORGEDOCK_SCHED_DIR: dir }, run, remote, host, open: (d, o) => { localOpens++; return openHeavy(d, { ...o, host }); }, read: () => { throw new Error("none"); } });
+    assert.equal(remoteCalls, 1); assert.equal(localOpens, 1);
+    assert.equal(ran[0].FORGE_HEAVY_HELD, "1");
   });
 });

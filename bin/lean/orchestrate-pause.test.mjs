@@ -3,7 +3,7 @@
 // #5975: a batch-level pause stops admission for every issue (dependency merge, engine/env re-admit, expiry), never a running lane.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { orchestrate } from "./orchestrate.mjs";
+import { orchestrate, AUTH_PROBE_MS, AUTH_ESCALATE_MS, HOLD_RAMP_STEP_MS } from "./orchestrate.mjs";
 
 const memStore = () => { let st = null; return { load: () => (st ? JSON.parse(JSON.stringify(st)) : null), save: (s) => { st = JSON.parse(JSON.stringify(s)); }, log: () => {} }; };
 const EE = (detail) => ({ terminalReason: "engine-error", detail });
@@ -57,6 +57,58 @@ describe("#5975: batch pause", () => {
   it("without getPause (or with no pause set) admission is unchanged", async () => {
     const r = await run({ script: {}, issues: [2, 1], extra: { getPause: null } });
     assert.deepEqual(r.calls, [1, 2]);
+  });
+});
+
+// #5988: a backend.auth outage is probed every 5 min, rotated, escalated once at 30 min; hold expiry is paced and warned at T-30.
+describe("#5988: auth outage probe and hold expiry", () => {
+  const AUTH = { terminalReason: "deferred", code: "backend.auth", retryInSeconds: 56 * 3600, detail: "login failed" };
+  const rot = (cur = { n: 1 }) => ({ accounts: [{ n: 1 }, { n: 2 }], current: () => cur.n, headroom: (ex) => [1, 2].some((n) => !(ex instanceof Map ? ex : new Map()).has(n)), resumeAt: (ex) => Math.max(0, ...[...(ex ?? new Map()).values()]) || null, isAccount: () => true,
+    pick: ({ exclude } = {}) => { const ex = new Set([...(exclude instanceof Map ? exclude.keys() : exclude ?? [])].map(Number)); const a = [1, 2].find((n) => !ex.has(n)); return a ? { account: a } : { account: null }; }, markLimited: (n) => { cur.n = n === 1 ? 2 : 1; return true; } });
+
+  it("login failure recovering at 10 min resumes within 5 min on the next account first, no operator action", async () => {
+    const resumed = await (async () => {
+      const c = { t: 5_000_000 }, s0 = c.t, ps = [], rows = [];
+      const out = await orchestrate({ issues: [1], parallel: 1, pollMs: 1000, readBody: async () => "", trusted: () => true, now: () => c.t, store: memStore(), rotator: rot(),
+        sleep: async (ms) => { c.t += Math.max(1, Number(ms) || 0); }, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 3 },
+        authProbe: async ({ account }) => { ps.push({ account, at: c.t - s0 }); return { ok: c.t - s0 >= 10 * 60000 }; },
+        runOne: async () => { c.t += 1000; return c.t - s0 < 10 * 60000 ? AUTH : MERGED; }, onUpdate: (x) => rows.push({ ...x, at: c.t - s0 }) });
+      return { out, ps, rows };
+    })();
+    assert.equal(resumed.out[0].outcome, "merged");
+    assert.ok(Number.isInteger(resumed.ps[0].account), "the probe runs on the next rotator account, picked before the lane retries");
+    const back = resumed.rows.find((x) => x.outcome === "merged");
+    assert.ok(back && back.at <= 10 * 60000 + AUTH_PROBE_MS + 5000, "resumed within one probe interval of the recovery");
+    assert.ok(!resumed.rows.some((x) => x.outcome === "auth-escalation"));
+  });
+
+  it("a 56 h outage pauses at most 30 min and escalates exactly once", async () => {
+    const c = { t: 9_000_000 }, s0 = c.t, rows = [], esc = []; let k = 0;
+    await orchestrate({ issues: [1], parallel: 1, pollMs: 1000, readBody: async () => "", trusted: () => true, now: () => c.t, store: memStore(), rotator: rot(),
+      sleep: async (ms) => { c.t += Math.max(1, Number(ms) || 0); }, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 3 },
+      authProbe: async () => ({ ok: false }), onEscalate: async (e) => esc.push(e),
+      runOne: async () => { c.t += 1000; return ++k <= 12 ? AUTH : MERGED; }, onUpdate: (x) => rows.push({ ...x, at: c.t - s0 }) });
+    assert.equal(esc.length, 1);
+    assert.equal(rows.filter((x) => x.outcome === "auth-escalation").length, 1);
+    assert.ok(rows.find((x) => x.outcome === "auth-escalation").at <= AUTH_ESCALATE_MS + 2 * AUTH_PROBE_MS);
+    assert.ok(c.t - s0 < 3 * 3600_000, "never a multi-hour pause");
+  });
+
+  it("expiry of 100 holds is announced once at T-30 and released at the controller's pace, not all at once", async () => {
+    const issues = Array.from({ length: 100 }, (_, i) => i + 1), clock = { t: 2_000_000 };
+    let held = new Set(issues), live = 0, peak = 0; const starts = [], release = clock.t + 20 * 60000;
+    const info = Object.fromEntries(issues.map((n) => [n, { owner: "op", since: "x", expiresAt: new Date(clock.t + 20 * 60000).toISOString() }]));
+    const rows = [];
+    await orchestrate({ issues, parallel: 4, pollMs: 1000, readBody: async () => "", trusted: () => true, now: () => clock.t, store: memStore(),
+      sleep: async (ms) => { clock.t += Math.max(1, Number(ms) || 0); }, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 3 },
+      getHeld: () => [...held], getHoldInfo: () => info,
+      expireHolds: () => { if (clock.t < Date.parse(info[1].expiresAt) || !held.size) return []; const due = [...held].map((n) => ({ issue: n, owner: "op", since: "x" })); held = new Set(); return due; },
+      runOne: async () => { live++; peak = Math.max(peak, live); starts.push({ live, since: clock.t - release }); clock.t += 1000; await Promise.resolve(); live--; return MERGED; }, onUpdate: (x) => rows.push(x) });
+    assert.equal(rows.filter((x) => x.outcome === "hold-alert").length, 100, "one T-30 alert per hold");
+    assert.ok(peak <= 4, `peak ${peak} never exceeds the controller's cap`);
+    const early = starts.filter((x) => x.since < HOLD_RAMP_STEP_MS);
+    assert.ok(early.length > 0 && early.every((x) => x.live === 1), "the first step after expiry admits one lane, not the parallel cap of 4");
+    assert.equal(rows.filter((x) => x.outcome === "merged").length, 100);
   });
 });
 

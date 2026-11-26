@@ -407,6 +407,25 @@ describe("#5938 stall verdict is re-evaluated: full K, recovery lanes, pool capa
   });
 });
 
+describe("#5988: a second restart for the same stall cause is refused", () => {
+  const stall = (ready, gates) => ({ code: "dispatch-stalled", ready, gates, detail: "stalled" });
+  it("a different ready set with the same cause is refused and the diagnosis is recorded", () => {
+    const root = tmpDir("stallcause");
+    mkdirSync(join(root, "b1"), { recursive: true });
+    const batch = { id: "b1", dir: join(root, "b1") };
+    const first = decideStallAction(stall([1, 2], ["base.red"]), { recovery: null, hosted: true });
+    assert.equal(first.action, "restart-daemon");
+    recordStallRecovery(batch, stall([1, 2], ["base.red"]), { action: first.action, sig: first.sig });
+    const rec = readHealth(batch.dir).stallRecovery;
+    assert.equal(rec.cause, "dispatch-stalled[base.red]");
+    assert.deepEqual(rec.gates, ["base.red"]);
+    const again = decideStallAction(stall([3], ["base.red"]), { recovery: rec, hosted: true });
+    assert.equal(again.action, "alert");
+    assert.match(again.cause, /second restart-daemon for the same cause/);
+    assert.equal(decideStallAction(stall([3], []), { recovery: rec, hosted: true }).action, "restart-daemon", "another cause is recovered once");
+  });
+});
+
 describe("#5987 efficiency status line", () => {
   it("batch status shows the efficiency line with and without breaches; none without a ledger", async () => {
     const { writeEfficiency } = await import("./efficiency.mjs");

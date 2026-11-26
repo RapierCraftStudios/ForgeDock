@@ -61,6 +61,7 @@ export const OUTCOME_CODES = Object.freeze({
   ENV_REPRO_UNRUNNABLE: "env.repro_unrunnable", // forge#4334: the repro harness could not run the repro test on head; an environment error, not a conformance failure
   ENV_LANE_LIMIT: "env.lane_limit", // forge#4690: the lane hit its own scope limit (TasksMax or MemoryMax) and was stopped; an environment error, never an engine-error, so the breaker ignores it
   ENV_CAPABILITY_REMOTE: "env.capability_remote", // forge#4542: a remote sandbox lane blocked only on a host-only capability (SOPS key, ops credentials, prod monitor SSH) the dispatching host has; recovered locally
+  ENV_ENGINE_SKEW: "env.engine_skew", // forge#5931: the sandbox ran a different engine version than the host; an environment error (gates fixed in the host version still fire), never conformance
   SANDBOX_START_FAILED: "sandbox.start_failed", // forge#4254: a lane sandbox could not start (a non-auth 4xx/config error or a non-HTTP start failure); needs-human, not relaunched
   BASE_RED: "base.red", // forge#5239: a verify.invariants guard fails on the base too; the lane is deferred behind the introducing issue, never needs-human
   SANDBOX_CAPACITY: "sandbox.capacity", // forge#4254: the sandbox provider had no capacity; deferred with backoff

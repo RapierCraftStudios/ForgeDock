@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { computeInputHash, emptyLedger, normalizeLedger, recordFailure, breach, admitInput, markEscalated, frozenContractHash, renderEscalation, renderAttempts, parseAttempts, validateAmendments, budgets, makeAttemptsSeam } from "./attempts.mjs";
+import { computeInputHash, emptyLedger, normalizeLedger, recordFailure, breach, admitInput, markEscalated, blockerSignature, frozenContractHash, renderEscalation, renderAttempts, parseAttempts, validateAmendments, budgets, makeAttemptsSeam } from "./attempts.mjs";
 import { renderContract } from "./render.mjs";
 import { postKeyed } from "./statuscomment.mjs";
 
@@ -31,19 +31,19 @@ describe("#5986 admission, budgets, escalation", () => {
     const a = admitInput(fail(null, "ci.red:x", "H1"), "H1", cfg);
     assert.equal(a.ok, false); assert.equal(a.code, "loop.no_new_input"); assert.match(a.reason, /ci\.red:x/);
   });
-  it("the 3rd identical signature breaches; 4 lanes breach; different signatures stay under max_identical", () => {
-    let l = fail(null, "s", "H1"); l = fail(l, "s", "H2");
+  it("the 2nd identical signature breaches; 4 lanes breach; different signatures stay under max_identical", () => {
+    let l = fail(null, "s", "H1");
     assert.equal(breach(l, cfg), null);
-    assert.equal(breach(fail(l, "s", "H3"), cfg).kind, "identical");
+    assert.equal(breach(fail(l, "s", "H2"), cfg).kind, "identical");
     let m = null; for (const [i, s] of ["a", "b", "c", "d"].entries()) m = fail(m, s, `H${i}`);
     assert.equal(breach(m, cfg).kind, "attempts");
     assert.equal(breach(m, { maxAttempts: 5 }), null);
   });
   it("a breach escalates once at the same hash, then loop.no_new_input; a new hash admits and clears the escalated flag after the next failure", () => {
-    let l = null; for (let i = 1; i <= 3; i++) l = fail(l, "s", `H${i}`);
-    assert.equal(admitInput(l, "H3", cfg).code, "escalate");
+    let l = null; for (let i = 1; i <= 2; i++) l = fail(l, "s", `H${i}`);
+    assert.equal(admitInput(l, "H2", cfg).code, "escalate");
     l = markEscalated(l);
-    assert.equal(admitInput(l, "H3", cfg).code, "loop.no_new_input");
+    assert.equal(admitInput(l, "H2", cfg).code, "loop.no_new_input");
     assert.deepEqual(admitInput(l, "H4", cfg), { ok: true });
     assert.equal(fail(l, "s", "H4").escalated, undefined, "the next window escalates again");
   });
@@ -123,5 +123,31 @@ describe("#5986 synthetic replay of looping issue timelines", () => {
       lanes++; ledger = recordFailure(ledger, { signature: "s", hash: "H" });
     }
     assert.ok(lanes <= 4, `lanes ${lanes}`);
+  });
+});
+
+describe("#5931 blocker signature", () => {
+  const cfg = {};
+  const blk = (o = {}) => blockerSignature({ code: "ci.red", detail: "boom 12 abcdef1", contractHash: "c1", engineVersion: "1.63.0", placement: "remote", ...o });
+  const failB = (b) => recordFailure(null, { signature: "s", hash: "H1", blocker: b });
+  it("an unchanged signature is refused; a changed engine version, placement or contract hash is admitted with a reason", () => {
+    const l = failB(blk()), cur = { engineVersion: "1.63.1", placement: "remote", contractHash: "c1" };
+    assert.equal(admitInput(l, "H1", cfg, cur).code, "loop.no_new_input");
+    assert.match(admitInput(l, "H1", cfg, { ...cur, engineVersion: "1.64.0" }).reason, /engine version/);
+    assert.match(admitInput(l, "H1", cfg, { ...cur, placement: "local" }).reason, /placement/);
+    assert.match(admitInput(l, "H1", cfg, { ...cur, contractHash: "c2" }).reason, /contract hash/);
+  });
+  it("a referenced env key that changed admits", () => {
+    const l = failB(blk({ detail: "missing SOPS_KEY", env: { SOPS_KEY: "a" } }));
+    assert.equal(admitInput(l, "H1", cfg, { env: { SOPS_KEY: "a" } }).ok, false);
+    assert.match(admitInput(l, "H1", cfg, { env: { SOPS_KEY: "b" } }).reason, /SOPS_KEY/);
+  });
+  it("two identical signatures breach and a credentials block persists hostPin", () => {
+    let l = recordFailure(null, { signature: "x", hash: "H1", blocker: blk({ detail: "Builder is blocked (credentials): ops_credentials" }) });
+    assert.equal(l.hostPin, true);
+    assert.equal(normalizeLedger(JSON.parse(renderAttempts(l).replace(/^<!-- FORGE:ATTEMPTS /, "").replace(/ -->$/, ""))).hostPin, true);
+    l = recordFailure(l, { signature: "x", hash: "H2" });
+    assert.equal(breach(l, cfg).kind, "identical");
+    assert.equal(l.hostPin, true);
   });
 });
