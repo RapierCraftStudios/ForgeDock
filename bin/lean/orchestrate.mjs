@@ -358,6 +358,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const keptBoxes = toMap(saved?.kept); // #6008: issue -> {issue, since, phase}: sandboxes kept for adopt (no dispatcher lease)
   const runRecs = toMap(saved?.running); // issue -> {startedAt, lane, pid?}: persisted so a restart can adopt the lane
   const pending = [...(saved?.pending ?? [])];
+  const selMatched = new Set(saved?.selMatched ?? []); // #6029: issues the selector has matched (persisted: a resumed runner keeps the leave provenance)
   const notBefore = toMap(saved?.notBefore);
   const requeues = toMap(saved?.requeues);
   const deferrals = toMap(saved?.deferrals);
@@ -522,7 +523,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       ...(requeueApplied.size ? { requeueApplied: [...requeueApplied], requeued: toObj(requeuedInfo) } : {}),
       ...(relabelled.size ? { relabelled: [...relabelled] } : {}), ...(cancelled ? { cancelled } : {}), ...(train ? { train: train.snapshot() } : {}),
       ...(estimate ? { estimates: toObj(estimates), enqueued: toObj(enqueued) } : {}), ...(heads.size ? { heads: [...heads] } : {}),
-      ...(engineSigs.size ? { engineSigs: toObj(engineSigs) } : {}), ...(deterministic.size ? { deterministicSigs: [...deterministic] } : {}), ...(toolReadmits.size ? { toolReadmits: [...toolReadmits] } : {}), ...(select ? { select } : {}), ...(readmit.size ? { readmit: toObj(readmit) } : {}), ...(envSigs.size ? { envSigs: toObj(envSigs) } : {}), ...(ledgers.size ? { attempts: toObj(ledgers) } : {}) });
+      ...(engineSigs.size ? { engineSigs: toObj(engineSigs) } : {}), ...(deterministic.size ? { deterministicSigs: [...deterministic] } : {}), ...(toolReadmits.size ? { toolReadmits: [...toolReadmits] } : {}), ...(select ? { select } : {}), ...(readmit.size ? { readmit: toObj(readmit) } : {}), ...(envSigs.size ? { envSigs: toObj(envSigs) } : {}), ...(ledgers.size ? { attempts: toObj(ledgers) } : {}), ...(selMatched.size ? { selMatched: [...selMatched] } : {}) });
   };
   const update = (row) => { store?.log?.(row); onUpdate(row); };
   // #5978 R11: a merge into a staging lane branch does not fire `Closes`: the seam closes the issue and folds its post-deploy checks into the release rollup.
@@ -1467,7 +1468,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // the `getAdded` path below; closed or moved pending issues leave; ended deferred/held/engine-error/conformance rows are requeued
   // through `drainRequeues` by policy (reconcile.mjs). Same DAG, priority and lane rules as an operator `--add`/`--requeue`.
   let nextReconcile = 0, parkedDigest = "";
-  const selFresh = [], autoRequeues = [], selMatched = new Set(); // #6022: issues the selector has matched in this run
+  const selFresh = [], autoRequeues = []; // #6022: selMatched (declared with the restores) = issues the selector has matched
   const reconcileTick = async () => {
     if (!reconcile) return;
     const t = now();
@@ -1478,13 +1479,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const labels = new Map((open ?? []).map((o) => [o.number, o.labels ?? []]));
     if (open) {
       const { join, leave } = diffSelection({ open, members: [...set], pending, running, results, matched: selMatched });
+      const matchedBefore = selMatched.size;
       for (const o of open) selMatched.add(o.number);
       selFresh.push(...join);
       for (const n of leave) {
         pending.splice(pending.indexOf(n), 1);
         skip(n, "left the selector: closed or moved");
       }
-      if (leave.length) save();
+      if (leave.length || selMatched.size > matchedBefore) save();
     }
     for (const e of envSigs.values()) if (Number.isInteger(e.number) && !set.has(e.number)) selFresh.push(e.number); // R7: the engine-filed env.* issue joins the order
     let base = null;
