@@ -31,7 +31,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    busy host → `deferred` / `host.busy`, before any lease or GitHub call.
    #5421: free disk is the third GC trigger. `diskLow` (`admission.mjs`) compares `host.freeMb` of the worktree root and `~/.forge`
    (`host.hygienePaths`) with forge.yaml `hygiene.min_free_gb` (default 5, 0 = off); `nearCeiling({minFreeGb})` counts it, so the
-   orchestrate `beforeAdmit` runs owned GC. `guardHeavyDisk` (`effects.mjs`) wraps `io.heavy`: below the threshold it runs GC once and,
+   orchestrate `beforeAdmit` runs owned GC. #6081: a held issue whose lane ended without a result (operator stop) is requeued as a `hold` row, never an engine-error or a breaker count; `run-issue` teardown on SIGTERM is bounded by `FORGEDOCK_TEARDOWN_MS` (default 30 s). `guardHeavyDisk` (`effects.mjs`) wraps `io.heavy`: below the threshold it runs GC once and,
    if still low, refuses the heavy step with `DISK_LOW` (`heavyAcquire` rethrows only that code). `hygiene.schedule` installs a
    systemd user timer or cron entry (`gc-schedule.mjs`, by `doctor --fix` / `init`) running `gc --apply`. Lanes get
    `COMPOSE_PROJECT_NAME=forgedock-lane-<issue>`; gc owns compose volumes/containers of that project.
