@@ -272,7 +272,7 @@ A [type:e2e] requirement needs a validate that runs a real e2e check (repo e2e s
 A new keyword/regex classifier ships negative examples (inputs it must not match).
 A forge.yaml outcome_evidence area change needs result outcome_evidence [{area,metric,corpus,before,after,better}] measured on recorded real inputs; its post-deploy checks get a numeric baseline.
 A new workspace-package dependency in a package.json no deliverable names is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
-If scripts/check-devdocs-freshness.sh exists, a behaviour change under its paths needs docs in the same change: add a new devdocs/decisions/<issue>-<slug>.md (a few lines: what changed and why). Prefer a new file over editing a shared dossier: parallel lanes editing the same dossier conflict at merge. Run the check against the base first.
+If scripts/check-devdocs-freshness.sh exists, a behaviour change under its paths adds a new devdocs/decisions/<issue>-<slug>.md in the same change (a new file never conflicts with parallel lanes); run it against the base first.
 
 Before writing ${RESULT_FILE}, after your last edit, run \`node ${FORGEDOCK_CLI} check\` in the worktree and fix until it passes; if it cannot pass, report the problem as blocked.
 A \`FAIL review\` line from check is a finding the reviewer would raise; fix it. Also:

@@ -2045,8 +2045,8 @@ export function normalizeKindModes(raw) {
 export const ADVISORY_CODES = Object.freeze([OUTCOME_CODES.CONFORMANCE_SCOPE_CREEP, OUTCOME_CODES.RECURRENCE_DESIGN_MISSING, OUTCOME_CODES.MAINTENANCE_HOTSPOT_GROWTH, OUTCOME_CODES.MAINTENANCE_COUNTER_GROWTH]);
 export const ADVISORY_KINDS = Object.freeze([
   "scope_creep", "check_unknown", "design_missing", "design_missing_repeated", "docs_missing", "docs_link_broken",
-  "coupled_file_missing", "ci_budget_unannotated", "activation_missing", "interface_seam", "hotspot_growth", "counter_growth",
-  "amendment_invalid", "substitute_unverified", "outcome_evidence_missing", "outcome_evidence_baseline_missing",
+  "ci_budget_unannotated", "hotspot_growth", "counter_growth",
+  "amendment_invalid", "substitute_unverified",
   "page_metadata_missing", "page_sitemap_missing", "page_canonical_missing", "page_structured_data_missing",
 ]);
 /** Split failures into {block, advisory}; advisory rows are reported on the issue and never park a lane. */

@@ -398,11 +398,11 @@ describe("core work-on", () => {
     assert.match(traj(w)[0], /Amendment kinds invalid \(1\); builder asked to correct/);
   });
 
-  it("an unknown amendment kind the builder does not fix parks only after the one correction (#5089)", async () => {
+  it("an unknown amendment kind the builder does not fix gets the one correction, then is advisory: not applied, never parks (#5089, unclog)", async () => {
     const bad = [{ kind: "deliverable_change", requirement: "R1", why: "w" }];
     const w = world({ amendments: bad, resumeAmendments: bad, reviews: [ok()] });
     const r = await run(w);
-    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(r.terminalReason, "merged");
     assert.equal(builders(w).filter((c) => /amendments in .*result\.json are not valid/.test(c[4] ?? "")).length, 1);
   });
 
@@ -1363,22 +1363,14 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     assert.equal(w.closed[0].at(-1), "completed");
   });
 
-  it("scope creep: an unauthorized file is caught by the precheck before any reviewer run; the resume reverts it and it merges", async () => {
+  it("scope creep is advisory (unclog): recorded as an ADVISORY event, no builder resume, the review runs and it merges", async () => {
     const dir = tmpDir("conf-creep-");
-    const w = world({ changed: ["src/foo.js", "src/billing.js", "test/foo.test.js"], resumeChanged: ["src/foo.js", "test/foo.test.js"] });
+    const w = world({ changed: ["src/foo.js", "src/billing.js", "test/foo.test.js"] });
     const r = await run(w, { dir });
     assert.equal(r.terminalReason, "merged");
-    assert.equal(reviewers(w).length, 1, "the reviewer ran only after the precheck passed");
-    assert.match(builders(w)[2][4], /conformance\.scope_creep: changed outside the contract's deliverables: src\/billing\.js/);
-    const ev = events(dir);
-    assert.ok(ev.indexOf("PRECHECK") < ev.indexOf("CONFORMANCE"));
-  });
-
-  it("scope creep that persists is needs-human conformance.scope_creep with no reviewer tokens spent", async () => {
-    const w = world({ changed: ["src/foo.js", "src/billing.js", "test/foo.test.js"] });
-    const r = await run(w);
-    assert.equal(r.code, "conformance.scope_creep"); assert.equal(reviewers(w).length, 0);
-    blockedNothingMerged(w);
+    assert.equal(reviewers(w).length, 1);
+    assert.ok(!builders(w).some((c) => /conformance\.scope_creep/.test(c[4] ?? "")), "no resume for advisory scope creep");
+    assert.ok(readLog(dir, 7).some((e) => e.event === "ADVISORY" && e.rows.includes("scope_creep")));
   });
 
   it("a claimed 'follow-up' with no typed deferral is needs-human conformance.untracked_deferral; nothing is filed or merged", async () => {
@@ -1721,8 +1713,8 @@ describe("devdocs freshness gate (the repo's own scripts/check-devdocs-freshness
     assert.match(traj(w).at(-1), /Docs freshness check failed; builder resumed once/);
   });
 
-  it("a doc the docs round edits outside the deliverables is an implied deliverable (no scope_creep); an unrelated extra file still is", async () => {
-    for (const [extra, code] of [[[], null], [["src/billing.js"], "conformance.scope_creep"]]) {
+  it("a doc the docs round edits outside the deliverables is an implied deliverable; an unrelated extra file is advisory scope creep (unclog), both merge", async () => {
+    for (const [extra, code] of [[[], null], [["src/billing.js"], null]]) {
       const w = dworld([STALE, { ok: true, output: "OK" }], { changed: ["src/foo.js", "test/foo.test.js"] });
       const inner = w.io.docsFreshness;
       w.io.docsFreshness = async (x) => { const r = await inner(x); if (r?.ok && !w.changed.includes("devdocs/modules/lean.md")) w.changed = [...w.changed, "devdocs/modules/lean.md", ...extra]; return r; };
@@ -1962,7 +1954,7 @@ describe("conformance shadow mode (the default)", () => {
   it("scope creep does not block in shadow (as today) but is recorded", async () => {
     const w = world({ changed: ["src/foo.js", "src/billing.js", "test/foo.test.js"], reviews: [conf({}, CONTRACT, ["src/foo.js", "src/billing.js", "test/foo.test.js"])] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
-    assert.match(shadowNote(w), /would BLOCK[\s\S]*conformance\.scope_creep[\s\S]*src\/billing\.js/);
+    assert.match(traj(w).join("\n"), /Advisory \(not blocking\): conformance\.scope_creep/); // unclog: advisory, not a would-block row
   });
 
   it("#4160 an incomplete review gets one targeted re-ask with only the missing ids, then needs-human; never merges in shadow", async () => {
@@ -2331,7 +2323,7 @@ describe("conformance shadow mode (the default)", () => {
     assert.deepEqual(reverts, ["clean -fdq -- .pytest_cache_x/log", "checkout -- src/bar.js"]);
     assert.ok(traj(w).some((x) => /Validate preflight reverted 2 path\(s\) its runs changed/.test(x)));
   });
-  it("#4353 the #4348 contract shape: an allowlist validate is dropped at freeze (CONTRACT_SCOPE_VALIDATE_DROPPED), the amended lane merges, and a real out-of-scope edit is still scope_creep", async () => {
+  it("#4353 the #4348 contract shape: an allowlist validate is dropped at freeze (CONTRACT_SCOPE_VALIDATE_DROPPED), the amended lane merges, and a real out-of-scope edit is advisory scope_creep (unclog)", async () => {
     const ALLOW = 'test -z "$(git diff --name-only origin/staging...HEAD | grep -v -x -e src/foo.js -e test/foo.test.js)"';
     const c = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: ALLOW }] }, files = ["src/foo.js", "test/foo.test.js", "docs/foo.md"];
     const shape = (changed) => ({ contract: c, changed, amendments: [{ kind: "add-deliverable", path: "docs/foo.md", why: "the docs-freshness rule needs the module doc" }],
@@ -2349,8 +2341,8 @@ describe("conformance shadow mode (the default)", () => {
     assert.ok(traj(w).some((t) => /Scope-check validate V2 dropped at contract freeze/.test(t)));
     const creep = world(shape([...files, "src/other.js"]));
     creep.io.runCommand = async () => ({ rc: 1, output: "" });
-    assert.equal((await run(creep)).code, "conformance.scope_creep");
-    assert.ok(builders(creep).some((b) => /changed outside the contract's deliverables: src\/other\.js/.test(b[4])));
+    assert.equal((await run(creep)).terminalReason, "merged", "unclog: an out-of-scope edit is advisory");
+    assert.match(traj(creep).join("\n"), /Advisory \(not blocking\): conformance\.scope_creep[^\n]*src\/other\.js/);
   });
 
   it("#4404 a Lighthouse requirement is tagged out_of_band at freeze; with instrumentation the lane merges and the PR body names the job", async () => {
@@ -2419,7 +2411,7 @@ describe("conformance shadow mode (the default)", () => {
     assert.equal((await runShadow(fixed)).terminalReason, "merged", "recorded by the resume, then merges");
     const a = world({ amendments: [{ kind: "add-deliverable", path: "src/x.js" }] });
     const ra = await runShadow(a);
-    assert.equal(ra.code, "conformance.unimplemented"); assert.match(nhBody(a), /amendment without why/);
+    assert.equal(ra.terminalReason, "merged", "unclog: an invalid amendment is advisory, not applied"); assert.match(traj(a).join("\n"), /Advisory \(not blocking\)[^\n]*amendment without why/);
   });
   it("#4737 decision records are persisted after the merge, never at gate time", async () => {
     const dir = tmpDir("dec-"); const prev = process.env.FORGEDOCK_DECISIONS_DIR; process.env.FORGEDOCK_DECISIONS_DIR = dir;
@@ -2576,11 +2568,11 @@ describe("conformance shadow mode (the default)", () => {
 
 describe("conformance gate: base-sync and contract size", () => {
   const CONFLICTING = { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }, OKSTATE = { mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" };
-  it("the base-sync re-review re-runs the precheck on the current files: creep introduced by conflict resolution is caught", async () => {
+  it("the base-sync re-review re-runs the precheck on the current files: creep introduced by conflict resolution is recorded as advisory (unclog)", async () => {
     const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], syncChanged: ["src/foo.js", "src/unrelated.js", "test/foo.test.js"] });
     const r = await run(w);
-    assert.equal(r.terminalReason, "needs-human"); assert.equal(w.merges.length, 0);
-    assert.ok(builders(w).some((b) => /conformance\.scope_creep: changed outside the contract's deliverables: src\/unrelated\.js/.test(b[4])));
+    assert.equal(r.terminalReason, "merged");
+    assert.match(traj(w).join("\n"), /Advisory \(not blocking\): conformance\.scope_creep[^\n]*src\/unrelated\.js/);
   });
   it("a large contract is posted compact so its JSON survives the comment cap and stays recoverable", () => {
     const big = { ...CONTRACT, requirements: Array.from({ length: 160 }, (_, i) => ({ id: `R${i}`, quote: "foo must handle a null argument without throwing.".repeat(4), disposition: "deliver" })) };
@@ -2738,7 +2730,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 2075, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 2075 tokens`); // 2075: #5979 (substitute-validate and out-of-band from the shared amendment schema); 2025: #5752 (mechanism supersedes, negative examples, outcome evidence) // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule) // 1925: #5760 (CI budget rule)
   });
 
-  it("#4519 generated_paths: both prompts name the globs (even with the gate off), and an amendment adding one blocks", async () => {
+  it("#4519 generated_paths: both prompts name the globs (even with the gate off), and an amendment adding one is advisory: not applied (unclog)", async () => {
     const G = ["web/public/openapi*.json"];
     for (const f of [facts([], { generated_paths: G }), facts([HOT], { enabled: false, generated_paths: G })]) {
       assert.match(hotspotPlanNote(f), /Generated paths \(forge\.yaml maintenance\.generated_paths, owned by the repo's generator\): web\/public\/openapi\*\.json\. Never list or amend them in/);
@@ -2747,9 +2739,9 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotPlanNote(facts([], { generated_paths: [] })), "", "no generated_paths: unchanged");
     const w = hworld(facts([], { generated_paths: G }), [facts([])], { amendments: [{ kind: "add-deliverable", path: "web/public/openapi.json", why: "sync the spec" }] });
     const r = await run(w);
-    assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0);
+    assert.equal(r.terminalReason, "merged");
     assert.match(builders(w)[0][4], /Generated paths .*openapi/);
-    assert.match(nh(w), /add-deliverable web\/public\/openapi\.json: generated path/);
+    assert.match(traj(w).join("\n"), /Advisory \(not blocking\)[^\n]*add-deliverable web\/public\/openapi\.json: generated path/);
   });
 
   it("the plan prompt carries the facts, the implement prompt the configured rule; growth within the limit merges; no extra runner calls", async () => {
@@ -2765,20 +2757,19 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(plain.calls.filter((c) => c[0] === "runner").length, w.calls.filter((c) => c[0] === "runner").length, "no extra LLM calls");
   });
 
-  it("unexempted growth of an over-threshold file blocks in enforce and in shadow: one resume, then needs-human maintenance.hotspot_growth, no reviewer run", async () => {
+  it("unexempted growth of an over-threshold file is advisory (unclog) in enforce and in shadow: recorded, no resume, it merges", async () => {
     for (const conformance of ["enforce", "shadow"]) {
       const w = hworld(facts([HOT]), [facts([GROWN])]);
       const r = await run(w, { conformance });
-      assert.equal(r.code, "maintenance.hotspot_growth", conformance); assert.equal(w.merges.length, 0);
-      assert.equal(builders(w).length, 3, `${conformance}: plan + implement + one resume`); assert.equal(reviewers(w).length, 0);
-      assert.match(builders(w)[2][4], /maintenance\.hotspot_growth: src\/foo\.js grew by 200 lines/);
-      assert.match(nh(w), /src\/foo\.js grew by 200 lines/);
+      assert.equal(r.terminalReason, "merged", conformance);
+      assert.equal(builders(w).length, 2, `${conformance}: plan + implement, no resume`);
+      assert.match(traj(w).join("\n"), /Advisory \(not blocking\): maintenance\.hotspot_growth[^\n]*src\/foo\.js grew by 200 lines/);
     }
   });
 
   it("growth moved out on the resume merges; an exemption in the contract or a failed/missing script never blocks", async () => {
     const w = hworld(facts([HOT]), [facts([GROWN]), facts([SMALL])]);
-    assert.equal((await run(w, { conformance: "shadow" })).terminalReason, "merged"); assert.equal(builders(w).length, 3);
+    assert.equal((await run(w, { conformance: "shadow" })).terminalReason, "merged"); assert.equal(builders(w).length, 2, "unclog: advisory growth costs no resume");
     const k = { ...CONTRACT, deliverables: [{ ...CONTRACT.deliverables[0], change: "guard null; hotspot-exempt: the guard must sit next to the parser it protects" }] };
     const we = hworld(facts([HOT]), [facts([GROWN])], { contract: k, reviews: [conf({}, k)] });
     assert.equal((await run(we)).terminalReason, "merged"); assert.equal(builders(we).length, 2);
@@ -4959,8 +4950,8 @@ describe("host admission (#4105)", () => {
   it("/orchestrate spec requeues host-busy lanes with a lower K and pauses on rate_limited", async () => {
     const { readFileSync } = await import("node:fs");
     const spec = readFileSync(new URL("../../commands/orchestrate.md", import.meta.url), "utf8");
-    assert.match(spec, /host busy[\s\S]*lower the effective K by\s+1 for the next 5 minutes, never below 1/);
-    assert.match(spec, /rate_limited[\s\S]*stop launching\s+new lanes until that reset time/);
+    assert.match(spec, /host\.busy[\s\S]*lower K by 1\s+for 5 minutes \(never below 1\)/);
+    assert.match(spec, /rate_limited`: launch nothing until the reset time/);
   });
 });
 
@@ -9401,7 +9392,7 @@ describe("per-kind conformance modes (engine.conformance_kinds)", () => {
     const w = world({ changed: CREEP, reviews: [conf({}, CONTRACT, CREEP)] });
     const r = await run(w, { conformance: "enforce", conformanceKinds: { "conformance.scope_creep": "shadow" } });
     assert.equal(r.terminalReason, "merged");
-    assert.match(shadowNote(w), /would BLOCK[\s\S]*conformance\.scope_creep[\s\S]*src\/billing\.js/);
+    assert.match(traj(w).join("\n"), /Advisory \(not blocking\): conformance\.scope_creep/); // unclog: scope creep is advisory whatever the kind mode
   });
 
   it("an enforce kind in a shadow lane blocks (scope creep is recorded-only in shadow by default)", async () => {
