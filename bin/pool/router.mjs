@@ -630,6 +630,7 @@ bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TM
       const caps = (await capacities()).filter((c) => acct === null || own(agents(), c.name)?.account === acct).map((c) => { const a = own(agents(), c.name); return { ...c, ...(a?.account ? { account: a.account } : {}), ...(a?.policy ? { policy: a.policy } : {}) }; }), byName = new Map(caps.map((c) => [c.name, c])), out = {};
       for (const [id, s] of Object.entries(sbx())) { if (acct !== null && !byName.has(s?.agent)) continue; const mb = byName.get(s?.agent)?.sandbox_disk_mb?.[id]; out[id] = Number.isFinite(mb) ? { ...s, disk_used_mb: mb } : s; }
       const remote_lanes = Object.keys(sbx()).filter(isLane).length; // #5735: lane sandboxes across all batches and agents
+      // #6062: usage_summary rides on each capacity record (spread above) unchanged
       return { status: 200, body: { agents: caps.map((c) => ({ ...c, lanes: laneView(c.name), ...diskReport(c) })), sandboxes: out, remote_lanes } };
     })],
     [route("POST", "/device/code"), { fn: async () => deviceStart(), auth: "none" }], // #5886
