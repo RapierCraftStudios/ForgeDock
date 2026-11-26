@@ -255,21 +255,22 @@ export async function rerunInfraFlakes({ io, repo, head, fence, policy }) {
     const cfg = parseFlakeConfig(policy);
     if (!fence?.lctx || !(cfg.rerunBudgetMin > 0)) return out;
     const prior = await readFlakes(fence.lctx), done = prior.filter((f) => f.rerun).map((f) => `${f.sha}:${f.check}`);
-    const runs = json(await io.gh(["run", "list", "--repo", repo, "--commit", head, "--status", "failure", "--json", "databaseId,name", "--limit", "20"])) ?? [];
+    const runs = json(await io.gh(["run", "list", "--repo", repo, "--commit", head, "--status", "failure", "--json", "databaseId,name,attempt", "--limit", "20"])) ?? [];
     const at = new Date(io.now?.() ?? Date.now()).toISOString(), entries = [];
     let spentMin = 0;
     for (const r of runs) {
       const log = String(await io.gh(["run", "view", String(r.databaseId), "--repo", repo, "--log-failed"]).catch(() => "")).slice(-20_000);
       const c = classifyFailure(log);
-      const [d] = planRerun({ jobs: [{ key: `${head}:${r.name}`, name: r.name, class: c.class }], done, spentMin, budgetMin: cfg.rerunBudgetMin });
+      const [d] = planRerun({ jobs: [{ key: `${head}:${r.name}`, name: r.name, class: c.class, attempt: r.attempt }], done, spentMin, budgetMin: cfg.rerunBudgetMin });
       if (d.rerun) {
         const f = await fenced(fence, { action: "rerun", key: `rerun-failed:${r.databaseId}` }, () => io.gh(["run", "rerun", String(r.databaseId), "--repo", repo, "--failed"]));
         if (f.refused) { out.skipped.push({ name: r.name, why: f.refused }); continue; }
         out.reran.push(r.name);
-      } else out.skipped.push({ name: r.name, why: d.why });
-      entries.push(flakeEntry({ check: r.name, signature: c.signature, kind: c.class === "infra" ? "infra" : "decision", sha: head, runIds: [r.databaseId], at, rerun: d.rerun }));
+      } else out.skipped.push({ name: r.name, why: d.why, ...(d.capped ? { capped: true } : {}) });
+      entries.push(flakeEntry({ check: r.name, signature: c.signature, kind: c.class === "infra" ? "infra" : "decision", sha: head, runIds: [r.databaseId], at, rerun: d.rerun, attempt: r.attempt, reuseForfeited: d.rerun }));
     }
-    await recordFlakes(fence.lctx, entries.filter((e) => e.kind === "infra"));
+    // #6014: a rerun entry carries the attempt count and the forfeited reuse; a cap refusal is a visible decision entry, never an infra one
+    await recordFlakes(fence.lctx, entries.filter((e) => e.kind === "infra" || e.attempt != null && !e.rerun && out.skipped.some((s) => s.capped && s.name === e.check)));
   } catch { /* best effort */ }
   return out;
 }
@@ -633,7 +634,7 @@ export async function releaseFromCli(argv, deps = {}) {
   if (argv[0] === "control") throw new Error(`unknown control verb ${argv[1] ?? ""}; ${RELEASE_USAGE}`);
   const unknown = argv.filter((a, i) => a.startsWith("--") && !["--repo", "--merge", "--watch", "--resume", "--lane", "--interval"].includes(a) && !(argv[i - 1] === "--resume" || argv[i - 1] === "--repo" || argv[i - 1] === "--lane" || argv[i - 1] === "--interval"));
   if (unknown.length) throw new Error(`unknown option ${unknown[0]}; ${RELEASE_USAGE}`);
-  if (argv.includes("--watch")) { // the bare flag delegates to the status loop (#5554)
+  if (argv.includes("--watch") && !argv.includes("--merge")) { // the bare flag delegates to the status loop (#5554); `--merge` is a start (#5848)
     const pick = (f) => (flag(argv, f) ? [f, flag(argv, f)] : []);
     return statusCli(["status", ...(flag(argv, "--resume") ? [flag(argv, "--resume")] : []), "--watch", ...pick("--repo"), ...pick("--interval")], { io, cwd, env, deps });
   }
@@ -656,6 +657,7 @@ export async function releaseFromCli(argv, deps = {}) {
     const { conductorGuard } = await import("./release-conductor.mjs"); // #5564: a configured conductor must exist on the default branch
     const noConductor = conductorGuard({ io, policy: pol, def: readBranches(cwd).default || "main" });
     if (noConductor) { io.print(`release: refused: ${noConductor}`); return 1; }
+    if (!pol && !resume) { io.print("release: refused: no valid .forge/release.yaml on the default branch (run release check-config)"); return 1; } // #5848: same reason as `release plan`
     config.policy = pol; config.fix = parseFixConfig(pol?.ci?.fix); // #5567: ci.fix.max_rounds / co_start / full_run_workflow
     config.deployPipeline = pol?.lanes?.[flag(argv, "--lane")]?.pipeline ?? "full"; // service/hotfix lanes dispatch with unit inputs
     if (pol?.verify) { // #5562: verification layers; risk class picks the soak minutes
@@ -674,11 +676,13 @@ export async function releaseFromCli(argv, deps = {}) {
     try { io.print(await budgetReportLine({ cwd, repo, gh: (a) => io.gh(a), now: io.now(), release: since ? await releaseRuns({ gh: (a) => io.gh(a), repo, sinceMs: since }) : null })); } catch { /* best effort */ }
   };
   await budget(null);
-  const r = await runRelease({ io, repo, opts: { merge: argv.includes("--merge"), lane: flag(argv, "--lane") }, config, branches: readBranches(cwd), root, id, mounts: deps.mounts });
+  const r = await runRelease({ io, repo, opts: { merge: argv.includes("--merge"), lane: flag(argv, "--lane") }, config, branches: readBranches(cwd), root, id, mounts: deps.mounts, steps: deps.steps });
   const line = r.status === "done" ? `release ${id}: done` : `release ${id}: ${r.status} at ${r.step}: ${r.reason} (resume: forgedock release --resume ${id})`;
   io.print(line);
   try { await budget(Date.parse(openRelease(root, id).load()?.startedAt) || null); } catch { /* best effort */ }
-  return r.status === "refused" ? 1 : r.status === "blocked" ? BLOCKED_EXIT : 0;
+  const code = r.status === "refused" ? 1 : r.status === "blocked" ? BLOCKED_EXIT : 0;
+  if (argv.includes("--watch") && code === 0 && r.status !== "done") return statusCli(["status", id, "--watch", "--repo", repo, ...(flag(argv, "--interval") ? ["--interval", flag(argv, "--interval")] : [])], { io, cwd, env, deps }); // #5848: watch the record this start created
+  return code;
 }
 
 /** `forgedock release verify <sha> [--repo R]`: exit 0 when the release head is the snapshot plus its recorded cherry-picks of staging commits, else 1. */

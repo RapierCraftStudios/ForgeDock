@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { PACKAGE_STORES } from "./cache-sweep.mjs";
+
+/** #6047: the lane's CPU quota as env, for lanes whose cgroup files are hidden (read by quotaCores in lean/admission.mjs). */
+export const cpuQuotaEnv = (cpus) => (Number.isFinite(cpus) && cpus > 0 ? { CS_CPU_QUOTA: String(cpus) } : {});
 
 /** #5757: work-dir and cache sweeps walk big trees (node_modules): 10 min, not the 120 s of a small rm. */
 export const SWEEP_TIMEOUT_MS = 10 * 60000;
@@ -34,13 +38,17 @@ export const dockerCli = {
     try { await docker(["kill", `--signal=${signal}`, name], { timeoutMs: 20000 }); return true; }
     catch (e) { if (/No such container|is not running/i.test(e.stderr ?? "")) return false; throw e; }
   },
+  /** #5856: re-weights a running container (throttle/unthrottle a borrowed lane); a gone container is not an error. */
+  async update(name, { cpuShares, memoryReservationMb }) { try { await docker(["update", "--cpu-shares", String(cpuShares), ...(memoryReservationMb ? ["--memory-reservation", `${memoryReservationMb}m`] : []), name], { timeoutMs: 20000 }); } catch (e) { if (!/No such container/i.test(e.stderr ?? "")) throw e; } },
+  /** `label` is one label or a list; docker ANDs the filters (#5881: [computeshare=1, computeshare.agent=<id>]). */
   async listLabelled(label) {
-    const out = await docker(["ps", "-a", "--filter", `label=${label}`, "--format", "{{.Names}}"], { timeoutMs: 20000 });
+    const out = await docker(["ps", "-a", ...[].concat(label).flatMap((l) => ["--filter", `label=${l}`]), "--format", "{{.Names}}"], { timeoutMs: 20000 });
     return out ? out.split("\n").filter(Boolean) : [];
   },
   async removeVolume(name) { try { await docker(["volume", "rm", "-f", name], { timeoutMs: 120000 }); } catch (e) { if (!/no such volume/i.test(e.stderr ?? "")) throw e; } },
-  async listVolumes(prefix) {
-    const out = await docker(["volume", "ls", "-q", "--filter", `name=${prefix}`], { timeoutMs: 20000 });
+  /** #5881: `label` (one or a list) restricts the list to volumes carrying it, e.g. this agent's. */
+  async listVolumes(prefix, label = []) {
+    const out = await docker(["volume", "ls", "-q", "--filter", `name=${prefix}`, ...[].concat(label).flatMap((l) => ["--filter", `label=${l}`])], { timeoutMs: 20000 });
     return out ? out.split("\n").filter((v) => v.startsWith(prefix)) : [];
   },
   /** Local image refs (`repo:tag`) starting with prefix; untagged images are skipped. */
@@ -54,10 +62,20 @@ export const dockerCli = {
     const out = await docker(["ps", "-a", "--format", "{{.Image}}"], { timeoutMs: 30000 });
     return out ? [...new Set(out.split("\n").filter(Boolean))] : [];
   },
+  /** #5891: freezes / thaws a container (its processes keep their state; the lane is paused, not failed). A gone container is not an error. */
+  async pause(name) { try { await docker(["pause", name], { timeoutMs: 20000 }); } catch (e) { if (!/No such container|already paused/i.test(e.stderr ?? "")) throw e; } },
+  async unpause(name) { try { await docker(["unpause", name], { timeoutMs: 20000 }); } catch (e) { if (!/No such container|not paused/i.test(e.stderr ?? "")) throw e; } },
+  /** #5891: dangling images (rebuildable) only; never a tagged or in-use one. */
+  async pruneImages() { return docker(["image", "prune", "-f"], { timeoutMs: 10 * 60000 }); },
+  /** #5891: package-manager caches inside a running sandbox (rebuildable); the worktree and lane state are untouched. Best effort. */
+  async pruneCaches(name) { try { await docker(["exec", name, "sh", "-c", `rm -rf ${PACKAGE_STORES.map((d) => `/cache/${d}`).join(" ")} 2>/dev/null; true`], { timeoutMs: 120000 }); } catch (e) { if (!/No such container|is not running|is paused/i.test(e.stderr ?? "")) throw e; } },
+  /** #5884: removes this agent's stopped containers and dangling images only (`label` carries the agent id, #5881). */
+  async containerPrune(label) { return docker(["container", "prune", "-f", ...[].concat(label).flatMap((l) => ["--filter", `label=${l}`])], { timeoutMs: 120000 }); },
+  async imagePrune(label) { return docker(["image", "prune", "-f", ...[].concat(label).flatMap((l) => ["--filter", `label=${l}`])], { timeoutMs: 120000 }); },
   async builderPrune(keepGb) { return docker(["builder", "prune", "-f", "--keep-storage", `${keepGb}gb`], { timeoutMs: 10 * 60000 }); },
   /** Volumes no container references (anonymous ones are named by 64 hex chars). */
-  async listDanglingVolumes() {
-    const out = await docker(["volume", "ls", "-q", "--filter", "dangling=true"], { timeoutMs: 30000 });
+  async listDanglingVolumes(label = []) {
+    const out = await docker(["volume", "ls", "-q", "--filter", "dangling=true", ...[].concat(label).flatMap((l) => ["--filter", `label=${l}`])], { timeoutMs: 30000 });
     return out ? out.split("\n").filter(Boolean) : [];
   },
   async pull(image) { return docker(["pull", "-q", image], { timeoutMs: 30 * 60000 }); },
@@ -87,6 +105,10 @@ export const dockerCli = {
   },
   /** #5757: creates a volume carrying labels (idempotent: an existing volume keeps its labels). */
   async createVolume(name, labels = []) { await docker(["volume", "create", ...labels.flatMap((l) => ["--label", l]), name], { timeoutMs: 20000 }); },
+  /** Labels of an existing volume ({} when it is missing or cannot be inspected). */
+  async volumeLabels(name) {
+    try { return JSON.parse(await docker(["volume", "inspect", "--format", "{{json .Labels}}", name], { timeoutMs: 20000 })) ?? {}; } catch { return {}; }
+  },
   /** #5757: runs the in-volume cache sweep (bin/pool/cache-sweep.mjs) in a lane-image container; resolves its JSON result, rejects on failure or timeout. */
   async sweepCache(volume, image, opts) {
     const out = await docker(["run", "--rm", "--network", "none", "-v", `${volume}:/cache`, "-e", `CS_CACHE_SWEEP_OPTS=${JSON.stringify(opts)}`, "-e", `CS_CACHE_SWEEP_SRC=${readFileSync(SWEEP_SRC, "utf8")}`, "--entrypoint", "sh", image, "-c", 'printf %s "$CS_CACHE_SWEEP_SRC" > /tmp/cache-sweep.mjs && exec node /tmp/cache-sweep.mjs'], { timeoutMs: SWEEP_TIMEOUT_MS });

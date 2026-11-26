@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { STATUS_SEP, parseStatus, renderStatus, putSection, writeStatus, findStatus, findLeading, hasSection, sectionText, commentId, isStatusPost, isUpsertPost,
-  postStatusSection, postUpsert, clearPipelineLabels, pipelineLabels, isPipelineLabel } from "./statuscomment.mjs";
+  postStatusSection, postUpsert, postKeyed, isKeyedPost, engineCommentCount, MAX_ENGINE_COMMENTS, clearPipelineLabels, pipelineLabels, isPipelineLabel } from "./statuscomment.mjs";
 
 const BOT = { author: { login: "rapiercraft-forgedock" }, authorAssociation: "CONTRIBUTOR" };
 const trusted = (c) => c.author?.login === "rapiercraft-forgedock";
@@ -124,10 +124,74 @@ describe("#5592 gh helpers", () => {
     assert.deepEqual(pipelineLabels([{ name: "bug" }, "needs-human", { name: "parked:x" }]), ["needs-human", "parked:x"]);
     const log = [];
     assert.deepEqual(await clearPipelineLabels({ gh: ghWith([], log), repo: "o/r", issue: 7 }), ["parked:ci.red", "needs-human"]);
-    assert.deepEqual(log.at(-1), ["issue", "edit", "7", "-R", "o/r", "--remove-label", "parked:ci.red,needs-human"]);
+    assert.deepEqual(log.slice(-2), [["issue", "edit", "7", "-R", "o/r", "--remove-label", "parked:ci.red"], ["issue", "edit", "7", "-R", "o/r", "--remove-label", "needs-human"]]);
     const log2 = [];
     assert.deepEqual(await clearPipelineLabels({ gh: ghWith([], log2), repo: "o/r", issue: 7, labels: [{ name: "bug" }] }), []);
     assert.equal(log2.length, 0, "nothing to remove: no gh call");
     assert.deepEqual(await clearPipelineLabels({ gh: async () => { throw new Error("boom"); }, repo: "o/r", issue: 7, labels: ["needs-human"] }), [], "best effort");
+  });
+  it("clearPipelineLabels removes the rest when one removal fails and reports it", async () => {
+    const edits = [];
+    const gh = async (a) => { if (a[1] === "edit") { if (a.at(-1) === "remediation-queue") throw new Error("not found"); edits.push(a.at(-1)); } return ""; };
+    const reported = [];
+    const out = await clearPipelineLabels({ gh, repo: "o/r", issue: 7, labels: ["needs-human:external", "remediation-queue", "parked:x"], onFail: (n) => reported.push(...n) });
+    assert.deepEqual(out, ["needs-human:external", "parked:x"]);
+    assert.deepEqual(edits, ["needs-human:external", "parked:x"]);
+    assert.deepEqual(reported, ["remediation-queue"]);
+  });
+  it("clearPipelineLabels reports failed removals to the reporter", async () => {
+    const seen = [];
+    await clearPipelineLabels({ gh: async () => { throw new Error("boom"); }, repo: "o/r", issue: 7, labels: ["needs-human"], onFail: (n, e) => seen.push([n, e.message]) });
+    assert.deepEqual(seen, [[["needs-human"], "boom"]]);
+    const read = [];
+    await clearPipelineLabels({ gh: async () => { throw new Error("read"); }, repo: "o/r", issue: 7, onFail: (n) => read.push(n) });
+    assert.deepEqual(read, [[]]);
+  });
+});
+
+describe("#5986 keyed upsert and the engine comment cap", () => {
+  // a tiny in-memory issue: comment posts append, PATCH edits
+  const issue = (seed = []) => {
+    const comments = [...seed], log = [];
+    const gh = async (a) => {
+      log.push(a);
+      if (a[1] === "view") return JSON.stringify({ comments });
+      if (a[1] === "comment") { const id = 100 + comments.length; comments.push({ ...BOT, url: url(id), body: a[a.indexOf("--body") + 1] }); return url(id); }
+      if (a[0] === "api") { const id = /comments\/(\d+)/.exec(a[3])[1]; comments.find((c) => c.url.endsWith(`-${id}`)).body = a[a.indexOf("-f") + 1].slice(5); return ""; }
+      return "";
+    };
+    return { gh, comments, log };
+  };
+  const post = (i, marker, body) => postKeyed({ gh: i.gh, repo: "o/r", issue: 7, marker, body, trusted });
+
+  it("an identical amendment payload posted twice yields one comment, updated with a counter", async () => {
+    const i = issue();
+    await post(i, "FORGE:AMENDMENT", "## Contract amended\n- add-deliverable a.mjs");
+    await post(i, "FORGE:AMENDMENT", "## Contract amended\n- add-deliverable a.mjs");
+    assert.equal(i.comments.length, 1);
+    assert.match(i.comments[0].body, /^<!-- FORGE:AMENDMENT -->\n[\s\S]*<!-- forge-key hash=[0-9a-f]{12} n=2 -->$/);
+    await post(i, "FORGE:AMENDMENT", "## Contract amended\n- add-deliverable b.mjs");
+    assert.equal(i.comments.length, 2, "a different payload is a new comment");
+  });
+  it("the trailing usage line does not make a repeat look new", async () => {
+    const i = issue();
+    await post(i, "FORGE:NEEDS_HUMAN", "## Needs human\nwhy\n\n_cost $0.10, wall 3 min_");
+    await post(i, "FORGE:NEEDS_HUMAN", "## Needs human\nwhy\n\n_cost $0.20, wall 5 min_");
+    assert.equal(i.comments.length, 1);
+  });
+  it("at 12 engine comments a new payload edits the newest comment of its kind in place and never adds one", async () => {
+    const i = issue(Array.from({ length: MAX_ENGINE_COMMENTS - 1 }, (_, k) => ({ ...BOT, url: url(k + 1), body: `<!-- FORGE:FACTS -->\nfact ${k}\n<!-- forge-key hash=${String(k).padStart(12, "0")} n=1 -->` })));
+    await post(i, "FORGE:AMENDMENT", "first");
+    assert.equal(i.comments.length, MAX_ENGINE_COMMENTS);
+    await post(i, "FORGE:AMENDMENT", "second");
+    await post(i, "FORGE:AMENDMENT", "third");
+    assert.equal(i.comments.length, MAX_ENGINE_COMMENTS, "capped");
+    assert.match(i.comments.at(-1).body, /third/);
+    assert.equal(await post(i, "FORGE:NEEDS_HUMAN", "no comment of this kind yet"), null, "nothing posted past the cap");
+    assert.equal(i.comments.length, MAX_ENGINE_COMMENTS);
+  });
+  it("only trusted FORGE comments count; keyed markers are recognised", () => {
+    assert.equal(engineCommentCount([{ ...BOT, body: "<!-- FORGE:FACTS -->" }, { author: { login: "x" }, body: "<!-- FORGE:FACTS -->" }, { ...BOT, body: "hi" }], trusted), 1);
+    assert.ok(isKeyedPost("FORGE:FACTS") && isKeyedPost(["FORGE:AMENDMENT"]) && !isKeyedPost("FORGE:PARKED"));
   });
 });

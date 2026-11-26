@@ -13,7 +13,9 @@ import { which } from "./toolchain.mjs";
 
 /** The running CLI's package version. */
 export const cliVersion = () => JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version;
-export const UPGRADE_COMMAND = "npx forgedock pool upgrade";
+export const UPGRADE_COMMAND = "npx forgedock pool upgrade --wait";
+/** The pool host is shared with other projects: an upgrade restarts it, so the hint waits for idle (#5726). */
+const SHARED_HOST_NOTE = "the pool host is shared, so upgrade only when idle";
 /** The `gh <cmd> --json` fields the engine reads (keep next to the call sites' lists in engine-cli.mjs and lean/*.mjs). */
 export const GH_FIELDS = Object.freeze({
   "issue view": ["number", "title", "body", "state", "stateReason", "labels", "comments", "milestone", "author", "createdAt", "updatedAt"],
@@ -90,8 +92,8 @@ export function checkPoolVersion({ exec, agents = null, cliVersion }) {
   const skewed = agents.filter((a) => a?.ok !== false && typeof a?.version === "string" && a.version !== cliVersion);
   if (!skewed.length) return pass(code, `${agents.length} agent(s) at ${cliVersion}`, "remote");
   const bad = skewed.filter((a) => !sameMajor(a.version, cliVersion));
-  if (!bad.length) return pass(code, skewed.map((a) => `agent ${a.name ?? "?"} runs ${a.version}, CLI is ${cliVersion} (compatible, same major)`).join("; ") + `; upgrade: ${UPGRADE_COMMAND}`, "remote");
-  return fail(code, bad.map((a) => `agent ${a.name ?? "?"} runs image version ${a.version}, CLI is ${cliVersion}`).join("; ") + `; upgrade: ${UPGRADE_COMMAND}`, "remote");
+  if (!bad.length) return pass(code, skewed.map((a) => `agent ${a.name ?? "?"} runs ${a.version}, CLI is ${cliVersion} (compatible, same major)`).join("; ") + `; upgrade: ${UPGRADE_COMMAND} (${SHARED_HOST_NOTE})`, "remote");
+  return fail(code, bad.map((a) => `agent ${a.name ?? "?"} runs image version ${a.version}, CLI is ${cliVersion}`).join("; ") + `; upgrade: ${UPGRADE_COMMAND} (${SHARED_HOST_NOTE})`, "remote");
 }
 
 /** No PATH wrapper dir resolves a heavy-shimmed tool back to the shim. */

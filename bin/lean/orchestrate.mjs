@@ -124,6 +124,8 @@
  * then queue order. A sub-issue's estimate is the parent's ÷ N, floored at the M default. Without `estimate` the order is
  * the queue order except that decomposed sub-issues go first. A settled row carries `est_minutes` (estimated vs. actual).
  */
+import { decideClear, decideAutoReset } from "./clear-breaker.mjs";
+import { RECONCILE_MS, BREAKER_COOLDOWN_MS, diffSelection, readmitDue, needsDecisionDigest, environmentalDetail, closesManually } from "./reconcile.mjs";
 import { parseDependsOn } from "../engine/phases.mjs";
 import { classifyNeedsHuman, recoveryCodeOf, recoveryClassOf, OUTCOME_CODES, ENV_VALIDATE_PLACEMENT, ENV_VALIDATE_TIMEOUT, MECHANICAL_CODES } from "../engine/outcome-codes.mjs";
 import { detectGateDeadlock, formatGateDeadlock } from "./gatewatch.mjs";
@@ -134,15 +136,24 @@ import { laneSize, SIZES } from "./budget.mjs";
 import { requeueKey, REQUEUABLE } from "./batch.mjs";
 import { makeCapWait } from "./capwait.mjs";
 import { mapLimit } from "./pmap.mjs";
-import { quotaRequeue } from "./rotator.mjs";
+import { quotaRequeue, nextAccountAfterAuthFailure } from "./rotator.mjs";
+import { holdExpiryWarnings } from "./limits.mjs";
 import { joinsDecomposed, addsEpicChildren, selectChildren, edgeText, DEFAULT_POLL_S } from "./autochildren.mjs";
 import { formatOverload } from "./hostload.mjs";
+import { normalizeStacking, planAdmissible, stackAdmissible } from "./stacking.mjs";
 import { lackedTools } from "./toolplace.mjs";
 import { openPrerequisites } from "./prereq.mjs";
+import { makeController, classifyRepo, formatConcurrency } from "./concurrency.mjs";
+import { admitInput, breach, recordFailure, blockerSignature, markEscalated, NO_NEW_INPUT } from "./attempts.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
+const PLAN_VERDICT = new Set(["invalid", "needs-human", "decomposed", "budget-exceeded"]); // #5909: plan-lane ends that settle the issue
+const DEFAULT_TRAIN_EVERY_MS = 30000; // #5836: merge-train poll period
+// #5836: a lane that ended pr-ready is waiting on the merge train, not failed: its dependents wait
+const WAITING_ON_TRAIN = (row) => row?.outcome === "pr-ready";
 // #5162: a dependent of a root that ended like this is held (resumable), not skipped. #5805: also behind a root held on an engine/env change.
+const ATTEMPT_FAILED = ["needs-human", "engine-error", "budget-exceeded", "failed"]; // #5986: final lane outcomes that count as a failed attempt
 const HOLD_ROOT = new Set(["needs-human", "engine-error", "deferred", "budget-exceeded", "held"]);
 /** #5162: members of a real dependency cycle (a nontrivial SCC or a self-loop) among `nodes`; `edgesOf(n)` lists n's dependencies. */
 export function cyclicNodes(nodes, edgesOf) {
@@ -170,11 +181,21 @@ export const MAX_REQUEUES = 2;
 export const DEFAULT_MAX_DEFERRALS = 3;
 // Relaunches of an issue whose lane ended engine-error.
 export const ENGINE_ERROR_RELAUNCHES = 1;
+// #5859: lanes of one pool agent lost without a result within the window that make it an agent restart (`sandbox.lost`), and their requeue delay
+export const AGENT_LOST_MIN = 3;
+export const AGENT_LOST_WINDOW_MS = 60000;
+export const AGENT_LOST_REQUEUE_MS = 60000;
+// #5988: a backend.auth outage is probed every AUTH_PROBE_MS, holds admissions at most AUTH_ESCALATE_MS, then escalates once.
+export const AUTH_PROBE_MS = 5 * 60000;
+export const AUTH_ESCALATE_MS = 30 * 60000;
+export const HOLD_RAMP_STEP_MS = 30000; // #5988: hold-expiry release ramp: one more lane per step
+/** #5988: a cause that belongs to one placement host: errors are counted per (signature, agent), not batch-wide. */
+const hostSignature = (r, detail) => (/\bsandbox\.exited\b/.test(`${r?.code ?? ""} ${detail ?? ""}`) ? "sandbox.exited" : null);
 export const HOST_BUSY_RETRY_S = 60;
 // #4528: a busy host or a full sandbox pool is a wait, not a failure: requeued after its retry-in, never capped.
 // A lane that could not be resolved because gh/git failed (network blip) is the same kind of wait (#4791).
 // #4788: an unreachable pool is a wait too (the lane already retried for unreachable_window_min); a stall is reported by poolStall.
-const UNCAPPED_DEFERRALS = new Set(["host.busy", "sandbox.capacity", "sandbox.unreachable", "lane.unresolved"]);
+const UNCAPPED_DEFERRALS = new Set(["host.busy", "sandbox.capacity", "sandbox.unreachable", "sandbox.repo_missing", "lane.unresolved", "base.red"]); // #5992: a red base is the base's wait, never the issue's
 export const POOL_OFFLINE_ALERT_MIN = 10;
 // #5112: `sandbox.capacity` deferrals of one issue after which `execution.fallback_local` runs it on the host (headroom permitting).
 export const CAPACITY_FALLBACK_AFTER = 3;
@@ -182,7 +203,9 @@ export const RATE_LIMIT_FALLBACK_S = 15 * 60;
 export const DEFER_BACKOFF_S = 120;
 export const DEFER_BACKOFF_MAX_S = 30 * 60;
 // #4685 + #5161: an engine-error detail that names a link or gateway failure (curl's "returned error: 502", HTTP/1.1 503, ...).
-export const TRANSPORT_TEXT = /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|HTTP 50[234]|returned error: 5\d\d|HTTP\/\d(\.\d)? 5\d\d|Bad Gateway|Service Unavailable|overloaded/i;
+// #5947: git transport failures (a dropped clone/fetch, a half-built mirror): a `net.transient` deferral, never an engine-error.
+export const GIT_TRANSPORT_TEXT = /curl (56|28)\b|early EOF|RPC failed|invalid index-pack output|unexpected disconnect|is not a local repository/i;
+export const TRANSPORT_TEXT = new RegExp(`fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|HTTP 50[234]|returned error: 5\\d\\d|HTTP\\/\\d(\\.\\d)? 5\\d\\d|Bad Gateway|Service Unavailable|overloaded|${GIT_TRANSPORT_TEXT.source}`, "i");
 /** #5161: a transient engine failure (model gateway 5xx, connection reset): retried with backoff, not the single relaunch. */
 export const isTransientEngineError = (detail) => TRANSPORT_TEXT.test(String(detail ?? ""));
 // #5161: transient engine-error retries per issue (forge.yaml `orchestration.transient_retries`) and their backoff: 30s, 2m, 8m, then 15m.
@@ -326,12 +349,14 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
  * @returns {Promise<Array<{issue:number, outcome:string, pr:?number, cost_usd:number, minutes:number, detail?:string}>>}
  */
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), blockedRefreshMs = 60000, onUpdate = () => {}, onCrossLane = () => {},
-  store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
-  classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null,
-  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
+  store = null, adopt = null, getParallel = null, usageRows = null, repoSlug = null, repoOf = null, getAdded = null, getRequeued = null, reconcile = null, select = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000, getClearBreaker = null, consumeClearBreaker = null, ackClearBreaker = null,
+  classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null, baseProbe = null,
+  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, heldFacts = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getPause = null, expirePause = null, getHoldInfo = null, authProbe = null, onEscalate = null, quarantineAgent = null, reseedCache = null, suspendLane = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
-  getChildren = null, autoChildren = null, baseWait = null, rotator = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null, envHold = null, logicalDeps = null }) {
+  getChildren = null, autoChildren = null, baseWait = null, rotator = null, stacking = "off", readPrReady = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null, envHold = null, envIssue = null, logicalDeps = null,
+  train = null, trainEveryMs = DEFAULT_TRAIN_EVERY_MS, attempts = null }) {
   const saved = store?.load?.() ?? null;
+  if (train && saved?.train) train.restore(saved.train); // #5836: the merge train resumes with the batch
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
   const deps = toMap(saved?.deps); // issue -> declared dependencies (any issue); only those in `set` are edges
@@ -339,11 +364,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const crossSeen = new Set(saved?.crossSeen ?? []);
   const results = toMap(saved?.results); // issue -> final row
   const running = new Map(); // issue -> promise
+  const keptBoxes = toMap(saved?.kept); // #6008: issue -> {issue, since, phase}: sandboxes kept for adopt (no dispatcher lease)
   const runRecs = toMap(saved?.running); // issue -> {startedAt, lane, pid?}: persisted so a restart can adopt the lane
   const pending = [...(saved?.pending ?? [])];
+  const selMatched = new Set(saved?.selMatched ?? []); // #6029: issues the selector has matched (persisted: a resumed runner keeps the leave provenance)
   const notBefore = toMap(saved?.notBefore);
   const requeues = toMap(saved?.requeues);
   const deferrals = toMap(saved?.deferrals);
+  const capReasons = toMap(saved?.capReasons); // #5938: issue -> the pool's last `sandbox.capacity` / host-disk reason (read by the batch health stall verdict)
   const capDefers = toMap(saved?.capDeferrals); // #5112: issue -> `sandbox.capacity` deferrals (uncapped, so not in `deferrals`)
   const capFellBack = new Set(); // #5112: issues already reported as a capacity fallback (one decision each)
   const engineErrors = toMap(saved?.engineErrors);
@@ -352,13 +380,20 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #5805: engine/env holds (off unless `envHold` is passed). `engineSigs`: issue -> signature of its relaunched engine-error;
   // `deterministic`: `version|signature` seen twice (never relaunched again on that version); `toolReadmits`: `issue|signature`
   // already re-admitted because the probe found the tool (a lane that still misses it waits for an engine or env change instead).
-  const ehOn = !!envHold;
+  const ehOn = !!envHold || !!envIssue;
+  // #5755: env.* failures are one engine/env defect per signature: `envSigs` signature -> {issues, number} (the env issue the `envIssue` seam
+  // filed or updated); affected product issues are held on it (never needs-human) and 2+ issues on a signature stop admitting lanes that need it.
+  const envSigs = toMap(saved?.envSigs);
   const engineSigs = toMap(saved?.engineSigs);
+  const heldSigs = toMap(saved?.heldSigs); // #5893: root -> {sig, removedAt} of the needs-human block last released; an identical block needs a newer removal event
+  const readmit = toMap(saved?.readmit); // #5978: re-admission policy state (backoff step, version and base seen) per ended issue
+  const ledgers = toMap(saved?.attempts); // #5986: issue -> attempts ledger; never cleared by releaseHeld, --requeue or --set-env (see attempts.mjs)
   const deterministic = new Set(saved?.deterministicSigs ?? []);
   const toolReadmits = new Set(saved?.toolReadmits ?? []);
   const ehMaxMs = Number(envHold?.maxMs) > 0 ? Number(envHold.maxMs) : ENV_HOLD_MAX_MS;
   const ehWatchMs = Number(envHold?.watchMs) > 0 ? Number(envHold.watchMs) : ENV_WATCH_MS;
   const curVersion = () => { try { return envHold?.version?.() ?? version ?? null; } catch { return version ?? null; } };
+  const curEnvValues = () => { try { return envHold?.envValues?.() ?? null; } catch { return null; } }; // #5931
   const curEnv = () => { try { return envHold?.envFingerprint?.() ?? null; } catch { return null; } };
   const missingTools = async (tools) => { if (typeof envHold?.missingTools !== "function") return null; try { const m = await envHold.missingTools(tools); return Array.isArray(m) ? m : null; } catch { return null; } };
   const checked = toMap(saved?.prefilter); // issue -> pre-filter result
@@ -366,6 +401,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const enqueued = toMap(saved?.enqueued); // #4409: issue -> when it last entered the queue (starvation guard)
   const heads = new Set(saved?.heads ?? []); // #4409: decomposed sub-issues not started yet: the head of their priority band
   let errorTimes = [...(saved?.errorTimes ?? [])];
+  const ceilingK = () => { let k = null; try { k = getParallel?.(); } catch { k = null; } return Number.isInteger(k) && k >= 1 ? k : parallel; }; // #5988: declared early: refreshHeld reads it
+  const holdWarned = new Set(); let holdRamp = null; // #5988: declared early: the hoisted refreshHeld reads them from finish/recovery callbacks
+  // #5859: agent restarts of this batch (one record each, shown by `status --batch`) and the lanes already requeued as `sandbox.lost`
+  const agentRestarts = [...(saved?.agentRestarts ?? [])];
+  const lostOnce = new Set(saved?.lostRequeued ?? []); // a lane lost again after its requeue is an ordinary engine-error
   // A legacy batch-local `holdUntil` (pre-#4190) names no account and is ignored: a same-account lane re-sets the hold.
   const holds = limits ?? memoryLimits(now);
   // #5205: accounts lanes reported limited (account -> until ms), persisted with the batch, excluded from headroom until then.
@@ -386,8 +426,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const quota = toMap(saved?.quota); // issue -> {cost_usd, minutes, resumeAt (epoch ms), rotations}
   let tripped = saved?.breaker ?? null;
   let pfAll = false, pfRemote = false, pfNoted = new Set(); // #4866: lane preflight holds
+  let baseRedHold = null; // #5992: {sha, issue, detail}: the base is red; only the attributed fixer is admitted until the sha moves or the guard passes
   let opHeld = new Set(); // #4592: operator-held issues this pass (the batch `hold` file is the authority)
   const opHeldHit = new Set(); // held issues that were pending this pass
+  let opPause = null, pauseHit = false; // #5975: the batch-level pause (the `pause` file is the authority); pauseHit: an issue was pending behind it this pass
   // #4376: operator cancel (the batch `cancel` file through `getCancelled`); persisted, but the file stays the authority.
   let cancelled = getCancelled ? (saved?.cancelled ?? null) : null;
   const budget = maintenance && Number(maintenance.share) > 0 ? { share: Number(maintenance.share), whenIdle: !!maintenance.whenIdle } : null;
@@ -404,6 +446,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const priorities = toMap(saved?.priorities); // issue -> priority number; only with the registry
   // #5138: read on every grant, so `--set-max-remote` reaches a running batch (a getter on `remote`); running lanes are never stopped.
   const remoteMax = () => { const m = remote?.max; return Number.isInteger(m) && m >= 0 ? m : 0; };
+  const maxHeldNoted = new Set(); // #5746: issues already announced as waiting on max_remote 0
   const remoteCapped = new Set(); // #5138: issues waiting for a max_remote slot; polled so a raised live max_remote admits them
   let poolOfflineSince = null, poolStallNoted = false; // #4788: when sampled online first read 0, and whether the stall was reported
   const capWait = makeCapWait({ now }); // #4909: a lane refused for capacity waits for a free slot, recorded as queue time
@@ -421,10 +464,16 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const rec = recovering.get(n);
     if (rec?.code === OUTCOME_CODES.ENV_TOOL_MISSING && rec.where === "remote" && !rec.toolNoRecipe && (rec.attempt ?? 1) <= 1 && !budgetLocal) return { where: "remote", reason: "retry remotely after sandbox provisioning" };
     // #5652: with host fallback off (execution.host_fallback / host.role: orchestrator) the host is orchestrator-only: no re-placement here
-    if (hostFallbackOn() && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
+    // #5931: a credentials block pinned the issue to the host (ledger hostPin): applied on readmit whatever host fallback says
+    if (ledgers.get(n)?.hostPin) return { where: "local", reason: "host pin: ops_credentials block" };
+    if (hostFallbackOn() && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_ENGINE_SKEW].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
     // #5371: a mechanical recovery never repeats the placement of the run that failed (a remote sandbox env defect recurs there), and a remote validate failure is rerun on the host
-    if (recovering.get(n)?.code === ENV_VALIDATE_PLACEMENT || (MECHANICAL_CODES.includes(recovering.get(n)?.code) && recovering.get(n)?.where === "remote")) return { where: "local", reason: `different placement: recovering ${recovering.get(n).code} off the remote run` };
-    { // #5331: a frozen contract naming a tool the sandbox is known to lack runs on the host (`remote.lacks`, `remote.contractOf(n)`; both optional)
+    if (recovering.get(n)?.code === ENV_VALIDATE_PLACEMENT || (MECHANICAL_CODES.includes(recovering.get(n)?.code) && recovering.get(n)?.where === "remote")) {
+      if (hostFallbackOn()) return { where: "local", reason: `different placement: recovering ${rec.code} off the remote run` };
+      // #5746: the host is not allowed: retry remotely (a fresh sandbox) instead of the orchestrator
+      if (!budgetLocal) return { where: "remote", reason: `retry remotely, host fallback off: recovering ${rec.code}` };
+    }
+    if (hostFallbackOn()) { // #5331: a frozen contract naming a tool the sandbox is known to lack runs on the host (`remote.lacks`, `remote.contractOf(n)`; both optional)
       const lk = lackedTools(remote.contractOf?.(n), remote.lacks);
       if (lk.tools.length) return { where: "local", reason: `host tool: sandbox lacks ${lk.tools.join(", ")}` };
     }
@@ -435,7 +484,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         return { where: p?.where === "remote" ? "remote" : "local", reason: String(p?.reason ?? "") };
       }
       return remote.isRemote?.(n) ? { where: "remote", reason: "mode remote" } : { where: "local", reason: "local" };
-    } catch { return { where: "local", reason: "placement failed" }; }
+    } catch { return hostFallbackOn() ? { where: "local", reason: "placement failed" } : { where: "remote", reason: "placement failed, host fallback off: retry remotely" }; } // #5746
   };
   const isRemote = (n) => placeOf(n)?.where === "remote";
   const placed = new Map(); // issue -> {where, reason} granted this pass, picked up by start()
@@ -450,9 +499,22 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #5592: env.tool_missing repeats are the same defect when the same tools are missing, whatever else the detail says (probe lines, ids, paths vary per run)
   const toolsOf = (d) => { const m = /(?:host|sandbox) is missing ([^\n]+?), so validate command/i.exec(String(d ?? "")); return m ? m[1].split(/\s*,\s*/).sort().join(",") : null; };
   const envSig = (code, d) => (code === OUTCOME_CODES.ENV_TOOL_MISSING ? toolsOf(d) : null) ?? sigOf(d);
+  const ENV_ALL_CODES = [...REPEAT_ENV_CODES, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_ENGINE_SKEW]; // #5755, #5931
+  const envKey = (code, d) => `${code}|${code === OUTCOME_CODES.ENV_TOOL_MISSING && toolsOf(d) ? toolsOf(d) : failureSignature(code, d).split("|").slice(1).join("|")}`;
   const maxFor = (cls) => (cls === "mechanical" ? mechMax : recoveryMax);
   const classUsed = toMap(saved?.recoveryClasses); // `${issue}:${class}` -> recovery lanes launched in that class
   const recoveries = toMap(saved?.recoveries); // issue -> recovery lanes launched (#4267)
+  // #5831 stacked lanes: `planned` = issue -> {contractHash, baseSha} of its finished plan lane; `planTried` = issues that had their one plan lane
+  const stackOn = normalizeStacking(stacking) !== "off";
+  // #5832 phase 2 (`full`): `prReady` = running issue -> {pr, branch, sha} of its PR-ready lane head (FORGE:STATE via `readPrReady`);
+  // `stackedTried` = issues whose one stacked build was admitted; `stackedOf` = issue -> {dependency, branch, sha} of that build.
+  const stackFull = normalizeStacking(stacking) === "full" && typeof readPrReady === "function";
+  const prReady = new Map();
+  const stackedOf = toMap(saved?.stacked);
+  const stackedTried = new Set(saved?.stackedTried ?? []);
+  const planned = toMap(saved?.planned);
+  const planTried = new Set(saved?.planTried ?? []);
+  const firstAdmit = new Map(), planMs = new Map(); // #5834: issue -> first admission ms; issue -> plan lane run ms (chain metrics)
   const recovering = toMap(saved?.recovering); // issue -> {code, attempt, detail, outcome, ...} of the recovery lane queued or running
   const freeRecovered = new Set(); // #5727: issues whose one free (no-attempt) recovery for a recipe-less remote tool miss was spent
   const requeueApplied = new Set(saved?.requeueApplied ?? []); // #4550: `--requeue` entries already applied (batch `requeue` file)
@@ -460,6 +522,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const everRelabelled = new Set(saved?.relabelled ?? []); // #4656: issues the runner already relabelled; never parked on top
   const relabelled = new Set(saved?.relabelled ?? []); // #4315: queued recoveries relabelled needs-human when a batch stopped
   // #4267: decisions are recorded, never awaited: a failing or slow recorder cannot block the batch.
+  // #5985: the controller moves are persisted to log.jsonl with their inputs (the post-deploy check reads them)
+  const conc = makeController({ ceiling: parallel, now });
+  let heavyHeldHit = false;
+  const concEmit = (e) => { if (!e) return; const ev = { ...e, batch: batchId ?? null, running: running.size, line: formatConcurrency({ running: running.size, k: e.k, ceiling: e.ceiling, factor: e.factor }) }; try { store?.log?.(ev); } catch { /* advisory */ } onUpdate(ev); };
   const decided = (d) => { try { Promise.resolve(decide?.(d)).catch(() => {}); } catch { /* best effort */ } };
   const firstLine = (x) => String(x ?? "").split("\n")[0].slice(0, 300);
 
@@ -467,17 +533,71 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   let halted = false; // #4454: stopped by `signal`; the batch's state is no longer this process's to write
   const save = () => {
     if (!store || halted) return;
-    store.save({ v: 1, ...(setup ? { phase: "setup", setup: { ...setup } } : {}), engineVersion: version, order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
-      pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors), ...(transients.size ? { transientRetries: toObj(transients) } : {}), ...(quota.size ? { quota: toObj(quota) } : {}), ...(limitedAccounts.size ? { limitedAccounts: toObj(limitedAccounts) } : {}), ...(capDefers.size ? { capDeferrals: toObj(capDefers) } : {}),
-      prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
+    store.save({ v: 1, ...(setup ? { phase: "setup", setup: { ...setup } } : {}), engineVersion: version, order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs), ...(keptBoxes.size ? { kept: toObj(keptBoxes) } : {}),
+      pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors), ...(transients.size ? { transientRetries: toObj(transients) } : {}), ...(quota.size ? { quota: toObj(quota) } : {}), ...(limitedAccounts.size ? { limitedAccounts: toObj(limitedAccounts) } : {}), ...(capDefers.size ? { capDeferrals: toObj(capDefers) } : {}), ...(capReasons.size ? { capReasons: toObj(capReasons) } : {}),
+      prefilter: toObj(checked), errorTimes, breaker: tripped, ...(agentRestarts.length ? { agentRestarts, lostRequeued: [...lostOnce] } : {}), ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
       ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
       ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering), recoveryClasses: toObj(classUsed) } : {}),
+      ...(planned.size || planTried.size ? { planned: toObj(planned), planTried: [...planTried] } : {}),
+      ...(stackedTried.size ? { stacked: toObj(stackedOf), stackedTried: [...stackedTried] } : {}),
       ...(requeueApplied.size ? { requeueApplied: [...requeueApplied], requeued: toObj(requeuedInfo) } : {}),
-      ...(relabelled.size ? { relabelled: [...relabelled] } : {}), ...(cancelled ? { cancelled } : {}),
+      ...(relabelled.size ? { relabelled: [...relabelled] } : {}), ...(cancelled ? { cancelled } : {}), ...(train ? { train: train.snapshot() } : {}),
       ...(estimate ? { estimates: toObj(estimates), enqueued: toObj(enqueued) } : {}), ...(heads.size ? { heads: [...heads] } : {}),
-      ...(engineSigs.size ? { engineSigs: toObj(engineSigs) } : {}), ...(deterministic.size ? { deterministicSigs: [...deterministic] } : {}), ...(toolReadmits.size ? { toolReadmits: [...toolReadmits] } : {}) });
+      ...(engineSigs.size ? { engineSigs: toObj(engineSigs) } : {}), ...(heldSigs.size ? { heldSigs: toObj(heldSigs) } : {}), ...(deterministic.size ? { deterministicSigs: [...deterministic] } : {}), ...(toolReadmits.size ? { toolReadmits: [...toolReadmits] } : {}), ...(select ? { select } : {}), ...(readmit.size ? { readmit: toObj(readmit) } : {}), ...(envSigs.size ? { envSigs: toObj(envSigs) } : {}), ...(ledgers.size ? { attempts: toObj(ledgers) } : {}), ...(selMatched.size ? { selMatched: [...selMatched] } : {}) });
   };
   const update = (row) => { store?.log?.(row); onUpdate(row); };
+  // #5978 R11: a merge into a staging lane branch does not fire `Closes`: the seam closes the issue and folds its post-deploy checks into the release rollup.
+  const closeOnLane = async (n, lane, row) => {
+    if (!reconcile?.closeIssue || !closesManually(lane)) return;
+    try { await reconcile.closeIssue(n, { lane, row }); update({ issue: n, outcome: "closed", detail: `closed on merge into ${lane}` }); } catch (err) { update({ issue: n, outcome: "close-failed", detail: String(err?.message ?? err).slice(0, 200) }); }
+  };
+  /** #5755: records `issue` on its signature and files or updates the one env issue (seam `envIssue.ensure`); the issue number, or null when none could be filed. */
+  const fileEnvIssue = async ({ sig, code, issue, tools, evidence }) => {
+    const e = envSigs.get(sig) ?? { issues: [], number: null };
+    if (!e.issues.includes(issue)) e.issues.push(issue);
+    if (!e.text) e.text = firstLine(evidence).slice(0, 240); // the raw line: the signature digit-normalises its tokens
+    envSigs.set(sig, e);
+    try {
+      const r = await envIssue.ensure({ sig, code, issues: [...e.issues], tools, evidence, number: e.number });
+      const no = Number.isInteger(r) ? r : r?.number;
+      if (Number.isInteger(no) && no > 0) e.number = no;
+    } catch { /* best effort: without an env issue the existing flow applies */ }
+    save();
+    return e.number;
+  };
+  const envBodies = new Map();
+  /** #5755: once 2 issues hit one env signature, a pending issue whose contract needs it is held on the env issue instead of admitted (seam `envIssue.needs(n, sig)`, else its body names a missing tool). */
+  const gateEnvSigs = async () => {
+    if (!envIssue || tripped || cancelled) return;
+    const gated = [...envSigs].filter(([, e]) => e.issues.length >= 2 && e.number);
+    if (!gated.length) return;
+    for (const n of [...pending]) {
+      if (results.has(n) || running.has(n)) continue;
+      for (const [sig, e] of gated) {
+        let need = false;
+        try {
+          if (typeof envIssue.needs === "function") need = (await envIssue.needs(n, sig, e)) === true;
+          else {
+            // the contract text (frozen contract when known, else the issue body) is matched against the signature's tools, or for other env codes its path/command tokens
+            if (!envBodies.has(n)) envBodies.set(n, `${String(await readBody(n) ?? "")}\n${JSON.stringify(remote?.contractOf?.(n) ?? "")}`);
+            const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const toks = sig.startsWith(`${OUTCOME_CODES.ENV_TOOL_MISSING}|`) ? sig.split("|")[1].split(",") : (e.text ?? "").split(/[\s,;:'"`()]+/).filter((t) => t.length >= 4 && /[/.\\]/.test(t) && !/^\d/.test(t));
+            need = toks.some((t) => t && new RegExp(`(^|[^\\w-])${esc(t)}($|[^\\w-])`).test(envBodies.get(n)));
+          }
+        } catch { need = false; }
+        if (!need) continue;
+        pending.splice(pending.indexOf(n), 1);
+        const tools = sig.startsWith(`${OUTCOME_CODES.ENV_TOOL_MISSING}|`) ? sig.split("|")[1].split(",") : null;
+        if (!e.issues.includes(n)) e.issues.push(n);
+        const final = { issue: n, outcome: "held", cost_usd: 0, minutes: 0, detail: `waiting on env issue #${e.number}: ${sig.split("|")[0]} hit ${e.issues.length - 1} issues; admitted again when it closes`,
+          envHold: { kind: tools ? "tool" : "env", sig, from: "pending", version: curVersion(), env: curEnv(), ...(tools ? { tools } : {}), envIssue: e.number, since: now() }, waiting: true };
+        results.set(n, final); save();
+        decided({ issue: n, what: `held: not admitted, its contract needs the env that env issue #${e.number} tracks (${sig})`, why: `${e.issues.length} issues hit the same signature`, alternative: "admit it into the same env failure" });
+        update(final);
+        break;
+      }
+    }
+  };
   const classifyOne = async (n) => {
     if (!budget) return;
     let c = null;
@@ -663,7 +783,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #5112: opt-in (`execution.fallback_local`): an issue the pool refused `capacityFallbackAfter` times (default CAPACITY_FALLBACK_AFTER)
   // for `sandbox.capacity` runs on the host when the host-busy guard (`remote.headroom()`, absent = allowed) passes; not ok or a throw waits.
   const capacityFallback = (n) => {
-    if (!remote?.offlineFallback) return false;
+    if (!remote?.offlineFallback || !hostFallbackOn()) return false; // #5746: host_fallback: false keeps the lane on the pool
     const after = Number.isInteger(remote.capacityFallbackAfter) && remote.capacityFallbackAfter > 0 ? remote.capacityFallbackAfter : CAPACITY_FALLBACK_AFTER;
     if ((capDefers.get(n) ?? 0) < after) return false;
     // #5592: an overloaded host holds every local admission (host_overloaded), so falling back would park the lane indefinitely: keep retrying the pool
@@ -698,7 +818,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         let cap = null, probeFailed = false;
         try { cap = remote.capacity?.() ?? null; } catch { probeFailed = true; }
         // #5048: only a failed probe (a throw) marks the pool down; null is unknown (first pass, no capacity()) and leaves the state; a sample clears it.
-        if (probeFailed) notePool(true, "capacity probe failed"); else if (cap !== null) notePool(false);
+        if (probeFailed) notePool(true, "capacity probe failed"); else if (cap !== null) { notePool(false); concEmit(conc.observe(cap)); } // #5985: the live sample moves the operating point
         // #4788: zero live agents for longer than `remote.poolOfflineMin` (default 10): one loud batch event, none while online > 0.
         if (cap && cap.online === 0) {
           poolOfflineSince ??= now();
@@ -709,7 +829,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           }
         } else if (cap && cap.online > 0) { poolOfflineSince = null; poolStallNoted = false; }
         // #4547: opt-in (`execution.fallback_local`): every pool agent offline or asleep (sampled online 0) runs the lane on the host.
-        if (remote.offlineFallback && cap && cap.online === 0) {
+        if (remote.offlineFallback && hostFallbackOn() && cap && cap.online === 0) {
           p = { where: "local", reason: `fallback to local: no pool agent online (${p.reason})` };
         } else if (capacityFallback(n)) {
           p = { where: "local", reason: `fallback to local: pool at capacity after ${capDefers.get(n)} deferrals (${p.reason})` };
@@ -718,17 +838,21 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
             decided({ issue: n, what: `run #${n} on the host: the pool refused it ${capDefers.get(n)} times for capacity (execution.fallback_local)`, why: "sustained sandbox.capacity and the host has headroom",
               alternative: "keep deferring until a pool slot frees" });
           }
-        } else if (cap && Number.isInteger(cap.free)) {
+        } else if (cap && (Number.isInteger(cap.free) || capWait.conditional(n, cap))) {
           if (cap.at !== capAt) { capAt = cap.at; capAdmits = 0; }
-          if (capWait.blocked(n, cap)) { notBefore.set(n, now() + Math.max(pollMs, 1)); return false; }
-          if (capAdmits >= cap.free && remoteRun.size < remoteMax()) { notBefore.set(n, now() + Math.max(pollMs, 1)); return false; }
+          // #5985: a refusal's named condition (load < 1.0, free mem > floor) and the per-lane refusal hold gate the relaunch, not the timer
+          if (capWait.blocked(n, cap) || conc.holding(n, cap)) { notBefore.set(n, now() + Math.max(pollMs, 1)); return false; }
+          if (Number.isInteger(cap.free) && capAdmits >= cap.free && remoteRun.size < remoteMax()) { notBefore.set(n, now() + Math.max(pollMs, 1)); return false; }
         }
         if (p.where === "remote" && remoteRun.size < remoteMax()) { remoteCapped.delete(n); capWait.admitted(n); remoteRun.add(n); capAdmits++; placed.set(n, p); return true; }
-        if (p.where === "remote" && !remote.fallbackLocal) { remoteCapped.add(n); return false; }
+        if (p.where === "remote" && (!remote.fallbackLocal || !hostFallbackOn())) { // #5746: host_fallback: false never runs a capped remote lane on the host
+          if (remoteMax() < 1 && !maxHeldNoted.has(n)) { maxHeldNoted.add(n); decided({ issue: n, what: `waiting: max_remote 0 (#${n} is queued, not run on the host)`, why: "remote mode holds admissions while max_remote is 0", alternative: "raise max_remote or set execution.host_fallback: true" }); }
+          remoteCapped.add(n); return false;
+        }
         if (p.where === "remote") p = { where: "local", reason: `fallback to local: max_remote ${remoteMax()} reached (${p.reason})` }; // #4256: hybrid runs it on the host
       } else {
         noteBudget(adm.reason);
-        if (remote.onBudget !== "local" && !remote.fallbackLocal) { budgetStop = adm.reason; return false; }
+        if ((remote.onBudget !== "local" && !remote.fallbackLocal) || !hostFallbackOn()) { budgetStop = adm.reason; return false; } // #5746: host_fallback: false stops instead of using the host
         budgetLocal = true; // falls through to the host path
         p = { where: "local", reason: `fallback to local: execution budget: ${adm.reason}` };
       }
@@ -766,30 +890,146 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   };
   const requeue = (n, delayMs) => { pending.push(n); enqueued.set(n, now()); if (delayMs > 0) notBefore.set(n, now() + delayMs); else notBefore.delete(n); };
   const TRANSPORT_COOLDOWN_MS = 5 * 60000;
+  const netTransients = new Map(); // #5947: issue -> net.transient deferrals (backoff step)
+  const envDetails = []; // #5978: the details of the recent engine-errors, for the breaker auto-reset
   let transportErrors = 0; // #4685: engine-errors in the current window that were link failures
   const noteEngineError = (detail = "") => {
     if (!breaker) return;
     const t = now(), windowMs = breaker.window_min * 60000;
     errorTimes = [...errorTimes.filter((x) => t - x < windowMs), t];
+    envDetails.push(detail); if (envDetails.length > breaker.errors) envDetails.shift();
     transportErrors = isTransientEngineError(detail) ? Math.min(transportErrors + 1, errorTimes.length) : 0;
     if (!tripped && errorTimes.length >= breaker.errors) {
-      tripped = { at: t, ...(transportErrors >= errorTimes.length ? { transport: true } : {}), detail: `circuit breaker: ${errorTimes.length} engine-errors within ${breaker.window_min} min; admissions stopped` };
+      tripped = { at: t, ...(envDetails.length && envDetails.every(environmentalDetail) ? { environmental: true } : {}), ...(transportErrors >= errorTimes.length ? { transport: true } : {}), detail: `circuit breaker: ${errorTimes.length} engine-errors within ${breaker.window_min} min; admissions stopped` };
       update({ issue: null, outcome: "breaker", detail: tripped.detail });
     }
+    return t;
+  };
+  // #5859: sandboxes of one pool agent ending without a result in a burst (AGENT_LOST_MIN within AGENT_LOST_WINDOW_MS) are an agent/VM
+  // restart: `sandbox.lost`, requeued once (after `remote.agentHealthy(agent)` answers, when the provider has it), never counted by the
+  // breaker or the engine-error relaunch. Lanes of the burst that settled as engine-errors first are rolled back. One batch event each.
+  // #5988: one backend.auth outage at a time: probed on a clock, rotated, escalated once; `authPass` runs every loop pass.
+  let authOutage = null;
+  const authPass = async () => {
+    const o = authOutage; if (!o) return;
+    const t = now();
+    if (!o.escalated && t - o.since >= AUTH_ESCALATE_MS) {
+      o.escalated = true;
+      const detail = `backend.auth: the claude login has failed for ${Math.round((t - o.since) / 60000)} min (accounts tried: ${[...o.failed].join(", ") || "none"}); admissions no longer held, operator action needed`;
+      try { holds.clear(o.key); } catch { /* fail-open */ }
+      for (const m of o.issues) notBefore.delete(m);
+      for (const f of o.failed) limitedAccounts.delete(f);
+      update({ issue: null, outcome: "auth-escalation", detail });
+      try { await onEscalate?.({ detail, issues: [...o.issues], batch: batchId ?? null }); } catch { /* advisory */ }
+      return;
+    }
+    if (o.escalated || !authProbe || t < o.nextProbe) return;
+    const next = nextAccountAfterAuthFailure(rotator, o.last ? [o.last] : []); // the account after the one that failed last
+    let ok = false; try { ok = Boolean((await authProbe({ account: next, configDir: next ? rotator?.configDir?.(next) ?? null : null }))?.ok); } catch { ok = false; }
+    if (ok) {
+      try { holds.clear(o.key); } catch { /* fail-open */ }
+      for (const m of o.issues) notBefore.delete(m);
+      for (const f of o.failed) limitedAccounts.delete(f);
+      authOutage = null;
+      update({ issue: null, outcome: "auth-resumed", detail: `backend.auth recovered after ${Math.round((t - o.since) / 60000)} min; admissions resumed${next ? ` on account ${next}` : ""}` });
+    } else {
+      if (next) o.last = next;
+      o.nextProbe = t + AUTH_PROBE_MS;
+    }
+  };
+  // #5988: engine-errors with one host-bound signature on one agent are counted per (signature, agent): at the breaker's threshold only that
+  // agent is quarantined (its cache reseeded once); the batch breaker never sees them, so unaffected agents keep admitting.
+  const QUARANTINE_REQUEUES = 3, quarantineRequeues = new Map(), scopedSeen = new Map(), quarantined = new Map(), reseeded = new Set(); // quarantined: key -> until
+  const scopedEngineError = async (agent, sig) => {
+    const t = now(), key = `${sig}|${agent}`, windowMs = breaker.window_min * 60000, win = [...(scopedSeen.get(key) ?? []).filter((x) => t - x < windowMs), t];
+    scopedSeen.set(key, win);
+    if (quarantined.get(key) > t) return { quarantined: true };
+    if (win.length >= breaker.errors) {
+      quarantined.set(key, t + windowMs);
+      if (!reseeded.has(agent)) { reseeded.add(agent); try { await reseedCache?.({ agent, signature: sig }); } catch { /* advisory */ } }
+      try { await quarantineAgent?.({ agent, signature: sig, errors: win.length }); } catch { /* advisory */ }
+      update({ issue: null, outcome: "agent-quarantine", detail: `agent ${agent} quarantined: ${win.length} engine-errors (${sig}) within ${breaker.window_min} min; other agents keep admitting` });
+      return { quarantined: true };
+    }
+    return { quarantined: false };
+  };
+  const lostSeen = new Map(); // agent -> [{n, at, err, ee, tr, sig}]: lost lanes settled as ordinary engine-errors in the window
+  const openRestart = (agent, t) => agentRestarts.find((g) => g.agent === agent && !g.closed && t - g.last < AGENT_LOST_WINDOW_MS);
+  const markLost = (agent, n, row, why) => {
+    lostOnce.add(n);
+    let g = openRestart(agent, now());
+    if (!g) agentRestarts.push(g = { agent, at: new Date(now()).toISOString(), last: now(), lanes: [] });
+    if (!g.lanes.includes(n)) g.lanes.push(n);
+    g.last = now(); g.requeued = g.lanes.length;
+    update({ ...row, outcome: "deferred", code: OUTCOME_CODES.SANDBOX_LOST, detail: `requeued: ${OUTCOME_CODES.SANDBOX_LOST} (agent ${agent} restarted): ${why ?? ""}` });
+  };
+  const rollBackLost = (agent, x) => {
+    if (x.err !== undefined) { const i = errorTimes.lastIndexOf(x.err); if (i >= 0) errorTimes.splice(i, 1); transportErrors = Math.min(transportErrors, errorTimes.length); }
+    if (!pending.includes(x.n) && !running.has(x.n)) return; // it already ended (its relaunch was used before): only the breaker count goes
+    for (const [m, v] of [[engineErrors, x.ee], [transients, x.tr], [engineSigs, x.sig]]) { if (v === undefined) m.delete(x.n); else m.set(x.n, v); }
+    if (pending.includes(x.n)) notBefore.set(x.n, now() + AGENT_LOST_REQUEUE_MS);
+    markLost(agent, x.n, { issue: x.n }, "settled as an engine-error before the restart was visible; rolled back");
+  };
+  const closeRestart = (g) => {
+    g.closed = true; g.requeued = g.lanes.length; g.detail = `agent ${g.agent} restarted at ${g.at}; ${g.lanes.length} lanes requeued`;
+    const ev = { event: "agent.restarted", batch: batchId ?? null, agent: g.agent, at: g.at, requeued: g.lanes.length, issues: [...g.lanes], detail: g.detail };
+    try { store?.log?.(ev); } catch { /* best effort */ }
+    onUpdate(ev);
+  };
+  const agentLostPass = async (t) => {
+    let changed = false;
+    for (const g of agentRestarts) {
+      if (g.closed) continue;
+      if (!g.healthyAt) {
+        let ok = true;
+        if (typeof remote?.agentHealthy === "function") { try { ok = (await remote.agentHealthy(g.agent)) === true; } catch { ok = false; } }
+        if (ok) { g.healthyAt = new Date(t).toISOString(); changed = true; } else for (const m of g.lanes) if (pending.includes(m)) notBefore.set(m, Math.max(notBefore.get(m) ?? 0, t + pollMs));
+      }
+      if (g.healthyAt && t - g.last >= AGENT_LOST_WINDOW_MS) { closeRestart(g); changed = true; }
+    }
+    if (changed) save();
   };
 
+  // #5986: a failed lane lands in the issue's ledger; a lifetime-budget breach escalates once (FORGE:ESCALATION, needs-human) and parks the row.
+  const recordAttempt = async (n, row, r) => {
+    try {
+      if (row.placement?.where === "remote" && r?.engineVersion) attempts.noteSandboxVersion?.(r.engineVersion); // #5931: the version the lane ran feeds the input hash
+      const hash = (await attempts.hash?.(n)) ?? null;
+      let l = ledgers.get(n) ?? (await attempts.load?.(n)) ?? null;
+      l = recordFailure(l, { signature: failureSignature(row.code ?? r?.code, row.detail), hash, spend: Number(row.cost_usd) || 0, run: r?.runUrl ?? null,
+        blocker: blockerSignature({ code: row.code ?? r?.code, detail: row.detail, contractHash: r?.contractHash ?? null, engineVersion: r?.engineVersion ?? (row.placement?.where === "remote" ? null : curVersion()), placement: row.placement?.where ?? null, env: curEnvValues() }) });
+      const b = breach(l, attempts.cfg);
+      if (b && !l.escalated) {
+        l = markEscalated(l);
+        await attempts.notify?.({ issue: n, code: "escalate", ledger: l, reason: b.detail });
+        if (row.outcome !== "needs-human") { row.detail = `attempts.exhausted: ${b.detail}\n${String(row.detail ?? "")}`; row.outcome = "needs-human"; }
+        decided({ issue: n, what: `escalated #${n} to a person: ${b.detail}`, why: "lifetime attempt budget (#5986)", alternative: "run another lane on the same input" });
+      }
+      ledgers.set(n, l);
+      const comments = await attempts.mirror?.(n, l);
+      if (Number.isInteger(comments)) ledgers.set(n, { ...l, comments });
+    } catch { /* the ledger is best effort: a failed write never changes the lane's outcome */ }
+  };
   // Apply one lane's result: requeue it (deferred, dependency-open, engine-error) or record its final row.
   const settleLane = async (n, r, rec, pf) => {
     if (halted) return; // #4454: a resume adopts the lane and settles it
+    // #5947: a git transport failure ends the lane as a `net.transient` deferral with backoff; the breaker never sees it.
+    if (!cancelled && (r?.terminalReason ?? "engine-error") === "engine-error" && GIT_TRANSPORT_TEXT.test(String(r?.detail ?? ""))) {
+      const k = (netTransients.get(n) ?? 0) + 1;
+      netTransients.set(n, k);
+      r = { ...r, terminalReason: "deferred", code: OUTCOME_CODES.NET_TRANSIENT, retryInSeconds: Math.round(transientRetryDelayMs(k) / 1000), detail: r.detail };
+    }
     // #5241: the lane ended: its lease goes with it. #5654: also an interrupted or engine-error end, which is requeued at once
     if (releaseLease && (cancelled || (r?.terminalReason ?? "engine-error") === "engine-error" || (r?.terminalReason === "deferred" && r?.code === "run.interrupted"))) { try { await releaseLease(n, rec); } catch { /* best effort: the lease expires */ } }
     // #4304: the pre-filter runs once per issue; a recovery pass's row adds the earlier attempt's cost, which already holds it.
     const pfCost = recovering.has(n) ? 0 : (pf?.cost_usd ?? 0);
-    const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + pfCost, minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(pf ? { prefilter: pf } : {}),
+    const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + pfCost, minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(r?.culprit ? { culprit: r.culprit } : {}), ...(pf ? { prefilter: pf } : {}), ...(rec?.stackedOn ? { stacked: true, stackedOn: rec.stackedOn } : {}),
       ...(() => { const w = capWait.take(n, r?.waits); return w && typeof w === "object" ? { waits: w } : {}; })(), ...(Number.isInteger(r?.heavyQueueMax) ? { heavyQueueMax: r.heavyQueueMax } : {}),
       ...(Number.isFinite(r?.wall_ms) ? { wall_ms: r.wall_ms } : {}), ...(Number.isFinite(r?.model_ms) ? { model_ms: r.model_ms } : {}), // #4451
       ...(phasesOf(r, rec) ? { phases: phasesOf(r, rec) } : {}), // #4908
       ...(Array.isArray(r?.followups) && r.followups.length ? { followups: r.followups } : {}), // #5078
+      ...(r?.cascade ? { cascade: r.cascade, cascades: Array.isArray(r.cascades) ? r.cascades : [r.cascade], ...(Number.isFinite(r.cascade_cost_usd) ? { cascade_cost_usd: r.cascade_cost_usd } : {}), ...(Number.isFinite(r.cascade_minutes) ? { cascade_minutes: r.cascade_minutes } : {}) } : {}), // #5833
+      ...(edges(n).length ? { deps: edges(n) } : {}), ...(firstAdmit.has(n) ? { admitted_at: firstAdmit.get(n), ended_at: now() } : {}), ...(planMs.has(n) ? { plan_minutes: Math.round(planMs.get(n) / 6000) / 10 } : {}), // #5834
       ...(Number.isFinite(r?.precheckMs) ? { precheck_ms: r.precheckMs } : {}), ...(Number.isInteger(r?.precheckDeferred) && r.precheckDeferred > 0 ? { precheck_deferred: r.precheckDeferred } : {}), // #4331
       ...(typeof r?.firstPass === "boolean" ? { first_pass: r.firstPass } : {}), // #4362
       ...(r?.turns && typeof r.turns === "object" ? { turns: r.turns } : {}), // #4392
@@ -816,22 +1056,54 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     if (sandboxUse.has(n)) row.sandbox = { ...sandboxUse.get(n), ...(sandboxUse.get(n).by_agent ? { by_agent: { ...sandboxUse.get(n).by_agent } } : {}) };
     const done = () => { running.delete(n); runRecs.delete(n); releaseSlot(n); endRemote(n); };
+    if (train && row.outcome === "pr-ready" && Number.isInteger(r?.pr) && r?.head) { // #5836: the slot frees now; the train merges the PR
+      const p = recovering.get(n);
+      if (p) { recovering.delete(n); row.cost_usd = Math.round(((Number(row.cost_usd) || 0) + (Number(p.cost_usd) || 0)) * 1e6) / 1e6; row.minutes = Math.round(((Number(row.minutes) || 0) + (Number(p.minutes) || 0)) * 10) / 10; }
+      train.add({ issue: n, pr: r.pr, head: r.head, required: Array.isArray(r.required) ? r.required : [], policy: r.policy, lane: r.lane ?? rec?.lane ?? null, milestone: r.milestone, postMerge: r.postMerge, laneSide: r.laneSide });
+      results.set(n, row); done(); save(); update(row);
+      return;
+    }
+    const planVerdict = rec?.plan && r?.terminalReason !== "planned" && PLAN_VERDICT.has(row.outcome);
+    if (planVerdict) { // #5909: a verdict end (invalid, needs-human, ...) is the issue's answer: it settles as a final row below, no build lane
+      planMs.set(n, (planMs.get(n) ?? 0) + Math.max(0, now() - rec.startedAt));
+      store?.log?.({ event: "STACK_PLAN_FAILED", issue: n, reason: row.outcome });
+    } else if (rec?.plan) {
+      // #5831: a plan lane ends `planned` or `plan-failed` and goes back to pending for its build lane. It is never a final row and
+      // never counts toward the breaker, the engine-error relaunch, the deferral or the requeue budgets (it returns before them).
+      done();
+      planMs.set(n, (planMs.get(n) ?? 0) + Math.max(0, now() - rec.startedAt)); // #5834
+      const ok = r?.terminalReason === "planned" && r?.planned?.contractHash && r?.planned?.baseSha;
+      if (ok) planned.set(n, { contractHash: r.planned.contractHash, baseSha: r.planned.baseSha });
+      store?.log?.({ event: ok ? "STACK_PLANNED" : "STACK_PLAN_FAILED", issue: n, ...(ok ? { contractHash: r.planned.contractHash, baseSha: r.planned.baseSha } : { reason: row.outcome }) });
+      requeue(n, 0); save();
+      if (!ok) decided({ issue: n, what: `plan lane for #${n} ended ${row.outcome}; it will run as a normal build lane after its dependencies`, why: firstLine(row.detail) || row.outcome, alternative: "retry the plan lane" });
+      update({ ...row, outcome: ok ? "planned" : "plan-failed", ...(ok ? { detail: `contract ${r.planned.contractHash} frozen at ${String(r.planned.baseSha).slice(0, 12)}` } : {}) });
+      return;
+    }
     // #5805: an engine/env-caused end that would repeat as-is: held with its signature, re-admitted by watchEnvHolds, never terminal.
-    const holdEnv = ({ kind, sig, tools = null, why }) => {
+    const holdEnv = ({ kind, sig, tools = null, why, envIssueNo = null }) => {
       const p = recovering.get(n);
       if (p) { // a recovery lane that hit an engine-error: its earlier attempts' cost stays on the row
         recovering.delete(n);
         row.cost_usd = Math.round(((Number(row.cost_usd) || 0) + (Number(p.cost_usd) || 0)) * 1e6) / 1e6;
         row.minutes = Math.round(((Number(row.minutes) || 0) + (Number(p.minutes) || 0)) * 10) / 10;
       }
-      const triggers = ["an engine upgrade", ...(envHold?.envFingerprint ? ["a --set-env"] : []), ...(tools?.length && envHold?.missingTools ? [`${tools.join(", ")} found on the host`] : [])];
+      const triggers = [...(envIssueNo ? [`env issue #${envIssueNo} closing`] : []), "an engine upgrade", ...(envHold?.envFingerprint ? ["a --set-env"] : []), ...(tools?.length && envHold?.missingTools ? [`${tools.join(", ")} found on the host`] : [])];
       const final = { ...row, outcome: "held", detail: `waiting on engine/env change: ${why}; re-admitted on ${triggers.join(" or ")}\n${String(row.detail ?? "")}`,
-        envHold: { kind, sig, from: row.outcome, version: curVersion(), env: curEnv(), ...(tools?.length ? { tools } : {}), since: now() }, waiting: true };
+        envHold: { kind, sig, from: row.outcome, version: curVersion(), env: curEnv(), ...(tools?.length ? { tools } : {}), ...(envIssueNo ? { envIssue: envIssueNo } : {}), since: now() }, waiting: true };
       results.set(n, final); done(); save();
       decided({ issue: n, what: `held: waiting on engine/env change (${why})`, why: firstLine(row.detail) || row.outcome,
         alternative: kind === "engine" ? "relaunch into the same engine-error, or end engine-error and wait for a manual --requeue" : "launch a recovery that fails the same way, or end needs-human and wait for a manual --requeue" });
       update(final);
     };
+    // #5931: a remote lane that ran another engine version than the host is an environment outcome, never conformance (gates fixed in the host version still fire there)
+    const ranVersion = r?.engineVersion ?? /ForgeDock\s*[·-]\s*v?(\d+\.\d+(?:\.\d+)?)/.exec(String(r?.banner ?? row.detail ?? ""))?.[1] ?? null;
+    const vmm = (v) => (/^v?(\d+\.\d+)/.exec(String(v ?? "")) ?? [])[1] ?? null;
+    if (row.placement?.where === "remote" && ranVersion && vmm(curVersion()) && vmm(ranVersion) !== vmm(curVersion()) && ["needs-human", "failed", "invalid", "budget-exceeded"].includes(row.outcome)) {
+      row.code = OUTCOME_CODES.ENV_ENGINE_SKEW;
+      row.detail = `${OUTCOME_CODES.ENV_ENGINE_SKEW}: the sandbox ran engine v${ranVersion}, the host is v${curVersion()}; not a conformance result. Place it locally or upgrade the agent.\n${String(row.detail ?? "")}`;
+      if (ehOn) return holdEnv({ kind: "env", sig: `${OUTCOME_CODES.ENV_ENGINE_SKEW}|${ranVersion}|${curVersion()}`, why: `sandbox engine v${ranVersion} differs from the host v${curVersion()}` });
+    }
     if (row.outcome === "dependency-open" && depList.length) {
       // #4387: a parked dependency is not pulled in again (fail-open on an unreadable label).
       let parked;
@@ -876,14 +1148,33 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       update({ ...row, detail: `stopped by cancel: ${r?.code ?? row.outcome}${r?.detail ? ` ${r.detail}` : ""}` });
       return;
     }
+    if (!(row.outcome === "deferred" && r?.code === "sandbox.capacity")) capDefers.delete(n); // #5746: a lane the pool accepted resets the capacity count
+    if (row.outcome === "deferred" && (r?.code === "stack.replan" || r?.code === "stack.restart") && !cancelled) {
+      // #5833: the stacked dependent's PR and branch were dropped. replan: it builds as a normal lane on the lane base (today's held/skipped
+      // rules decide while its dependency is unsatisfied); restart: it may stack again on the dependency's new head, from the frozen contract.
+      const so = stackedOf.get(n);
+      stackedOf.delete(n); planned.delete(n);
+      if (r.code === "stack.restart") { stackedTried.delete(n); if (so) prReady.delete(so.dependency); }
+      requeue(n, 0); done(); save();
+      store?.log?.({ event: "STACK_CASCADE", issue: n, cascade: r.cascade, ...(so ? { dependency: so.dependency } : {}) });
+      decided({ issue: n, what: `stacked cascade ${r.cascade} for #${n}`, why: firstLine(row.detail) || "the stacked dependency moved or ended", alternative: "keep the stacked PR" });
+      update({ ...row, detail: `requeued after cascade ${r.cascade}: ${firstLine(row.detail)}` });
+      return;
+    }
     if (row.outcome === "deferred") {
       const pol = deferPolicy(r, { now: now(), deferrals: deferrals.get(n) ?? 0, maxDeferrals });
       let capGated = false; // #4909: the pool reports free slots, so the slot (not the retry-in timer) gates the relaunch
       if (r?.code === "sandbox.unreachable") notePool(true, r.detail ?? "sandbox unreachable");
+      if (r?.code === "base.red" && baseProbe && !baseRedHold) { // #5992: a lane's base.red result raises the one batch hold at once (its guardRed verdict is cached, so this runs no second probe)
+        try { const v = await baseProbe(); if (v?.red) { const issue = Number.isInteger(v.att?.issue) ? v.att.issue : null, detail = `base.red: base ${String(v.sha).slice(0, 12)} is red on ${(v.commands ?? []).join(", ") || "a guard command"}${v.att ? `; last change ${String(v.att.sha).slice(0, 12)}${issue ? ` (#${issue})` : ""}` : ""}; admissions paused until the base moves`; update({ issue: null, outcome: "preflight", code: "base.red", detail }); baseRedHold = { sha: v.sha, issue, detail }; } } catch { /* the next pass probes */ }
+      }
       if (r?.code === "sandbox.capacity") {
-        capWait.refused(n);
-        capDefers.set(n, (capDefers.get(n) ?? 0) + 1); // #5112: counted for the fallback_local capacity fallback
-        try { capGated = Number.isInteger(remote?.capacity?.()?.free); } catch { capGated = false; }
+        capWait.refused(n, r.reason ?? null);
+        concEmit(conc.refused({ issue: n, code: r.code, reason: r.reason, live: r.live ?? null })); // #5985
+        if (r.detail) capReasons.set(n, String(r.detail).slice(0, 300));
+        // #5112: counted for the fallback_local capacity fallback; #5746: a host-busy refusal is not pool capacity
+        if (!/host[ _-]?busy|headroom/i.test(String(r.detail ?? ""))) capDefers.set(n, (capDefers.get(n) ?? 0) + 1);
+        try { const c = remote?.capacity?.(); capGated = Number.isInteger(c?.free) || capWait.conditional(n, c); } catch { capGated = false; }
       }
       if (!pol.capped) {
         if (!pol.host && !pol.hold) deferrals.set(n, (deferrals.get(n) ?? 0) + 1);
@@ -905,12 +1196,21 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
             if (!(Number.isFinite(rotAt) && rotAt > now())) rotAt = null;
           }
           // #5203: no account has headroom: the hold lasts until the earliest reset across accounts, not this lane's own reset.
-          const holdMs = usage && rotAt !== null ? rotAt - now() : pol.delayMs;
+          let holdMs = usage && rotAt !== null ? rotAt - now() : pol.delayMs;
+          if (r?.code === "backend.auth") { // #5988: probe every 5 min, never hold past the 30 min escalation, rotate to the next account
+            const t0 = now();
+            if (!authOutage) authOutage = { since: t0, nextProbe: t0 + AUTH_PROBE_MS, failed: new Set(), escalated: false, key: r?.backendId ?? identity(), issues: new Set() };
+            authOutage.issues.add(n);
+            try { const cur = authOutage.escalated ? null : rotator?.current?.(); if (cur) { authOutage.failed.add(cur); authOutage.last = cur; limitedAccounts.set(cur, t0 + AUTH_PROBE_MS); try { rotator.markLimited?.(cur, t0 + AUTH_PROBE_MS); } catch { /* best effort */ } } } catch { /* fail-open */ }
+            holdMs = Math.min(holdMs, AUTH_PROBE_MS);
+            if (t0 - authOutage.since >= AUTH_ESCALATE_MS) { await authPass(); holdMs = 0; }
+          }
           if (rq) {
             delayMs = rq.delayMs;
             // #5095 + #5094: the pool account's own hold (not the host's) still routes hybrid lanes local until its reset.
             try { const pool = remote?.identity?.(); if (!rq.rotated && pool && r?.backendId === pool) holds.set(pool, now() + pol.delayMs, `batch ${batchId ?? "?"} #${n}`); } catch { /* fail-open */ }
-          } else try { holds.set(r?.backendId ?? identity(), rotAt ?? now() + holdMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
+          } else if (holdMs > 0 || r?.code !== "backend.auth") try { holds.set(r?.backendId ?? identity(), rotAt ?? now() + holdMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
+          else delayMs = AUTH_PROBE_MS; // #5988: escalated: no hold; the lane retries as its own probe
           const q = quota.get(n) ?? { cost_usd: 0, minutes: 0, rotations: 0 };
           const resumeAt = usage ? now() + (rq ? rq.delayMs : holdMs) : Math.max(now() + (rq ? rq.delayMs : pol.delayMs), rotAt ?? 0);
           quota.set(n, { cost_usd: Math.round(((Number(q.cost_usd) || 0) + (Number(row.cost_usd) || 0)) * 1e6) / 1e6, minutes: Math.round(((Number(q.minutes) || 0) + (Number(row.minutes) || 0)) * 10) / 10,
@@ -927,8 +1227,35 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       }
       row.detail = `gave up after ${deferrals.get(n) ?? 0} deferrals: ${r?.detail ?? r?.code ?? ""}`;
     }
+    const la = row.outcome === "engine-error" && r?.lostWithoutResult && !cancelled && !lostOnce.has(n) ? (r.agent ?? r.sandbox?.agent ?? null) : null;
+    let lostNow = null;
+    if (la) { // #5859
+      const t = now(), win = (lostSeen.get(la) ?? []).filter((x) => t - x.at < AGENT_LOST_WINDOW_MS);
+      if (openRestart(la, t) || win.length + 1 >= AGENT_LOST_MIN) {
+        lostSeen.delete(la);
+        for (const x of win) rollBackLost(la, x);
+        if (tripped && !tripped.transport && breaker && errorTimes.length < breaker.errors && win.length && tripped.at >= win[0].at) {
+          tripped = null;
+          update({ issue: null, outcome: "breaker", detail: `circuit breaker cleared: the engine-errors were agent ${la} restarting (${OUTCOME_CODES.SANDBOX_LOST})` });
+        }
+        markLost(la, n, row, row.detail);
+        requeue(n, AGENT_LOST_REQUEUE_MS); done(); save();
+        return;
+      }
+      lostNow = { n, at: t, ee: engineErrors.get(n), tr: transients.get(n), sig: engineSigs.get(n) };
+      lostSeen.set(la, [...win, lostNow]);
+    }
     if (row.outcome === "engine-error") {
-      noteEngineError(r?.detail);
+      const ag = r?.agent ?? r?.sandbox?.agent ?? null, hs = ag && breaker ? hostSignature(r, row.detail) : null;
+      const sc = hs ? await scopedEngineError(ag, hs) : null;
+      const qn = sc?.quarantined ? (quarantineRequeues.get(n) ?? 0) + 1 : 0; // a lane waits out the quarantine a bounded number of times, then counts as an ordinary engine-error (batch breaker included)
+      if (sc?.quarantined && qn <= QUARANTINE_REQUEUES) { quarantineRequeues.set(n, qn); // #5988: an agent in quarantine: its lane waits and is requeued without a relaunch or breaker count; unaffected agents keep admitting
+        requeue(n, AGENT_LOST_REQUEUE_MS); done(); save();
+        update({ ...row, outcome: "requeued", detail: `requeued: agent ${ag} is quarantined (${hs}); retried in ${Math.round(AGENT_LOST_REQUEUE_MS / 1000)}s` });
+        return;
+      }
+      const errAt = hs && !sc?.quarantined ? undefined : noteEngineError(r?.detail);
+      if (lostNow) lostNow.err = errAt;
       // #5161: a transient failure (gateway 5xx, reset) waits out the outage with backoff instead of the single immediate relaunch.
       if (transientMax > 0 && isTransientEngineError(row.detail)) {
         const k = (transients.get(n) ?? 0) + 1;
@@ -984,6 +1311,20 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       }
     }
     // #5526: the hold is re-read here (it is only read once per pass): a held issue's terminal outcome starts no recovery lane.
+    // #5755: an env.* needs-human end is the engine's defect: one env issue per signature, the product issue held on it (waiting-dependency), no needs-human.
+    if (envIssue && row.outcome === "needs-human" && ENV_ALL_CODES.includes(row.code)) {
+      const tools = row.code === OUTCOME_CODES.ENV_TOOL_MISSING ? toolsOf(row.detail) : null;
+      const sig = envKey(row.code, row.detail);
+      const no = await fileEnvIssue({ sig, code: row.code, issue: n, tools: tools ? tools.split(",") : null, evidence: String(row.detail ?? "") });
+      // A security issue is not parked behind an env fix and never sits in remediation-queue: it keeps its needs-human for a person.
+      let names = []; try { names = typeof issueLabels === "function" ? ((await issueLabels(n)) ?? []) : []; } catch { names = []; }
+      if (names.some((l) => /security/i.test(String(l?.name ?? l)))) {
+        row.securityEscalated = true;
+        row.detail = `Security issue escalated: ${row.code} is an env defect tracked${no ? ` on env issue #${no}` : ""}; it is not parked in the remediation queue.\n${String(row.detail ?? "")}`;
+        if (typeof relabelNeedsHuman === "function") { try { await relabelNeedsHuman({ issue: n, evidence: `Security issue escalated: \`${row.code}\` env defect${no ? ` (env issue #${no})` : ""}:\n${String(row.detail ?? "")}` }); } catch { /* best effort */ } }
+        decided({ issue: n, what: `escalated: ${row.code} on a security issue, not held or queued for remediation`, why: firstLine(row.detail), alternative: "hold it on the env issue like other product issues" });
+      } else return holdEnv({ kind: tools ? "tool" : "env", sig, tools: tools ? tools.split(",") : null, envIssueNo: no, why: no ? `${row.code}: env issue #${no} owns the fix` : `${row.code}: the env issue could not be filed; held, never needs-human` });
+    }
     const heldNow = recoveryMax && ["needs-human", "ci-pending", "budget-exceeded"].includes(row.outcome) && (refreshHeld(), opHeld.has(n));
     if (heldNow) decided({ issue: n, what: `no recovery lane for #${n}: ${heldByOperator(n)}`, why: firstLine(row.detail) || row.outcome, alternative: "recover while the operator holds it" });
     if (recoveryMax && !heldNow && ["needs-human", "ci-pending", "budget-exceeded"].includes(row.outcome)) {
@@ -1002,7 +1343,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       // A tool-missing recovery that would run on the host (not the #5423 remote retry) is not launched while the probe still misses the tool.
       const envNoHost = !hostFallbackOn() && row.placement?.where === "remote" && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(row.code);
       const lacking = row.code === OUTCOME_CODES.ENV_TOOL_MISSING ? toolsOf(row.detail) : null;
-      if (ehOn && !envNoHost) {
+      if (ehOn && !envNoHost && !row.securityEscalated) {
         let stillLacks = false;
         if (!repeatEnv && !sameHostReplay && lacking && classifyNeedsHuman(facts) === "recoverable" && used < max && !(row.placement?.where === "remote" && used === 0 && !budgetLocal)) {
           const miss = await missingTools(lacking.split(","));
@@ -1033,7 +1374,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           while (isOver() && now() - t0 < OVERLOAD_RECOVERY_MAX_MS) await sleep(Math.max(pollMs, 1));
         }
       }
-      if (!repeatEnv && !noHostRecovery && !sameHostReplay && classifyNeedsHuman(facts) === "recoverable" && used < max) {
+      // #5979: failure.repeated is a typed park (not in RECOVERABLE_CODES): never relaunched, reported parked below
+      if (!repeatEnv && !noHostRecovery && !sameHostReplay && row.code !== OUTCOME_CODES.FAILURE_REPEATED && classifyNeedsHuman(facts) === "recoverable" && used < max) {
         // #5727: the first remote end on a tool no recipe can install, before any build work, is re-placed on the host without spending an attempt
         const free = !prior && r?.toolNoRecipe === true && row.code === OUTCOME_CODES.ENV_TOOL_MISSING && row.placement?.where === "remote" && !freeRecovered.has(n);
         const code = recoveryCodeOf(facts), attempt = used + 1;
@@ -1059,11 +1401,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       try { await relabelNeedsHuman({ issue: n, evidence: `Implement turn budget overrun (\`budget.exceeded\`) not recovered in this batch:\n${String(row.detail ?? "")}` }); } catch { /* best effort */ }
     }
     // #4656: a mechanical terminal park (recovery spent or none applies) moves to the remediation queue, not the human queue.
-    if (row.outcome === "needs-human" && !row.parkedQueued && !everRelabelled.has(n) && typeof relabelNeedsHuman === "function" && (cls => cls === "parked" || (cls === "recoverable" && prior))(classifyNeedsHuman({ ...row, issueEdited: r?.issueEdited === true }, { parked: true }))) { // a recoverable row with a finished recovery has used its attempts
+    if (row.outcome === "needs-human" && !row.parkedQueued && !row.securityEscalated && !everRelabelled.has(n) && typeof relabelNeedsHuman === "function" && (cls => cls === "parked" || (cls === "recoverable" && prior))(classifyNeedsHuman({ ...row, issueEdited: r?.issueEdited === true }, { parked: true }))) { // a recoverable row with a finished recovery has used its attempts
       try { const res = await relabelNeedsHuman({ issue: n, parked: { code: row.code, pr: Number.isInteger(row.pr) ? row.pr : null }, evidence: `Mechanical park \`${row.code}\`${Number.isInteger(row.pr) ? ` (PR #${row.pr})` : ""}:\n${String(row.detail ?? "")}` }); if (res !== false && res !== "failed" && res !== "skipped") row.parkedQueued = true; else if (res === false || res === "failed") { const ev = { event: "relabel.failed", issue: n, batch: batchId ?? null, detail: `parked relabel failed (${row.code}): needs-human kept` }; try { store?.log?.(ev); } catch { /* best effort */ } onUpdate(ev); } } catch { /* best effort */ }
     }
+    if (attempts && ATTEMPT_FAILED.includes(row.outcome)) await recordAttempt(n, row, r); // #5986
     results.set(n, row);
     if (row.outcome === "merged" && lifecycle && r?.milestone) lifecycleTitles.add(String(r.milestone)); // #4657
+    if (row.outcome === "merged") await closeOnLane(n, rec?.lane ?? r?.lane, row);
     if (row.outcome === "merged" && integration?.onMerged && String(rec?.lane ?? r?.lane ?? "").startsWith("milestone/")) {
       // #4667: counts the merge toward the milestone's integration run; an error is a row, never the outcome.
       try { await integration.onMerged(n, { ...row, lane: rec?.lane ?? r?.lane }, r); } catch (e) { update({ issue: n, outcome: "integration", detail: `integration check failed: ${String(e?.message ?? e).slice(0, 300)}` }); }
@@ -1081,6 +1425,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #5437: a lane's post-run bookkeeping (r.postRun) starts once its slot is free; the batch waits for it before it ends.
   const postRuns = new Set();
   const settle = async (n, r, rec, pf) => {
+    if (r?.kept) keptBoxes.set(n, r.kept); // #6008
     await settleLane(n, r, rec, pf);
     if (typeof r?.postRun !== "function") return;
     const p = Promise.resolve().then(() => r.postRun()).catch(() => {}).finally(() => postRuns.delete(p));
@@ -1096,7 +1441,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const k = laneRetries.get(n) ?? 0; laneRetries.set(n, k + 1);
     return { terminalReason: "deferred", code: "lane.unresolved", retryInSeconds: Math.min(DEFER_BACKOFF_S * 2 ** k, DEFER_BACKOFF_MAX_S), cost_usd: 0, detail: l.detail };
   })().then((x) => settle(n, x, rec, null)));
-  const start = (n) => {
+  const start = (n, { plan = false, stackedOn = null } = {}) => {
     const ln = lanes.get(n);
     if (ln && !ln.ok && ln.transient && resolveLane) { retryLane(n, runRecs.get(n) ?? { startedAt: now() }); return; }
     if (ln && !ln.ok) { // settled synchronously: nothing runs, no lease, no comment
@@ -1110,8 +1455,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     placed.delete(n);
     const queueMs = Number.isFinite(enqueued.get(n)) ? Math.max(0, now() - enqueued.get(n)) : null; // #4908: queue_wait in the phase ledger
     heads.delete(n); enqueued.delete(n); busyNoted.delete(n);
-    const rec = { startedAt: now(), ...(queueMs != null ? { queueMs } : {}), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}), ...(pl ? { placement: pl } : {}) };
-    runRecs.set(n, rec); notBefore.delete(n); save();
+    const rec = { startedAt: now(), ...(plan ? { plan: true } : {}), ...(stackedOn ? { stackedOn } : {}), ...(queueMs != null ? { queueMs } : {}), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}), ...(pl ? { placement: pl } : {}) };
+    if (!firstAdmit.has(n)) firstAdmit.set(n, rec.startedAt); // #5834: chain wall time starts at the first admission, plan lane included
+    runRecs.set(n, rec); keptBoxes.delete(n); notBefore.delete(n); capReasons.delete(n); save();
     track(n, (async () => {
       // Pre-filter once per issue (a requeued issue is not re-checked); fail-open: an error means a normal lane.
       if (prefilter && !checked.has(n)) { let pf = null; try { pf = await prefilter(n, lane); } catch { pf = null; } checked.set(n, pf); save(); }
@@ -1123,7 +1469,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         if (!["merged", "invalid", "deferred"].includes(gone?.outcome)) gone = null; // #4920: deferred = another lane owns the issue (lease or open PR on GitHub)
       }
       // #5526: a hold placed since the pass read is honoured at launch: the issue goes back to pending, no lane
-      if (!cancelled && !halted) { refreshHeld(); if (opHeld.has(n)) { running.delete(n); runRecs.delete(n); releaseSlot(n); endRemote(n); requeue(n, 0); save(); return; } }
+      if (!cancelled && !halted) { refreshHeld(); refreshPause(); if (opHeld.has(n) || opPause) { running.delete(n); runRecs.delete(n); releaseSlot(n); endRemote(n); requeue(n, 0); save(); return; } }
       if (halted) return; // #4454: stopped before launch; no pid, so a resume queues it again
       let r;
       if (cancelled) r = { terminalReason: "deferred", code: "run.interrupted", cost_usd: 0, detail: "cancelled before launch" }; // #4376
@@ -1133,7 +1479,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       else if (pf?.parked) r = { terminalReason: pf.kind, cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
       else {
         try {
-          r = await runOne(n, lane, { ...(signal ? { signal } : {}), remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(recovering.has(n) ? { recover: { code: recovering.get(n).code, attempt: recovering.get(n).attempt, final: recovering.get(n).attempt >= (recovering.get(n).max ?? recoveryMax) } } : {}), onStart: (info) => {
+          r = await runOne(n, lane, { ...(signal ? { signal } : {}), remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(plan ? { plan: true } : planned.has(n) ? { planned: planned.get(n) } : {}), ...(rec.stackedOn ? { stackedOn: rec.stackedOn } : {}), ...(recovering.has(n) ? { recover: { code: recovering.get(n).code, attempt: recovering.get(n).attempt, final: recovering.get(n).attempt >= (recovering.get(n).max ?? recoveryMax) } } : {}), onStart: (info) => {
             Object.assign(rec, info ?? {}); save();
             if (rec.remote && remoteRun.has(n)) noteRemote(n, rec.handle);
             if (cancelled) stop(n, rec); // #4376: launched while the cancel arrived
@@ -1208,7 +1554,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
 
   // #5469: a final held row names the owner and since when the hold recorded them (`forgedock orchestrate --hold ... --for`)
   const heldByOperator = (n) => { let e = null; try { e = getHoldInfo?.()?.[n] ?? null; } catch { e = null; } return e ? `held by operator (${e.owner}, since ${e.since})` : "held by operator"; };
-  const heldDetail = (n) => cancelled ? "cancelled by operator" : opHeld.has(n) ? heldByOperator(n) : baseHeld.has(n) ? baseHeld.get(n) : tripped?.detail ?? (integHeld.has(n) ? `integration: ${integHeld.get(n)}` : (driftHeld.has(n) ? `drift: ${driftHeld.get(n)} flagged` : budgetStop ? `execution budget: ${budgetStop}` : budgetHeld ? "maintenance share" : "not run"));
+  const heldDetail = (n) => cancelled ? "cancelled by operator" : opHeld.has(n) ? heldByOperator(n) : opPause ? pauseText() : baseHeld.has(n) ? baseHeld.get(n) : tripped?.detail ?? (integHeld.has(n) ? `integration: ${integHeld.get(n)}` : (driftHeld.has(n) ? `drift: ${driftHeld.get(n)} flagged` : budgetStop ? `execution budget: ${budgetStop}` : budgetHeld ? "maintenance share" : "not run"));
   // #4315: a recovery queued but never launched (the batch stopped: breaker, budget, hold; or a resume that did not relaunch a
   // lost run) left the issue without needs-human, since a non-final attempt does not relabel. Relabel it once, with the full reason.
   // #4318: also on a throw out of the loop and on a signal (`onExit`); `cause` overrides the held reason. Runs once per process.
@@ -1228,11 +1574,48 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   if (typeof onExit === "function") { try { onExit(relabelQueued); } catch { /* best effort */ } }
 
   // #4408: issues added to the running batch; returns how many joined. Re-reading the cumulative list is a no-op.
+  // #5978: standing order (`--select`): one reconcile per interval. Matching open issues and engine-filed env.* issues join through
+  // the `getAdded` path below; closed or moved pending issues leave; ended deferred/held/engine-error/conformance rows are requeued
+  // through `drainRequeues` by policy (reconcile.mjs). Same DAG, priority and lane rules as an operator `--add`/`--requeue`.
+  let nextReconcile = 0, parkedDigest = "";
+  const selFresh = [], autoRequeues = []; // #6022: selMatched (declared with the restores) = issues the selector has matched
+  const reconcileTick = async () => {
+    if (!reconcile) return;
+    const t = now();
+    if (t < nextReconcile) return;
+    nextReconcile = t + (reconcile.everyMs ?? RECONCILE_MS);
+    let open = null;
+    try { open = await reconcile.list(); } catch { open = null; } // a failed read never makes anything leave
+    const labels = new Map((open ?? []).map((o) => [o.number, o.labels ?? []]));
+    if (open) {
+      const { join, leave } = diffSelection({ open, members: [...set], pending, running, results, matched: selMatched });
+      const matchedBefore = selMatched.size;
+      for (const o of open) selMatched.add(o.number);
+      selFresh.push(...join);
+      for (const n of leave) {
+        pending.splice(pending.indexOf(n), 1);
+        skip(n, "left the selector: closed or moved");
+      }
+      if (leave.length || selMatched.size > matchedBefore) save();
+    }
+    for (const e of envSigs.values()) if (Number.isInteger(e.number) && !set.has(e.number)) selFresh.push(e.number); // R7: the engine-filed env.* issue joins the order
+    let base = null;
+    try { base = (await reconcile.base?.()) ?? null; } catch { base = null; }
+    const { requeue, parked } = readmitDue({ results, state: readmit, now: t, version: reconcile.version?.() ?? null, base, labels: (n) => labels.get(n) ?? [] });
+    for (const q of requeue) autoRequeues.push({ issue: q.issue, at: `reconcile-${t}`, reason: q.reason, by: "reconcile" });
+    const digest = needsDecisionDigest(parked);
+    if (digest !== parkedDigest) {
+      parkedDigest = digest;
+      if (digest) decided({ issue: null, what: digest, why: "one recovery attempt used; parked for an operator instead of lost", alternative: "forgedock orchestrate --requeue after deciding" });
+    }
+    if (requeue.length || parked.length) save();
+  };
   const drainAdds = async () => {
     const kids = await drainChildren();
-    if (!getAdded) return kids;
+    await reconcileTick();
+    if (!getAdded && !selFresh.length) return kids;
     let got = [];
-    try { got = getAdded() ?? []; } catch { got = []; }
+    try { got = [...(getAdded?.() ?? []), ...selFresh.splice(0)]; } catch { got = []; }
     const fresh = [...new Set((Array.isArray(got) ? got : []).filter((n) => Number.isSafeInteger(n) && n > 0 && !set.has(n)))];
     if (!fresh.length) return kids;
     // An edge an operator wrote into a pending issue after the batch started (it waits on an added issue) holds too.
@@ -1286,9 +1669,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #4550: `--requeue` entries (batch `requeue` file) not applied yet: a terminal issue and the dependents skipped behind it
   // return to pending, the prior rows kept in history; their `Depends on` edges are re-read from the body and replaced (#5112).
   const drainRequeues = async () => {
-    if (!getRequeued) return 0;
+    if (!getRequeued && !autoRequeues.length) return 0;
     let got = [];
-    try { got = getRequeued() ?? []; } catch { got = []; }
+    try { got = [...(getRequeued?.() ?? []), ...autoRequeues.splice(0)]; } catch { got = []; }
     const fresh = (Array.isArray(got) ? got : []).filter((e) => Number.isSafeInteger(e?.issue) && !requeueApplied.has(requeueKey(e)));
     let n = 0;
     for (const e of fresh) {
@@ -1306,6 +1689,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         continue;
       }
       if (!row || !REQUEUABLE(row.outcome) || running.has(e.issue)) continue;
+      train?.drop(e.issue); // #5836: a requeued pr-ready row leaves the train
       const moved = [e.issue], priors = new Map([[e.issue, row]]);
       results.delete(e.issue);
       for (let i = 0; i < moved.length; i++) { // dependents skipped behind a requeued issue (fixpoint)
@@ -1360,6 +1744,33 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     s.at = t;
     try { Promise.resolve(stopLane(n, rec)).then((ok) => { if (ok !== false) s.accepted = true; }, () => {}); } catch { /* best effort */ }
   }
+  // #6008: hold and pause reach a kept sandbox through the durable marker on its issue (the sandbox cannot read batch files); cleared on release/unpause.
+  const markKept = (ns, on, reason) => { if (!suspendLane) return; for (const n of ns) { try { Promise.resolve(suspendLane(n, on, reason)).catch(() => {}); } catch { /* best effort */ } } };
+  // #5975: the batch pause. `paused (reason, until …)`, the one text every surface shows.
+  function pauseText(p = opPause) { return `paused (${p?.reason ?? "no reason given"}, until ${p?.expiresAt ?? "unpause"})`; }
+  function refreshPause() {
+    if (!getPause) return;
+    if (expirePause) { // like #5469 holds: a pause past its expiry is lifted here, with a row and a decision
+      let e = null; try { e = expirePause() ?? null; } catch { e = null; }
+      if (e) {
+        decided({ issue: null, what: `pause expired (paused by ${e.owner} since ${e.since}${e.reason ? `: ${e.reason}` : ""}); admission resumed`, why: "pause expiry (--pause --for)", alternative: "pause it again" });
+        update({ issue: null, outcome: "pause-expired", detail: `${e.owner}, since ${e.since}` });
+        if (e.ownerGone) update({ issue: null, outcome: "hold-alert", detail: `the pause owner session (${e.owner}) is gone; the pause expired and admission resumed` });
+      }
+    }
+    let got = null; try { got = getPause() ?? null; } catch { got = opPause; }
+    const next = got && typeof got === "object" ? got : null;
+    if (next && !opPause) {
+      decided({ issue: null, what: `batch ${pauseText(next)} (forgedock orchestrate --pause); running lanes continue`, why: "operator request", alternative: "cancel the batch" });
+      update({ issue: null, outcome: "pause", detail: pauseText(next) });
+    } else if (!next && opPause) {
+      decided({ issue: null, what: "batch unpaused (forgedock orchestrate --unpause); admission resumed", why: "operator request", alternative: "resume the batch" });
+      update({ issue: null, outcome: "unpause", detail: "admission resumed" });
+    }
+    if (next && !opPause) markKept([...keptBoxes.keys()], true, "paused");
+    else if (!next && opPause) markKept([...keptBoxes.keys()].filter((n) => !opHeld.has(n)), false, "paused");
+    opPause = next;
+  }
   // #4592: re-read the hold set; one decision and one row when it changes.
   const holdExpiring = (list) => { let info = null; try { info = getHoldInfo?.() ?? null; } catch { info = null; } return !!expireHolds && list.some((n) => Number.isFinite(Date.parse(info?.[n]?.expiresAt))); }; // #5469
   // #5632: a function declaration (hoisted): finish/recovery callbacks of a resumed batch can call it before this line runs
@@ -1367,10 +1778,19 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (!getHeld) return;
     if (expireHolds) { // #5469: a hold past its expiry is released here; the diff below then admits it. A dead owner session is an alert.
       let due = []; try { due = expireHolds() ?? []; } catch { due = []; }
+      if (due.length > 1) holdRamp = { at: now() };
+      if (due.length > 1) concEmit({ event: "concurrency", change: "hold-release", k: conc.operating("light"), ceiling: ceilingK(), factor: "hold expiry", inputs: { released: due.length } }); // #5988: the release is paced by K(), never all at once
       for (const e of due) {
         decided({ issue: null, what: `hold on #${e.issue} expired (held by ${e.owner} since ${e.since}${e.reason ? `: ${e.reason}` : ""}); re-admitted`, why: "hold expiry (--hold --for)", alternative: "hold it again" });
         update({ issue: null, outcome: "hold-expired", detail: `#${e.issue} (${e.owner}, since ${e.since})` });
         if (e.ownerGone) update({ issue: null, outcome: "hold-alert", detail: `#${e.issue}: the hold owner session (${e.owner}) is gone; the hold expired and the issue was re-admitted` });
+      }
+    }
+    if (expireHolds) { // #5988: one alert per hold at T-30 min
+      let info = null; try { info = getHoldInfo?.() ?? null; } catch { info = null; }
+      for (const w of holdExpiryWarnings(info, { now: now(), warned: holdWarned })) {
+        holdWarned.add(w.key);
+        update({ issue: null, outcome: "hold-alert", detail: `#${w.issue}: the hold expires at ${w.expiresAt} (in ${Math.round(w.inMs / 60000)} min); release or extend it, or it re-admits through the concurrency controller` });
       }
     }
     let got = [];
@@ -1379,6 +1799,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const fmt = (ns) => ns.map((n) => `#${n}`).join(", ");
     const held = [...next].filter((n) => !opHeld.has(n)), freed = [...opHeld].filter((n) => !next.has(n));
     opHeld = next;
+    markKept(held.filter((n) => keptBoxes.has(n)), true, "held");
+    markKept(freed.filter((n) => keptBoxes.has(n) && !opPause), false, "held");
     for (const n of held) if (running.has(n)) update({ issue: n, outcome: "hold", detail: `#${n} held after launch: lane still running` }); // #5526
     if (held.length) {
       decided({ issue: null, what: `held ${fmt(held)} (forgedock orchestrate --hold)`, why: "operator request", alternative: "cancel the batch" });
@@ -1478,6 +1900,26 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const readmitted = new Set(); // "n:b": re-admit n on blocker b once; a lane that re-skips on b stays skipped
   const blockerOf = (n) => { const r = results.get(n); const m = r?.outcome === "skipped" ? /^dependency #(\d+) /.exec(r.detail ?? "") : null; return m ? Number(m[1]) : null; };
   const watchable = () => !!dispatchCheck && [...results.keys()].some((n) => blockerOf(n) !== null);
+  // #5986: readmission needs a new input hash. false = refused (loop.no_new_input: the label stays, one note per hash); a missing ledger or unreadable input admits.
+  const refusedNoted = new Set();
+  const gateAdmit = async (n, { relabel = false } = {}) => {
+    if (!attempts) return true;
+    try {
+      let l = ledgers.get(n) ?? null;
+      if (!l) { l = (await attempts.load?.(n)) ?? null; if (l) ledgers.set(n, l); }
+      if (!l) return true;
+      const hash = (await attempts.hash?.(n)) ?? null, a = admitInput(l, hash, attempts.cfg, { engineVersion: curVersion(), placement: placeOf(n)?.where ?? null, env: curEnvValues() });
+      if (a.ok) { if (a.reason) update({ issue: n, event: "readmit.signature_changed", detail: `readmitted: ${a.reason}`, batch: batchId ?? null }); return true; }
+      const key = `${n}|${hash}|${a.code}`;
+      if (!refusedNoted.has(key)) {
+        refusedNoted.add(key);
+        if (a.code === "escalate") { l = markEscalated(l); ledgers.set(n, l); save(); await attempts.mirror?.(n, l); }
+        await attempts.notify?.({ issue: n, code: a.code, ledger: l, reason: a.reason, relabel });
+        update({ issue: n, event: NO_NEW_INPUT, code: NO_NEW_INPUT, detail: `${NO_NEW_INPUT}: ${a.reason}`, batch: batchId ?? null });
+      }
+      return false;
+    } catch { return true; }
+  };
   // #5162: held rows behind `root` return to pending (and the root too when `withRoot`: requeued, counters reset), parents first via the edges.
   const releaseHeld = (root, withRoot, why) => {
     const moved = withRoot && results.has(root) ? [root] : [];
@@ -1519,10 +1961,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         }
       }
       let why = null;
-      if (v && h.version && v !== h.version) why = `engine version changed v${h.version} → v${v}`;
-      else if (fp && h.env && fp !== h.env) why = "batch env changed (--set-env)";
+      if (h.envIssue && typeof envIssue?.isClosed === "function") { let c = false; try { c = (await envIssue.isClosed(h.envIssue)) === true; } catch { c = false; } if (c) why = `env issue #${h.envIssue} closed`; }
+      if (!why && v && h.version && v !== h.version) why = `engine version changed v${h.version} → v${v}`;
+      if (why) { /* env issue closed */ } else if (fp && h.env && fp !== h.env) why = "batch env changed (--set-env)";
       else if (h.tools?.length && !toolReadmits.has(`${n}|${h.sig}`) && (await missingTools(h.tools))?.length === 0) { why = `${h.tools.join(", ")} now found on the host`; toolReadmits.add(`${n}|${h.sig}`); }
-      if (why) { engineSigs.delete(n); releaseHeld(n, true, `re-admitted: ${why}`); continue; }
+      if (why) { if (!(await gateAdmit(n))) continue; engineSigs.delete(n); releaseHeld(n, true, `re-admitted: ${why}`); continue; }
       if (now() - (Number(h.since) || 0) >= ehMaxMs && !/no engine\/env change within/.test(r.detail ?? "")) { // the wait is over: the row stays held (resumable, --requeue), the batch may end
         const { waiting, ...rest } = r;
         const [head, ...tail] = String(rest.detail ?? "").split("\n");
@@ -1538,8 +1981,19 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (ro === undefined || running.has(root) || settled.has(root)) continue;
       if (restoredHeld.has(root) && ["needs-human", "budget-exceeded"].includes(ro) && typeof issueLabels === "function") { // label removed: requeue the root, its subtree follows
         let names = null;
-        try { names = await issueLabels(root); } catch { names = null; }
-        if (Array.isArray(names) && !names.includes("needs-human")) { releaseHeld(root, true, "needs-human label removed"); continue; }
+        try { names = await issueLabels(root, { fresh: true }); } catch { names = null; } // #5893: never the memoized read
+        if (Array.isArray(names) && !names.includes("needs-human")) {
+          let sig = null;
+          if (typeof heldFacts === "function") { // the removal must post-date the block; unreadable evidence fails closed
+            let f = null; try { f = (await heldFacts(root)) ?? null; } catch { f = null; }
+            if (!f || !Number.isFinite(f.removedAt) || !Number.isFinite(f.blockedAt) || f.removedAt <= f.blockedAt) continue;
+            const prev = heldSigs.get(root);
+            sig = { sig: `${ro}:${f.askKey ?? ""}`, removedAt: f.removedAt };
+            if (prev && prev.sig === sig.sig && f.removedAt <= prev.removedAt) continue; // identical block, no new removal event
+          }
+          if (await gateAdmit(root, { relabel: true })) { if (sig) heldSigs.set(root, sig); releaseHeld(root, true, "needs-human label removed"); }
+          continue;
+        }
       }
       if (!dispatchCheck) continue;
       let g = null;
@@ -1598,7 +2052,45 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     if (back.size) save();
   };
-  const K = () => { let k = null; try { k = getParallel?.(); } catch { k = null; } return Number.isInteger(k) && k >= 1 ? k : parallel; };
+  // #5985: K is the ceiling; the controller's operating point (and a lower heavy-lane cap) sits under it. A pool with no load/memory data leaves K unchanged.
+  // #5985: light/heavy per lane (its repo's recent cpu_avg from usage-history rows, array or getter); heavy lanes have their own concurrent cap
+  const laneClassOf = (n) => { let rows = null; try { rows = typeof usageRows === "function" ? usageRows() : usageRows; } catch { rows = null; } let repo = repoSlug; try { repo = repoOf?.(n) ?? repoSlug; } catch { repo = repoSlug; } return rows && repo ? classifyRepo(rows, repo) : "light"; };
+  const heavyFull = (n) => { if (laneClassOf(n) !== "heavy") return false; let h = 0; for (const m of running.keys()) if (m !== n && laneClassOf(m) === "heavy") h++; if (h < conc.heavyLimit()) return false; if (!heavyHeldHit) { heavyHeldHit = true; concEmit({ event: "concurrency", change: "heavy-cap", k: conc.operating("light"), ceiling: ceilingK(), factor: "heavy cap", inputs: { heavy_limit: conc.heavyLimit() } }); } return true; };
+  // #5988: a hold expiry releasing several issues re-admits them on a ramp (one more lane per HOLD_RAMP_STEP_MS), as new work ramps, not all at once.
+  const K = () => { conc.setCeiling(ceilingK()); const k = conc.operating("light"); if (!holdRamp) return k; const step = 1 + Math.floor((now() - holdRamp.at) / HOLD_RAMP_STEP_MS); if (step >= k) { holdRamp = null; return k; } return step; };
+  // #5836: one train poll (throttled): a merged PR becomes a merged row; a red, conflicting or moved-head PR is handed back as a
+  // needs-human row through the normal settle path, so in-batch recovery requeues a fix lane.
+  let lastTrainTick = -Infinity;
+  const runTrain = async () => {
+    if (!train?.size() || signal?.aborted || now() - lastTrainTick < trainEveryMs) return;
+    lastTrainTick = now();
+    let evs = [];
+    try { evs = await train.tick(); } catch { evs = []; }
+    for (const e of evs) {
+      const n = e.issue, prev = results.get(n) ?? { issue: n };
+      if (e.kind === "merged") {
+        const { waiting, ...rest } = prev;
+        const row = { ...rest, outcome: "merged", detail: e.detail };
+        results.set(n, row);
+        if (lifecycle && e.entry.milestone) lifecycleTitles.add(String(e.entry.milestone));
+        await closeOnLane(n, e.entry.lane, row);
+        if (integration?.onMerged && String(e.entry.lane ?? "").startsWith("milestone/")) {
+          try { await integration.onMerged(n, { ...row, lane: e.entry.lane }, { milestone: e.entry.milestone }); } catch (err) { update({ issue: n, outcome: "integration", detail: `integration check failed: ${String(err?.message ?? err).slice(0, 300)}` }); }
+        }
+        save(); update(row);
+      } else {
+        results.delete(n);
+        // #5838: a bisection culprit broke the merged tree of its batch, not its own head; the recovery note leads with that.
+        const c = e.culprit, detail = c ? `Recovery note: PR #${c.pr} broke the merged tree of train batch ${c.batch} (required check ${c.check}${c.url ? ` ${c.url}` : ""}), not its own head; fix it against ${e.entry.lane ?? "the base"} with the PRs merged before it.\n${e.detail}` : e.detail;
+        await settleLane(n, { terminalReason: "needs-human", code: e.code, detail, pr: e.pr, cost_usd: prev.cost_usd ?? 0, lane: e.entry.lane, ...(c ? { culprit: c } : {}) }, { startedAt: now() - Math.round((Number(prev.minutes) || 0) * 60000), lane: e.entry.lane }, null);
+        if (results.get(n)?.outcome === "needs-human" && !everRelabelled.has(n) && typeof relabelNeedsHuman === "function") {
+          everRelabelled.add(n);
+          try { await relabelNeedsHuman({ issue: n, evidence: detail }); } catch { /* best effort */ }
+        }
+      }
+    }
+    save();
+  };
   let firstPass = true; // #5805: a resume (e.g. after an upgrade) re-checks the engine/env holds at once
   try {
     for (;;) {
@@ -1606,11 +2098,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       await drainAdds();
       await drainRequeues();
       checkCancel();
+      await runTrain();
       await watchBlockers(!pending.length && !running.size);
       await watchEnvHolds(firstPass || (!pending.length && !running.size)); // #5805
       firstPass = false;
-      if (!pending.length && !running.size) {
+      if (!pending.length && !running.size && !train?.size()) {
         if (envWaiting() && !signal?.aborted) { await nap(ehWatchMs); continue; } // #5805: only engine/env holds remain: keep re-checking them
+        if (reconcile && !signal?.aborted && !cancelled && !tripped) { await nap(reconcile.everyMs ?? RECONCILE_MS); continue; } // #5978: a standing order stays open: the next reconcile may bring issues
         break;
       }
       // Resolve skips first: a dependency that finished unsatisfied (or never can) skips its dependents.
@@ -1619,7 +2113,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         for (let i = pending.length - 1; i >= 0; i--) {
           const n = pending[i];
           if (results.has(n)) { pending.splice(i, 1); continue; }
-          const bad = edges(n).find((d) => results.has(d) && !SATISFIED.has(results.get(d).outcome));
+          const bad = edges(n).find((d) => results.has(d) && !SATISFIED.has(results.get(d).outcome) && !WAITING_ON_TRAIN(results.get(d)));
           if (bad !== undefined) {
             pending.splice(i, 1); again = true;
             const br = results.get(bad), root = br.root ?? bad, ro = results.get(root)?.outcome ?? br.outcome;
@@ -1628,15 +2122,19 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           }
         }
       }
+      if (agentRestarts.length) await agentLostPass(now()); // #5859
       const t = now();
       const holdUntil = heldUntil();
       let started = 0;
       driftHeld.clear();
       integHeld.clear();
       opHeldHit.clear();
+      pauseHit = false;
       blockedHit.clear();
       baseHit.clear();
       refreshHeld();
+      refreshPause();
+      await authPass(); // #5988
       await refreshBlocked();
       await refreshBaseWaits();
       checkGates();
@@ -1652,12 +2150,28 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         if (pfNoted.size && !keys.size) update({ issue: null, outcome: "preflight", detail: "preflight cleared; admissions resumed" });
         pfNoted = keys;
       }
+      // #5992: one dispatcher probe per (repo, base sha) while lanes wait; red holds every admission but the attributed fixer's.
+      if (baseProbe && !tripped && !cancelled && !holdUntil && pending.length) {
+        let v = null;
+        try { v = await baseProbe(); } catch { v = null; }
+        if (v?.red) {
+          const issue = Number.isInteger(v.att?.issue) ? v.att.issue : null;
+          const detail = `base.red: base ${String(v.sha).slice(0, 12)} is red on ${(v.commands ?? []).join(", ") || "a guard command"}${v.att ? `; last change ${String(v.att.sha).slice(0, 12)}${issue ? ` (#${issue})` : ""}` : ""}; admissions paused until the base moves`;
+          if (baseRedHold?.sha !== v.sha) update({ issue: null, outcome: "preflight", code: "base.red", detail });
+          baseRedHold = { sha: v.sha, issue, detail };
+        } else if (baseRedHold) { update({ issue: null, outcome: "preflight", detail: "base.red cleared; admissions resumed" }); baseRedHold = null; }
+      }
+      let planPass = false; // #5831: the plan pass evaluates every other gate but the in-batch dependencies
+      await gateEnvSigs(); // #5755
       const isReady = (n) => {
         if (pfAll || (pfRemote && isRemote(n))) return false;
+        if (baseRedHold && n !== baseRedHold.issue) return false; // #5992
+        if (opPause) { pauseHit = true; return false; } // #5975: every admission path (dependency merge, env/engine re-admit, requeue, add, recovery) ends here
         if (opHeld.has(n)) { opHeldHit.add(n); return false; }
         if (blocked.has(n)) { blockedHit.add(n); return false; } // #4773
         if (baseHeld.has(n)) { baseHit.add(n); return false; } // #5031
-        if (!((notBefore.get(n) ?? 0) <= t && edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome)))) return false;
+        if (!((notBefore.get(n) ?? 0) <= t && (planPass || edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome))))) return false;
+        if (heavyFull(n)) return false; // #5985: a wave of heavy (test-suite) lanes never takes the whole ceiling
         if (integration?.holds) {
           let why = null;
           try { why = integration.holds(n, { lane: lanes.get(n)?.lane ?? null }); } catch { why = null; }
@@ -1697,6 +2211,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         for (const n of want) wanted.add(n);
         for (const n of ready) {
           if (running.size >= K()) break;
+          if (heavyFull(n)) continue; // #5985
           const g = grant(n, wanted);
           if (g === "busy") continue; // #4481
           if (!g && (notBefore.get(n) ?? 0) > t) continue; // #5592: per-issue wait, not a full host queue
@@ -1706,12 +2221,83 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       } else if (!tripped && !cancelled && !holdUntil) {
         for (const n of rank(pending.filter(isReady))) {
           if (running.size >= K()) break;
+          if (heavyFull(n)) continue; // #5985
           if (grant(n, new Set()) === true) { pending.splice(pending.indexOf(n), 1); start(n); started++; }
         }
+      }
+      // #5832: stacked lanes (phase 2, `full`). A dependent whose one unmerged in-batch dependency is PR-ready (precheck green, review
+      // passed) builds now on that lane head; its PR targets the dependency branch and the merge step holds it until the dependency merged.
+      if (stackFull && !tripped && !cancelled && !holdUntil && !pfAll && running.size < K()) {
+        const watch = new Set(pending.filter((n) => !stackedTried.has(n)).flatMap((n) => edges(n)).filter((d) => running.has(d) && !results.has(d)));
+        for (const d of watch) {
+          if (prReady.has(d)) continue;
+          let rd = null;
+          try { rd = await readPrReady(d); } catch { rd = null; }
+          if (rd?.branch && rd?.sha) prReady.set(d, rd);
+        }
+        planPass = true;
+        let sc = [];
+        try { sc = rank(pending.filter((n) => stackAdmissible({ n, edges: edges(n), results, pending, running, prReady, stackedTried, satisfied: SATISFIED }) && isReady(n))); } finally { planPass = false; }
+        for (const n of sc) {
+          if (running.size >= K()) break;
+          if (heavyFull(n)) continue; // #5985
+          if (lanes.get(n)?.ok === false || (notBefore.get(n) ?? 0) > t) continue;
+          const so = stackAdmissible({ n, edges: edges(n), results, pending, running, prReady, stackedTried, satisfied: SATISFIED });
+          if (!so || grant(n, new Set()) !== true) continue;
+          pending.splice(pending.indexOf(n), 1);
+          stackedTried.add(n); stackedOf.set(n, so);
+          store?.log?.({ event: "STACK_BUILD_START", issue: n, stacked: true, stackedOn: so });
+          decided({ issue: n, what: `stacked build for #${n} on #${so.dependency}'s lane head ${String(so.sha).slice(0, 12)}`, why: "orchestration.stacking: full builds a dependent once its dependency's PR is ready; the PR targets the dependency branch and merges only after the dependency", alternative: "wait for the dependency to merge" });
+          start(n, { stackedOn: so }); started++;
+        }
+        if (sc.length) save();
+      }
+      // #5831: stacked lanes (phase 1). After every ready issue, an idle slot plans a dependent whose only unmet gates are in-batch
+      // dependencies still pending or running: one plan lane per issue per batch (contract frozen, no build).
+      if (stackOn && !tripped && !cancelled && !holdUntil && !pfAll && running.size < K() && !pending.some(isReady)) {
+        planPass = true;
+        let cands = [];
+        try { cands = rank(pending.filter((n) => planAdmissible({ n, edges: edges(n), results, pending, running, planTried, satisfied: SATISFIED }) && isReady(n))); } finally { planPass = false; }
+        for (const n of cands) {
+          if (running.size >= K()) break;
+          if (heavyFull(n)) continue; // #5985
+          if (lanes.get(n)?.ok === false || (notBefore.get(n) ?? 0) > t) continue;
+          if (grant(n, new Set()) !== true) continue;
+          pending.splice(pending.indexOf(n), 1);
+          planTried.add(n);
+          const open = edges(n).filter((d) => !results.has(d));
+          store?.log?.({ event: "STACK_PLAN_START", issue: n, dependencies: open });
+          decided({ issue: n, what: `plan lane for #${n} while ${open.map((d) => `#${d}`).join(", ")} ${open.length > 1 ? "are" : "is"} still open`, why: "orchestration.stacking: plan admits a dependent in an idle slot; the contract freezes now and the build starts after its dependencies merged", alternative: "leave the slot idle until the dependencies merge" });
+          start(n, { plan: true }); started++;
+        }
+        if (cands.length) save();
       }
       if (reg) withdrawExcept(wanted);
       // #4685: a breaker tripped only by link failures (a router restart) closes itself after a cooldown
       if (tripped?.transport && now() - tripped.at >= TRANSPORT_COOLDOWN_MS) { tripped = null; errorTimes = []; transportErrors = 0; save(); }
+      // #5978: a standing order's breaker closes itself after a cooldown when the failures were environmental and the pool is healthy
+      if (tripped && reconcile && !tripped.transport) {
+        let healthy = true; try { healthy = reconcile.poolHealthy ? reconcile.poolHealthy() !== false : true; } catch { healthy = true; }
+        const d = decideAutoReset({ tripped, now: now(), cooldownMs: BREAKER_COOLDOWN_MS, environmental: tripped.environmental === true, poolHealthy: healthy });
+        if (d.reset) {
+          tripped = null; errorTimes = []; transportErrors = 0; save();
+          decided({ issue: null, what: `circuit breaker reset automatically: ${d.why}`, why: "FORGE:DECISION: the engine-errors were environmental (VM restart, mirror, network) and the pool is healthy again", alternative: "forgedock orchestrate --clear-breaker" });
+          update({ issue: null, outcome: "breaker", detail: `circuit breaker cleared automatically: ${d.why}` });
+          continue;
+        }
+      }
+      // #5947: --clear-breaker on a schedd-hosted batch reaches this runner through the batch's request file
+      if (getClearBreaker) { // #5964: time-scoped; the request is consumed only after the decision, so a long pass never loses it
+        let req = null; try { req = getClearBreaker(); } catch { req = null; }
+        if (req) {
+          const d = decideClear({ tripped, requestAt: req });
+          const wasTripped = Boolean(tripped);
+          if (d.clear) { const was = wasTripped; tripped = null; errorTimes = []; transportErrors = 0; save(); try { ackClearBreaker?.({ cleared: was }); } catch { /* advisory */ } }
+          else if (d.stale) { try { ackClearBreaker?.({ cleared: false }); } catch { /* advisory */ } }
+          try { consumeClearBreaker?.(); } catch { /* advisory */ }
+          if (d.clear && wasTripped) continue; // admission ran before this check: re-run the pass so the cleared batch resumes instead of falling to the "nothing runnable" skip
+        }
+      }
       if (tripped && !running.size) { await drainAdds(); break; } // breaker: let running lanes finish, keep the rest pending for a resume
       if (cancelled && !running.size) { await drainAdds(); break; } // #4376: cancel: the rest end held for a resume
       if (budgetStop && !running.size) { await drainAdds(); break; } // execution budget (stop): the same, the rest end held
@@ -1734,30 +2320,36 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (holdUntil) waits.push(holdUntil);
       let wake = waits.length ? Math.max(0, Math.min(...waits) - t) : null;
       if (holdUntil && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #4446: a cleared hold (forgedock limits clear) admits on the next poll
+      if (getPause && pending.length && (opPause || running.size)) wake = Math.min(wake ?? pollMs, pollMs); // #5975: an --unpause or expiry
       if ((getParallel || getHeld) && pending.length) wake = Math.min(wake ?? pollMs, pollMs);
       if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
       if (pending.some((n) => remoteCapped.has(n))) wake = Math.min(wake ?? pollMs, pollMs); // #5138: a live --set-max-remote raise
       if ((getAdded || getRequeued || (getChildren && addsEpicChildren(autoChildren?.mode))) && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408/#4550: an add or requeue while only lanes run
       if (getRequeued && pending.some((n) => quota.has(n) || notBefore.has(n))) wake = Math.min(wake ?? pollMs, pollMs); // #5203: a --requeue releasing a quota pause
-      if ((pfAll || pfRemote) && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #4866
+      if ((pfAll || pfRemote || baseRedHold) && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #4866
       if (baseWait && pending.length && baseHeld.size) wake = Math.min(wake ?? pollMs, pollMs); // #5031: a landed commit releases on the next tick
       if (getBlocked && pending.length && blockedHit.size) wake = Math.min(wake ?? pollMs, pollMs); // #4773: a removed label releases on the next tick
       if (getHeld && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4592: a release while only lanes run
       if (syncParked && running.size && parkedPrs().length) wake = Math.min(wake ?? syncEveryMs, Math.max(0, syncEveryMs - (t - (lastParkedSync ?? t)))); // #4525
       if (running.size && watchable()) wake = Math.min(wake ?? WATCH_EVERY_MS, WATCH_EVERY_MS); // #4595: re-check the blockers of skipped rows
       if (running.size && envWaiting()) wake = Math.min(wake ?? ehWatchMs, ehWatchMs); // #5805: re-check engine/env holds while lanes run
-      if (tripped) wake = null;
+      if (train?.size()) wake = Math.min(wake ?? trainEveryMs, Math.max(0, trainEveryMs - (now() - lastTrainTick))); // #5836
+      if (reconcile && running.size) wake = Math.min(wake ?? reconcile.everyMs ?? RECONCILE_MS, reconcile.everyMs ?? RECONCILE_MS); // #5978
+      if (tripped) wake = getClearBreaker ? Math.min(wake ?? pollMs, pollMs) : null;
       if (getCancelled && running.size && (!cancelled || [...running.keys()].some((n) => { const x = stopSent.get(n); return x && !(x.accepted && x.reported); }))) wake = Math.min(wake ?? pollMs, pollMs); // #5241: a cancel keeps polling a lane whose stop is unconfirmed // #4376: notice a cancel while lanes run
       if (running.size) {
         if (wake === null) await race(running.values());
         else { const ac = new AbortController(); await race([...running.values(), sleep(wake, ac.signal)]); ac.abort(); }
       } else if (started) continue; // only lane-refused rows settled (synchronously): re-resolve skips first
+      else if (train?.size()) await nap(wake ?? trainEveryMs); // #5836: only train-held PRs are left: poll the train
       else if (pending.length && offered.size) await nap(wake); // waiting for a host slot
-      else if (pending.length && (pfAll || pfRemote)) await nap(Math.min(wake ?? pollMs, pollMs)); // #4866: a failing lane preflight is re-checked on the next poll
+      else if (pending.length && (pfAll || pfRemote || baseRedHold)) await nap(Math.min(wake ?? pollMs, pollMs)); // #4866: a failing lane preflight is re-checked on the next poll
       else if (pending.length && blockedHit.size) await nap(wake ?? pollMs); // #4773: only blocked issues wait: poll for the label's removal
       else if (pending.length && baseHit.size) await nap(wake ?? pollMs); // #5031: only issues waiting for a base commit: poll for it
       else if (pending.length && waits.length) await nap(Math.min(wake, getCancelled ? pollMs : Infinity)); // wake is poll-capped by a hold or a live K; #4454: nap wakes on a stop
       else if (pending.length && budgetHeld) { if (await drainAdds()) continue; break; } // maintenance the budget does not admit now: held for a later batch
+      else if (pending.length && opPause && pauseHit && Number.isFinite(Date.parse(opPause.expiresAt)) && !cancelled) await nap(wake ?? pollMs); // #5975: a timed pause keeps the batch open until it expires, not finalised silently
+      else if (pending.length && opPause && pauseHit) { if (await drainAdds()) continue; break; } // #5975: paused with no expiry: pending for a --resume after --unpause
       else if (pending.length && opHeldHit.size && !pending.some((n) => !opHeldHit.has(n) && isReady(n)) && holdExpiring([...opHeldHit]) && !cancelled) await nap(wake ?? pollMs); // #5469: a hold with an expiry keeps the batch open until it expires (re-admit or alert), not finalised silently
       else if (pending.length && opHeldHit.size && !pending.some((n) => !opHeldHit.has(n) && isReady(n))) { if (await drainAdds()) continue; break; } // #4592: held by the operator: pending for a --resume
       else if (pending.length && (driftHeld.size || integHeld.size)) { if (await drainAdds()) continue; break; } // held by a drift flag (block_dispatch) or a red integration streak (#4667): pending for a later batch
@@ -1785,6 +2377,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     throw e;
   }
   await Promise.allSettled([...postRuns]); // #5437
+  if (agentRestarts.some((g) => !g.closed) && !halted) { for (const g of agentRestarts) if (!g.closed) closeRestart(g); save(); } // #5859
   if (reg) withdrawExcept(new Set());
   await relabelQueued();
   // #4657: a milestone whose `close_on` state is reached closes here; a failure is a row, never an outcome change.

@@ -5,7 +5,7 @@ import { writeFileSync } from "node:fs";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
 import assert from "node:assert/strict";
-import { releaseFromCli, gateState } from "./release.mjs";
+import { releaseFromCli, withStubs, gateState } from "./release.mjs";
 import { controlFromCli, VERBS } from "./release-control.mjs";
 import { CONTROL_VERBS, collectStatus, renderReleaseStatus, watchStatus, explainIssue, explainPr, renderExplain, parseNextAction, policyFromYaml, registerPlannerRule, PLANNER_RULES } from "./release-status.mjs";
 
@@ -227,5 +227,57 @@ describe("release status / explain (#5554)", () => {
     for (const argv of [["--watch", "--repo", REPO], ["status", "--watch", "--interval", "3", "--repo", REPO]]) { const [code, io] = await run(argv); assert.equal(code, 0); assert.equal(io.printed.length, 1); assert.match(io.printed[0], /status=done/); }
     await assert.rejects(run(["status", "--watch", "--interval", "0", "--repo", REPO]), /positive number/);
     await assert.rejects(releaseFromCli(["status", "--bogus"], { io: fakeIo() }), /unknown option --bogus/);
+  });
+
+  it("#5848: `release --merge --watch` without a valid release.yaml prints the reason and check-config hint, exits 1, shows no older record", async () => {
+    const io = fakeIo({ state: { ...STATE, status: "refused" } });
+    const code = await releaseFromCli(["--merge", "--watch", "--repo", REPO], { io, cwd: managedDir, env: { FORGEDOCK_RELEASE_DIR: join(managedDir, "rel") }, deps: {} });
+    const out = io.printed.join("\n");
+    assert.equal(code, 1);
+    assert.match(out, /refused: no valid \.forge\/release\.yaml.*check-config/);
+    assert.ok(!out.includes(ID), out);
+  });
+  it("#5848: plain `release --merge` without a valid release.yaml also refuses with the check-config hint and exits 1", async () => {
+    const io = fakeIo({ state: { ...STATE, status: "refused" } });
+    const code = await releaseFromCli(["--merge", "--repo", REPO], { io, cwd: managedDir, env: { FORGEDOCK_RELEASE_DIR: join(managedDir, "rel") }, deps: {} });
+    const out = io.printed.join("\n");
+    assert.equal(code, 1);
+    assert.match(out, /check-config/);
+    assert.ok(!out.includes(ID), out);
+  });
+
+  it("#5848: `release --merge --watch` with a valid release.yaml prints only the record this start created", async () => {
+    const io = fakeIo({ state: { ...STATE, status: "refused" }, active: { lease: null, holds: [] } });
+    const policy = "schema: 1\nbranches: {default: main, integration: staging}\nunits:\n  api: {paths: [\"services/api/**\"], criticality: high}\nlanes:\n  release: {pipeline: full, ci_tier: T3, base: integration}\ndeploy:\n  pipelines:\n    full: {workflow: deploy.yml, trigger: push, wait: true}\nci:\n  tiers: {T3: {jobs: [e2e]}}\n";
+    io.git = (a) => { if (String(a[1]).endsWith(".forge/release.yaml")) return policy; throw new Error("git"); };
+    io.now = () => Date.UTC(2026, 10, 20, 1, 2, 3);
+    io.runningLanes = async () => [];
+    const refs = {}, commits = {}, trees = {}; // an in-memory git ledger: what this start writes is what the watch reads
+    const miss = () => Object.assign(new Error("HTTP 404"), { status: 404 });
+    io.api = async (m, p, body) => {
+      const n = Object.keys(commits).length + 1;
+      if (m === "POST" && p.endsWith("/git/trees")) { trees[`t${n}`] = { ...(body.base_tree ? trees[body.base_tree] : {}), ...Object.fromEntries(body.tree.map((f) => [f.path, f.content])) }; return { sha: `t${n}` }; }
+      if (m === "POST" && p.endsWith("/git/commits")) { commits[`c${n}`] = body.tree; return { sha: `c${n}` }; }
+      if (m === "POST" && p.endsWith("/git/refs")) { const br = body.ref.replace("refs/heads/", ""); if (refs[br]) throw Object.assign(new Error("HTTP 422"), { status: 422 }); refs[br] = body.sha; return {}; }
+      if (m === "PATCH") { refs[/git\/refs\/heads\/(.+)$/.exec(p)[1]] = body.sha; return {}; }
+      if (m !== "GET") return {};
+      let r;
+      if ((r = /git\/commits\/(.+)$/.exec(p))) return { tree: { sha: commits[r[1]] } };
+      if ((r = /git\/ref\/heads\/(.+)$/.exec(p))) { if (!refs[r[1]]) throw miss(); return { object: { sha: refs[r[1]] } }; }
+      if ((r = /git\/matching-refs\/heads\/(.*)$/.exec(p))) return Object.keys(refs).filter((b) => b.startsWith(r[1])).map((b) => ({ ref: `refs/heads/${b}` }));
+      if ((r = /contents\/([^?]+)\?ref=(.+)$/.exec(p))) { const f = trees[commits[refs[decodeURIComponent(r[2])]]]?.[r[1]]; if (f === undefined) throw miss(); return { content: Buffer.from(f).toString("base64") }; }
+      throw miss();
+    };
+    const steps = { preflight: async () => ({ stopped: true, why: "stub stop" }) }; // the start ends non-terminal, so the watch begins
+    let polls = 0; io.sleep = async () => { if (++polls > 2) throw new Error("watch-ended"); }; // a stopped release never turns terminal: end the loop after a few polls
+    await assert.rejects(releaseFromCli(["--merge", "--watch", "--repo", REPO], { io, cwd: managedDir, env: { FORGEDOCK_RELEASE_DIR: join(managedDir, "rel2") }, steps: withStubs(steps) }), /watch-ended/);
+    const out = io.printed.join("\n");
+    const created = /release (r[\w-]+): stopped at preflight/.exec(out)?.[1];
+    assert.ok(created && created !== ID, out);
+    assert.ok(Object.keys(refs).includes(`forge-ledger/${created}`), "the start wrote its ledger");
+    const watched = io.printed.filter((l) => l.startsWith("status=") || /status=/.test(l)).map((l) => /\b(r\d{8}-[\w-]+)/.exec(l)?.[1]).filter(Boolean);
+    assert.ok(watched.length && watched.every((w) => w === created), out); // the watch shows the created release only
+    assert.ok(!out.includes(ID), out);
+    assert.doesNotMatch(out, /no valid \.forge\/release\.yaml/);
   });
 });

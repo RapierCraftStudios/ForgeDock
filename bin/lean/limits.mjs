@@ -60,3 +60,20 @@ export function openLimits(file = limitsFile(), { now = () => Date.now() } = {})
     list: () => Object.entries(read()).map(([id, h]) => ({ id, until: h.until, source: h.source ?? null, setAt: h.setAt ?? null })),
   };
 }
+
+/** #5988: a hold expiry alert is posted this long before `expiresAt` (T-30 min). */
+export const HOLD_EXPIRY_WARN_MS = 30 * 60000;
+
+/**
+ * #5988: hold-info entries (`{issue: {expiresAt, ...}}`) whose expiry is within `leadMs` and not yet warned. `warned` is the
+ * caller's marker set (an issue is warned once per expiresAt). Pure; an entry without a valid future expiry is never listed.
+ * @returns {Array<{issue:number, expiresAt:string, inMs:number, key:string}>}
+ */
+export function holdExpiryWarnings(info, { now = Date.now(), leadMs = HOLD_EXPIRY_WARN_MS, warned = new Set() } = {}) {
+  const out = [];
+  for (const [n, e] of Object.entries(info ?? {})) {
+    const at = Date.parse(e?.expiresAt), key = `${n}@${e?.expiresAt}`;
+    if (Number.isFinite(at) && at > now && at - now <= leadMs && !warned.has(key)) out.push({ issue: Number(n), expiresAt: e.expiresAt, inMs: at - now, key });
+  }
+  return out;
+}

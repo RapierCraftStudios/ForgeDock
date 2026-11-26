@@ -234,6 +234,13 @@ export async function fixStep(ctx) {
   if (!r?.pr) return blocked("no review result recorded by the review step");
   const seam = seamOf(ctx);
   const cfg = parseFixConfig(ctx.config?.fix);
+  // #5912: a resume reads the result saved while CI was still running. A CI-only failure at an unmoved head is re-summarised once, so CI
+  // that finished green since posts GATE_PASS instead of the stale "still pending" block.
+  if (r.marker !== "FORGE:GATE_PASS" && !r.blocking?.length && !r.guards?.length && (r.ciPendingOnly || !(r.ciFailing > 0)) && (await seam.headOf(r.pr)) === r.head) {
+    const s = await resummarise(ctx, seam, r);
+    if (s.err) return blocked(s.err);
+    r = s.r;
+  }
   while (r.marker !== "FORGE:GATE_PASS") {
     // Only cancelled duplicate runs are red (#5502): nothing to fix. The summary reruns them once; re-summarise without spending the round.
     if (!r.blocking?.length && r.ciFailing > 0 && r.ciCancelOnly) {
@@ -257,7 +264,7 @@ export async function fixStep(ctx) {
     const rec = collectFindings({ head: r.head, jobs, findings: r.items ?? [], guards: r.guards ?? [] });
     const b = blockingOf(rec);
     if (!b.ci.length && !b.review.length && !b.guards.length && !r.blocking?.length && jobs.pending?.length) return blocked(`required checks of #${r.pr} still running (${jobs.pending.join(", ")}), with no failure to fix yet; re-run the release once CI finishes`);
-    if (!b.ci.length && !b.review.length && !b.guards.length && !r.blocking?.length && !(r.ciFailing > 0)) return blocked(`${r.verdict} with neither a blocking finding nor red CI to fix`);
+    if (!b.ci.length && !b.review.length && !b.guards.length && !r.blocking?.length && !(r.ciFailing > 0)) return blocked(`${r.verdict} (${r.marker}) on #${r.pr} at ${String(r.head).slice(0, 7)} with neither a blocking finding nor red CI to fix: nothing is pending or failing, so the gate summary names the actual blocker; read it and re-run the release`);
     const hashesNow = Object.fromEntries(rec.ci.map((j) => [j.name, j.inputHash ?? inputHash(j.name, r.head)]));
     const brief = compileBrief(rec, { commands: ctx.config?.preflight ? [ctx.config.preflight.command] : [], rerunChecks: jobsToRerun(hashesNow, ctx.state.fixloop?.hashes ?? {}) });
     // Non-blocking and out-of-wave findings become next-plan issues, once per head; they are never part of the fix and never merged after READY (I16).
@@ -403,8 +410,9 @@ export function realSeam({ repo, def, env = process.env, laneStrip = [], cwd = p
     runLane: ({ issue, lane }) => new Promise((resolve) => {
       const dir = mkdtempSync(join(tmpdir(), "release-lane-"));
       const rf = join(dir, "result.json");
+      // #5794: FORGE_RELEASE_FIX_LANE marks the release job's own fix lane so its merge is not held on the release PR's CI
       // #5785: `lane` is the lane name; the child gets the sandbox env (a string env leaves it without PATH or auth)
-      const child = spawnIn(process.execPath, [join(ROOT, "bin", "forgedock.mjs"), "run-issue", String(issue), "--lane", lane, "--result-file", rf], { cwd, env: sandboxEnv, stdio: "ignore" });
+      const child = spawnIn(process.execPath, [join(ROOT, "bin", "forgedock.mjs"), "run-issue", String(issue), "--lane", lane, "--result-file", rf], { cwd, env: { ...sandboxEnv, FORGE_RELEASE_FIX_LANE: "1" }, stdio: "ignore" });
       const timer = setTimeout(() => child.kill("SIGTERM"), LANE_MS);
       const done = () => { clearTimeout(timer); let r = null; try { r = JSON.parse(readFileSync(rf, "utf8")); } catch { /* no result */ } rmSync(dir, { recursive: true, force: true }); resolve(r); };
       child.on("error", done); child.on("exit", done);

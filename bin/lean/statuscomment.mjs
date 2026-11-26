@@ -17,6 +17,8 @@
 
 export const STATUS_MARKER = "FORGE:STATUS";
 export const STATUS_SEP = "<!-- FORGE:STATUS:SEP -->";
+import { createHash } from "node:crypto";
+
 /** Markers folded into the status comment, keyed by the FIRST marker of a post. */
 export const STATUS_SECTIONS = Object.freeze(["FORGE:STARTED", "FORGE:CONTEXT", "FORGE:LANE_BRANCH", "FORGE:LITE", "FORGE:TRAJECTORY", "FORGE:DECISION"]);
 /** Sections that keep their last N entries instead of only the newest. */
@@ -24,6 +26,11 @@ export const APPEND_SECTIONS = Object.freeze({ "FORGE:DECISION": 5 });
 export const ENTRY_SEP = "\n\n---\n\n";
 /** Markers posted once and edited in place (the marker leads the comment body, so anchored readers still match). */
 export const UPSERT_MARKERS = Object.freeze(["FORGE:INVESTIGATION", "FORGE:IMPLEMENTATION", "FORGE:PARKED"]);
+/** #5979: markers re-derived on every pass; a repeat of the same state posts nothing (FACTS and DEPENDENCY are edited in place, NEEDS_HUMAN stays a new comment when it changed). */
+export const IN_PLACE_MARKERS = Object.freeze(["FORGE:FACTS", "FORGE:DEPENDENCY", "FORGE:NEEDS_HUMAN", "FORGE:AMENDMENT-STATE"]);
+/** #5931: the hidden tag that keys an in-place comment to its issue's contract hash: one comment per (marker, hash), edited in place while the hash holds. */
+export const contractKey = (hash) => (hash ? `<!-- forge-contract hash=${String(hash).replace(/[^\w]/g, "")} -->` : "");
+export const contractKeyOf = (body) => /<!-- forge-contract hash=(\w+) -->/.exec(String(body ?? ""))?.[1] ?? null;
 
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const markLine = (m) => `<!-- ${m} -->`;
@@ -149,20 +156,59 @@ export async function postUpsert({ gh, repo, issue, markers, body, comments = nu
   return newUrl(gh, repo, issue, full);
 }
 
+/** #5986: markers posted once per (kind, content hash): an identical payload updates one comment and bumps its counter. */
+export const KEYED_MARKERS = Object.freeze(["FORGE:AMENDMENT", "FORGE:NEEDS_HUMAN", "FORGE:FACTS"]);
+export const isKeyedPost = (marker) => KEYED_MARKERS.includes(asArr(marker)[0]);
+/** Hard cap of engine comments per issue: beyond it a post edits an existing comment in place and never adds one. */
+export const MAX_ENGINE_COMMENTS = 12;
+export const engineCommentCount = (comments, trusted) => (comments ?? []).filter((c) => /^\s*<!--\s*FORGE:/.test(String(c?.body ?? "")) && trusted(c)).length;
+const contentKey = (body) => createHash("sha256").update(String(body)).digest("hex").slice(0, 12);
+
+/**
+ * Post `body` under `marker` keyed by (marker, content hash): a trusted comment with the same hash is edited with `n` bumped, a new
+ * payload is a new comment, and at `limit` engine comments the newest comment of that kind is edited in place (none: nothing is posted, null).
+ * The comments are always read fresh. Returns the comment url.
+ */
+export async function postKeyed({ gh, repo, issue, marker, body, cap = (s) => s, trusted, limit = MAX_ENGINE_COMMENTS, comments = null }) {
+  const t = trusted ?? (await import("./prefilter.mjs")).isTrustedIssueComment;
+  const list = comments ?? await viewComments(gh, repo, issue), key = contentKey(String(body).replace(/\n\n_[^\n]*_\s*$/, "")); // the trailing usage line varies per run
+  const mine = list.filter((c) => new RegExp(`^\\s*<!--\\s*${esc(marker)}(?![A-Za-z0-9_:])`).test(String(c?.body ?? "")) && t(c) && commentId(c));
+  const keyLine = (c) => /<!-- forge-key hash=(\w+) n=(\d+) -->\s*$/.exec(String(c.body)); // trailing: the leading marker line stays exactly `<!-- MARKER -->` for every reader
+  const same = [...mine].reverse().find((c) => keyLine(c)?.[1] === key);
+  const render = (n) => cap(`<!-- ${marker} -->\n${body}${n > 1 ? `\n\n_Identical update seen ${n} times._` : ""}\n<!-- forge-key hash=${key} n=${n} -->`);
+  const edit = async (c, n) => { try { await patchWith(gh, repo)(commentId(c), render(n)); return c.url ?? null; } catch { return undefined; } };
+  if (same) {
+    const n = Number(keyLine(same)[2]) + 1;
+    const u = await edit(same, n); if (u !== undefined) return u;
+  }
+  if (engineCommentCount(list, t) >= limit) {
+    const last = mine[mine.length - 1];
+    if (!last) return null;
+    const u = await edit(last, 1); return u === undefined ? null : u;
+  }
+  return newUrl(gh, repo, issue, render(1));
+}
+
 /** #5592: labels that mean "parked / waiting for a person or the remediation queue"; a live or finished issue must not keep them. */
 export const isPipelineLabel = (name) => { const n = String(name ?? ""); return n === "needs-human" || n.startsWith("needs-human:") || n.startsWith("parked:") || n === "remediation-queue"; };
 /** The pipeline labels among `labels` (names, or `{name}` objects). */
 export const pipelineLabels = (labels) => (labels ?? []).map((l) => (typeof l === "string" ? l : l?.name)).filter(isPipelineLabel);
 
 /**
- * Remove the pipeline labels from an issue. `labels` is what the caller already read (names or `{name}`); null re-reads them.
- * Best effort, returns the removed names ([] when none or on failure).
+ * Remove the pipeline labels from an issue, one call per label so one failing removal leaves the others removed (#5759).
+ * `labels` is what the caller already read (names or `{name}`); null re-reads them. Returns the removed names; `onFail(names, err)`
+ * receives the labels whose removal (or the re-read, names []) failed.
  */
-export async function clearPipelineLabels({ gh, repo, issue, labels = null }) {
+export async function clearPipelineLabels({ gh, repo, issue, labels = null, onFail = null }) {
+  const removed = [], failed = [];
+  let names;
   try {
-    const names = pipelineLabels(labels ?? JSON.parse(String(await gh(["issue", "view", String(issue), "-R", repo, "--json", "labels"])))?.labels);
-    if (!names.length) return [];
-    await gh(["issue", "edit", String(issue), "-R", repo, "--remove-label", names.join(",")]);
-    return names;
-  } catch { return []; }
+    names = pipelineLabels(labels ?? JSON.parse(String(await gh(["issue", "view", String(issue), "-R", repo, "--json", "labels"])))?.labels);
+  } catch (e) { try { onFail?.([], e); } catch { /* reporting is best effort */ } return []; }
+  let last = null;
+  for (const name of names) {
+    try { await gh(["issue", "edit", String(issue), "-R", repo, "--remove-label", name]); removed.push(name); } catch (e) { failed.push(name); last = e; }
+  }
+  if (failed.length) { try { onFail?.(failed, last); } catch { /* reporting is best effort */ } }
+  return removed;
 }

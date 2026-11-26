@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseRecurrenceConfig, detectRecurrence, recursLinks, pathsOverlap, recurrenceFacts, designLaneNote, designContractFailures } from "./recurrence.mjs";
+import { parseRecurrenceConfig, detectRecurrence, recursLinks, pathsOverlap, recurrenceFacts, designLaneNote, designContractFailures, isReleaseHead } from "./recurrence.mjs";
 
 const row = (number, o = {}) => ({ number, kind: "PR", status: "merged", title: `fix leak ${number}`, matched: ["reservation", "leak"], ...o });
 const NAMED = ["src/billing/reserve.js"];
@@ -76,6 +76,45 @@ describe("recurrence detection (#5751)", () => {
   });
 });
 
+describe("recurrence evidence excludes release PRs and later merges (#6016)", () => {
+  const gh = (meta) => async (a) => {
+    const j = a.join(" ");
+    if (j.includes("search/issues")) return [10, 11, 12].map((n) => JSON.stringify({ number: n, title: `pr ${n}`, pr: true, merged: true })).join("\n");
+    const f = /pulls\/(\d+)\/files/.exec(j); if (f) return "src/billing/reserve.js\n";
+    const m = /pulls\/(\d+)$/.exec(a[1] ?? ""); if (m) return JSON.stringify(meta[m[1]]);
+    throw new Error("unexpected " + j);
+  };
+  it("a release PR and a PR merged after the issue was filed are not earlier fixes", async () => {
+    const meta = { 10: { head: "release/20261123-1", merged: "2026-11-01T00:00:00Z" }, 11: { head: "feat/x", merged: "2026-11-20T00:00:00Z" }, 12: { head: "feat/y", merged: "2026-11-02T00:00:00Z" } };
+    const d = await recurrenceFacts({ io: { gh: gh(meta) }, repo: "o/r", issue: 7, title: "reservation leak", body: "See src/billing/reserve.js", namedPaths: NAMED, threshold: 2, createdAt: "2026-11-10T00:00:00Z" });
+    assert.deepEqual(d.evidence.map((e) => e.number), [12]);
+    assert.equal(d.recurs, false);
+  });
+  it("a PR merged after createdAt that closes this issue is still evidence (reopened issue)", async () => {
+    const meta = {
+      10: { head: "feat/x", merged: "2026-11-20T00:00:00Z", body: "Closes #7" },
+      11: { head: "feat/y", merged: "2026-11-20T00:00:00Z", body: "Closes #77" },
+      12: { head: "feat/z", merged: "2026-11-20T00:00:00Z", body: "unrelated sibling" },
+    };
+    const d = await recurrenceFacts({ io: { gh: gh(meta) }, repo: "o/r", issue: 7, title: "reservation leak", body: "See src/billing/reserve.js", namedPaths: NAMED, threshold: 2, createdAt: "2026-11-10T00:00:00Z" });
+    assert.deepEqual(d.evidence.map((e) => e.number), [10]);
+  });
+  it("a release-head PR that also closes the issue stays excluded", async () => {
+    const meta = {
+      10: { head: "release/20261123-1", merged: "2026-11-20T00:00:00Z", body: "Fixes #7" },
+      11: { head: "feat/y", merged: "2026-11-02T00:00:00Z", body: "" },
+      12: { head: "feat/z", merged: "2026-11-02T00:00:00Z", body: "" },
+    };
+    const d = await recurrenceFacts({ io: { gh: gh(meta) }, repo: "o/r", issue: 7, title: "reservation leak", body: "See src/billing/reserve.js", namedPaths: NAMED, threshold: 2, createdAt: "2026-11-10T00:00:00Z" });
+    assert.deepEqual(d.evidence.map((e) => e.number).sort(), [11, 12]);
+  });
+  it("isReleaseHead matches only release/ heads", () => {
+    assert.equal(isReleaseHead("release/1"), true);
+    assert.equal(isReleaseHead("feat/release/1"), false);
+    assert.equal(isReleaseHead(null), false);
+  });
+});
+
 describe("design lane (#5751)", () => {
   const det = detectRecurrence({ rows: [row(10), row(11)], mergedPrFiles: { 10: NAMED, 11: NAMED }, namedPaths: NAMED });
   it("the plan note names the earlier fixes and asks why they failed, delete or replace, a measurable outcome and allows a split", () => {
@@ -95,5 +134,39 @@ describe("design lane (#5751)", () => {
     assert.match(designContractFailures({ design: { why_failed: "", disposition: "replace", outcome: { metric: "m", target: 0 } } }, det)[0].detail, /why_failed is empty/);
     assert.deepEqual(designContractFailures({ design: { why_failed: "w", disposition: "delete", outcome: { metric: "m", target: 0 } } }, det), []);
     assert.deepEqual(designContractFailures({}, { recurs: false }), [], "an ordinary lane needs no design block");
+  });
+});
+
+import { designDemanded } from "./recurrence.mjs";
+describe("symptom match and one-time design demand (#5979)", () => {
+  const files = { 10: NAMED, 11: NAMED };
+  it("path-only overlap without a symptom match does not recur", () => {
+    const rows = [row(10, { matched: ["billing"], title: "tidy billing" }), row(11, { matched: ["reserve"], title: "rename" })];
+    const d = detectRecurrence({ rows, mergedPrFiles: files, namedPaths: NAMED, body: "the page is slow" });
+    assert.equal(d.recurs, false);
+    assert.equal(d.count, 0);
+  });
+  it("a code-shaped symptom plus path still recurs", () => {
+    const rows = [row(10, { matched: ["reservation.leak"] }), row(11, { matched: ["reservation.leak"] })];
+    assert.equal(detectRecurrence({ rows, mergedPrFiles: files, namedPaths: NAMED }).recurs, true);
+  });
+  it("a backticked signature of the issue in the row title is a symptom match", () => {
+    const rows = [row(10, { matched: ["billing"], title: "fix `ERR_RESERVE` crash" }), row(11, { matched: ["billing"], title: "again ERR_RESERVE" })];
+    assert.equal(detectRecurrence({ rows, mergedPrFiles: files, namedPaths: NAMED, body: "throws `ERR_RESERVE`" }).recurs, true);
+  });
+  it("a Recurs link is unchanged", () => {
+    assert.equal(detectRecurrence({ rows: [], mergedPrFiles: { 5: NAMED, 6: NAMED }, body: "Recurs #5, #6", namedPaths: NAMED }).recurs, true);
+  });
+  it("a design block already demanded on an earlier run is not demanded again", () => {
+    const det = { recurs: true, count: 2, demanded: true };
+    const f = designContractFailures({}, det);
+    assert.equal(f.length, 1);
+    assert.equal(f[0].kind, "design_missing_repeated");
+    assert.equal(designContractFailures({}, { ...det, demanded: false })[0].kind, "design_missing");
+    assert.deepEqual(designContractFailures({ design: { why_failed: "w", disposition: "replace", outcome: { metric: "m", target: "t" } } }, det), []);
+  });
+  it("designDemanded reads an earlier NEEDS_HUMAN naming the design lane", () => {
+    assert.equal(designDemanded([{ body: "<!-- FORGE:NEEDS_HUMAN -->\nrecurring issue (2 earlier fixes) routed to a design lane: no design block" }]), true);
+    assert.equal(designDemanded([{ body: "<!-- FORGE:NEEDS_HUMAN -->\nother" }]), false);
   });
 });
