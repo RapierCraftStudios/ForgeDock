@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { makeGapAuditor, parseGapConfig, redact, auditGap } from "./lane-audit-gap.mjs";
+import { makeGapAuditor, parseGapConfig, redactGap, auditGap } from "./lane-audit-gap.mjs";
 import { runLaneAudit } from "./lane-audit.mjs";
 
 const ON = parseGapConfig({ orchestrate: { lane_audit: { file_gaps: "true" } } });
@@ -45,8 +45,8 @@ describe("#6078 gap audit", () => {
     const g = fakeGh();
     await run(g, 5, { ...C, action: "see acme/secret-app at /home/bob/work/secret-app/x.mjs" });
     assert.doesNotMatch(g.issues[0].body, /acme|secret-app|\/home/);
-    assert.equal(redact("acme/secret-app /tmp/x/y", { repo: "acme/secret-app" }), "<repo> <path>");
-    assert.equal(redact("version 1.2.0 ok", { repo: "a/b" }), "version 1.2.0 ok");
+    assert.equal(redactGap("acme/secret-app /tmp/x/y", { repo: "acme/secret-app" }), "<repo> <path>");
+    assert.equal(redactGap("version 1.2.0 ok", { repo: "a/b" }), "version 1.2.0 ok");
   });
   it("returns null without throwing when gh fails", async () => {
     assert.equal(await run({ gh: async () => { throw new Error("boom"); } }, 1), null);

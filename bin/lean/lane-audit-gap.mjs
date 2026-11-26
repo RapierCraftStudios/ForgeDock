@@ -19,7 +19,7 @@ export function parseGapConfig(yaml) {
 const esc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** Strip what must not reach the engine repo (#6020): the lane's own repo, any owner/name, absolute paths. */
-export function redact(text, { repo = "" } = {}) {
+export function redactGap(text, { repo = "" } = {}) {
   let t = String(text ?? "");
   const [, name] = String(repo).split("/");
   if (repo) t = t.replace(new RegExp(esc(repo), "gi"), "<repo>");
@@ -30,7 +30,7 @@ export function redact(text, { repo = "" } = {}) {
 }
 
 const lanesOf = (body) => [...new Set([...(/Affected lanes:\s*([^\n]*)/.exec(body)?.[1] ?? "").matchAll(/#(\d+)/g)].map((m) => Number(m[1])))];
-const render = ({ sig, c, count, lanes, version, repo }) => `<!-- forge-gap: ${sig} -->\n**Engine gap** \`${sig}\`\n\n- Class: ${redact(c.class, { repo })}\n- Owner: ${redact(c.owner ?? "-", { repo })}\n- Action: ${redact(c.action ?? "-", { repo })}\n- Engine version: ${redact(version ?? "-", { repo })}\n- Occurrences: ${count}\n- Affected lanes: ${lanes.map((n) => `#${n}`).join(", ")}\n`;
+const render = ({ sig, c, count, lanes, version, repo }) => `<!-- forge-gap: ${sig} -->\n**Engine gap** \`${sig}\`\n\n- Class: ${redactGap(c.class, { repo })}\n- Owner: ${redactGap(c.owner ?? "-", { repo })}\n- Action: ${redactGap(c.action ?? "-", { repo })}\n- Engine version: ${redactGap(version ?? "-", { repo })}\n- Occurrences: ${count}\n- Affected lanes: ${lanes.map((n) => `#${n}`).join(", ")}\n`;
 
 /**
  * Build the gap seam for runLaneAudit: async (bundle, classified) -> {issue, count, action} | null. Never throws.
@@ -53,7 +53,7 @@ export function makeGapAuditor({ gh, cfg = DEFAULT_GAP, repo = "" } = {}) {
         await gh(["issue", "edit", String(found.number), "--repo", cfg.repo, "--body", render({ sig, c, count: lanes.length, lanes, version, repo })]);
         return { issue: found.number, count: lanes.length, action: "update" };
       }
-      const out = String(await gh(["issue", "create", "--repo", cfg.repo, "--label", cfg.label, "--title", `engine-gap: ${redact(sig, { repo })} (${c.class})`, "--body", render({ sig, c, count: 1, lanes: [lane], version, repo })]));
+      const out = String(await gh(["issue", "create", "--repo", cfg.repo, "--label", cfg.label, "--title", `engine-gap: ${redactGap(sig, { repo })} (${c.class})`, "--body", render({ sig, c, count: 1, lanes: [lane], version, repo })]));
       const n = Number(out.match(/(\d+)\s*$/)?.[1]);
       return Number.isSafeInteger(n) ? { issue: n, count: 1, action: "create" } : null;
     } catch { return null; }
