@@ -3791,6 +3791,11 @@ Filing: `file_issues` is **opt-in, default off** (only an explicit `file_issues:
 - The dispatcher writes the marker (`suspendLane`, `suspendMarker` in `bin/engine-cli.mjs`): when a kept sandbox is recorded (halted, `sandbox.unreachable`, `sandbox.auth`; `providerLanes` `suspendKept`), when a kept issue is held (`--hold`) or its batch paused (`--pause`); cleared on release, unpause and adopt (`resumeKept`). Held/paused batches still admit nothing, including deferred issues whose retry timer fires (`isReady`, launch re-read); `--hold <id> pending` holds every pending and backing-off issue.
 - Kept sandboxes are recorded in `state.kept` (issue, since, phase) and listed by `orchestrate --status` and `pool status` (table section and `kept_sandboxes` in `--json`) via `keptSandboxes` (`bin/lean/batch.mjs`).
 
+## Release-branch lane checks (#6049)
+
+- The pre-PR CI precheck (`bin/lean/ci-precheck.mjs`) also reads the required checks of the release branch (the first default branch, skipped when it equals the lane base) and passes it to `scripts/ci-local` as `--release-branch`. The github-actions adapter then counts a workflow with `pull_request` to, or `push` on, that branch as a gate, so release-only formatter and suite-wiring jobs are selected with the why `required check "X" on release branch`. Without a release branch the plan is unchanged.
+- `CI_PRECHECK_PARITY` lists the required release checks the lane cannot run (no job maps, or the job is heavy, excluded or unrunnable). The first round files one issue per gap, deduped by the hidden marker `FORGE:PARITY_GAP <context>` (`reportParityGaps` in `bin/lean/basered.mjs`). It never blocks the PR.
+
 ## Lane audit at unhappy terminals (#6076)
 
 - `finish()` in `bin/lean/lean.mjs` calls `runLaneAudit` (`bin/lean/lane-audit.mjs`) once at needs-human (including PARKED), engine-error and a final budget/ci-pending terminal, after the terminal post. The call is wrapped in try/catch and `runLaneAudit` never throws, so an audit cannot change the terminal reason or code.
