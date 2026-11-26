@@ -65,10 +65,12 @@ export const OUTCOME_CODES = Object.freeze({
   BASE_RED: "base.red", // forge#5239: a verify.invariants guard fails on the base too; the lane is deferred behind the introducing issue, never needs-human
   SANDBOX_CAPACITY: "sandbox.capacity", // forge#4254: the sandbox provider had no capacity; deferred with backoff
   SANDBOX_TRANSIENT: "sandbox.transient", // forge#5095: the sandbox provider answered a 5xx on launch (router/agent infrastructure) or the launch hit a status-less transport error (forge#5656: fetch failed, ECONNRESET, ETIMEDOUT); deferred with backoff, capped by max_deferrals, never needs-human
+  SANDBOX_DISK_PRESSURE: "sandbox.disk_pressure", // forge#5891: the agent stopped the lane to save its host drive from filling; the worktree and volume are kept, the requeued lane adopts them
   SANDBOX_AUTH: "sandbox.auth", // forge#4685: the sandbox provider refused or lacked the credential (HTTP 401/403, no token); deferred, never needs-human
   SANDBOX_UNREACHABLE: "sandbox.unreachable", // forge#4672: the sandbox provider stayed unreachable past execution.unreachable_window_min; deferred, the sandbox is kept for adopt
   SANDBOX_LOST: "sandbox.lost", // forge#5859: 3+ sandboxes on one pool agent ended without a result within 60s (agent/VM restart); deferred and requeued once, never counted by the breaker or the engine-error relaunch
   SANDBOX_REPO_MISSING: "sandbox.repo_missing", // forge#5890: the lane repo cwd is missing, not a git repo, or git could not spawn there (ENOENT/EACCES); deferred and requeued, never breaker-counted or relaunched as an engine-error
+  NET_TRANSIENT: "net.transient", // forge#5947: a git clone/fetch hit a transport failure (curl 56/28, early EOF, invalid index-pack output, unexpected disconnect); deferred with backoff, never breaker-counted or relaunched as an engine-error
   LEASE_HELD: "lease.held",
   DEPENDENCY_OPEN: "dependency.open",
   DESIGN_SPEC_REQUIRED: "design.spec_required", // forge#5330: a page under forge.yaml design.routes has no FORGE:DESIGN_SPEC and design.gate is blocking; needs-human until /design approves a spec
@@ -99,6 +101,7 @@ export const OUTCOME_CODES = Object.freeze({
   CONFORMANCE_UNIMPLEMENTED: "conformance.unimplemented",
   CONFORMANCE_E2E_UNVERIFIED: "conformance.e2e_unverified",
   CONFORMANCE_SCOPE_CREEP: "conformance.scope_creep",
+  FAILURE_REPEATED: "failure.repeated", // #5979: the same failure twice; parked, never recovered (kept out of RECOVERABLE_CODES)
   CONFORMANCE_UNTRACKED_DEFERRAL: "conformance.untracked_deferral",
   CONFORMANCE_UNJUSTIFIED_DEFERRAL: "conformance.unjustified_deferral",
   CONFORMANCE_PRESERVE_VIOLATED: "conformance.preserve_violated",

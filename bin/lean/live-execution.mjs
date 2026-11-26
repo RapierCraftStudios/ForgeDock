@@ -87,6 +87,31 @@ export function formatOverride(o) {
   return [s.maxRemote !== undefined ? `max_remote ${s.maxRemote}` : null, s.mode ? `placement ${s.mode}` : null].filter(Boolean).join(", ") || "no change";
 }
 
+/** #5933: what `--set-max-remote <id> 0` does on a remote batch; null unless the patch sets 0 without a placement change. */
+export function drainNote(patch) {
+  const s = sanitizeOverride(patch) ?? {};
+  return s.maxRemote === 0 && !s.mode ? "remote starts paused; nothing runs locally" : null;
+}
+
+/**
+ * #5735: the `--set-max-remote` note from the pool router's lane view (`httpTransport.agentLanes()`: {agents: [{name, used,
+ * ceiling|null}], total}): the remote lane total across batches, per-agent used/ceiling, and a leading warning when every
+ * listed agent has a ceiling and `n` exceeds their sum. null lanes -> null. Never throws.
+ */
+export function remoteLaneNote(n, lanes) {
+  try {
+    if (!lanes || typeof lanes !== "object") return null;
+    const list = Array.isArray(lanes.agents) ? lanes.agents.filter((a) => a && typeof a === "object") : [];
+    const ceil = (a) => (Number.isInteger(a.ceiling) && a.ceiling >= 0 ? a.ceiling : null);
+    const total = Number.isInteger(lanes.total) ? lanes.total : list.reduce((s, a) => s + (Number.isInteger(a.used) ? a.used : 0), 0);
+    const per = list.map((a) => `${a.name}: lanes ${Number.isInteger(a.used) ? a.used : 0}/${ceil(a) ?? "-"}`);
+    const lines = [`remote lanes across batches: ${total}${per.length ? ` (${per.join(", ")})` : ""}`];
+    const sum = list.length && list.every((a) => ceil(a) !== null) ? list.reduce((s, a) => s + ceil(a), 0) : null;
+    if (sum !== null && Number.isInteger(n) && n > sum) lines.unshift(`warning: max_remote ${n} exceeds the pool host lane ceiling ${sum}; lanes beyond it are deferred`);
+    return lines.join(String.fromCharCode(10));
+  } catch { return null; }
+}
+
 /**
  * Hybrid validation weight (#4256) that is computed only when first needed: `initial` (already computed) or `compute()`
  * started on the first `get()`; until it resolves (or when it fails) a light weight is used.

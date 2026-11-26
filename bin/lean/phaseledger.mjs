@@ -93,6 +93,12 @@ export const laneSum = (phases) => Object.entries(phases ?? {}).reduce((s, [id, 
 /** True when the lane phases sum to within `tol` of `wallMs`. */
 export const withinWall = (phases, wallMs, tol = 0.05) => isNum(wallMs) && wallMs >= 0 && Math.abs(laneSum(phases) - wallMs) <= Math.max(1, wallMs * tol);
 
+/** Fixed overhead = lane wall time not spent in a model call (never negative); model_share = model time / wall (0 when wall <= 0). */
+export function overheadStats(_phases, wallMs, modelMs) {
+  const wall = isNum(wallMs) ? wallMs : 0, model = isNum(modelMs) ? modelMs : 0;
+  return { fixed_overhead_ms: Math.max(0, wall - model), model_share: wall > 0 ? Math.round((model / wall) * 1000) / 1000 : 0 };
+}
+
 export function flattenPhases(phases) {
   const out = {};
   for (const [id, v] of Object.entries(phases ?? {})) {

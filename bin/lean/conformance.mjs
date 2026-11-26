@@ -50,6 +50,7 @@ import { globToRegex } from "../../scripts/ci-local/lib.mjs";
 import { contractBriefProblems } from "./pagegate.mjs"; // #5428
 import { counterGrowth } from "./hotarea.mjs"; // #5751
 import { designContractFailures } from "./recurrence.mjs"; // #5751
+import { AMEND_KINDS } from "./amendment-schema.mjs"; // #5979
 const C = OUTCOME_CODES;
 
 /** #4789: folds what a builder retyping a quote changes: unicode punctuation, markdown links/markup, escapes, invisible chars. */
@@ -662,7 +663,6 @@ export function validateContract(c, issueText, { repro = false, pages = null, te
 /** forge#4519: a shell pattern as in scripts/hotspots.sh `case` (`*` crosses `/`, `?` one character), anchored. */
 const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
 
-const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "supersedes", "decision", "substitute-validate", "out-of-band"];
 const UNRELATED_CI_KIND = "unrelated-ci-failure";
 const GUARD_ID_RE = /^#?\d+$/;
 const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer", deferred: "defer", deferral: "defer", "scope-deferral": "defer", "verification-substitution": "substitute-validate", "out-of-band-verification": "out-of-band" };
@@ -709,15 +709,19 @@ function splitRequirementRefs(ref) {
 function amendmentProblem(a, tag) {
   const kind = a?.kind;
   const need = kind === "add-deliverable" ? "needs a path" : kind === "add-requirement" ? "needs requirement {id, quote}"
-    : kind === "supersedes" ? "needs guard: \"#N\" (the guarded issue) or mechanism: \"<name>\" (#5752: retires the guards whose tests the lane deletes)" : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)"
+    : kind === "supersedes" ? "needs guard: \"#N\" (the guarded issue) or mechanism: \"<name>\" (#5752: retires the guards whose tests the lane deletes); a validate row id such as G2 is not a guard: use substitute-validate {validate, command, why}" : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)"
       : kind === "substitute-validate" ? "needs validate: \"V#\" and command" : kind === "out-of-band" ? "needs requirement: \"R#\" and evidence (the job or workflow that measures it)"
       : kind === "decision" ? "needs decision {choice, anchors: [paths or globs], symbols?, supersedes?: decision id}" : null;
   const why = need ? `amendment kind '${kind}' ${need}` : `unknown kind '${kind ?? ""}'; valid kinds are ${AMEND_KINDS.join(", ")}`;
   return `unknown or incomplete amendment: ${why}: ${tag}`;
 }
 
+/** #5979: a supersedes whose guard is a frozen validate-row id (G2, V1), not a #N guard issue. */
+const isValidateRowGuard = (a, ids) => !blank(a.guard) && !GUARD_ID_RE.test(String(a.guard).trim()) && (ids ?? []).includes(String(a.guard).trim());
+const validateRowProblem = (id, tag) => `supersedes guard '${String(id).trim()}' is a validate row of the contract, not a guard issue; use {"kind":"substitute-validate","validate":"${String(id).trim()}","command":"<runnable equivalent>","why":"..."}: ${tag}`;
+
 /** #5089: shape-only check of the builder's amendments (unknown kind, missing path or requirement), run before the gate so one in-lane correction can fix them. Returns the rejection strings; [] when valid. */
-export function amendmentKindProblems(amendments) {
+export function amendmentKindProblems(amendments, validateIds = []) {
   const out = [];
   for (const raw of Array.isArray(amendments) ? amendments : []) {
     const a = normalizeAmendment(raw);
@@ -726,7 +730,9 @@ export function amendmentKindProblems(amendments) {
     const known = AMEND_KINDS.includes(a?.kind);
     const missing = a?.kind === "add-deliverable" ? blank(a.path)
       : TRACKED.includes(a?.kind) || a?.kind === "amend-requirement" ? blank(a.requirement) : false;
+    const validateRow = known && a.kind === "supersedes" && isValidateRowGuard(a, validateIds);
     if (!known || missing) out.push(amendmentProblem(a, tag));
+    else if (validateRow) out.push(validateRowProblem(a.guard, tag));
   }
   return out;
 }
@@ -822,6 +828,8 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       c.mechanisms = [...(c.mechanisms ?? []).filter((m) => m.mechanism !== mechanism), { mechanism, why: String(a.why).trim() }];
       applied.push({ kind: a.kind, target: `mechanism ${mechanism}`, why: String(a.why).trim() });
       continue;
+    } else if (a.kind === "supersedes" && isValidateRowGuard(a, [...(c.validate ?? []), ...(c.regression ?? [])].map((v) => v?.id))) {
+      problems.push(validateRowProblem(a.guard, tag)); continue;
     } else if (a.kind === "supersedes" && GUARD_ID_RE.test(String(a.guard ?? "").trim())) {
       // #4693: retires one guard's guard_broken for this lane; the reviewer judges it, the engine tells the guarded issue after merge
       const guard = `#${String(a.guard).trim().replace(/^#/, "")}`;
@@ -1165,6 +1173,8 @@ export function interfaceDecisionFailures(contract, result, changedFiles) {
   return out;
 }
 
+const tagText = (q) => String(q ?? "").replace(/`[^`\n]*`/g, (span, at, all) => (/[^\s.,;:)]/.test(all.slice(at + span.length).replace(/`[^`\n]*\[type:[^`\n]*`/g, "")) ? "" : span));
+const wantsE2e = (r) => /\[type:(?:e2e|manual)\]/i.test(tagText(r?.quote));
 /**
  * Deterministic checks before any reviewer tokens are spent: unauthorized files, failed or missing validation,
  * requirements not implemented, deferrals without a tracking issue, and unexempted hotspot growth. Returns {ok, failures[], superseded[]}; each failure carries a
@@ -1185,6 +1195,10 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
     if (r.disposition === "post-deploy" && !(r.check && checkIds.has(r.check))) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "check_unknown", detail: `${r.id} post-deploy check ${r.check ? `'${r.check}'` : "id"} is neither on the default branch nor added by this PR (.forge/post-deploy-checks.json)` });
+  }
+  // #5754: a deliver [type:e2e]/[type:manual] row whose observable exists only in production (live stack, deploy, prod window) cannot be produced by the placement: fail fast with a typed code instead of spending builder resumes
+  for (const r of contract.requirements ?? []) {
+    if (r.disposition === "deliver" && wantsE2e(r) && !isOutOfBand(r) && r.verify !== "in_lane" && prodOnlyE2e(r.quote)) failures.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_placement", detail: `${r.id} is a [type:e2e]/[type:manual] criterion observable only in production or on the live stack, which this lane cannot produce; mark ${r.id} post-deploy so it is transferred to the epic's acceptance instead of spending builder resumes (#5754)` });
   }
   // #4769: a default-off rollout entry added by the diff needs an activation row
   if (newOffKeys?.length) for (const f of activationFailures(contract, newOffKeys)) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, ...f });
@@ -1544,8 +1558,6 @@ export function checkCompleteness(rv, { contract, changedFiles, issueText, pathE
 
 /** #4726, #5339: a requirement quote that carries a `[type:e2e]` or `[type:manual]` criterion. */
 /** #5547: a tag inside a mid-sentence code span (`` `[type:e2e]` row whose ... ``) is a mention of the tag, not the tag; a trailing backticked tag still counts. */
-const tagText = (q) => String(q ?? "").replace(/`[^`\n]*`/g, (span, at, all) => (/[^\s.,;:)]/.test(all.slice(at + span.length).replace(/`[^`\n]*\[type:[^`\n]*`/g, "")) ? "" : span));
-const wantsE2e = (r) => /\[type:(?:e2e|manual)\]/i.test(tagText(r?.quote));
 /** #5339: failure kinds enforced without an `engine.conformance_kinds` entry (the entry still overrides). */
 // #5449: test_missing/test_weak are only generated for bug lanes (testadequacy.mjs), so enforcing the kinds is bug-only.
 const DEFAULT_ENFORCED_KINDS = ["e2e_row", "test_missing", "test_weak"];
@@ -1561,12 +1573,14 @@ export function isE2eCommand(command, e2e = null) {
   if (typeof e2e?.isSpec === "function" && cmd.split(/\s+/).some((t) => t && e2e.isSpec(t.replace(/^["']+|["']+$/g, "")))) return true;
   return E2E_CMD_RE.test(cmd);
 }
+/** #5754: a criterion verified against the running live stack/service/environment/cluster: observable only in production, so post-deploy at freeze instead of builder resumes. Checked after the local-runnable exclusion. */
+const LIVE_STACK_RE = /\b(?:against|on|in)\s+(?:the\s+)?live\s+(?:stack|service|environment|cluster)\b|\breal traffic\s+(?:against|on)\s+(?:the\s+)?live\b/i;
 /** #5468: a `[type:e2e]`/`[type:manual]` quote whose observable only exists in production (live URL, deploy, prod probe); local stack, browser and sandbox wording is runnable pre-merge. */
 export function prodOnlyE2e(quote) {
   const q = String(quote ?? "");
   if (LIVE_INFRA_RE.test(q)) return true; // #5547
   if (/\b(?:localhost|127\.0\.0\.1|local stack|playwright|browser|sandbox|staging)\b/i.test(q)) return false;
-  return /https?:\/\//i.test(q) || /\b(?:after (?:the )?deploy|production|prod probe|live (?:domain|site)|prod)\b/i.test(q) || PROD_WINDOW_RE.test(q);
+  return /https?:\/\//i.test(q) || /\b(?:after (?:the )?deploy|production|prod probe|live (?:domain|site)|prod)\b/i.test(q) || PROD_WINDOW_RE.test(q) || LIVE_STACK_RE.test(q);
 }
 /** #5547: criteria whose run needs a live benchmark, a paid run, remote infra or host-level load: observable only outside the lane, by shape not by repo name. */
 const LIVE_INFRA_RE = /\b(?:live|paid|remote)\s+(?:benchmarks?|runs?|infra(?:structure)?|hosts?)\b|\bbench(?:mark)?[\w.-]*\.(?:mjs|js|py|sh)\b|\bre-?run\b[^.]{0,60}\bbench(?:mark)?\b|\b(?:sandbox pool|(?:remote|rented|cloud|gpu) (?:infra|hosts?|runners?|clusters?|boxe?s?|machines?|gpus?|pool)|on (?:a|the) (?:remote|rented|cloud|gpu) \w+)\b|\bsynthetic load\b|\b\d+\s*[×x]\s*(?:nproc|cores?|cpus?)\b|\bCPU hogs?\b|\bhost[- ]level (?:load|run)\b|\b[≤<]=?\s*[\d.]+\s*[×x]\s*(?:the\s+)?(?:control\s+)?cost\b/i;
@@ -2021,6 +2035,30 @@ export function normalizeKindModes(raw) {
  * @param {{code?: string}[]} failures
  * @param {{shadow?: boolean, kinds?: Record<string,string>|null, allow?: string[]}} [o]
  */
+/**
+ * Advisory gates (2026-11-26 unclog): rules about the shape of the work (file scope, registries, docs placement,
+ * recurrence design, amendment syntax, growth counters) are reported, never blocking. Measured on 102 open FD/AlterLab
+ * issues: these rows caused ~30% of needs-human parks, repeated identically across reruns, and forced every lane to edit
+ * the same shared files (45 of 67 conflicted base-syncs). A lane still blocks on what shows the change is wrong: failing
+ * validate/CI/guard/repro runs, regressions and unimplemented requirements.
+ */
+export const ADVISORY_CODES = Object.freeze([OUTCOME_CODES.CONFORMANCE_SCOPE_CREEP, OUTCOME_CODES.RECURRENCE_DESIGN_MISSING, OUTCOME_CODES.MAINTENANCE_HOTSPOT_GROWTH, OUTCOME_CODES.MAINTENANCE_COUNTER_GROWTH]);
+export const ADVISORY_KINDS = Object.freeze([
+  "scope_creep", "check_unknown", "design_missing", "design_missing_repeated", "docs_missing", "docs_link_broken",
+  "ci_budget_unannotated", "hotspot_growth", "counter_growth",
+  "amendment_invalid",
+  "page_metadata_missing", "page_sitemap_missing", "page_canonical_missing", "page_structured_data_missing",
+]);
+/**
+ * Split failures into {block, advisory}; advisory rows are reported on the issue and never park a lane. `enforce`: codes
+ * a repo explicitly set to "enforce" (forge.yaml engine.conformance_kinds), which stay blocking.
+ */
+export function splitAdvisory(failures, { enforce = [] } = {}) {
+  const block = [], advisory = [];
+  for (const f of failures ?? []) (!enforce.includes(f?.code) && (ADVISORY_KINDS.includes(f?.kind) || ADVISORY_CODES.includes(f?.code)) ? advisory : block).push(f);
+  return { block, advisory };
+}
+
 export function blockingFailures(failures, { shadow = false, kinds = null, allow = [] } = {}) {
   const block = [], record = [];
   for (const f of failures ?? []) {

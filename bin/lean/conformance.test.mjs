@@ -1719,6 +1719,27 @@ describe("#5087 a plan decision may not weaken an e2e/integration criterion to m
   });
 });
 
+describe("supersedes naming a validate row (#5979)", () => {
+  const frozen = { requirements: [], deliverables: [], validate: [{ id: "V1", command: "true" }, { id: "G2", command: "node --test a.test.mjs" }] };
+  it("rejects guard G2 with a substitute-validate hint and records no supersedes", () => {
+    const r = applyAmendments(frozen, [{ kind: "supersedes", guard: "G2", why: "w" }]);
+    assert.equal(r.problems.length, 1);
+    assert.match(r.problems[0], /substitute-validate/);
+    assert.deepEqual(r.contract.supersedes ?? [], []);
+  });
+  it("amendmentKindProblems reports it only when given the validate ids", () => {
+    const a = [{ kind: "supersedes", guard: "G2", why: "w" }];
+    assert.match(amendmentKindProblems(a, ["G2"])[0], /substitute-validate/);
+    assert.deepEqual(amendmentKindProblems(a), []);
+  });
+  it("a #N guard and a mechanism still apply", () => {
+    const r = applyAmendments(frozen, [{ kind: "supersedes", guard: "#123", why: "w" }, { kind: "supersedes", mechanism: "m", why: "w" }]);
+    assert.deepEqual(r.problems, []);
+    assert.equal(r.contract.supersedes[0].guard, "#123");
+    assert.equal(r.contract.mechanisms[0].mechanism, "m");
+  });
+});
+
 describe("amendmentKindProblems (#5089)", () => {
   it("flags the invented deliverable_change kind and names the valid kinds", () => {
     const p = amendmentKindProblems([{ kind: "deliverable_change", requirement: "R1", why: "no Linux build" }]);
@@ -2396,5 +2417,70 @@ describe("recurrence counters and design lane precheck (#5751)", () => {
     assert.match(partial.failures[0].detail, /disposition.*; design\.outcome needs a metric and a target/);
     assert.equal(run({ recurrence: rec }, { ...C, design }).ok, true);
     assert.equal(run({ recurrence: { ...rec, recurs: false } }).ok, true, "no recurrence: no design check");
+  });
+});
+
+describe("#5754 live-stack e2e rows convert to post-deploy at freeze", () => {
+  const LIVE = "A burst of 100 requests produces zero 429 lines against the live stack [type:e2e]";
+  const mk = (quote) => ({ ...C, requirements: [{ id: "R1", quote, disposition: "deliver" }], validate: [{ id: "V1", command: "pytest tests/test_x.py" }] });
+  it("converts the live-stack quote through autoPostDeployE2e", () => {
+    assert.equal(prodOnlyE2e(LIVE), true);
+    const out = autoPostDeployE2e(mk(LIVE));
+    assert.deepEqual(out.converted.map((x) => x.id), ["R1"]);
+    assert.equal(out.contract.requirements[0].disposition, "post-deploy");
+    for (const q of ["real traffic against the live stack stays under 1% errors [type:manual]", "passes on the live cluster [type:e2e]"]) assert.equal(prodOnlyE2e(q), true, q);
+  });
+  it("keeps localhost, local stack, sandbox, staging and plain wording as deliver", () => {
+    for (const q of ["100 requests give zero 429 lines against localhost [type:e2e]", "zero 429 lines against the local stack, not the live stack [type:e2e]", "sandbox run against the live stack mock [type:e2e]", "zero 429 on staging, not the live stack [type:e2e]", "the live reload works in the dev stack [type:e2e]"]) {
+      assert.equal(prodOnlyE2e(q), false, q);
+      assert.equal(autoPostDeployE2e(mk(q)).converted.length, 0, q);
+    }
+  });
+});
+
+describe("#5754 precheck fails fast on a deliver row the placement cannot produce", () => {
+  const LIVE = "A burst of 100 requests produces zero 429 lines against the live stack [type:e2e]";
+  const run = (quote, extra = {}) => precheck({ contract: { ...C, requirements: [{ id: "R1", quote, disposition: "deliver", ...extra }], validate: [] }, result: { requirements: [], validation: [] }, changedFiles: [] });
+  it("a live-stack deliver e2e row fails with a typed code before any builder resume", () => {
+    const f = run(LIVE).failures.filter((x) => x.kind === "e2e_placement");
+    assert.equal(f.length, 1);
+    assert.equal(f[0].code, "conformance.e2e_unverified");
+  });
+  it("local, post-deploy, out-of-band and non-e2e rows do not trip it", () => {
+    assert.equal(run("works against the local stack [type:e2e]").failures.some((x) => x.kind === "e2e_placement"), false);
+    assert.equal(run(LIVE, { disposition: "post-deploy" }).failures.some((x) => x.kind === "e2e_placement"), false);
+    assert.equal(run(LIVE, { verify: "out_of_band", evidence: "job" }).failures.some((x) => x.kind === "e2e_placement"), false);
+    assert.equal(run("zero 429 lines against the live stack").failures.some((x) => x.kind === "e2e_placement"), false);
+  });
+});
+
+import { AMENDMENT_EXAMPLES, AMEND_KINDS as SCHEMA_KINDS } from "./amendment-schema.mjs";
+import { builderImplementPrompt, amendmentCorrectionPrompt } from "./prompts.mjs";
+
+describe("builder prompt amendments agree with the validator (#5979)", () => {
+  const frozen = {
+    requirements: [{ id: "R1", quote: "q", disposition: "deliver" }],
+    deliverables: [{ id: "D1", path: "a.mjs", change: "c", requirements: ["R1"] }],
+    validate: [{ id: "V1", command: "true" }, { id: "G2", command: "node --test a.test.mjs" }],
+  };
+  it("every documented example passes the shape check and applies without problems", () => {
+    assert.equal(AMENDMENT_EXAMPLES.length, SCHEMA_KINDS.length);
+    for (const ex of AMENDMENT_EXAMPLES) {
+      assert.deepEqual(amendmentKindProblems([ex], ["V1", "G2"]), [], ex.kind);
+      const r = applyAmendments(frozen, [ex]);
+      assert.deepEqual(r.problems, [], `${ex.kind}: ${r.problems}`);
+    }
+  });
+  it("the builder prompt names every kind and the substitute-validate path", () => {
+    const p = builderImplementPrompt();
+    for (const k of SCHEMA_KINDS) assert.ok(p.includes(`"${k.replace("defer|post-deploy", "defer")}`) || p.includes(k), k);
+    assert.match(p, /"kind":"substitute-validate","validate":"G2"/);
+    assert.match(p, /never a supersedes guard/);
+    assert.match(amendmentCorrectionPrompt(["x"]), /substitute-validate/);
+  });
+  it("substitute-validate for G2 validates; supersedes G2 is still rejected", () => {
+    const ok = applyAmendments(frozen, [{ kind: "substitute-validate", validate: "G2", command: "node --test a.test.mjs", why: "w" }]);
+    assert.deepEqual(ok.problems, []);
+    assert.match(applyAmendments(frozen, [{ kind: "supersedes", guard: "G2", why: "w" }]).problems[0], /substitute-validate/);
   });
 });
