@@ -144,7 +144,7 @@ import { normalizeStacking, planAdmissible, stackAdmissible } from "./stacking.m
 import { lackedTools } from "./toolplace.mjs";
 import { openPrerequisites } from "./prereq.mjs";
 import { makeController, classifyRepo, formatConcurrency } from "./concurrency.mjs";
-import { admitInput, breach, recordFailure, markEscalated, NO_NEW_INPUT } from "./attempts.mjs";
+import { admitInput, breach, recordFailure, blockerSignature, markEscalated, NO_NEW_INPUT } from "./attempts.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
@@ -462,7 +462,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const rec = recovering.get(n);
     if (rec?.code === OUTCOME_CODES.ENV_TOOL_MISSING && rec.where === "remote" && !rec.toolNoRecipe && (rec.attempt ?? 1) <= 1 && !budgetLocal) return { where: "remote", reason: "retry remotely after sandbox provisioning" };
     // #5652: with host fallback off (execution.host_fallback / host.role: orchestrator) the host is orchestrator-only: no re-placement here
-    if (hostFallbackOn() && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
+    // #5931: a credentials block pinned the issue to the host (ledger hostPin): applied on readmit whatever host fallback says
+    if (ledgers.get(n)?.hostPin) return { where: "local", reason: "host pin: ops_credentials block" };
+    if (hostFallbackOn() && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_ENGINE_SKEW].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
     // #5371: a mechanical recovery never repeats the placement of the run that failed (a remote sandbox env defect recurs there), and a remote validate failure is rerun on the host
     if (recovering.get(n)?.code === ENV_VALIDATE_PLACEMENT || (MECHANICAL_CODES.includes(recovering.get(n)?.code) && recovering.get(n)?.where === "remote")) {
       if (hostFallbackOn()) return { where: "local", reason: `different placement: recovering ${rec.code} off the remote run` };
@@ -495,7 +497,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #5592: env.tool_missing repeats are the same defect when the same tools are missing, whatever else the detail says (probe lines, ids, paths vary per run)
   const toolsOf = (d) => { const m = /(?:host|sandbox) is missing ([^\n]+?), so validate command/i.exec(String(d ?? "")); return m ? m[1].split(/\s*,\s*/).sort().join(",") : null; };
   const envSig = (code, d) => (code === OUTCOME_CODES.ENV_TOOL_MISSING ? toolsOf(d) : null) ?? sigOf(d);
-  const ENV_ALL_CODES = [...REPEAT_ENV_CODES, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE]; // #5755
+  const ENV_ALL_CODES = [...REPEAT_ENV_CODES, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_ENGINE_SKEW]; // #5755, #5931
   const envKey = (code, d) => `${code}|${code === OUTCOME_CODES.ENV_TOOL_MISSING && toolsOf(d) ? toolsOf(d) : failureSignature(code, d).split("|").slice(1).join("|")}`;
   const maxFor = (cls) => (cls === "mechanical" ? mechMax : recoveryMax);
   const classUsed = toMap(saved?.recoveryClasses); // `${issue}:${class}` -> recovery lanes launched in that class
@@ -991,7 +993,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     try {
       const hash = (await attempts.hash?.(n)) ?? null;
       let l = ledgers.get(n) ?? (await attempts.load?.(n)) ?? null;
-      l = recordFailure(l, { signature: failureSignature(row.code ?? r?.code, row.detail), hash, spend: Number(row.cost_usd) || 0, run: r?.runUrl ?? null });
+      l = recordFailure(l, { signature: failureSignature(row.code ?? r?.code, row.detail), hash, spend: Number(row.cost_usd) || 0, run: r?.runUrl ?? null,
+        blocker: blockerSignature({ code: row.code ?? r?.code, detail: row.detail, contractHash: r?.contractHash ?? null, engineVersion: r?.engineVersion ?? curVersion(), placement: row.placement?.where ?? null }) });
       const b = breach(l, attempts.cfg);
       if (b && !l.escalated) {
         l = markEscalated(l);
@@ -1090,6 +1093,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         alternative: kind === "engine" ? "relaunch into the same engine-error, or end engine-error and wait for a manual --requeue" : "launch a recovery that fails the same way, or end needs-human and wait for a manual --requeue" });
       update(final);
     };
+    // #5931: a remote lane that ran another engine version than the host is an environment outcome, never conformance (gates fixed in the host version still fire there)
+    const ranVersion = r?.engineVersion ?? /ForgeDock\s*[·-]\s*v?(\d+\.\d+(?:\.\d+)?)/.exec(String(r?.banner ?? row.detail ?? ""))?.[1] ?? null;
+    const vmm = (v) => (/^v?(\d+\.\d+)/.exec(String(v ?? "")) ?? [])[1] ?? null;
+    if (row.placement?.where === "remote" && ranVersion && vmm(curVersion()) && vmm(ranVersion) !== vmm(curVersion()) && ["needs-human", "failed", "invalid", "budget-exceeded"].includes(row.outcome)) {
+      row.code = OUTCOME_CODES.ENV_ENGINE_SKEW;
+      row.detail = `${OUTCOME_CODES.ENV_ENGINE_SKEW}: the sandbox ran engine v${ranVersion}, the host is v${curVersion()}; not a conformance result. Place it locally or upgrade the agent.\n${String(row.detail ?? "")}`;
+      if (ehOn) return holdEnv({ kind: "env", sig: `${OUTCOME_CODES.ENV_ENGINE_SKEW}|${ranVersion}|${curVersion()}`, why: `sandbox engine v${ranVersion} differs from the host v${curVersion()}` });
+    }
     if (row.outcome === "dependency-open" && depList.length) {
       // #4387: a parked dependency is not pulled in again (fail-open on an unreadable label).
       let parked;
@@ -1885,8 +1896,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       let l = ledgers.get(n) ?? null;
       if (!l) { l = (await attempts.load?.(n)) ?? null; if (l) ledgers.set(n, l); }
       if (!l) return true;
-      const hash = (await attempts.hash?.(n)) ?? null, a = admitInput(l, hash, attempts.cfg);
-      if (a.ok) return true;
+      const hash = (await attempts.hash?.(n)) ?? null, a = admitInput(l, hash, attempts.cfg, { engineVersion: curVersion(), placement: placeOf(n)?.where ?? null });
+      if (a.ok) { if (a.reason) update({ issue: n, event: "readmit.signature_changed", detail: `readmitted: ${a.reason}`, batch: batchId ?? null }); return true; }
       const key = `${n}|${hash}|${a.code}`;
       if (!refusedNoted.has(key)) {
         refusedNoted.add(key);
