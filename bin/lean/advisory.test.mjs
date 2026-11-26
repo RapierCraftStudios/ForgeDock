@@ -13,7 +13,6 @@ describe("advisory gates (unclog)", () => {
       { code: C.CONFORMANCE_SCOPE_CREEP, detail: "review-side creep has no kind" },
       { code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_row", detail: "e2e" },
       { code: C.CONFORMANCE_UNTRACKED_DEFERRAL, kind: "untracked_deferral", detail: "deferral" },
-      { code: C.CONFORMANCE_UNIMPLEMENTED, kind: "no_status", detail: "R1 no status" },
       { code: C.CONFORMANCE_UNIMPLEMENTED, kind: "review_unimplemented", detail: "reviewer opinion" },
       { code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_missing", detail: "V1 no result" },
       { code: C.ENV_TOOL_MISSING, kind: "validate_env", detail: "tool" },
@@ -29,7 +28,7 @@ describe("advisory gates (unclog)", () => {
     ];
     const { block, advisory } = splitAdvisory(rows);
     assert.deepEqual(block.map((f) => f.kind ?? f.code), ["validate_failed", "requirement_unimplemented", "repro_red_green", "source_deliverable_untouched", C.CONFORMANCE_REGRESSION, C.CONFORMANCE_OMISSION]);
-    assert.equal(advisory.length, 11);
+    assert.equal(advisory.length, 10);
   });
   it("never lists a kind that proves the change wrong", () => {
     for (const k of ["validate_failed", "requirement_unimplemented", "repro_red_green", "source_deliverable_untouched", "test_missing", "test_weak"]) assert.ok(!ADVISORY_KINDS.includes(k), k);

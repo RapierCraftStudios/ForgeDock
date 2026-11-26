@@ -69,7 +69,7 @@ export const PLANNER_TIGHTENING = Object.freeze({
 });
 
 const PATH_RE = /[\w@.-]+(?:\/[\w@.*-]+)+\.\w+|[\w@.-]+\/[\w@.*-]+\/?/g;
-const NEEDS_RESULT = new Set(["requirement_unimplemented", "no_status", "untracked_deferral"]);
+const NEEDS_RESULT = new Set(["requirement_unimplemented", "requirement_no_status", "untracked_deferral"]);
 
 /**
  * The deterministic conformance findings of the current tree: [{code, kind, detail, section}]. Validate commands are not

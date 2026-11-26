@@ -423,7 +423,13 @@ export function conformanceResumePrompt(failures, mode = "local", lane = "") {
   const baseMoved = lane && failures.some((f) => f?.kind === "validate_failed")
     ? `\n\nIf a validate command fails only because origin/${lane} moved on after this branch started (the change itself is fine), bring the branch up to date with \`git merge --no-edit origin/${lane}\` (already fetched; never rebase or force), resolve any conflicts, then re-run every validate command and record the results.`
     : "";
-  return `The change does not conform to the frozen contract and the issue:\n${failures.slice(0, 30).map((f) => `- ${f.code}: ${String(f.detail).slice(0, 900)}`).join("\n")}${baseMoved}\n\nFix each item in the code, or record a typed amendment with a why in ${RESULT_FILE}. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+  // #6058: a requirement with no status row was skipped, not failed: name each id with its quote and ask for the work and a row
+  const skipped = failures.filter((f) => f?.kind === "requirement_no_status" && f.reqId);
+  const rest = skipped.length ? failures.filter((f) => !skipped.includes(f)) : failures;
+  const targeted = skipped.length
+    ? `You skipped ${skipped.length === 1 ? "a requirement" : `${skipped.length} requirements`}: ${RESULT_FILE} has no status row for ${skipped.map((f) => f.reqId).join(", ")}, so ${skipped.length === 1 ? "it was" : "they were"} not addressed at all:\n${skipped.map((f) => `- ${f.reqId}: "${String(f.quote ?? "").slice(0, 400)}"`).join("\n")}\n\nFor each one, implement it now (a file it needs that no deliverable names is an \`add-deliverable\` amendment), then add its row {"id","status","evidence"} to the requirements array of ${RESULT_FILE}, keeping the rows already there.${rest.length ? "\n\nAlso:\n" : ""}`
+    : "The change does not conform to the frozen contract and the issue:\n";
+  return `${targeted}${rest.slice(0, 30).map((f) => `- ${f.code}: ${String(f.detail).slice(0, 900)}`).join("\n")}${baseMoved}\n\nFix each item in the code, or record a typed amendment with a why in ${RESULT_FILE}. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
 /** forge#4159: the one resume for package.json edges between workspace packages the contract does not name. */

@@ -161,3 +161,9 @@ The router ships agents only `AGENT_BUNDLE_PATHS` (`package.json`, `bin/pool`, `
 - `router.json` `repos.<slug>.agents` (allowlist) and `exclude_agents` pin a repo to hosts. `placeable(c, spec)` in `router.mjs` is the one eligibility rule: account (#5886) AND allowlist AND not excluded. `launch()`, `claim()` and `seedAgent()` all use it, so no placement path bypasses it. A repo whose allowed agents are all busy gets the usual 503 capacity deferral, never another host.
 - `agents` counts only when a non-empty array of strings; empty or any other type is unset (any agent), so unset config behaves exactly as before. `exclude_agents` subtracts from the allowlist. Seed picks use the slug of the `/sandboxes/:id/mirrors` query or `/seed` body.
 - `GET /status?repo=<slug>` and `GET /agents?repo=<slug>` return only the repo's placeable agents (and their sandboxes); `httpTransport.capacity({repo})` sends it, so the dispatcher admits against capacity the repo can use. No `?repo=` = unchanged. Tests: `bin/pool/affinity.test.mjs`.
+
+## Entry 2026-11-26 — engine-aware placement (#6091)
+- `launch()`, `claim()` and `seedAgent()` order agents on the router's own engine (`versionOf(repo_root).version`) before headroom/cpus; an agent with no version in `/capacity` is neutral (capacity order, as before). `execution.min_lane_engine` rides in the launch spec: agents below it are dropped and, if none is left, the launch is a 503 `pool.engine_old` deferral (retry after `engine_old_retry_after_s`/`retry_after_s`). Unset, lower-engine agents stay a fallback.
+- `status()` agents carry `engine_version` and `engine_skew` (below the target); `pool status` shows an ENGINE column and `SKEW`. `pool upgrade` and `forgedock update` name agents still on an older engine.
+- The orchestrator re-admits an engine-held remote lane on the agent's engine (`envHold.agentVersion`, from the router status), not its own.
+

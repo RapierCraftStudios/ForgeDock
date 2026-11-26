@@ -1116,10 +1116,10 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
     if (r.disposition === "deliver" && isOutOfBand(r)) {
       // #4404: measured outside the lane; the builder delivers its instrumentation (budget test or bench committed, job configured)
       const row = st.find((x) => x?.id === r.id);
-      if (row?.instrumented !== true && s !== "implemented") failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: s ? "requirement_unimplemented" : "no_status", detail: `${r.id} is verified out of band${r.evidence ? ` by ${r.evidence}` : ""} but reported "${s ?? "no status"}" without instrumented: true` });
+      if (row?.instrumented !== true && s !== "implemented") failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: s == null ? "requirement_no_status" : "requirement_unimplemented", ...(s == null ? { reqId: r.id, quote: r.quote } : {}), detail: `${r.id} is verified out of band${r.evidence ? ` by ${r.evidence}` : ""} but reported "${s ?? "no status"}" without instrumented: true` });
     } else if (r.disposition === "deliver") {
       if (s === "deferred" || s === "post-deploy") failures.push({ code: C.CONFORMANCE_UNTRACKED_DEFERRAL, kind: "untracked_deferral", detail: `${r.id} was contracted as deliver but reported "${s}" without a typed amendment` });
-      else if (s !== "implemented") failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: s ? "requirement_unimplemented" : "no_status", detail: `${r.id} reported "${s ?? "no status"}"` }); // #6083: a missing status line is bookkeeping (advisory); the linked passing test is the evidence
+      else if (s !== "implemented") failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: s == null ? "requirement_no_status" : "requirement_unimplemented", ...(s == null ? { reqId: r.id, quote: r.quote } : {}), detail: `${r.id} reported "${s ?? "no status"}"` }); // #6058: a missing row is a skipped requirement, not a failed one
     }
   }
   for (const f of baselineFailures ?? []) failures.push({ code: C.CONFORMANCE_REGRESSION, ...f }); // #5448
@@ -1899,7 +1899,7 @@ export const ADVISORY_CODES = Object.freeze([
   OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.CONTRACT_INVALID_COMMAND,
 ]);
 export const ADVISORY_KINDS = Object.freeze([
-  "no_status", "review_unimplemented",
+  "review_unimplemented",
   "validate_missing", "validate_command_invalid", "validate_timeout", "validate_env", "validate_drift",
   "repro_env", "repro_mutation_survivor", "mutation_survived", "dep_install",
   "e2e_row", "e2e_placement", "ui_browser_unverified",

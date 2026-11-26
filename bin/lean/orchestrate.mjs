@@ -393,6 +393,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const ehMaxMs = Number(envHold?.maxMs) > 0 ? Number(envHold.maxMs) : ENV_HOLD_MAX_MS;
   const ehWatchMs = Number(envHold?.watchMs) > 0 ? Number(envHold.watchMs) : ENV_WATCH_MS;
   const curVersion = () => { try { return envHold?.version?.() ?? version ?? null; } catch { return version ?? null; } };
+  const vmm2 = (x) => (/^v?(\d+\.\d+)/.exec(String(x ?? "")) ?? [])[1] ?? null;
+  const agentVersionOf = async () => { try { return (await envHold?.agentVersion?.()) ?? null; } catch { return null; } };
   const curEnvValues = () => { try { return envHold?.envValues?.() ?? null; } catch { return null; } }; // #5931
   const curEnv = () => { try { return envHold?.envFingerprint?.() ?? null; } catch { return null; } };
   const missingTools = async (tools) => { if (typeof envHold?.missingTools !== "function") return null; try { const m = await envHold.missingTools(tools); return Array.isArray(m) ? m : null; } catch { return null; } };
@@ -1098,6 +1100,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     };
     // #5931: a remote lane that ran another engine version than the host is an environment outcome, never conformance (gates fixed in the host version still fire there)
     const ranVersion = r?.engineVersion ?? /ForgeDock\s*[·-]\s*v?(\d+\.\d+(?:\.\d+)?)/.exec(String(r?.banner ?? row.detail ?? ""))?.[1] ?? null;
+    if (ranVersion && row.placement?.where === "remote") row.engineVersion = String(ranVersion); // R3: the engine that actually ran stays on the row
     const vmm = (v) => (/^v?(\d+\.\d+)/.exec(String(v ?? "")) ?? [])[1] ?? null;
     if (row.placement?.where === "remote" && ranVersion && vmm(curVersion()) && vmm(ranVersion) !== vmm(curVersion()) && ["needs-human", "failed", "invalid", "budget-exceeded"].includes(row.outcome)) {
       row.code = OUTCOME_CODES.ENV_ENGINE_SKEW;
@@ -1601,7 +1604,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     for (const e of envSigs.values()) if (Number.isInteger(e.number) && !set.has(e.number)) selFresh.push(e.number); // R7: the engine-filed env.* issue joins the order
     let base = null;
     try { base = (await reconcile.base?.()) ?? null; } catch { base = null; }
-    const { requeue, parked } = readmitDue({ results, state: readmit, now: t, version: reconcile.version?.() ?? null, base, labels: (n) => labels.get(n) ?? [] });
+    const agentV = await agentVersionOf(); // R6: the agent that would run the lane, so an agent upgrade re-admits
+    const { requeue, parked } = readmitDue({ results, state: readmit, now: t, version: agentV ? `${reconcile.version?.() ?? ""}|agent=${agentV}` : reconcile.version?.() ?? null, base, labels: (n) => labels.get(n) ?? [] });
     for (const q of requeue) autoRequeues.push({ issue: q.issue, at: `reconcile-${t}`, reason: q.reason, by: "reconcile" });
     const digest = needsDecisionDigest(parked);
     if (digest !== parkedDigest) {
@@ -1962,7 +1966,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       }
       let why = null;
       if (h.envIssue && typeof envIssue?.isClosed === "function") { let c = false; try { c = (await envIssue.isClosed(h.envIssue)) === true; } catch { c = false; } if (c) why = `env issue #${h.envIssue} closed`; }
-      if (!why && v && h.version && v !== h.version) why = `engine version changed v${h.version} → v${v}`;
+      // R6/R8: a remote lane runs on a pool agent, so its engine is the agent's, not this host's. While every placeable agent is below the engine
+      // the lane needs, the hold stays; an agent upgrade (not the orchestrator's) is the trigger.
+      const av = r.placement?.where === "remote" ? await agentVersionOf() : null;
+      if (av) {
+        const needMM = vmm2(v), ranV = String(h.sig ?? "").startsWith(`${OUTCOME_CODES.ENV_ENGINE_SKEW}|`) ? h.sig.split("|")[1] : null;
+        if (ranV) { if (vmm2(av) === needMM && vmm2(av) !== vmm2(ranV)) why = `agent engine upgraded v${ranV} → v${av}`; }
+        else if (needMM && vmm2(av) === needMM && v && h.version && v !== h.version) why = `engine version changed v${h.version} → v${v}`;
+      } else if (!why && v && h.version && v !== h.version) why = `engine version changed v${h.version} → v${v}`;
       if (why) { /* env issue closed */ } else if (fp && h.env && fp !== h.env) why = "batch env changed (--set-env)";
       else if (h.tools?.length && !toolReadmits.has(`${n}|${h.sig}`) && (await missingTools(h.tools))?.length === 0) { why = `${h.tools.join(", ")} now found on the host`; toolReadmits.add(`${n}|${h.sig}`); }
       if (why) { if (!(await gateAdmit(n))) continue; engineSigs.delete(n); releaseHeld(n, true, `re-admitted: ${why}`); continue; }
