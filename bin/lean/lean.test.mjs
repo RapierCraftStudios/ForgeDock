@@ -5782,6 +5782,23 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.ok(!w.comments.some((c) => c.includes("FORGE:CONTRACT")), "not re-posted");
     assert.match(traj(w)[0], /frozen contract [0-9a-f]{12} recovered from the issue/);
   });
+  it("#5920 a reused frozen contract gets the validate.recipes rewrite and an audit amendment, once", async () => {
+    const recipes = [{ match: "^node --test ", replace: "node --test --test-reporter=dot " }];
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", lastSubject: "wip(forge): checkpoint after idle timeout", issueComments: [frozenComment()] });
+    const r = await run(w, { validateRecipes: recipes });
+    assert.equal(r.terminalReason, "merged");
+    assert.match(w.files[`${WT}/.forge-lean/contract.json`], /node --test --test-reporter=dot test\/foo\.test\.js/, "the rewritten command is the one the lane runs");
+    const am = w.comments.filter((c) => c.includes("FORGE:AMENDMENT") && c.includes("rewrite-validate"));
+    assert.equal(am.length, 1);
+    assert.match(am[0], new RegExp(`frozen contract ${contractHash(contractJson(CONTRACT))}`));
+    assert.ok(!am[0].includes("AMENDMENT-STATE"), "audit only: never replayed as an amendment");
+    const w2 = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", lastSubject: "wip(forge): checkpoint after idle timeout", issueComments: [frozenComment(), { body: am[0], author_association: "OWNER", user: { type: "User", login: "op" } }] });
+    await run(w2, { validateRecipes: recipes });
+    assert.equal(w2.comments.filter((c) => c.includes("rewrite-validate")).length, 0, "a second reuse posts nothing new");
+    const w3 = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", lastSubject: "wip(forge): checkpoint after idle timeout", issueComments: [frozenComment()] });
+    await run(w3);
+    assert.ok(!w3.comments.some((c) => c.includes("rewrite-validate")), "no recipe, no amendment");
+  });
   it("recovery lane replays accepted supersedes amendment (#4899)", async () => {
     const sup = { kind: "supersedes", guard: "#4785", why: "behaviour changed on purpose" };
     const state = { contract: contractHash(contractJson(CONTRACT)), amendments: [sup] };
