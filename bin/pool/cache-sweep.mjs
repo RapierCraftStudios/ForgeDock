@@ -88,7 +88,7 @@ function sweepDepcache(dc, { cutoff, now, capBytes, rm, depcacheBytes }) {
   for (const repo of kids(dc)) {
     const rk = repo.path.slice(dc.length + 1);
     if (rk === "stores") continue;
-    if (SNAP.test(rk)) { if (repo.mtimeMs < cutoff) rm(repo.path); continue; } // an entry of the flat layout (no repo level)
+    if (SNAP.test(rk)) { if (snapLastUsed(repo) < cutoff && !lockLive(repo.path, now)) rm(repo.path); continue; } // an entry of the flat layout (no repo level)
     let snaps = kids(repo.path).filter((k) => SNAP.test(k.path.slice(repo.path.length + 1)));
     for (const k of kids(repo.path)) if (/\.(tmp-\d+|lock)$/.test(k.path) && k.mtimeMs < cutoff) rm(k.path); // dead publishers' tmp dirs, old locks
     snaps = snaps.map((k) => ({ ...k, lastUsedMs: snapLastUsed(k), live: lockLive(k.path, now) }));
