@@ -37,7 +37,7 @@ import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mj
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
 import { hasRecipe, installLaneTools, genericInstallCommands, RECIPES } from "../pool/lane-tools.mjs";
-import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, manifestDepOwner } from "./preflight.mjs";
+import { testRunnerProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, manifestDepOwner, collectOnlyCommand, collectImportMiss, contractCommands } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
 import { ceilingFor, modelInfo, restartDecision, DEFAULT_CEILING, WINDOW_SHARE, RESTART_COST_USD, CACHE_READ_USD, REAL_LIMIT_SHARE, predictRestart, handoffFacts, routeHandoff, buildReadsOf, NARROW_NOTE } from "./ceiling.mjs";
@@ -127,7 +127,7 @@ import { ensureSignedOff, salvageBranch, dropSalvageTracking } from "./signoff.m
 import { reconcileCheckpoints } from "./checkpoint-reconcile.mjs";
 import { guardStagedDeletions, deletionEvidence, maxForeignDeletions } from "./delguard.mjs";
 import { createLedger, flattenPhases, overheadStats } from "./phaseledger.mjs";
-import { DEFAULT_CATALOG_SOURCES, deriveCatalog, mergeRecipes, rewriteMissed, isDriftFailure, rewriteSubprojectVenv } from "./validate-catalog.mjs";
+import { DEFAULT_CATALOG_SOURCES, deriveCatalog, mergeRecipes, rewriteMissed, isDriftFailure, rewriteSubprojectVenv, deriveTestEnvMap, rewriteToCiEnv } from "./validate-catalog.mjs";
 import { holderGone } from "./liveness.mjs";
 import { planStale, stackedBaseBlock, validStackedOn, cascadeDecision, invalidatedChecks } from "./stacking.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
@@ -2192,6 +2192,11 @@ export async function runCore(o) {
       const vr = rewriteSubprojectVenv(r.contract, freezeTracked, (rel) => existsSync(join(wt, rel))); // #5683
       r.contract = vr.contract;
       for (const x of vr.applied) T.decisions.push(`sub-project venv rewrite of ${x.id}: \`${x.from}\` -> \`${x.to}\``);
+      // #5753: a pytest path CI runs in another env (working-directory + poetry/uv run) runs there, not under a bare interpreter
+      const ciTexts = (validateCatalogSources ?? DEFAULT_CATALOG_SOURCES).map((p) => { try { return readFileSync(join(wt, p), "utf8"); } catch { return ""; } });
+      const ce = rewriteToCiEnv(r.contract, deriveTestEnvMap(ciTexts), freezeTracked, (rel) => existsSync(join(wt, rel)));
+      r.contract = ce.contract;
+      for (const x of ce.applied) T.decisions.push(`CI test-env rewrite of ${x.id}: \`${x.from}\` -> \`${x.to}\``);
       r.contract = foldRegression(r.contract); // #5448: the blast-radius regression set runs as validate G# entries
       const e = autoPostDeployE2e(r.contract); // #5468: production-only e2e/manual rows become post-deploy with a generated check
       for (const x of e.converted) { if (x.check) genChecks[x.check] = x.entry; T.decisions.push(`Production-only e2e/manual requirement ${x.id} frozen as post-deploy with ${x.check ? `generated check ${x.check}` : "no check (production observation window)"}`); }
@@ -2222,6 +2227,17 @@ export async function runCore(o) {
       const fullEnv = { ...process.env, ...env };
       for (const v of Array.isArray(contract.validate) ? contract.validate : []) {
         if (v?.id && typeof v.command === "string") for (const name of unsetEnvVars(v.command, fullEnv)) misses.push({ ids: [v.id], tool: name, kind: "env-var", source: "env" });
+      }
+      if (io.preflightRun) { // #5753: one collect-only run per pytest command imports its test modules before a builder is spent
+        const done = new Set(misses.flatMap((m) => m.ids)), repoHas = repoTracks(files);
+        for (const v of contractCommands(contract)) {
+          const cmd = done.has(v.id) ? null : collectOnlyCommand(v.command);
+          if (!cmd) continue;
+          let r;
+          try { r = await heavyStep("precheck", () => io.preflightRun({ command: cmd, timeoutMs: 60000, env, cwd: wt })); } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
+          const miss = collectImportMiss(r, { repoHas });
+          if (miss) misses.push({ ids: [v.id], ...miss, source: "collect" });
+        }
       }
       if (io.preflightRun) {
         const skipIds = [...new Set(misses.flatMap((m) => m.ids))];
@@ -2690,8 +2706,8 @@ export async function runCore(o) {
       }
       { // #5447: the test plan's declared env is checked on the host the lane runs on before building; a missing runner is provisioned once, else the lane ends env.tool_missing (the orchestrator re-places it on a host that has it)
         const deps5683 = await depOwnerOf(), projEnv = () => { const e = laneEnv(); const d = projectBinDirs(wt, deps5683.files); if (d.length) e.PATH = withLocalBins(e.PATH ?? process.env.PATH ?? "", d); return e; };
-        const projDeps = declaredEnv(frozen).filter((t) => deps5683.owner(t) !== null); // #5683: a sub-project's declared dependency is prepared and resolved through its bin dirs, never a host tool
-        const probeEnv = async () => { const miss = []; for (const t of declaredEnv(frozen)) { if (deps5683.owner(t) !== null) continue; const r = io.runCommand ? await io.runCommand({ command: t === "pytest" ? "python3 -m pytest --version" : `command -v ${t} >/dev/null || { test -d node_modules/${t} && ! test -e node_modules/.bin/${t}; } || ls -d .venv/lib/python*/site-packages/${t} >/dev/null 2>&1`, cwd: wt, timeoutMs: 30000, env: projEnv() }).catch(() => ({ rc: 1 })) : { rc: 0 }; if ((r?.rc ?? 0) !== 0) miss.push(t); } return miss; };
+        const projDeps = declaredEnv(frozen, deps5683.files).filter((t) => deps5683.owner(t) !== null); // #5683: a sub-project's declared dependency is prepared and resolved through its bin dirs, never a host tool
+        const probeEnv = async () => { const miss = []; for (const t of declaredEnv(frozen, deps5683.files)) { if (deps5683.owner(t) !== null) continue; const r = io.runCommand ? await io.runCommand({ command: t === "pytest" ? "python3 -m pytest --version" : `command -v ${t} >/dev/null || { test -d node_modules/${t} && ! test -e node_modules/.bin/${t}; } || ls -d .venv/lib/python*/site-packages/${t} >/dev/null 2>&1`, cwd: wt, timeoutMs: 30000, env: projEnv() }).catch(() => ({ rc: 1 })) : { rc: 0 }; if ((r?.rc ?? 0) !== 0) miss.push(t); } return miss; };
         let envMiss = await probeEnv();
         if (projDeps.length && io.deps?.prepare) { try { await io.deps.prepare({ wt, repoKey: depcacheNamespace({ repo, fallback: repoKey(cwd) }), env: toolchain?.env ?? undefined }); ev({ event: "TESTPLAN_ENV_PROJECT_DEPS", names: projDeps }); } catch { /* the install gate reports failures */ } }
         if (envMiss.length) {
