@@ -470,7 +470,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const envFile = join(dir, `${name}.env`); // the JIT config is a credential: an 0600 env file, never argv
     writeFileSync(envFile, `ACTIONS_RUNNER_INPUT_JITCONFIG=${jitconfig}\n`, { mode: 0o600 });
     try {
-      await docker.run(["--rm", "--name", `cs-runner-${name}`.slice(0, 120), "--label", RUNNER_LABEL, "--label", `computeshare.runner.label=${label}`, "--cpus", String(cpus), "--memory", "2048m", "--env-file", envFile, cfg.runner_image ?? "ghcr.io/actions/actions-runner:latest", "/home/runner/run.sh"]);
+      await docker.run(["--rm", "--name", `cs-runner-${name}`.slice(0, 120), "--label", RUNNER_LABEL, "--label", `computeshare.runner.label=${label}`, "--cpus", String(cpus), "--memory", `${Math.round(mem_gb * 1024)}m`, "--env-file", envFile, cfg.runner_image ?? "ghcr.io/actions/actions-runner:latest", "/home/runner/run.sh"]);
     } finally { rmSync(envFile, { force: true }); }
     runners()[name] = { label, cpus, mem_gb, startedAt: now() }; store.save();
     return { status: 201, body: { name, state: "running" } };
