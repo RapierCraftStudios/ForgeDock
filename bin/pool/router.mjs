@@ -645,8 +645,8 @@ bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TM
     [route("GET", "/health"), { fn: async () => ({ status: 200, body: { ok: true, agents: Object.keys(agents()).length, sandboxes: Object.keys(sbx()).length } }), auth: "none" }],
     [route("POST", "/sandboxes"), fd(async (_p, body) => launch(body))],
     [route("POST", "/sandboxes/claim"), fd(async (_p, body) => claim(body))],
-    [route("GET", "/sandboxes/:id/mirrors"), fd(async ({ id }, _b, url) => seedForward(id, "GET", `/mirrors?${new URLSearchParams([...url.searchParams].filter(([k]) => ["slug", "cache_key", "upload"].includes(k)))}`, undefined, url.searchParams.get("slug")))], // #5949
-    [route("POST", "/sandboxes/:id/seed"), fd(async ({ id }, body) => seedForward(id, "POST", "/mirrors/seed", body, body?.slug))],
+    [route("GET", "/sandboxes/:id/mirrors"), fd(async ({ id }, _b, url) => seedForward(id, "GET", `/mirrors?${new URLSearchParams([...[...url.searchParams].filter(([k]) => ["slug", "cache_key", "upload"].includes(k)), ["uploader", id]])}`, undefined, url.searchParams.get("slug")))], // #5949; uploader: per-sandbox part file (concurrent identical bundles)
+    [route("POST", "/sandboxes/:id/seed"), fd(async ({ id }, body) => seedForward(id, "POST", "/mirrors/seed", { ...(body ?? {}), uploader: id }, body?.slug))],
     [route("GET", "/sandboxes/:id"), fd(async ({ id }) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}`))],
     [route("GET", "/sandboxes/:id/logs"), fd(async ({ id }, _b, url) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/logs?cursor=${encodeURIComponent(url.searchParams.get("cursor") ?? "0")}`))],
     [route("GET", "/sandboxes/:id/result"), fd(async ({ id }) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/result`))],

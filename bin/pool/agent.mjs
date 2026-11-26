@@ -1044,7 +1044,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
 
   const routes = [
     [route("GET", "/health"), async () => ({ status: 200, body: { ok: true, ...capacity() } })],
-    [route("GET", "/mirrors"), async (_p, _b, url) => ({ status: 200, body: await mirrors.tips({ slug: url.searchParams.get("slug"), cache_key: url.searchParams.get("cache_key"), upload: url.searchParams.get("upload") }).catch(seedFail) })], // #5949
+    [route("GET", "/mirrors"), async (_p, _b, url) => ({ status: 200, body: await mirrors.tips({ slug: url.searchParams.get("slug"), cache_key: url.searchParams.get("cache_key"), upload: url.searchParams.get("upload"), uploader: url.searchParams.get("uploader") }).catch(seedFail) })], // #5949
     [route("POST", "/mirrors/seed"), async (_p, body) => { try { return { status: 200, body: body?.finish ? await mirrors.finish(body) : mirrors.chunk(body) }; } catch (e) { return { status: e.status ?? 500, body: { error: e.message, ...(e.extra ?? {}) } }; } }],
     [route("GET", "/capacity"), async () => ({ status: 200, body: capacity() })],
     [route("POST", "/sandboxes"), async (_p, body) => { const r = await launch(body ?? {}); if (Number.isInteger(body?.spec?.warm)) warm.replenish().catch((e) => log.warn?.(`warm replenish: ${e.message}`)); return r; }],
