@@ -166,6 +166,17 @@ describe("fixStep", () => {
     assert.equal(c.state.fixloop.heads[H2].rounds, 1, "the round is counted per head sha");
   });
 
+  it("#6013: failures the staging-health gate named ride in the one fix brief with the release-PR round's failures", async () => {
+    const s = fakeSeam({ heads: [H2], jobs: [{ name: "lint", conclusion: "failure", log: "bad" }] });
+    let brief = "";
+    s.fileFixIssue = async (a) => { brief = a.brief; return 100; };
+    const c = ctx(s, { review: { result: { ...failed, ciFailing: 1 } } });
+    c.state.knownFailures = [{ name: "black", cause: "regression" }, { name: "lint", cause: "regression" }];
+    await fixStep(c);
+    assert.match(brief, /ci:black/);
+    assert.equal((brief.match(/ci:lint/g) ?? []).length, 1);
+  });
+
   it("is bounded: one round (ci.fix.max_rounds default 1), then HELD with an owner ask for a non-flake, non-regression failure", async () => {
     const bad = { code: 0, data: { verdict: "BLOCK DEPLOY", marker: "FORGE:GATE_FAILURE", ciFailing: 0 }, lines: [] };
     const s = fakeSeam({ heads: [H2], summary: bad, fins: [fin({ toFile: [{ title: "x", severity: "CRITICAL" }] })] });

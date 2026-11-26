@@ -160,6 +160,7 @@ async function preflightStep(ctx) {
     state.knownFailures = health.failed;
     noteRound(ctx, { head: health.head, outcome: "red-staging", cause: health.failed.some((f) => f.cause === "regression") || !health.failed.length ? "regression" : "runner" });
     ctx.save(); return { refused: health.refused, failed: health.failed }; }
+  state.knownFailures = health.failed ?? [];
   const warn = health.warning ? { warning: health.warning } : {};
   if (isSnapshot(ctx.config)) return { snapshot: true, held: 0, ...warn };
   const lanes = await io.runningLanes(repo);
