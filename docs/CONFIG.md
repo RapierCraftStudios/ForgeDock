@@ -2036,6 +2036,7 @@ review:
     auth: "JWT + refresh token rotation; sessions stored in Redis"
     database: "Always use docker exec <container> for psql/migrations"
 
+  # max_parallel: 2         # release review: reviewers running at once (default max(2, cores/2)); the rest queue. Reviewers run at nice 19 / ionice idle (#6098)
   # max_filed_findings: 2   # per-review cap on filed findings (default 2; 1 on review-finding lineage)
 
   # key_paths:

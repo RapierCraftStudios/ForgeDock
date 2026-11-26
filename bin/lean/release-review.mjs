@@ -10,10 +10,11 @@
  */
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
-import { tmpdir, homedir } from "node:os";
+import { tmpdir, homedir, cpus } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runHostPreflight } from "./release-preflight.mjs";
+import { lowerPriority } from "./hostload.mjs";
 import { reviewStagingJson, reviewStagingIo, CI_EXCLUDED_CHECKS } from "../review-staging.mjs";
 import { pickFixes, recut, revertLast } from "./release-snapshot.mjs";
 import { parseFixConfig, collectFindings, blockingOf, compileBrief, roundsAt, recordRound, secondPush, secondPushOf, holdForOwner, jobsToRerun, inputHash, deferredOf } from "./release-fixloop.mjs";
@@ -106,6 +107,30 @@ export function resolveSkillName(name, { configDir, read = (p) => readFileSync(p
   try { return /"forgedock(@[^"]*)?"\s*:/.test(read(join(configDir, "plugins", "installed_plugins.json"))) ? `forgedock:${name}` : name; } catch { return name; }
 }
 
+/** #6098: default reviewer fan-out on this host: max(2, cores / 2). */
+export const defaultReviewParallel = (cores = cpus().length || 1) => Math.max(2, Math.floor(cores / 2));
+/** #6098: forge.yaml `review.max_parallel` (a positive integer) read from raw text; null when absent or invalid. */
+export function reviewMaxParallel(raw) {
+  const lines = String(raw ?? "").split("\n");
+  const at = lines.findIndex((l) => /^review:\s*(#.*)?$/.test(l));
+  if (at < 0) return null;
+  for (let i = at + 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l.trim() || /^\s*#/.test(l)) continue;
+    if (/^\S/.test(l)) break;
+    const m = /^\s+max_parallel:\s*["']?(\d+)["']?\s*(#.*)?$/.exec(l);
+    if (m) return Number(m[1]) > 0 ? Number(m[1]) : null;
+  }
+  return null;
+}
+/** #6098: run `fn` over `items` with at most `cap` in flight; the rest queue. Results keep the input order; a rejection rejects the batch. */
+export async function mapLimit(items, cap, fn) {
+  const n = Math.max(1, Math.floor(Number(cap)) || 1), out = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { for (;;) { const i = next++; if (i >= items.length) return; out[i] = await fn(items[i], i); } }));
+  return out;
+}
+
 /** One review round at the current head: dispatch, test gate, head check, finalize. @returns {{moved: string}|{fail}|{ok}} */
 async function reviewRound({ seam, pr, def, delta }) {
   const pre = await seam.pre({ pr, delta });
@@ -122,7 +147,8 @@ async function reviewRound({ seam, pr, def, delta }) {
   const send = (domain, note = "") => seam.runAgent({ role: `release-review-${domain}`, issue: pr, prompt: note ? `${prompts.get(domain)}\n\n${note}` : prompts.get(domain) });
   const failures = new Map();
   const attempt = (domain, note) => send(domain, note).catch((e) => { failures.set(domain, sessionFailure(e)); return null; });
-  await Promise.all(agents.map((a) => attempt(a.domain)));
+  const cap = Math.max(1, Math.floor(Number(seam.maxParallel?.()) || 0)) || defaultReviewParallel(); // #6098: queue beyond the cap, never every reviewer at once
+  await mapLimit(agents, cap, (a) => attempt(a.domain));
   // #5516: the missing-config guard of commands/test-gate.md is deterministic, so no session decides it; otherwise the gate
   // session gets a full tool set (Skill, Task, Bash) and the resolved skill name, never a bare `/test-gate`.
   const plan = await seam.testGatePlan();
@@ -138,7 +164,7 @@ async function reviewRound({ seam, pr, def, delta }) {
     const missing = missingReviewers(fin.lines).filter((d) => prompts.has(d));
     if (!missing.length) return { fail: `finalize stopped (exit ${fin.code}): ${(fin.lines ?? []).slice(-2).join(" | ").slice(0, 300)}${failureNote(failures)}` };
     // once: the same brief with the note the spec prescribes; a second miss is a degraded panel
-    await Promise.all(missing.map((d) => attempt(d, "structured findings block required: post your findings comment again, ending with the REVIEW-FINDINGS-START/END block.")));
+    await mapLimit(missing, cap, (d) => attempt(d, "structured findings block required: post your findings comment again, ending with the REVIEW-FINDINGS-START/END block."));
     fin = await seam.finalize({ pr, testGateOutput: gateFile });
     if (fin.code !== 0 || !fin.data) {
       if (headMoved(fin.lines)) return { moved: m.headSha };
@@ -310,6 +336,8 @@ export async function fixStep(ctx) {
 const seamOf = (ctx) => ctx.io.review ?? (ctx.seam ??= realSeam(ctx));
 
 /** Real effects of the review steps: the review-staging library, the engine runner, the filing scripts, gh and a lane process. */
+/** #6098: CPU niceness of reviewer processes (ionice idle class is applied alongside). */
+export const REVIEW_NICE = 19;
 export function realSeam({ repo, def, env = process.env, laneStrip = [], cwd = process.cwd(), makeRunner = null, gh: ghIn = null, io = null, spawn: spawnIn = spawn }) {
   const sleep = io?.sleep ?? ((ms) => new Promise((res) => setTimeout(res, ms))), now = io?.now ?? (() => Date.now());
   const say = io?.print ?? ((m) => process.stderr.write(`${m}\n`));
@@ -334,10 +362,14 @@ export function realSeam({ repo, def, env = process.env, laneStrip = [], cwd = p
     readFile: (p) => readFileSync(p, "utf8"),
     markLaunched: (file, domains, head) => { appendFileSync(file, domains.map((d) => `${d}\n`).join("")); writeFileSync(`${file}.head`, `${head}\n`); },
     saveTestGate: (pr, text) => { mkdirSync(sd, { recursive: true }); const f = join(sd, `${pr}_test_gate_output.txt`); writeFileSync(f, text); return f; },
+    maxParallel: () => { // #6098
+      try { return reviewMaxParallel(readFileSync(env.FORGE_CONFIG || join(cwd, "forge.yaml"), "utf8")) ?? defaultReviewParallel(); } catch { return defaultReviewParallel(); }
+    },
     runAgent: async ({ role, issue, prompt, fullSession = false }) => {
       runner ??= makeRunner ? makeRunner() : (await import("./effects.mjs")).makeLeanRunner();
       // not readOnly: each reviewer posts its own PR comment; the test gate (#5516) needs Skill/Task, so a full session
-      return runner({ role, issue, cwd, env: pinnedEnv(), prompt, fullSession, system: "You are an isolated reviewer of one release PR. Do only what the prompt asks.", maxMs: REVIEW_MS, idleMs: 10 * 60_000 });
+      return runner({ role, issue, cwd, env: pinnedEnv(), prompt, fullSession, system: "You are an isolated reviewer of one release PR. Do only what the prompt asks.", maxMs: REVIEW_MS, idleMs: 10 * 60_000,
+        onSpawn: (child) => lowerPriority(child?.pid, { level: REVIEW_NICE }) }); // #6098: reviewers run at nice 19 / ionice idle on the orchestrator host
     },
     testGatePlan: async () => {
       let raw = null;
