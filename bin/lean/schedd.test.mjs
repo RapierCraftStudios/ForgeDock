@@ -660,6 +660,24 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await d.close(); }
   });
 
+  it("#6042: a batch whose breaker is environmental is re-hosted by the timer", async () => {
+    const dir = tmpDir("schedd-rehost-env-"), root = join(dir, "batches"), id = "b20261031-000000-6042";
+    const calls = [];
+    const runBatch = async ({ argv, sink }) => {
+      calls.push(argv);
+      const b = openBatch(root, id);
+      if (argv[0] !== "--resume") { b.writePlan({ daemon: true, repo: "o/r" }); b.store.save({ v: 1, order: [1], results: {}, running: {}, pending: [1], notBefore: { 1: Date.now() + 300 }, breaker: { at: Date.now(), errors: 3, environmental: true } }); }
+      sink.batch({ id, dir: b.dir });
+      return {};
+    };
+    const d = await startDaemon({ dir, root, runBatch, log: () => {}, resumeOnStart: false });
+    try {
+      await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: ["1"], cwd: dir, env: {} });
+      await until(() => calls.length >= 2, 8000);
+      assert.equal(calls[1][0], "--resume");
+    } finally { await d.close(); }
+  });
+
   it("#4454: close() stops every hosted batch loop before releasing the lock; no batch admits a lane after close()", async () => {
     const dir = tmpDir("schedd-stop-"), root = join(dir, "batches"), lock = scheddPaths(dir).lock;
     const started = { a: [], b: [] }, stoppedWithLock = {};

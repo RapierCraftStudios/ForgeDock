@@ -331,7 +331,7 @@ export function runningSplit(state, parallel = null) {
 export function evaluateDispatchStall(state, { held = [], parallel = null, hosted = false, lastProgressMs = null, now = Date.now(), windowMin = DEFAULT_STALL_MIN, cancelled = false, reported = false, gates = [], lanesAliveMs = null, paused = null } = {}) {
   if (!state || cancelled || reported || lastProgressMs === null) return null;
   if (paused) return null; // #5975: an operator pause is an intended wait, not a dispatch stall
-  if (state.breaker && !state.breaker.transport) return null; // an operator --resume clears it; a re-host would stop again at once
+  if (state.breaker && !state.breaker.transport && !state.breaker.environmental) return null; // an operator --resume clears it; a re-host would stop again at once
   const order = new Set((state.order ?? []).map(Number)), results = state.results ?? {}, heldSet = new Set(held.map(Number));
   const running = Object.keys(state.running ?? {}).length;
   const k = Number.isInteger(parallel) && parallel > 0 ? parallel : Number.isInteger(state.parallel) && state.parallel > 0 ? state.parallel : 1;
