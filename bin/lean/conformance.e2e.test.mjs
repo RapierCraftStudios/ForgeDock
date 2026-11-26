@@ -67,7 +67,7 @@ function makeWorld(dir, script) {
   git(["add", "-A"], repo); git(["commit", "-q", "-m", "base"], repo);
   git(["push", "-q", "origin", "main"], repo); git(["push", "-q", "origin", "main:staging"], repo); git(["fetch", "-q", "origin"], repo);
   git(["clone", "-q", origin, merger], dir);
-  const gh = { issues: { 101: { ...ISSUE, state: "OPEN", reason: null, labels: new Set(), comments: [] } }, next: 200, prs: [] };
+  const gh = { issues: { 101: { ...(script.issue ?? ISSUE), state: "OPEN", reason: null, labels: new Set(), comments: [] } }, next: 200, prs: [] };
   const counts = { builder: 0, reviewer: 0 };
   const tools = (wt) => ({
     write: (files) => writeAll(wt, files),
@@ -144,7 +144,7 @@ function builderScript(cs) {
   };
 }
 /** A diligent reviewer made deterministic: every row comes from the worktree the engine handed it. */
-function oracle(c) {
+function oracle(c, quotes = Q) {
   const between = (tag) => c.prompt.split(`<${tag}>\n`)[1].split(`\n</${tag}>`)[0];
   const k = JSON.parse(between("contract")), files = between("changed_files").split("\n").filter(Boolean);
   const read = (p) => { try { return fs.readFileSync(path.join(c.cwd, p), "utf8"); } catch { return ""; } };
@@ -158,9 +158,11 @@ function oracle(c) {
   });
   const covered = (q) => k.requirements.some((r) => r.quote === q) || k.preserve.some((p) => p.what.includes(q));
   const billing = git(["diff", "--name-only", "origin/staging...HEAD", "--", "src/billing.js"], c.cwd).trim() !== "";
-  const rv = { issue_coverage: Object.values(Q).map((q) => ({ quote: q, status: covered(q) ? "covered" : "missing" })), requirements: rows,
+  const rv = { issue_coverage: Object.values(quotes).map((q) => ({ quote: q, status: covered(q) ? "covered" : "missing" })), requirements: rows,
     scope: files.map((f) => ({ file: f, authorized_by: k.deliverables.find((d) => d.path === f)?.id ?? (f.startsWith("test/") ? "test" : "none") })),
-    preserve: [{ id: "P1", status: billing ? "violated" : "intact", evidence: "src/billing.js:1" }, { id: "P2", status: "intact", evidence: "test/routes.test.js:1" }], regressions: [] };
+    preserve: [{ id: "P1", status: billing ? "violated" : "intact", evidence: "src/billing.js:1" }, { id: "P2", status: "intact", evidence: "test/routes.test.js:1" },
+    // history rows (H#) come from the host-wide ~/.forge/guards cache other test files write to; this repo has no such history
+    ...k.preserve.filter((p) => /^H\d+$/.test(p.id)).map((p) => ({ id: p.id, status: "intact", evidence: "src/billing.js:1" }))], regressions: [] };
   const bad = rv.issue_coverage.some((x) => x.status !== "covered") || rows.some((r) => ["missing", "partial"].includes(r.status)) || rv.scope.some((s) => s.authorized_by === "none") || billing;
   return "```json\n" + JSON.stringify({ ...rv, verdict: bad ? "NONCONFORMING" : "CONFORMS", summary: "oracle" }) + "\n```";
 }
@@ -168,7 +170,7 @@ const generic = () => "```json\n" + JSON.stringify({ verdict: "PASS", fixes_issu
 
 async function runCase(cs, conformance = "enforce", extra = {}) {
   const dir = tmpDir("conf-e2e-");
-  const w = makeWorld(dir, { builder: builderScript(cs), reviewer: (n, c) => (cs.generic ? generic() : oracle(c)) });
+  const w = makeWorld(dir, { builder: builderScript(cs), reviewer: (n, c) => (cs.generic ? generic() : oracle(c, cs.quotes)), issue: cs.issue });
   if (extra.runCommand) w.io.runCommand = extra.runCommand;
   const ret = await runCore({ issue: 101, repo: "o/r", lane: "staging", cwd: w.repo, worktreeRoot: path.join(dir, "wt"), dir: path.join(dir, "runs"), io: w.io, random: () => 0.5, stableMs: 0, livePollMs: 20, conformance, ...(extra.opts ?? {}) });
   return { ...w.observe(ret), log: readLog(path.join(dir, "runs"), 101, { repo: "o/r" }) }; // #4432: keyed by repo
@@ -202,10 +204,12 @@ describe("conformance gate end-to-end (real git, disposable repo)", { skip: !HAV
         res.amendments = [{ kind: "add-requirement", requirement: req("R3"), why: "the issue's requirement 3 was missing" }, { kind: "add-deliverable", id: "D3", path: "src/routes/export.js", why: "implements R3" }]; } });
     merged(o); assert.ok(o.staging.export); assert.ok(o.markers.includes("FORGE:AMENDMENT"));
   });
-  it("3 scope creep: an unauthorized billing change is stopped by the precheck and reverted before it can reach staging", async () => {
+  it("3 scope creep: an unauthorized billing change is caught by the review's preserve check and reverted before it can reach staging", async () => {
     const o = await runCase({ contract: FULL, impl: (t) => { fix(t, ["scrape", "search", "export"]); t.write({ "src/billing.js": "export function price(units) { return Math.round(units) * 0.01; }\n" }); },
       resume: (t) => t.restore("src/billing.js") });
-    merged(o); assert.equal(o.staging.billingChanged, false); assert.deepEqual([o.counts.builder, o.counts.reviewer], [3, 1]);
+    // unclog: file scope alone is advisory (no precheck stop); the violated preserve row (P1) blocks and the resume reverts it
+    merged(o); assert.equal(o.staging.billingChanged, false); assert.deepEqual([o.counts.builder, o.counts.reviewer], [3, 2]);
+    assert.ok(o.log.some((e) => e.event === "ADVISORY" && e.rows.includes("scope_creep")), "scope creep is recorded as advisory");
   });
   it("4 a claimed follow-up without a tracking issue blocks merge before any review", async () => {
     const o = await runCase({ contract: FULL, impl: (t) => fix(t, ["scrape", "search"]), claims: (k) => claimAll(k).map((r) => (r.id === "R3" ? { id: "R3", status: "deferred", note: "follow-up" } : r)) });
@@ -262,7 +266,7 @@ describe("conformance gate end-to-end (real git, disposable repo)", { skip: !HAV
   it("#5087 a declared topology.route_reachability that rejects the new route blocks before merge (#38241 fixture)", async () => {
     const ingress = path.join(tmpDir("ingress-"), "check-ingress.sh");
     fs.writeFileSync(ingress, "for p in \"$@\"; do case \"$p\" in /api/v1/batch*) ;; /api/v1/*) echo \"unreachable: $p -> api\" >&2; exit 1 ;; esac; done\n");
-    const o = await runCase({ contract: ROUTED, impl: addRoute }, "enforce", { runCommand: runCheckCommand, opts: { routeReachability: `bash ${ingress}`, verify: { maxRounds: 0 } } });
+    const o = await runCase({ contract: ROUTED, impl: addRoute }, "enforce", { runCommand: runCheckCommand, opts: { routeReachability: `bash ${ingress.replace(/\\/g, "/")}`, verify: { maxRounds: 0 } } });
     assert.equal(o.staging.search, false, "staging untouched");
     assert.equal(o.ret.terminalReason, "needs-human"); assert.equal(o.pr, undefined, "no PR");
     assert.ok(o.log.some((e) => e.event === "PRECHECK" && e.failures.includes("conformance.unimplemented")));
@@ -274,6 +278,30 @@ describe("conformance gate end-to-end (real git, disposable repo)", { skip: !HAV
     assert.equal(o.ret.terminalReason, "needs-human"); assert.equal(o.pr, undefined, "no PR");
     assert.ok(o.log.some((e) => e.event === "PRECHECK" && e.failures.includes("conformance.unimplemented")));
     assert.match(o.ret.detail, /topology\.prod_parity/);
+  });
+  // #5750: a symptom plus a prescribed fix: the outcome rows bind, the prescription is guidance
+  const GQ = { R1: "Outstanding reservations return to 0 after a 429 on the scrape route.", R2: "Catch the rate limiter error in the scrape route and return an empty result.", AC3: Q.AC3 };
+  const GISSUE = { ...ISSUE, title: "429 leaks the scrape spend reservation", body: `## Problem\nWhen the rate limiter rejects a request with 429, the scrape route never releases the spend reservation.\n\n## Proposed fix\n${GQ.R2}\n\n## Acceptance\n- ${GQ.R1}\n- ${GQ.AC3}` };
+  const GUIDED = () => ({ requirements: [{ id: "R1", quote: GQ.R1, disposition: "deliver" }, { id: "R2", quote: GQ.R2, disposition: "guidance", why: "adapt: release the reservation and re-throw the 429 instead; an empty result hides the limit from the caller" }],
+    deliverables: [D.R1, D.R5], preserve: [{ id: "P1", what: `${Q.AC3} (src/billing.js price())` }, { id: "P2", what: `${Q.AC2} (test/routes.test.js)` }], validate: [{ id: "V1", command: V1 }] });
+  const prescribed = route("scrape", false).replace("  check(req.user, limits);", "  try {\n    check(req.user, limits);\n  } catch (e) {\n    if (e.status === 429) return { ok: false, scrape: [] };\n    throw e;\n  }");
+  it("#5750 the frozen contract binds the outcome and records the prescription as guidance", async () => {
+    const o = await runCase({ issue: GISSUE, quotes: GQ, contract: GUIDED, impl: (t) => fix(t, ["scrape"]) });
+    const posted = o.issue.comments.find((x) => x.includes("FORGE:CONTRACT")) ?? "";
+    assert.match(posted, /guidance/);
+    merged(o); assert.equal(o.ret.terminalReason, "merged");
+  });
+  it("#5750 a lane meeting the outcome with a different fix passes", async () => {
+    const o = await runCase({ issue: GISSUE, quotes: GQ, contract: GUIDED, impl: (t) => fix(t, ["scrape"]) });
+    merged(o);
+    const review = o.issue.comments.find((x) => x.includes("FORGE:REVIEW")) ?? "";
+    assert.ok(review.includes("| R2 | guidance (non-binding): adapt: release the reservation"), "the guidance row shows its stance and reason");
+    assert.ok(review.includes("**Issue coverage:** 2/2 "), "the guidance row is not counted as an issue requirement");
+  });
+  it("#5750 a lane following the prescription but missing the outcome fails", async () => {
+    const o = await runCase({ issue: GISSUE, quotes: GQ, contract: GUIDED, impl: (t) => t.write({ "src/routes/scrape.js": prescribed, "test/leak.test.js": leakTest([]) }) });
+    assert.equal(o.ret.terminalReason, "needs-human"); assert.equal(o.pr, undefined, "no PR"); assert.equal(o.issue.state, "OPEN");
+    assert.equal(o.ret.code, "conformance.unimplemented");
   });
   it("6 a generic PASS over an incomplete implementation never merges (review.incomplete)", async () => {
     const o = await runCase({ contract: FULL, impl: (t) => fix(t, ["scrape", "export"]), generic: true });

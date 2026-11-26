@@ -166,3 +166,159 @@ describe("#5805 probes", () => {
     assert.equal(envFingerprint(undefined), envFingerprint({}));
   });
 });
+
+describe("#5755 one env issue per signature", () => {
+  const seam = (closed = () => false) => {
+    const calls = [];
+    return { calls, ensure: async (a) => { calls.push(a); return 900; }, isClosed: async () => closed() };
+  };
+  const timeout = (extra = {}) => ({ terminalReason: "needs-human", code: "env.validate_timeout", detail: "validate V1 timed out after 900s on host 1234", ...extra });
+
+  it("two issues with the same env signature share one env issue and are held, never needs-human", async () => {
+    const e = seam();
+    const { byIssue, calls } = await harness({ script: { 1: [miss("html2text")], 2: [miss("html2text")] }, envHold: null, extra: { envIssue: e } });
+    assert.equal(byIssue[1].outcome, "held");
+    assert.equal(byIssue[2].outcome, "held");
+    assert.equal(byIssue[1].envHold.envIssue, 900);
+    assert.deepEqual(e.calls.map((c) => c.sig), ["env.tool_missing|html2text", "env.tool_missing|html2text"]);
+    assert.deepEqual(e.calls[1].issues, [1, 2]);
+    assert.equal(calls.length, 2, "no recovery lane is launched");
+  });
+
+  it("after 2 issues hit a signature a pending issue whose body names the tool is not admitted", async () => {
+    const e = seam();
+    const bodies = { 3: "needs html2text to validate", 4: "unrelated" };
+    const { byIssue, calls } = await harness({ script: { 1: [miss("html2text")], 2: [miss("html2text")], 3: [MERGED], 4: [MERGED] }, envHold: null, extra: { envIssue: e, readBody: async (n) => bodies[n] ?? "" } });
+    assert.equal(byIssue[3].outcome, "held");
+    assert.equal(byIssue[3].envHold.envIssue, 900);
+    assert.equal(byIssue[4].outcome, "merged");
+    assert.equal(calls.some((c) => c.n === 3), false);
+  });
+
+  it("env.validate_timeout and env.capability_remote are held on an env issue, not needs-human", async () => {
+    const e = seam();
+    const { byIssue } = await harness({ script: { 1: [timeout()], 2: [{ terminalReason: "needs-human", code: "env.capability_remote", detail: "capability sops is host-only" }] }, envHold: null, extra: { envIssue: e } });
+    assert.equal(byIssue[1].outcome, "held");
+    assert.equal(byIssue[2].outcome, "held");
+  });
+
+  it("held issues are requeued when the env issue closes", async () => {
+    let closed = false;
+    const e = seam(() => closed);
+    const { byIssue } = await harness({ script: { 1: [miss("html2text"), MERGED] }, envHold: null,
+      onRow: (r) => { if (r.issue === 1 && r.outcome === "held") closed = true; }, extra: { envIssue: e } });
+    assert.equal(byIssue[1].outcome, "merged");
+  });
+
+  it("without the seam the env.validate_timeout flow is unchanged (needs-human)", async () => {
+    const { byIssue } = await harness({ script: { 1: [timeout()] }, envHold: null });
+    assert.notEqual(byIssue[1].outcome, "held");
+  });
+
+  it("after 2 issues hit a non-tool signature a pending issue whose contract names its path is not admitted", async () => {
+    const e = seam();
+    const t = (d) => ({ terminalReason: "needs-human", code: "env.validate_timeout", detail: d });
+    const bodies = { 3: "validate runs shared/html2text/build.sh", 4: "unrelated" };
+    const { byIssue } = await harness({ script: { 1: [t("validate timed out running shared/html2text/build.sh")], 2: [t("validate timed out running shared/html2text/build.sh")], 3: [MERGED], 4: [MERGED] },
+      envHold: null, extra: { envIssue: e, readBody: async (n) => bodies[n] ?? "" } });
+    assert.equal(byIssue[3].outcome, "held");
+    assert.equal(byIssue[4].outcome, "merged");
+  });
+
+  it("an env park on a security issue escalates: not held, not parked into remediation-queue", async () => {
+    const e = seam();
+    const relabels = [];
+    const { byIssue } = await harness({ script: { 1: [miss("html2text")] }, envHold: null,
+      extra: { envIssue: e, issueLabels: async () => ["security"], relabelNeedsHuman: async (a) => { relabels.push(a); return true; } } });
+    assert.equal(byIssue[1].outcome, "needs-human");
+    assert.match(byIssue[1].detail, /Security issue escalated/);
+    assert.equal(relabels.some((a) => a.parked), false, "no parked/remediation-queue relabel");
+    assert.equal(relabels.some((a) => !a.parked && /Security issue escalated/.test(a.evidence)), true, "needs-human label applied");
+  });
+
+  it("when the env issue cannot be filed the env.* failure is still held, never needs-human", async () => {
+    const e = { ensure: async () => { throw new Error("gh down"); }, isClosed: async () => false };
+    const { byIssue } = await harness({ script: { 1: [miss("html2text")] }, envHold: null, extra: { envIssue: e } });
+    assert.equal(byIssue[1].outcome, "held");
+    assert.equal(byIssue[1].envHold.envIssue, undefined);
+  });
+});
+
+describe("#5859 agent restart: correlated sandbox loss is sandbox.lost, not engine-error", () => {
+  const LOST = (n, agent = "legion") => ({ terminalReason: "engine-error", detail: `sandbox fake-${n} exited without a result`, lostWithoutResult: true, agent });
+  const BREAKER = { errors: 3, window_min: 10 };
+
+  it("agent restart: 20 lanes lost on one agent are sandbox.lost, not engine-errors", async () => {
+    const issues = Array.from({ length: 20 }, (_, i) => i + 1);
+    const script = Object.fromEntries(issues.map((n) => [n, [LOST(n), MERGED]]));
+    const store = memStore(), logged = [];
+    store.log = (ev) => logged.push(ev);
+    let probes = 0; // the agent is still booting for its first two probes, then reports a fresh boot
+    const r = await harness({ script, issues, parallel: 20, store, envHold: undefined,
+      extra: { envHold: null, breaker: BREAKER, remote: { agentHealthy: async () => ++probes > 2 } } });
+    assert.ok(!r.updates.some((u) => u.outcome === "breaker"), "the breaker never trips");
+    const lost = r.updates.filter((u) => u.code === "sandbox.lost");
+    assert.deepEqual([...new Set(lost.map((u) => u.issue))].sort((a, b) => a - b), issues, "all 20 requeued with sandbox.lost");
+    for (const n of issues) assert.equal(r.byIssue[n].outcome, "merged", `#${n} admitted again once the agent is healthy`);
+    assert.equal(r.calls.length, 40, "each lane relaunched exactly once");
+    const st = store.load();
+    assert.deepEqual(st.engineErrors, {}, "relaunch counters unchanged");
+    assert.deepEqual(st.errorTimes, [], "nothing counted by the breaker");
+    assert.equal(st.breaker, null);
+    const ev = logged.filter((e) => e.event === "agent.restarted");
+    assert.equal(ev.length, 1, "one batch-level event");
+    assert.equal(ev[0].requeued, 20);
+    assert.match(ev[0].detail, /^agent legion restarted at \d{4}-.*Z; 20 lanes requeued$/);
+    assert.equal(r.updates.filter((u) => u.event === "agent.restarted").length, 1);
+    assert.equal(st.agentRestarts.length, 1);
+    assert.equal(st.agentRestarts[0].requeued, 20);
+    assert.ok(probes >= 3, "admission waited for the agent's healthy probe");
+  });
+
+  // #5967 R5/R8: a host-memory OOM restart of the agent VM ends N sandboxes together; the VM-restart class is sandbox.lost (not a second pool.vm_restart code).
+  it("N sandboxes ending together on an agent VM restart are sandbox.lost deferrals, no breaker trip (#5967)", async () => {
+    const issues = [1, 2, 3, 4, 5];
+    const script = Object.fromEntries(issues.map((n) => [n, [LOST(n), MERGED]]));
+    const store = memStore();
+    let probes = 0;
+    const r = await harness({ script, issues, parallel: 5, store, envHold: undefined,
+      extra: { envHold: null, breaker: BREAKER, remote: { agentHealthy: async () => ++probes > 1 } } });
+    assert.ok(!r.updates.some((u) => u.outcome === "breaker"));
+    assert.deepEqual([...new Set(r.updates.filter((u) => u.code === "sandbox.lost").map((u) => u.issue))].sort((x, y) => x - y), issues);
+    assert.ok(!r.updates.some((u) => u.code === "engine-error"));
+    const st = store.load();
+    assert.deepEqual(st.errorTimes, []);
+    assert.equal(st.breaker, null);
+    for (const n of issues) assert.equal(r.byIssue[n].outcome, "merged");
+  });
+
+  it("agent restart: failure after healthy is an ordinary engine-error", async () => {
+    const store = memStore();
+    const r = await harness({ script: { 1: [LOST(1), LOST(1), MERGED], 2: [LOST(2), MERGED], 3: [LOST(3), MERGED] }, issues: [1, 2, 3], parallel: 3, store,
+      envHold: undefined, extra: { envHold: null, breaker: { errors: 5, window_min: 10 } } });
+    assert.deepEqual(r.calls.filter((c) => c.n === 1).length, 3, "#1: sandbox.lost requeue, then the ordinary single relaunch");
+    assert.ok(r.updates.some((u) => u.issue === 1 && /^relaunching once: sandbox fake-1/.test(u.detail ?? "")));
+    const st = store.load();
+    assert.deepEqual(st.engineErrors, { 1: 1 });
+    assert.equal(st.errorTimes.length, 1, "the second loss of #1 counts toward the breaker");
+    for (const n of [1, 2, 3]) assert.equal(r.byIssue[n].outcome, "merged");
+  });
+
+  it("two unrelated sandbox exits stay engine-errors", async () => {
+    const store = memStore();
+    const r = await harness({ script: { 1: [LOST(1), MERGED], 2: [LOST(2, "box2"), MERGED], 3: [LOST(3), MERGED] }, issues: [1, 2, 3], parallel: 3, store,
+      envHold: undefined, extra: { envHold: null, breaker: { errors: 5, window_min: 10 } } });
+    // #1 and #3 share an agent (2 < 3), #2 is on another: no restart
+    assert.ok(!r.updates.some((u) => u.code === "sandbox.lost" || u.event === "agent.restarted"));
+    const st = store.load();
+    assert.deepEqual(st.engineErrors, { 1: 1, 2: 1, 3: 1 });
+    assert.equal(st.errorTimes.length, 3, "each counts toward the breaker as today");
+    assert.equal(st.agentRestarts, undefined);
+  });
+
+  it("two lost lanes with a 3-error breaker still trip it", async () => {
+    const r = await harness({ script: { 1: [LOST(1), EE("real bug")], 2: [LOST(2, "box2"), EE("real bug 2")] }, issues: [1, 2], parallel: 2,
+      envHold: undefined, extra: { envHold: null, breaker: { errors: 2, window_min: 10 } } });
+    assert.ok(r.updates.some((u) => u.outcome === "breaker"));
+  });
+});

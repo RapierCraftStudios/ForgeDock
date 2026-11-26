@@ -8,10 +8,14 @@ import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { resolveLane, makeLaneCache } from "./lane.mjs";
 import { orchestrate, deferPolicy, DEFER_BACKOFF_S, formatOutcomeLists, CAPACITY_FALLBACK_AFTER, isTransientEngineError, transientRetryDelayMs, DEFAULT_TRANSIENT_RETRIES } from "./orchestrate.mjs";
-import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane, detachedLanes } from "./batch.mjs";
+import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane, detachedLanes, stackedOnOf, keptSandboxes } from "./batch.mjs";
 import { makeLedger } from "./ledger.mjs";
+import { placeLane } from "./execution.mjs";
+import { liveRemote } from "./live-execution.mjs";
 import { providerLanes } from "./execution.mjs";
 import { orchestrateFromCli, runFromCli, readOrchestration, makeRelabelNeedsHuman, makeMarkRecovering, makeDispatchCheck } from "../engine-cli.mjs";
+// Windows hosts: these tests exercise POSIX-only behaviour (file modes, tmpfs, systemd units, sh/bash scripts, file-URL paths); Linux CI runs them.
+const POSIX_ONLY = process.platform === "win32" && "POSIX-only behaviour";
 
 // orchestrateFromCli opens the host lane registry (#4191): keep it in a temp dir, also for spawned dispatchers.
 process.env.FORGEDOCK_SCHED_DIR = tmpDir("batch-sched-");
@@ -241,7 +245,7 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.equal(rows.length, 7);
   });
 
-  it("batch files: atomic writes, live K via --set-parallel, tmpfs refused, pid reuse not adopted", async () => {
+  it("batch files: atomic writes, live K via --set-parallel, tmpfs refused, pid reuse not adopted", { skip: POSIX_ONLY }, async () => {
     const root = tmpDir("batch-files-");
     const b = openBatch(root, "b1");
     b.writePlan({ argv: ["1"] });
@@ -267,9 +271,11 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.equal(isLaneAlive(42, "lane", { kill: () => true, procDir: proc }), true);
     writeFileSync(join(pd, "stat"), "42 (no) de) Z 1 42 42 0 -1\n");
     assert.equal(isLaneAlive(42, "lane", { kill: () => true, procDir: proc }), false);
-    assert.deepEqual(readOrchestration(root), { breaker: { errors: 3, window_min: 30 }, maxDeferrals: 3, transientRetries: 4, blockedLabel: "blocked", globalParallel: null, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] } });
+    assert.deepEqual(stackedOnOf({ stacked: { 7: { dependency: 6, branch: "b", sha: "abcdef1" } } }, 7), { dependency: 6, branch: "b", sha: "abcdef1" }, "#5832: stackedOn read from batch state");
+    assert.equal(stackedOnOf({}, 7), null);
+    assert.deepEqual(readOrchestration(root), { breaker: { errors: 3, window_min: 30 }, maxDeferrals: 3, transientRetries: 4, blockedLabel: "blocked", globalParallel: null, stacking: "off", recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] }, mergeTrain: "off", mergeTrainBatch: 4, maxAttemptsPerIssue: 4, maxIdenticalSignature: 2 });
     writeFileSync(join(root, "forge.yaml"), "orchestration:\n  breaker:\n    errors: 5\n    window_min: 10\n  max_deferrals: 2\n  global_parallel: 4\n  transient_retries: 2\n");
-    assert.deepEqual(readOrchestration(root), { breaker: { errors: 5, window_min: 10 }, maxDeferrals: 2, transientRetries: 2, blockedLabel: "blocked", globalParallel: 4, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] } });
+    assert.deepEqual(readOrchestration(root), { breaker: { errors: 5, window_min: 10 }, maxDeferrals: 2, transientRetries: 2, blockedLabel: "blocked", globalParallel: 4, stacking: "off", recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] }, mergeTrain: "off", mergeTrainBatch: 4, maxAttemptsPerIssue: 4, maxIdenticalSignature: 2 });
   });
 
   it("run-issue --result-file writes the lane result, also when the run throws", async () => {
@@ -383,6 +389,31 @@ describe("#4318: the batch dispatcher's signal relabel and the needs-human relab
         assert.equal(await h.run(), "skipped");
         assert.deepEqual(h.calls, ["view"]);
       }
+    });
+    it("relabel skips an open issue whose fix PR merged on a non-lean head", async () => {
+      const calls = [];
+      const gh = async (a) => {
+        calls.push(a.slice(0, 2).join(" "));
+        if (a[1] === "view" && a[0] === "issue") return JSON.stringify({ state: "OPEN", body: "", labels: [], closedByPullRequestsReferences: [{ number: 41 }] });
+        if (a[0] === "pr") return JSON.stringify({ state: "MERGED", mergedAt: "2026-11-17T15:43:35Z" });
+        return "";
+      };
+      for (const parked of [null, { code: "env.validate_timeout" }]) assert.equal(await makeRelabelNeedsHuman({ gh, repo: "o/r", now: () => 1000 })({ issue: 7, evidence: "why", parked }), "skipped");
+      assert.ok(!calls.includes("issue edit"));
+      const labelled = async (a) => (a[0] === "issue" && a[1] === "view" ? JSON.stringify({ state: "OPEN", body: "", labels: [{ name: "workflow:merged" }] }) : "");
+      assert.equal(await makeRelabelNeedsHuman({ gh: labelled, repo: "o/r", now: () => 1000 })({ issue: 7, evidence: "why" }), "skipped");
+    });
+    it("relabel still parks an issue reopened after merge", async () => {
+      const calls = [];
+      const gh = async (a) => {
+        calls.push(a.slice(0, 2).join(" "));
+        if (a[0] === "issue" && a[1] === "view") return JSON.stringify({ state: "OPEN", body: "", labels: [], closedByPullRequestsReferences: [{ number: 41 }] });
+        if (a[0] === "pr") return JSON.stringify({ state: "MERGED", mergedAt: "2026-11-17T15:43:35Z" });
+        if (a[0] === "api" && a[1].endsWith("/events")) return "reopened\t2026-11-18T00:00:00.000Z\t";
+        return "";
+      };
+      assert.equal(await makeRelabelNeedsHuman({ gh, repo: "o/r", now: () => 1000 })({ issue: 7, evidence: "why" }), true);
+      assert.ok(calls.includes("issue edit"));
     });
     it("an expired lease relabels: the label first, then the comment", async () => {
       const h = hook({ state: "OPEN", body: LIVE(500) });
@@ -1454,7 +1485,7 @@ describe("#4592: forgedock orchestrate --hold / --release", () => {
 });
 
 describe("#4751: batch state is private", () => {
-  it("batch state files are private", () => {
+  it("batch state files are private", { skip: POSIX_ONLY }, () => {
     const root = tmpDir("batch-private");
     const old = process.umask(0o022);
     try {
@@ -1475,7 +1506,7 @@ describe("#4751: batch state is private", () => {
 });
 
 describe("batch plan secrets (#4787)", () => {
-  it("writePlan never writes secret env values and keeps the plan 0600", () => {
+  it("writePlan never writes secret env values and keeps the plan 0600", { skip: POSIX_ONLY }, () => {
     const b = openBatch(join(tmpDir("batch-sec-"), "batches"), "b20260101-000000-1");
     b.writePlan({ v: 1, env: { PATH: "/bin", COMPUTESHARE_TOKEN: "tok-123", AWS_ACCESS_KEY: "k-456" } });
     const raw = readFileSync(join(b.dir, "plan.json"), "utf8");
@@ -1484,7 +1515,7 @@ describe("batch plan secrets (#4787)", () => {
     assert.deepEqual(b.readPlan().envSecrets, ["AWS_ACCESS_KEY", "COMPUTESHARE_TOKEN"]);
     assert.equal(statSync(join(b.dir, "plan.json")).mode & 0o777, 0o600);
   });
-  it("scrubPlan rewrites a pre-fix 0644 plan and is a no-op otherwise", () => {
+  it("scrubPlan rewrites a pre-fix 0644 plan and is a no-op otherwise", { skip: POSIX_ONLY }, () => {
     const b = openBatch(join(tmpDir("batch-sec-"), "batches"), "b20260101-000000-2");
     mkdirSync(b.dir, { recursive: true });
     writeFileSync(join(b.dir, "plan.json"), JSON.stringify({ v: 1, env: { PATH: "/bin", COMPUTESHARE_TOKEN: "tok-123" } }), { mode: 0o644 });
@@ -1589,6 +1620,42 @@ describe("#5138: live max_remote and placement of a running batch", () => {
     const rows = await done;
     assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged", "merged"]);
     assert.deepEqual(seen.find(([n]) => n === 3)[1], [3]);
+  });
+  const liveDrain = (state) => liveRemote({ isRemote: () => true, capacity: () => null }, { exec: { mode: "remote", maxRemote: 2 }, readOverride: () => ({ maxRemote: state.m }), place: (e) => placeLane({ exec: e }) });
+  it("#5933 remote batch at max_remote 0 holds lanes pending", async () => {
+    const st = { m: 0 }, seen = [];
+    const done = orchestrate({ issues: [1], parallel: 2, pollMs: 1, readBody: async () => "", sleep: tick, remote: liveDrain(st),
+      runOne: async (n, _ln, ctx = {}) => { seen.push([n, ctx.placement?.where]); return { terminalReason: "merged", pr: 100 + n }; } });
+    for (let i = 0; i < 20; i++) await tick();
+    assert.deepEqual(seen, [], "nothing runs, locally or remotely, at max_remote 0");
+    st.m = 1;
+    await done;
+    assert.deepEqual(seen, [[1, "remote"]]);
+  });
+  it("#5933 lowering max_remote to 0 leaves a running lane running", async () => {
+    const st = { m: 2 }, seen = [];
+    let open, running = false;
+    const gate = new Promise((r) => { open = r; });
+    const done = orchestrate({ issues: [1, 2], parallel: 2, pollMs: 1, readBody: async () => "", sleep: tick, remote: liveDrain(st),
+      runOne: async (n, _ln, ctx = {}) => { seen.push([n, ctx.placement?.where]); if (n === 1) { running = true; await gate; } return { terminalReason: "merged", pr: 100 + n }; } });
+    await until(() => running);
+    st.m = 0;
+    for (let i = 0; i < 20; i++) await tick();
+    assert.ok(!seen.some(([n, w]) => w === "local"), "no lane lands on the host");
+    open();
+    await new Promise((r) => setTimeout(r, 5));
+    st.m = 2;
+    const rows = await done;
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+  });
+  it("#5933 --set-max-remote 0 prints drain semantics", async () => {
+    const root = tmpDir("batch-drain-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: ["1"] });
+    const lines = [], l = console.log;
+    console.log = (...x) => { lines.push(x.join(" ")); };
+    try { await orchestrateFromCli(["--set-max-remote", "b1", "0"], { batchRoot: root }); } finally { console.log = l; }
+    assert.match(lines.join("\n"), /remote starts paused; nothing runs locally/);
   });
   it("--set-max-remote / --set-placement write the batch's execution file; bad values and provider-less remote refused", async () => {
     const root = tmpDir("batch-live-exec-");
@@ -2011,5 +2078,121 @@ describe("#5669: an upgrade handover adopts live lanes instead of requeueing the
     assert.equal(ir.length, 1);
     assert.match(ir[0].detail, /^interrupted: upgrade v1\.59\.1→v1\.59\.2; /);
     assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[4, "merged"]]);
+  });
+});
+
+describe("#5975: batch pause", () => {
+  it("pause file: set, read, clear, expiry and invalid content", () => {
+    const b = openBatch(tmpDir("batch-pause5975-"), "b1");
+    b.writePlan({ argv: [], repo: "o/r" });
+    assert.equal(b.readPause(), null);
+    const rec = b.setPause({ owner: "op@h", reason: "release cut", forMs: 7200000 });
+    assert.equal(rec.reason, "release cut");
+    assert.equal(Date.parse(b.readPause().expiresAt) - Date.parse(b.readPause().since), 7200000);
+    assert.equal(b.expirePause(Date.now()), null, "not due yet");
+    const gone = b.expirePause(Date.now() + 7300000);
+    assert.equal(gone.owner, "op@h");
+    assert.equal(b.readPause(), null, "expiry lifts it");
+    b.setPause({ owner: "op@h", reason: "x" });
+    assert.equal(b.expirePause(Date.now() + 1e12), null, "no expiry never expires");
+    assert.equal(b.clearPause(), true);
+    assert.equal(b.clearPause(), false);
+    writeFileSync(join(b.dir, "pause"), "not json");
+    assert.equal(b.readPause(), null);
+    writeFileSync(join(b.dir, "pause"), "[1]");
+    assert.equal(b.readPause(), null);
+  });
+
+  it("through the CLI: --pause needs --reason, records the expiry, --unpause lifts it; sched show lists it", async () => {
+    const root = tmpDir("batch-pause5975-cli-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: [], repo: "o/r" });
+    b.store.save({ order: [1, 2], pending: [1, 2] });
+    const io = { gh: async () => JSON.stringify({ state: "OPEN" }) };
+    await assert.rejects(orchestrateFromCli(["--pause", "b1"], { batchRoot: root, io }), /--reason/);
+    await assert.rejects(orchestrateFromCli(["--pause", "b1", "--reason", "x", "--for", "soon"], { batchRoot: root, io }), /--for expects/);
+    await assert.rejects(orchestrateFromCli(["--pause", "nope", "--reason", "x"], { batchRoot: root, io }), /no batch nope/);
+    const res = await quiet(() => orchestrateFromCli(["--pause", "b1", "--for", "2h", "--reason", "release cut"], { batchRoot: root, io }));
+    assert.equal(res.pause.reason, "release cut");
+    assert.ok(Date.parse(b.readPause().expiresAt) - Date.parse(b.readPause().since) === 2 * 3600000);
+    const { summaryLines } = await import("./batch-health.mjs");
+    assert.ok(summaryLines(root).some((l) => /batch b1: paused \(release cut, until \d{4}-/.test(l)));
+    await quiet(() => orchestrateFromCli(["--unpause", "b1"], { batchRoot: root, io }));
+    assert.equal(b.readPause(), null);
+    assert.ok(!summaryLines(root).some((l) => /paused/.test(l)));
+  });
+
+  it("--hold <id> --all is sugar for --pause; --hold <id> N still holds one issue (#5975)", async () => {
+    const root = tmpDir("batch-pause5975-all-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: [], repo: "o/r" });
+    b.store.save({ order: [1, 2], pending: [1, 2] });
+    const io = { gh: async () => JSON.stringify({ state: "OPEN" }) };
+    await quiet(() => orchestrateFromCli(["--hold", "b1", "1"], { batchRoot: root, io }));
+    assert.equal(b.readPause(), null, "a per-issue hold does not pause the batch");
+    await quiet(() => orchestrateFromCli(["--hold", "b1", "--all", "--for", "2h"], { batchRoot: root, io }));
+    assert.equal(b.readPause().reason, "--hold --all");
+    assert.ok(Date.parse(b.readPause().expiresAt) > Date.parse(b.readPause().since));
+    await quiet(() => orchestrateFromCli(["--unpause", "b1"], { batchRoot: root, io }));
+    assert.equal(b.readPause(), null);
+  });
+
+  it("a paused batch is not a dispatch stall", async () => {
+    const { evaluateDispatchStall } = await import("./batch-health.mjs");
+    const state = { order: [1], pending: [1], results: {}, running: {}, parallel: 1 };
+    const opts = { hosted: true, lastProgressMs: 0, now: 3600000 * 5, windowMin: 10 };
+    assert.ok(evaluateDispatchStall(state, opts), "unpaused: a stall");
+    assert.equal(evaluateDispatchStall(state, { ...opts, paused: { reason: "x" } }), null);
+  });
+});
+
+describe("#5992: base.red is a batch hold, not a per-issue capped deferral", () => {
+  it("base.red is uncapped; other codes still cap", () => {
+    assert.deepEqual(deferPolicy({ code: "base.red", retryInSeconds: 900 }, { now: 0, deferrals: 99, maxDeferrals: 3 }), { delayMs: 900000, host: true });
+    assert.deepEqual(deferPolicy({ code: "merge.transient", retryInSeconds: 60 }, { now: 0, deferrals: 3, maxDeferrals: 3 }), { capped: true });
+  });
+
+  it("10 lanes + red base: 1 probe run, only the fixer launches, no 'gave up'; a sha move resumes admission in one pass", async () => {
+    const { c, now, sleep } = fakeClock();
+    const issues = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    const launches = [], updates = [];
+    let sha = "a".repeat(40), probes = 0;
+    const baseProbe = async () => { probes++; return sha === "a".repeat(40) ? { red: true, sha, commands: ["guard"], att: { sha: "f".repeat(40), issue: 10 } } : { red: false, sha }; };
+    let passes = 0;
+    const rows = await orchestrate({ issues, parallel: 10, maxDeferrals: 3, now, readBody: async () => "", baseProbe, pollMs: 10,
+      onUpdate: (u) => updates.push(u),
+      sleep: async (ms) => { await sleep(ms); if (++passes === 3) sha = "b".repeat(40); },
+      runOne: async (n) => { launches.push([n, sha === "a".repeat(40) ? "red" : "green"]); return { terminalReason: "merged", pr: 100 + n }; } });
+    const redLaunches = launches.filter((l) => l[1] === "red").map((l) => l[0]);
+    assert.deepEqual(redLaunches, [10], "only the attributed fixer is admitted while the base is red");
+    assert.equal(launches.length, 10, "every lane runs once after the base moves");
+    assert.ok(rows.every((r) => r.outcome === "merged"));
+    assert.ok(!rows.some((r) => /gave up/.test(r.detail ?? "")));
+    assert.equal(updates.filter((u) => u.code === "base.red").length, 1, "one batch-level hold row");
+    assert.ok(updates.some((u) => /base\.red cleared/.test(u.detail ?? "")));
+    assert.ok(c.t >= 1_000_000);
+  });
+});
+
+// #5978: the selector is kept in the batch plan argv/state; coverage classifies every matching open issue.
+import { coverage as coverage5978 } from "./batch.mjs";
+describe("coverage (#5978)", () => {
+  it("every open match lands in exactly one class; human-blocked is the only unscheduled-allowed class", () => {
+    const state = { pending: [2], running: { 1: {} }, results: { 3: { outcome: "needs-human", detail: "needs a product decision" } } };
+    const c = coverage5978({ state, open: [1, 2, 3].map((number) => ({ number })) });
+    assert.deepEqual([c.running, c.queued, c.humanBlocked, c.unscheduled], [[1], [2], [3], []]);
+  });
+  it("a human label blocks an issue with no row; an unknown one is unscheduled", () => {
+    const c = coverage5978({ state: { pending: [] }, open: [{ number: 4, labels: ["human:credentials"] }, { number: 5, labels: ["bug"] }] });
+    assert.deepEqual([c.humanBlocked, c.unscheduled], [[4], [5]]);
+  });
+});
+
+describe("#6008 kept-sandbox listing", () => {
+  it("lists issue, age and phase from state.kept and, with no live dispatcher, from remote run records", () => {
+    const state = { kept: { 5: { issue: 5, since: 1_000, phase: "review", id: "sbx-5" } }, running: { 6: { startedAt: 4_000, remote: true, handle: { id: "sbx-6" } }, 7: { startedAt: 4_000, pid: 99 } } };
+    const rows = keptSandboxes(state, { now: 61_000 });
+    assert.deepEqual(rows.map((r) => [r.issue, r.ageMs, r.phase]), [[5, 60_000, "review"], [6, 57_000, null]]);
+    assert.deepEqual(keptSandboxes(state, { now: 61_000, live: true }).map((r) => r.issue), [5], "a live dispatcher's running lanes are not kept");
   });
 });

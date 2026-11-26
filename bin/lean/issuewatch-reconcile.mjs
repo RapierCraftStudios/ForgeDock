@@ -8,6 +8,7 @@
  * FORGE:DECISION or a newer comment) is released so the next pass re-claims it. `status --stuck` lists the old claims. Gh, the clock and the
  * lane launch are injected; the state callbacks (`fail`, `settle`, `release`) belong to the caller.
  */
+import { mergedEvidence } from "./merged-park.mjs";
 import { classifyNeedsHuman, REMEDIATION_QUEUE_LABEL } from "../engine/outcome-codes.mjs";
 
 const HOUR_MS = 3600_000;
@@ -121,6 +122,7 @@ export async function remediateStep({ watch, repo, io, state, handles, lanes = {
     r.status = "failed";
     const reason = `remediation lane for \`${r.code}\` exited ${res.code}`;
     state.outcomes[n] = { kind: "needs-human", code: r.code, at: now, reason };
+    if (await mergedEvidence({ gh: io.gh, repo, issue: Number(n) })) { fail(Number(n)); continue; } // #5759: a merged fix is not parked after the fact
     try {
       await io.gh(["issue", "edit", String(n), "-R", repo, "--add-label", NEEDS_HUMAN_LABEL, "--remove-label", REMEDIATION_QUEUE_LABEL]);
       await io.gh(["issue", "comment", String(n), "-R", repo, "--body", `## Needs human\nissue-watch ${watch.name} remediated this parked issue once (${reason}); a person has to take it from here.`]);

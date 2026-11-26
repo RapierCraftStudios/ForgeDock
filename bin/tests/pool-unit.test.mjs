@@ -2,11 +2,15 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { runPoolCli } from "../pool/cli.mjs";
 import { restartCheck, lastExitReason } from "../pool/health.mjs";
+// Windows hosts: these tests exercise POSIX-only behaviour (file modes, tmpfs, systemd units, sh/bash scripts, file-URL paths); Linux CI runs them.
+const POSIX_ONLY = process.platform === "win32" && "POSIX-only behaviour";
 
-const root = new URL("../../", import.meta.url).pathname;
-const read = (p) => readFileSync(root + p, "utf8");
+// fileURLToPath, forward slashes: a URL pathname is /C:/... on win32; bash (Git Bash) and fs both take C:/...
+const root = fileURLToPath(new URL("../../", import.meta.url)).replace(/\\/g, "/");
+const read = (p) => readFileSync(root + p, "utf8").replace(/\r\n/g, "\n"); // a CRLF checkout (core.autocrlf) reads as LF
 
 describe("pool unit hardening (#4673)", () => {
   it("router sets a distinctive process title", async () => {
@@ -16,10 +20,10 @@ describe("pool unit hardening (#4673)", () => {
     const title = process.title; process.title = old;
     assert.equal(title, "forgedock-pool-router");
   });
-  it("schedd sets its title", () => {
+  it("schedd sets its title", { skip: POSIX_ONLY }, () => {
     assert.match(read("bin/engine-cli.mjs"), /process\.title = "forgedock-schedd"/);
   });
-  it("generated units carry OOMScoreAdjust= from the shared snippet and StartLimitIntervalSec=0 in [Unit] only", () => {
+  it("generated units carry OOMScoreAdjust= from the shared snippet and StartLimitIntervalSec=0 in [Unit] only", { skip: POSIX_ONLY }, () => {
     const out = (mode) => spawnSync("bash", ["-c", `. ${root}pool/install/unit-hardening.sh; unit_hardening ${mode}`], { encoding: "utf8" }).stdout;
     for (const mode of ["user", "system"]) {
       assert.match(out(mode), /^OOMScoreAdjust=-?\d+$/m);
@@ -28,9 +32,9 @@ describe("pool unit hardening (#4673)", () => {
     }
     for (const f of ["install-router.sh", "install-agent.sh", "install-schedd.sh"]) assert.match(read(`pool/install/${f}`), /unit-hardening\.sh/);
   });
-  it("StartLimitIntervalSec=0 lands in [Unit], not [Service], of every generated unit", () => {
+  it("StartLimitIntervalSec=0 lands in [Unit], not [Service], of every generated unit", { skip: POSIX_ONLY }, () => {
     for (const [f, mode] of [["install-router.sh", "user"], ["install-agent.sh", "system"], ["install-schedd.sh", "user"]]) {
-      const heredoc = read(`pool/install/${f}`).match(/<<-?\s*\\?'?(\w+)'?\n(\[Unit\][\s\S]*?)\n\1\n/)[2];
+      const heredoc = [...read(`pool/install/${f}`).matchAll(/<<-?\s*\\?'?(\w+)'?\n(\[Unit\][\s\S]*?)\n\1\n/g)].map((m) => m[2]).find((h) => /unit_hardening/.test(h));
       const script = `. ${root}pool/install/unit-hardening.sh; cat <<EOF\n${heredoc}\nEOF`;
       const unit = spawnSync("bash", ["-c", script], { encoding: "utf8" }).stdout;
       const sections = {};
@@ -40,7 +44,7 @@ describe("pool unit hardening (#4673)", () => {
       assert.ok(!sections.Service.some((l) => l.startsWith("StartLimitIntervalSec")), `${f}: present in [Service]`);
     }
   });
-  it("schedd unit gets CPUWeight and a watchdog timer; router and agent units get no priority lines (#4780)", () => {
+  it("schedd unit gets CPUWeight and a watchdog timer; router and agent units get no priority lines (#4780)", { skip: POSIX_ONLY }, () => {
     const out = (mode) => spawnSync("bash", ["-c", `. ${root}pool/install/unit-hardening.sh; unit_priority ${mode}`], { encoding: "utf8" }).stdout;
     assert.match(out("user"), /^CPUWeight=\d+$/m);
     assert.doesNotMatch(out("user"), /Nice=/);
@@ -64,7 +68,7 @@ describe("pool unit hardening (#4673)", () => {
 });
 
 describe("per-repo lane image (#5650)", () => {
-  it("agent resolves the image through lane-tools and keeps the base default", () => {
+  it("agent resolves the image through lane-tools and keeps the base default", { skip: POSIX_ONLY }, () => {
     const src = read("bin/pool/agent.mjs");
     assert.match(src, /resolveLaneImage\(\{ tools: spec\.lane_tools, baseImage: spec\.image \?\? image, docker \}\)/);
     assert.match(src, /: \(spec\.image \?\? image\)/);

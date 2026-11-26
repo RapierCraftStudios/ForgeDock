@@ -95,7 +95,7 @@ import { checkContext, refreshContextFlow } from "./review-context.mjs";
 import { runConfigCommand } from "./config-history.mjs";
 import { validateForgeYaml } from "./config-schema.mjs";
 import { botTokenStatus } from "./bot-token-status.mjs";
-import { assessForgeHome, isProblem as forgeHomeIsProblem, describe as describeForgeHome, readUserForgeHomeWin, clearUserForgeHomeWin } from "./forge-home-check.mjs";
+import { assessForgeHome, isProblem as forgeHomeIsProblem, describe as describeForgeHome, readUserForgeHomeWin, clearUserForgeHomeWin, hookScriptTree } from "./forge-home-check.mjs";
 import { applyAuthEnv, startAuthRefresh, doctorAppAuth, AUTH_REFRESH_COMMANDS } from "./auth/app-token.mjs";
 import {
   parseNameStatusDiff,
@@ -1107,6 +1107,13 @@ async function installHygieneSchedule(cwd, write = () => {}) {
     const { installGcSchedule } = await import("./gc-schedule.mjs");
     const r = await installGcSchedule({ schedule: h.schedule, enabled: h.auto_gc, cwd });
     if (r.status !== "off") write(`  Hygiene schedule: ${r.status} (${r.kind}) ${r.detail}\n`);
+    try { // #5987: daily introspect, filed only on an explicit orchestrate.slo.file_issues: true (the installer removes the entry otherwise)
+      const [{ installIntrospectSchedule }, { parseSloConfig }, { parseForgeYaml }] = await Promise.all([import("./introspect-schedule.mjs"), import("./lean/slo.mjs"), import("./forge-utils.mjs")]);
+      let fileIssues = false;
+      try { fileIssues = parseSloConfig(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))).fileIssues; } catch { fileIssues = false; }
+      const i = await installIntrospectSchedule({ enabled: fileIssues, cwd });
+      if (i.status !== "off") write(`  Introspect schedule: ${i.status} (${i.kind}) ${i.detail}\n`);
+    } catch { /* advisory */ }
     return r;
   } catch { return null; }
 }
@@ -2497,7 +2504,7 @@ async function doctor(fix = false, verbose = false) {
    * "already registered" regardless of whether its script path still
    * resolves, so a dangling entry must be explicitly cleared before forge()
    * will register a fresh one. (forge#1895)
-   * @returns {{state: 'ok'|'no-entry'|'unparseable'|'dangling'|'error', path: (string|null), command?: string, ephemeral?: boolean, error: (string|null)}}
+   * @returns {{state: 'ok'|'foreign'|'no-entry'|'unparseable'|'dangling'|'error', path: (string|null), command?: string, ephemeral?: boolean, error: (string|null)}}
    */
   function detectSessionStartHookPath() {
     try {
@@ -2526,7 +2533,9 @@ async function doctor(fix = false, verbose = false) {
         return { state: "unparseable", path: null, command: hookCommand, error: null };
       }
       if (existsSync(hookScriptPath)) {
-        return { state: "ok", path: hookScriptPath, error: null };
+        // Exists, but may belong to an old checkout rather than the active install (#5796).
+        const tree = hookScriptTree({ scriptPath: hookScriptPath, sourceDir: FORGE_HOME, persistedHome: join(HOME, ".forge") });
+        return { state: tree === "foreign" ? "foreign" : "ok", path: hookScriptPath, error: null };
       }
       return {
         state: "dangling",
@@ -2566,7 +2575,7 @@ async function doctor(fix = false, verbose = false) {
     console.log(`  ${CYAN}↻${RESET}  Repairing command links + SessionStart hook...`);
     try {
       const staleHook = detectSessionStartHookPath();
-      if (staleHook.state === "dangling") {
+      if (staleHook.state === "dangling" || staleHook.state === "foreign") {
         removeSessionStartHook(settingsPath);
       }
       await forge(ctx());
@@ -2924,7 +2933,7 @@ async function doctor(fix = false, verbose = false) {
   {
     let hookPathResult = detectSessionStartHookPath();
     let hookPathWasBroken = false;
-    if (hookPathResult.state === "dangling" && fix) {
+    if ((hookPathResult.state === "dangling" || hookPathResult.state === "foreign") && fix) {
       hookPathWasBroken = true;
       await runInstallRepairOnce();
       hookPathResult = detectSessionStartHookPath();
@@ -2939,6 +2948,11 @@ async function doctor(fix = false, verbose = false) {
       warn(
         "SessionStart hook script path",
         `Could not parse a script path out of the registered hook command ("${hookPathResult.command}"). Run: npx forgedock install`,
+      );
+    } else if (hookPathResult.state === "foreign") {
+      warn(
+        "SessionStart hook script path",
+        `${hookPathResult.path} is outside the active ForgeDock install (${FORGE_HOME}) and ~/.forge — the hook runs a different tree. Run: npx forgedock doctor --fix  (or: npx forgedock install)`,
       );
     } else if (hookPathResult.state === "ok") {
       if (fix && hookPathWasBroken) {

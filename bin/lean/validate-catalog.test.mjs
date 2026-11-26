@@ -38,6 +38,9 @@ describe("#5653 validate catalogue", () => {
   it("classifies a stale generated artifact, not a test failure", () => {
     assert.equal(isDriftFailure("error: generated tools file is out of date"), true);
     assert.equal(isDriftFailure("AssertionError: 1 != 2"), false);
+    // 5730: the AlterLab #40841 line
+    assert.equal(isDriftFailure("listings/official/maps/agent.md: missing or out of date (run --render-agent-md --render-page)"), true);
+    assert.equal(isDriftFailure("AssertionError: expected 3, got 4"), false);
   });
 });
 
