@@ -32,6 +32,10 @@ describe("selector reconcile (R2, R13)", () => {
     const d = diffSelection({ open: [{ number: 5 }, { number: 6 }], members: [5, 7, 8], pending: [7], running: new Set([8]), results: new Map() });
     assert.deepEqual(d, { join: [6], leave: [7] });
   });
+  it("#6022 only a member the selector matched can leave: env.* issues, children, --add and argv members stay pending", () => {
+    const d = diffSelection({ open: [{ number: 5 }], members: [5, 7, 9], pending: [7, 9], running: new Set(), results: new Map(), matched: new Set([5, 7]) });
+    assert.deepEqual(d, { join: [], leave: [7] });
+  });
   it("a failed read leaves nothing (parseSelected null)", () => {
     assert.equal(parseSelected("not json"), null);
     assert.deepEqual(parseSelected('[{"number":3,"labels":[{"name":"x"}]}]'), [{ number: 3, labels: ["x"] }]);

@@ -499,10 +499,11 @@ export function readVerify(cwd = process.cwd()) {
     return coerceCiVerify(parseVerify({ ...sec, ...(invariants ? { invariants } : {}), ...(flaky ? { flaky } : {}), ...(guard_command ? { guard_command } : {}), ...(baselines ? { baselines } : {}), ...(sandboxes ? { sandboxes } : {}) }), { cwd }); // #5278: local-first never pushes for paid CI before review
   } catch { return undefined; }
 }
-/** #4542: forge.yaml `execution.host_capabilities` (+ patterns) for a lane's remote-block mapping; undefined when none are declared. */
+/** #4542: forge.yaml `execution.host_capabilities` (+ patterns) for a lane's remote-block mapping, plus `offload_wrappers`; undefined when none are declared. */
 export function readHostCaps(cwd = process.cwd()) {
   const e = readExecution(cwd);
-  return e?.hostCapabilities?.length ? { hostCapabilities: e.hostCapabilities, ...(e.hostCapabilityPatterns ? { hostCapabilityPatterns: e.hostCapabilityPatterns } : {}) } : undefined;
+  if (!e?.hostCapabilities?.length && !e?.offloadWrappers?.length) return undefined;
+  return { hostCapabilities: e.hostCapabilities ?? [], ...(e.hostCapabilityPatterns ? { hostCapabilityPatterns: e.hostCapabilityPatterns } : {}), ...(e.offloadWrappers ? { offloadWrappers: e.offloadWrappers } : {}) };
 }
 /** #4778: the capabilities the dispatching host relays to this sandbox lane (`CS_RELAY_CAPS`, set by the remote provider); `{}` when none. */
 export function readRelayCaps(env = process.env) {
@@ -520,7 +521,8 @@ export function readRelayCaps(env = process.env) {
 export function readHostFallback(cwd = process.cwd()) {
   let hostRole = null;
   try { hostRole = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.host?.role ?? null; } catch { /* unreadable: role unset */ }
-  return hostFallbackAllowed({ hostFallback: readExecution(cwd)?.hostFallback ?? null, hostRole });
+  const exec = readExecution(cwd);
+  return hostFallbackAllowed({ hostFallback: exec?.hostFallback ?? null, hostRole, mode: exec?.mode ?? null });
 }
 export function readExecution(cwd = process.cwd()) {
   try {
@@ -2199,10 +2201,13 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         hostFallback: readHostFallback(), capacity, isRemote: () => true, identity: () => holdId, ...(exec.fallbackLocal ? { offlineFallback: true, headroom: hostHeadroom, ...(exec.capacityFallbackAfter ? { capacityFallbackAfter: exec.capacityFallbackAfter } : {}) } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
         admit: (u) => execBudget.admit(u),
         onUsage: (n, sb, rec) => {
-          try { execBudget.record(sandboxBudgetKey(batch.id, sb.id ?? n), sb); } catch { /* the batch total still counts it */ }
+          try { execBudget.record(sandboxBudgetKey(batch.id, sb.id ?? n, rec?.handle?.startedAt ?? rec?.startedAt ?? null), sb); } catch { /* the batch total still counts it */ }
           Promise.resolve(emitSbx({ event: "SANDBOX_USAGE", issue: n, provider: sb.provider, sandbox_id: sb.id, minutes: sb.minutes, cost_usd: sb.cost_usd, batch: batch.id })).catch(() => {});
         },
-      }, { exec, readOverride: batch.readExecution, place, onChange: (e) => sink.line(`execution: live placement ${e.mode}, max_remote ${e.maxRemote}`) });
+      }, { exec, readOverride: batch.readExecution, place, onChange: (e) => sink.line(`execution: live placement ${e.mode}, max_remote ${e.maxRemote}`),
+        // #5746: a live max_remote left below the pinned value is announced once after FORGEDOCK_MAX_REMOTE_WARN_HOURS (default 6)
+        belowPinnedHours: Number(process.env.FORGEDOCK_MAX_REMOTE_WARN_HOURS) || undefined,
+        onBelowPinned: (w) => sink.line(`WARNING: execution: live max_remote ${w.maxRemote} has been below the pinned ${w.pinned} for over ${w.hours}h (forgedock orchestrate --set-max-remote ${batch.id} ${w.pinned} restores it)`) });
       sink.line(`execution: ${hybrid ? "hybrid" : "remote"} via ${provider.name}, max_remote ${exec.maxRemote}`);
     } else {
       lanes = withPlacement(batchMod.detachedLanes({ batch, cwd, env: laneEnv, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs, spawnFn: laneSpawn }));
@@ -2240,7 +2245,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const schedMod = await import("./lean/sched.mjs");
   const registry = deps.sched !== undefined ? deps.sched : schedMod.openSched(schedMod.schedDir());
   const overload = deps.overload !== undefined ? deps.overload : registry ? liveOverload(readAdmission(cwd)) : null; // #5174
-  const labelNames = async (n) => {
+  const labelNames = async (n, { fresh = false } = {}) => { // #5893: `fresh` re-reads (the readmit decision); the cache serves placement
+    if (fresh) { try { await reader.refresh([n]); labelsOf.delete(n); } catch { /* offline: the cached labels */ } } // #5990: one GraphQL call, not a gh spawn per issue
     if (!labelsOf.has(n)) labelsOf.set(n, await reader.labels(n));
     return labelsOf.get(n);
   };
@@ -2457,6 +2463,16 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       onInterrupted: deps.onInterrupted ?? (async (n) => leanIo.gh(["issue", "edit", String(n), "-R", repo, "--remove-label", "workflow:building"]).catch(() => {})),
       // #4387: an out-of-set dependency labelled needs-human is not pulled into the batch
       issueLabels: labelNames,
+      // #5893: a held needs-human root is released only when the label's removal event post-dates the newest FORGE:NEEDS_HUMAN comment
+      heldFacts: deps.heldFacts ?? (async (n) => {
+        const ev = JSON.parse(await leanIo.gh(["api", `repos/${repo}/issues/${n}/events`, "--paginate", "--jq", "[.[] | select(.event==\"unlabeled\" and .label.name==\"needs-human\") | .created_at]"]).then((o) => `[${String(o).replace(/\]\s*\[/g, ",").replace(/^\s*\[|\]\s*$/g, "")}]`));
+        const cs = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "comments"])).comments ?? [];
+        const blk = cs.filter((c) => String(c.body ?? "").includes("<!-- FORGE:NEEDS_HUMAN"));
+        const last = blk[blk.length - 1];
+        const ask = cs.filter((c) => /FORGE:ASK key=/.test(String(c.body ?? ""))).pop();
+        const t = (x) => Date.parse(x);
+        return { removedAt: Math.max(...ev.map(t), -Infinity), blockedAt: last ? t(last.createdAt) : NaN, askKey: ask ? (/FORGE:ASK key=([^\s>]+)/.exec(String(ask.body))?.[1] ?? "") : "" };
+      }),
       // #5986: per-issue attempts ledger and input-hash admission (off under the test seams)
       ...((deps.attempts !== undefined ? deps.attempts : testDeps ? null : true) ? { attempts: deps.attempts !== undefined ? deps.attempts : makeAttemptsSeam({ gh: (a) => leanIo.gh(a), repo, engineVersion: ENGINE_VERSION, sandboxVersion: scheddMod.readInstalledVersion?.() ?? null, cfg: { maxAttempts: orch.maxAttemptsPerIssue, maxIdentical: orch.maxIdenticalSignature } }) } : {}),
       // #4725: a closed (completed) dependency is satisfied even when it still carries a stale needs-human label
@@ -2517,6 +2533,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { batchEfficiency, formatEfficiencyLines } = await import("./stats/efficiency.mjs");
     report.push(...formatEfficiencyLines(await (deps.efficiency ?? batchEfficiency)({ batchDir: batch.dir, runsDir: dir, repo, gh: (a) => leanIo.gh(a), rows })));
   } catch (e) { report.push(`efficiency: n/a (${String(e?.message ?? e).split("\n")[0].slice(0, 160)})`); }
+  try { report.push(...await (await import("./stats/churn.mjs")).readChurn({ gh: (a) => leanIo.gh(a), repo, issues: rows.map((r) => r.issue).filter(Number.isInteger) })); } catch { /* #5979: churn lines never fail a batch */ }
   report.push(await budgetReportLine({ cwd, repo, gh: (a) => leanIo.gh(a) })); // #5278: month usage, projection and any auto switch to local-first
   const adequacyLine = formatTestAdequacySummary(rows); // #5449
   if (adequacyLine) report.push(adequacyLine);
@@ -2828,7 +2845,7 @@ export async function scheddFromCli(argv, deps = {}) {
   if (argv.length) throw new Error("usage: forgedock schedd [status | watchdog [--stall-sec N]]");
   (deps.renice ?? (await import("./lean/schedd-health.mjs")).bestEffortRenice)(); // #4780: lanes must not starve the scheduler
   process.title = "forgedock-schedd"; // distinctive name for OOM-killer avoid lists and ps (#4673)
-  const d = await schedd.startDaemon({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }), exit: deps.exit ?? ((c) => process.exit(c)), ...(deps.due !== undefined ? { due: deps.due } : { due: scheddDue }),
+  const d = await (deps.startDaemon ?? schedd.startDaemon)({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }), exit: deps.exit ?? ((c) => process.exit(c)), ...(deps.due !== undefined ? { due: deps.due } : { due: scheddDue }),
     ...(deps.daemonPreflight !== undefined ? { preflight: deps.daemonPreflight } : deps.batchDeps ? {} : { preflight: async () => { const lc = await import("./lean/lanecheck.mjs"); return (await lc.runLaneChecks({ exec: readExecution(process.cwd()), io: await lc.hostLaneIo() })).filter((c) => !c.ok); } }) });
   if (!d.running) {
     // #4775: under systemd, exiting here (code 0) makes `Restart=always` loop while another daemon holds the lock: stand by, take over when it dies

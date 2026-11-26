@@ -147,6 +147,7 @@ import { admitInput, breach, recordFailure, markEscalated, NO_NEW_INPUT } from "
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
+const PLAN_VERDICT = new Set(["invalid", "needs-human", "decomposed", "budget-exceeded"]); // #5909: plan-lane ends that settle the issue
 const DEFAULT_TRAIN_EVERY_MS = 30000; // #5836: merge-train poll period
 // #5836: a lane that ended pr-ready is waiting on the merge train, not failed: its dependents wait
 const WAITING_ON_TRAIN = (row) => row?.outcome === "pr-ready";
@@ -342,7 +343,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), blockedRefreshMs = 60000, onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, usageRows = null, repoSlug = null, repoOf = null, getAdded = null, getRequeued = null, reconcile = null, select = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000, getClearBreaker = null, consumeClearBreaker = null, ackClearBreaker = null,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null, baseProbe = null,
-  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getPause = null, expirePause = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, suspendLane = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
+  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, heldFacts = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getPause = null, expirePause = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, suspendLane = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
   getChildren = null, autoChildren = null, baseWait = null, rotator = null, stacking = "off", readPrReady = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null, envHold = null, envIssue = null, logicalDeps = null,
   train = null, trainEveryMs = DEFAULT_TRAIN_EVERY_MS, attempts = null }) {
@@ -375,6 +376,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // filed or updated); affected product issues are held on it (never needs-human) and 2+ issues on a signature stop admitting lanes that need it.
   const envSigs = toMap(saved?.envSigs);
   const engineSigs = toMap(saved?.engineSigs);
+  const heldSigs = toMap(saved?.heldSigs); // #5893: root -> {sig, removedAt} of the needs-human block last released; an identical block needs a newer removal event
   const readmit = toMap(saved?.readmit); // #5978: re-admission policy state (backoff step, version and base seen) per ended issue
   const ledgers = toMap(saved?.attempts); // #5986: issue -> attempts ledger; never cleared by releaseHeld, --requeue or --set-env (see attempts.mjs)
   const deterministic = new Set(saved?.deterministicSigs ?? []);
@@ -432,6 +434,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const priorities = toMap(saved?.priorities); // issue -> priority number; only with the registry
   // #5138: read on every grant, so `--set-max-remote` reaches a running batch (a getter on `remote`); running lanes are never stopped.
   const remoteMax = () => { const m = remote?.max; return Number.isInteger(m) && m >= 0 ? m : 0; };
+  const maxHeldNoted = new Set(); // #5746: issues already announced as waiting on max_remote 0
   const remoteCapped = new Set(); // #5138: issues waiting for a max_remote slot; polled so a raised live max_remote admits them
   let poolOfflineSince = null, poolStallNoted = false; // #4788: when sampled online first read 0, and whether the stall was reported
   const capWait = makeCapWait({ now }); // #4909: a lane refused for capacity waits for a free slot, recorded as queue time
@@ -451,8 +454,12 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     // #5652: with host fallback off (execution.host_fallback / host.role: orchestrator) the host is orchestrator-only: no re-placement here
     if (hostFallbackOn() && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
     // #5371: a mechanical recovery never repeats the placement of the run that failed (a remote sandbox env defect recurs there), and a remote validate failure is rerun on the host
-    if (recovering.get(n)?.code === ENV_VALIDATE_PLACEMENT || (MECHANICAL_CODES.includes(recovering.get(n)?.code) && recovering.get(n)?.where === "remote")) return { where: "local", reason: `different placement: recovering ${recovering.get(n).code} off the remote run` };
-    { // #5331: a frozen contract naming a tool the sandbox is known to lack runs on the host (`remote.lacks`, `remote.contractOf(n)`; both optional)
+    if (recovering.get(n)?.code === ENV_VALIDATE_PLACEMENT || (MECHANICAL_CODES.includes(recovering.get(n)?.code) && recovering.get(n)?.where === "remote")) {
+      if (hostFallbackOn()) return { where: "local", reason: `different placement: recovering ${rec.code} off the remote run` };
+      // #5746: the host is not allowed: retry remotely (a fresh sandbox) instead of the orchestrator
+      if (!budgetLocal) return { where: "remote", reason: `retry remotely, host fallback off: recovering ${rec.code}` };
+    }
+    if (hostFallbackOn()) { // #5331: a frozen contract naming a tool the sandbox is known to lack runs on the host (`remote.lacks`, `remote.contractOf(n)`; both optional)
       const lk = lackedTools(remote.contractOf?.(n), remote.lacks);
       if (lk.tools.length) return { where: "local", reason: `host tool: sandbox lacks ${lk.tools.join(", ")}` };
     }
@@ -463,7 +470,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         return { where: p?.where === "remote" ? "remote" : "local", reason: String(p?.reason ?? "") };
       }
       return remote.isRemote?.(n) ? { where: "remote", reason: "mode remote" } : { where: "local", reason: "local" };
-    } catch { return { where: "local", reason: "placement failed" }; }
+    } catch { return hostFallbackOn() ? { where: "local", reason: "placement failed" } : { where: "remote", reason: "placement failed, host fallback off: retry remotely" }; } // #5746
   };
   const isRemote = (n) => placeOf(n)?.where === "remote";
   const placed = new Map(); // issue -> {where, reason} granted this pass, picked up by start()
@@ -522,7 +529,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       ...(requeueApplied.size ? { requeueApplied: [...requeueApplied], requeued: toObj(requeuedInfo) } : {}),
       ...(relabelled.size ? { relabelled: [...relabelled] } : {}), ...(cancelled ? { cancelled } : {}), ...(train ? { train: train.snapshot() } : {}),
       ...(estimate ? { estimates: toObj(estimates), enqueued: toObj(enqueued) } : {}), ...(heads.size ? { heads: [...heads] } : {}),
-      ...(engineSigs.size ? { engineSigs: toObj(engineSigs) } : {}), ...(deterministic.size ? { deterministicSigs: [...deterministic] } : {}), ...(toolReadmits.size ? { toolReadmits: [...toolReadmits] } : {}), ...(select ? { select } : {}), ...(readmit.size ? { readmit: toObj(readmit) } : {}), ...(envSigs.size ? { envSigs: toObj(envSigs) } : {}), ...(ledgers.size ? { attempts: toObj(ledgers) } : {}) });
+      ...(engineSigs.size ? { engineSigs: toObj(engineSigs) } : {}), ...(heldSigs.size ? { heldSigs: toObj(heldSigs) } : {}), ...(deterministic.size ? { deterministicSigs: [...deterministic] } : {}), ...(toolReadmits.size ? { toolReadmits: [...toolReadmits] } : {}), ...(select ? { select } : {}), ...(readmit.size ? { readmit: toObj(readmit) } : {}), ...(envSigs.size ? { envSigs: toObj(envSigs) } : {}), ...(ledgers.size ? { attempts: toObj(ledgers) } : {}) });
   };
   const update = (row) => { store?.log?.(row); onUpdate(row); };
   // #5978 R11: a merge into a staging lane branch does not fire `Closes`: the seam closes the issue and folds its post-deploy checks into the release rollup.
@@ -762,7 +769,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #5112: opt-in (`execution.fallback_local`): an issue the pool refused `capacityFallbackAfter` times (default CAPACITY_FALLBACK_AFTER)
   // for `sandbox.capacity` runs on the host when the host-busy guard (`remote.headroom()`, absent = allowed) passes; not ok or a throw waits.
   const capacityFallback = (n) => {
-    if (!remote?.offlineFallback) return false;
+    if (!remote?.offlineFallback || !hostFallbackOn()) return false; // #5746: host_fallback: false keeps the lane on the pool
     const after = Number.isInteger(remote.capacityFallbackAfter) && remote.capacityFallbackAfter > 0 ? remote.capacityFallbackAfter : CAPACITY_FALLBACK_AFTER;
     if ((capDefers.get(n) ?? 0) < after) return false;
     // #5592: an overloaded host holds every local admission (host_overloaded), so falling back would park the lane indefinitely: keep retrying the pool
@@ -808,7 +815,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           }
         } else if (cap && cap.online > 0) { poolOfflineSince = null; poolStallNoted = false; }
         // #4547: opt-in (`execution.fallback_local`): every pool agent offline or asleep (sampled online 0) runs the lane on the host.
-        if (remote.offlineFallback && cap && cap.online === 0) {
+        if (remote.offlineFallback && hostFallbackOn() && cap && cap.online === 0) {
           p = { where: "local", reason: `fallback to local: no pool agent online (${p.reason})` };
         } else if (capacityFallback(n)) {
           p = { where: "local", reason: `fallback to local: pool at capacity after ${capDefers.get(n)} deferrals (${p.reason})` };
@@ -824,11 +831,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           if (Number.isInteger(cap.free) && capAdmits >= cap.free && remoteRun.size < remoteMax()) { notBefore.set(n, now() + Math.max(pollMs, 1)); return false; }
         }
         if (p.where === "remote" && remoteRun.size < remoteMax()) { remoteCapped.delete(n); capWait.admitted(n); remoteRun.add(n); capAdmits++; placed.set(n, p); return true; }
-        if (p.where === "remote" && !remote.fallbackLocal) { remoteCapped.add(n); return false; }
+        if (p.where === "remote" && (!remote.fallbackLocal || !hostFallbackOn())) { // #5746: host_fallback: false never runs a capped remote lane on the host
+          if (remoteMax() < 1 && !maxHeldNoted.has(n)) { maxHeldNoted.add(n); decided({ issue: n, what: `waiting: max_remote 0 (#${n} is queued, not run on the host)`, why: "remote mode holds admissions while max_remote is 0", alternative: "raise max_remote or set execution.host_fallback: true" }); }
+          remoteCapped.add(n); return false;
+        }
         if (p.where === "remote") p = { where: "local", reason: `fallback to local: max_remote ${remoteMax()} reached (${p.reason})` }; // #4256: hybrid runs it on the host
       } else {
         noteBudget(adm.reason);
-        if (remote.onBudget !== "local" && !remote.fallbackLocal) { budgetStop = adm.reason; return false; }
+        if ((remote.onBudget !== "local" && !remote.fallbackLocal) || !hostFallbackOn()) { budgetStop = adm.reason; return false; } // #5746: host_fallback: false stops instead of using the host
         budgetLocal = true; // falls through to the host path
         p = { where: "local", reason: `fallback to local: execution budget: ${adm.reason}` };
       }
@@ -992,7 +1002,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       results.set(n, row); done(); save(); update(row);
       return;
     }
-    if (rec?.plan) {
+    const planVerdict = rec?.plan && r?.terminalReason !== "planned" && PLAN_VERDICT.has(row.outcome);
+    if (planVerdict) { // #5909: a verdict end (invalid, needs-human, ...) is the issue's answer: it settles as a final row below, no build lane
+      planMs.set(n, (planMs.get(n) ?? 0) + Math.max(0, now() - rec.startedAt));
+      store?.log?.({ event: "STACK_PLAN_FAILED", issue: n, reason: row.outcome });
+    } else if (rec?.plan) {
       // #5831: a plan lane ends `planned` or `plan-failed` and goes back to pending for its build lane. It is never a final row and
       // never counts toward the breaker, the engine-error relaunch, the deferral or the requeue budgets (it returns before them).
       done();
@@ -1065,6 +1079,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       update({ ...row, detail: `stopped by cancel: ${r?.code ?? row.outcome}${r?.detail ? ` ${r.detail}` : ""}` });
       return;
     }
+    if (!(row.outcome === "deferred" && r?.code === "sandbox.capacity")) capDefers.delete(n); // #5746: a lane the pool accepted resets the capacity count
     if (row.outcome === "deferred" && (r?.code === "stack.replan" || r?.code === "stack.restart") && !cancelled) {
       // #5833: the stacked dependent's PR and branch were dropped. replan: it builds as a normal lane on the lane base (today's held/skipped
       // rules decide while its dependency is unsatisfied); restart: it may stack again on the dependency's new head, from the frozen contract.
@@ -1088,7 +1103,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         capWait.refused(n, r.reason ?? null);
         concEmit(conc.refused({ issue: n, code: r.code, reason: r.reason, live: r.live ?? null })); // #5985
         if (r.detail) capReasons.set(n, String(r.detail).slice(0, 300));
-        capDefers.set(n, (capDefers.get(n) ?? 0) + 1); // #5112: counted for the fallback_local capacity fallback
+        // #5112: counted for the fallback_local capacity fallback; #5746: a host-busy refusal is not pool capacity
+        if (!/host[ _-]?busy|headroom/i.test(String(r.detail ?? ""))) capDefers.set(n, (capDefers.get(n) ?? 0) + 1);
         try { const c = remote?.capacity?.(); capGated = Number.isInteger(c?.free) || capWait.conditional(n, c); } catch { capGated = false; }
       }
       if (!pol.capped) {
@@ -1263,7 +1279,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       // #5652: a remote lane's tool/capability end is not recovered on the host when host fallback is off; the lane message names the fix
       const noHostRecovery = !hostFallbackOn() && row.placement?.where === "remote" && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(row.code);
       if (noHostRecovery) decided({ issue: n, what: `no host re-placement for ${row.code}: host fallback is off (execution.host_fallback / host.role: orchestrator)`, why: firstLine(row.detail), alternative: "re-place the lane on the host" });
-      if (!repeatEnv && !noHostRecovery && !sameHostReplay && classifyNeedsHuman(facts) === "recoverable" && used < max) {
+      // #5979: failure.repeated is a typed park (not in RECOVERABLE_CODES): never relaunched, reported parked below
+      if (!repeatEnv && !noHostRecovery && !sameHostReplay && row.code !== OUTCOME_CODES.FAILURE_REPEATED && classifyNeedsHuman(facts) === "recoverable" && used < max) {
         // #5727: the first remote end on a tool no recipe can install, before any build work, is re-placed on the host without spending an attempt
         const free = !prior && r?.toolNoRecipe === true && row.code === OUTCOME_CODES.ENV_TOOL_MISSING && row.placement?.where === "remote" && !freeRecovered.has(n);
         const code = recoveryCodeOf(facts), attempt = used + 1;
@@ -1470,7 +1487,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // the `getAdded` path below; closed or moved pending issues leave; ended deferred/held/engine-error/conformance rows are requeued
   // through `drainRequeues` by policy (reconcile.mjs). Same DAG, priority and lane rules as an operator `--add`/`--requeue`.
   let nextReconcile = 0, parkedDigest = "";
-  const selFresh = [], autoRequeues = [];
+  const selFresh = [], autoRequeues = [], selMatched = new Set(); // #6022: issues the selector has matched in this run
   const reconcileTick = async () => {
     if (!reconcile) return;
     const t = now();
@@ -1480,7 +1497,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     try { open = await reconcile.list(); } catch { open = null; } // a failed read never makes anything leave
     const labels = new Map((open ?? []).map((o) => [o.number, o.labels ?? []]));
     if (open) {
-      const { join, leave } = diffSelection({ open, members: [...set], pending, running, results });
+      const { join, leave } = diffSelection({ open, members: [...set], pending, running, results, matched: selMatched });
+      for (const o of open) selMatched.add(o.number);
       selFresh.push(...join);
       for (const n of leave) {
         pending.splice(pending.indexOf(n), 1);
@@ -1862,8 +1880,19 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (ro === undefined || running.has(root) || settled.has(root)) continue;
       if (restoredHeld.has(root) && ["needs-human", "budget-exceeded"].includes(ro) && typeof issueLabels === "function") { // label removed: requeue the root, its subtree follows
         let names = null;
-        try { names = await issueLabels(root); } catch { names = null; }
-        if (Array.isArray(names) && !names.includes("needs-human")) { if (await gateAdmit(root, { relabel: true })) releaseHeld(root, true, "needs-human label removed"); continue; }
+        try { names = await issueLabels(root, { fresh: true }); } catch { names = null; } // #5893: never the memoized read
+        if (Array.isArray(names) && !names.includes("needs-human")) {
+          let sig = null;
+          if (typeof heldFacts === "function") { // the removal must post-date the block; unreadable evidence fails closed
+            let f = null; try { f = (await heldFacts(root)) ?? null; } catch { f = null; }
+            if (!f || !Number.isFinite(f.removedAt) || !Number.isFinite(f.blockedAt) || f.removedAt <= f.blockedAt) continue;
+            const prev = heldSigs.get(root);
+            sig = { sig: `${ro}:${f.askKey ?? ""}`, removedAt: f.removedAt };
+            if (prev && prev.sig === sig.sig && f.removedAt <= prev.removedAt) continue; // identical block, no new removal event
+          }
+          if (await gateAdmit(root, { relabel: true })) { if (sig) heldSigs.set(root, sig); releaseHeld(root, true, "needs-human label removed"); }
+          continue;
+        }
       }
       if (!dispatchCheck) continue;
       let g = null;

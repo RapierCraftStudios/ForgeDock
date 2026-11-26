@@ -44,7 +44,7 @@
  * `interrupted: upgrade vX→vY` row (orchestrate.mjs).
  * `runBatch({argv, cwd, env, sink, keepBreaker, signal})` is injected (engine-cli `runBatch`); `sink` gets `batch(b)`, `row(r)`, `line(text)`.
  */
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { execFileSync, spawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
@@ -54,6 +54,10 @@ import { fileURLToPath } from "node:url";
 import { schedDir, pidAlive } from "./sched.mjs";
 import { DEFAULT_STALL_MIN, FIRST_HOUR_FILE, FIRST_HOUR_MIN, batchVerdict, clearStaleStall, decideStallAction, evaluateDispatchStall, firstHourReport, readHealth, recordStallAlert, recordStallRecovery, runningSplit, writeFirstHour } from "./batch-health.mjs";
 import { probeBatchEnv } from "./lanecheck.mjs";
+import { computeEfficiency, idleCause, operatorEvents, readEfficiency, writeEfficiency } from "./efficiency.mjs";
+import { ledgerPass, parseSloConfig } from "./slo.mjs";
+import { introspectReportPath } from "../introspect-schedule.mjs";
+import { parseForgeYaml } from "../forge-utils.mjs";
 import { HEARTBEAT_MS, writeHeartbeat, clearHeartbeat } from "./schedd-health.mjs";
 import { batchRoot, listBatches, openBatch, SECRET_ENV } from "./batch.mjs";
 import { killTrackedChildren } from "./effects.mjs";
@@ -223,7 +227,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   lockCheckMs = LOCK_CHECK_MS, admitMs = Number(process.env.FORGEDOCK_SCHEDD_ADMIT_MS) || ADMIT_MS, lagMs = LAG_MS, stallCheckMs = Number(process.env.FORGEDOCK_SCHEDD_STALL_CHECK_MS) || 60_000, stallMin = Number(process.env.FORGEDOCK_SCHEDD_STALL_MIN) || DEFAULT_STALL_MIN, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS, preflight = null,
   abandonMs = (Number(process.env.FORGEDOCK_SCHEDD_ABANDON_DAYS) > 0 ? Number(process.env.FORGEDOCK_SCHEDD_ABANDON_DAYS) * 24 * 3600 * 1000 : ABANDON_AGE_MS), killChildren = killTrackedChildren,
   hostLoad = liveOverload(), installedVersion = readInstalledVersion, respawn = undefined, probeEnv = (env) => probeBatchEnv(env), restartForStall = undefined,
-  exit = null, hardExitMs = HARD_EXIT_MS, unit = unitState, probe = undefined, successorMs = SUCCESSOR_MS, successorPollMs = 200, rehost = undefined } = {}) {
+  exit = null, hardExitMs = HARD_EXIT_MS, unit = unitState, probe = undefined, successorMs = SUCCESSOR_MS, successorPollMs = 200, rehost = undefined, sloGh = undefined, introspect = undefined } = {}) {
   const startOpts = arguments[0] ?? {};
   const p = scheddPaths(dir);
   // #5204: default handover target: a new daemon from the (new) install unless systemd restarts the unit itself
@@ -617,6 +621,26 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     phase("watch");
     try { await watchPass(); } finally { watching = false; phase("idle"); }
   };
+  // #5987: per-pass efficiency ledger + SLO filing (default-off) + one introspect run at batch end. Advisory: every failure is swallowed.
+  const sloGhDefault = (args) => new Promise((ok, no) => { import("node:child_process").then(({ execFile }) => execFile("gh", args, { timeout: 30000 }, (e, out) => (e ? no(e) : ok(String(out))))); });
+  async function efficiencyTick(b, plan, state, { now, reported, cancelled }) {
+    try {
+      if (cancelled || !state) return;
+      const repoCwd = plan.cwd ?? process.cwd();
+      let cfg;
+      try { cfg = parseSloConfig(parseForgeYaml(readFileSync(join(repoCwd, "forge.yaml"), "utf8"))); } catch { cfg = parseSloConfig({}); }
+      const ceiling = b.readParallel() ?? Number(state.parallel ?? plan.parallel) ?? 0, running = Object.keys(state.running ?? {}).length;
+      const sample = reported ? null : { t: now, running, ceiling: Number.isFinite(ceiling) ? ceiling : running, ready: (state.pending ?? []).length, ...((c) => (c ? { cause: c } : {}))(b.readPause?.() ? "auth-pause" : idleCause(b.readLog(), now) ?? (b.readHeld().length ? "hold" : undefined)) };
+      const r = await ledgerPass({ batch: b, sample, cfg, gh: sloGh ?? sloGhDefault, now, repo: plan.repo ?? null, operator: operatorEvents(b.dir), compute: computeEfficiency, readEff: readEfficiency, writeEff: writeEfficiency, reportPath: cfg.fileIssues ? introspectReportPath(repoCwd) : null });
+      if (r?.actions?.length) log(`schedd: slo ${r.actions.map((a) => `${a.op} ${a.sig} #${a.issue}`).join(", ")}`);
+      const mark = join(b.dir, "introspect.json");
+      if (reported && cfg.fileIssues && !existsSync(mark)) {
+        writeEfficiency(b.dir, { ...r.eff, introspect: { at: new Date(now).toISOString() } });
+        writeFileSync(mark, JSON.stringify({ at: new Date(now).toISOString() }) + "\n", { mode: 0o600 });
+        (introspect ?? ((id, cwd) => spawn(process.execPath, [join(fileURLToPath(new URL("..", import.meta.url)), "introspect-schedule.mjs"), "--run"], { cwd, stdio: "ignore", detached: true, windowsHide: true }).unref()))(b.id, repoCwd);
+      }
+    } catch { /* advisory */ }
+  }
   async function watchPass() {
     const now = Date.now();
     for (const id of listBatches(root)) {
@@ -628,6 +652,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
         const created = Date.parse(plan.created ?? "");
         if (b.isTerminal() && (!Number.isFinite(created) || now - created >= 24 * 3600_000)) continue; // nothing left to report or re-host
         const reported = !!b.readReport(), cancelled = !!b.readCancel(), state = b.store.peek(), isHosted = hosted.has(id) || starting.has(id);
+        await efficiencyTick(b, plan, state, { now, reported, cancelled }); // #5987: advisory; never throws, never changes dispatch
         const stallOpts = { held: b.readHeld(), paused: b.readPause?.() ?? null, parallel: b.readParallel(), hosted: isHosted, lastProgressMs: b.lastProgressMs(), now, windowMin: stallMin, cancelled, reported, lanesAliveMs: lanesAlive(b, state) };
         let stall = evaluateDispatchStall(state, stallOpts);
         if (stall && preflight) { // #5745: name the preflight gate holding admission (advisory; dispatch decisions are unchanged)

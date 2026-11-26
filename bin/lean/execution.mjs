@@ -142,6 +142,7 @@ export function parseExecution(sec = {}) {
     onBudget: str(s.on_budget) === "local" ? "local" : "stop", costPerMinute: cpm ?? 0 };
   const capList = (v) => (Array.isArray(v) ? v : str(v) ? str(v).split(",") : []).map((x) => str(x).toLowerCase()).filter((x) => CAPABILITY_RE.test(x));
   const hostCapabilities = [...new Set(capList(s.host_capabilities))];
+  const offloadWrappers = [...new Set(capList(s.offload_wrappers))]; // unclog: host commands that only send work elsewhere (e.g. a remote-run wrapper); a sandbox runs their argument directly
   const patRaw = Array.isArray(s.host_capability_patterns) ? s.host_capability_patterns : str(s.host_capability_patterns) ? str(s.host_capability_patterns).split(",") : [];
   const hostCapabilityPatterns = patRaw.map((x) => { const t = str(x), i = t.indexOf(":"); return { name: t.slice(0, i).trim().toLowerCase(), pattern: t.slice(i + 1).trim() }; })
     .filter((x) => CAPABILITY_RE.test(x.name) && x.pattern && safeRegExp(x.pattern));
@@ -162,7 +163,7 @@ export function parseExecution(sec = {}) {
   const plan = ["free", "pro", "team", "enterprise"].includes(str(s.plan).toLowerCase()) ? str(s.plan).toLowerCase() : null;
   const publicDefault = str(s.public_default).toLowerCase() === "actions" ? "actions" : null; // #5900: opt-in only
   const dispatcher = /^[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?$/.test(str(s.dispatcher)) ? str(s.dispatcher) : null;
-  return { mode, maxRemote, provider, image, secrets, budget, ...(jobLimit ? { jobLimit } : {}), ...(ciReserve !== null ? { ciReserve } : {}), ...(plan ? { plan } : {}), ...(publicDefault ? { publicDefault } : {}), ...(dispatcher ? { dispatcher } : {}), ...(hostFallback !== null ? { hostFallback } : {}), ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(repoSource ? { repoSource } : {}), ...(accountRotator ? { accountRotator } : {}), ...(lt.tools.length ? { laneTools: lt.tools } : {}), ...(lt.errors.length ? { laneToolsErrors: lt.errors } : {}) };
+  return { mode, maxRemote, provider, image, secrets, budget, ...(jobLimit ? { jobLimit } : {}), ...(ciReserve !== null ? { ciReserve } : {}), ...(plan ? { plan } : {}), ...(publicDefault ? { publicDefault } : {}), ...(dispatcher ? { dispatcher } : {}), ...(hostFallback !== null ? { hostFallback } : {}), ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(offloadWrappers.length ? { offloadWrappers } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(tokenFile ? { tokenFile } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(capacityFallbackAfter !== null ? { capacityFallbackAfter } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}), ...(repoSource ? { repoSource } : {}), ...(accountRotator ? { accountRotator } : {}), ...(lt.tools.length ? { laneTools: lt.tools } : {}), ...(lt.errors.length ? { laneToolsErrors: lt.errors } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -179,7 +180,7 @@ const KEEP_DAYS = 7;
 
 /**
  * The execution budget (#4255). `record(key, {minutes, cost_usd})` adds one lane attempt to today's host total; the key
- * (`<batch>#<sandbox id>#<startedAt>`) makes a repeated record a no-op. `admit({minutes, cost_usd, running})` gets the
+ * (`<batch>#<sandbox id>`) holds one entry per sandbox with its latest cumulative usage (#5987); an identical repeat is a no-op. `admit({minutes, cost_usd, running})` gets the
  * batch's settled + running usage (`running` the running part alone) and refuses once a batch cap, or a day cap with
  * today's host total plus this batch's running usage, is reached. A corrupt or unreadable day file refuses while a day
  * cap is set (a hard cap fails closed) and is ignored otherwise; it is never overwritten.
@@ -296,11 +297,14 @@ export function detectNeeds(text, exec = null, { prose = false } = {}) {
 
 /**
  * #5652: may a remote lane that lacks a tool or host capability be re-placed on the dispatching host? An explicit
- * `execution.host_fallback` wins; else off when forge.yaml `host.role` is `orchestrator`; else on (existing repos unchanged).
+ * `execution.host_fallback` wins; else off when forge.yaml `host.role` is `orchestrator`; else off in `mode: remote` (#5746);
+ * else on (hybrid and local unchanged).
  */
-export function hostFallbackAllowed({ hostFallback = null, hostRole = null } = {}) {
+export function hostFallbackAllowed({ hostFallback = null, hostRole = null, mode = null } = {}) {
   if (typeof hostFallback === "boolean") return hostFallback;
-  return String(hostRole ?? "").trim().toLowerCase() !== "orchestrator";
+  if (String(hostRole ?? "").trim().toLowerCase() === "orchestrator") return false;
+  // #5746: in remote mode the host is not a fallback unless the repo opts in with host_fallback: true
+  return mode !== "remote";
 }
 
 /** Declared host capabilities a remote lane's block summary names (#4542); empty when it names none the host has. */
@@ -403,7 +407,10 @@ export function placeLane({ exec = null, verifyMode = "local", labels = [], weig
     const missing = (Array.isArray(needs) ? needs : []).map(String).filter((n) => n && !(Array.isArray(relays) ? relays : []).includes(n));
     if (missing.length) return { where: "local", reason: `host capability: ${missing.join(", ")}` };
   }
-  if (mode !== "hybrid") { const where = placement(exec); return { where, reason: `mode ${EXECUTION_MODES.includes(mode) ? mode : "local"}` }; }
+  if (mode !== "hybrid") {
+    const where = placement(exec);
+    return { where, reason: `mode ${EXECUTION_MODES.includes(mode) ? mode : "local"}` };
+  }
   if (!(Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1)) return { where: "local", reason: "max_remote 0" };
   if (verifyMode === "ci") return { where: "local", reason: "verify.mode ci: validation runs on CI, not billed twice" };
   const names = (Array.isArray(labels) ? labels : []).map((l) => String(l ?? "").trim().toLowerCase());

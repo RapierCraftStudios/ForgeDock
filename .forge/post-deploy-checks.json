@@ -204,6 +204,13 @@
     "timeout": 120,
     "for": "7d"
   },
+  "R12-followup": {
+    "run": "test \"$(gh api \"repos/{owner}/{repo}/issues/comments?since=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)&per_page=100\" --paginate --jq '.[]|select(.body|startswith(\"<!-- FORGE:\"))|.issue_url' | sort | uniq -c | awk '$1>6' | wc -l)\" -eq 0",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "7d",
+    "why": "#5979 R12: over one day no issue gains more than 6 ForgeDock comments (upper bound on churn; state-change exemption is not machine-checkable, so a hit is reviewed by hand). Baseline: count of issues over 6 comments/day before the churn fixes is unmeasured, target 0."
+  },
   "lane-concurrency-achieved-70pct": {
     "run": "node -e \"const fs=require('fs'),p=require('path'),r=process.env.FORGEDOCK_BATCH_DIR||p.join(require('os').homedir(),'.forge','batches');let ok=true,n=0;for(const b of fs.existsSync(r)?fs.readdirSync(r):[]){let t='';try{t=fs.readFileSync(p.join(r,b,'log.jsonl'),'utf8')}catch{continue}for(const l of t.split('\\\\n')){let e;try{e=JSON.parse(l)}catch{continue}if(e.event==='concurrency'&&e.change==='increase'&&e.ceiling>0){n++;if(e.running<0.7*e.ceiling&&e.k<e.ceiling&&e.inputs&&e.inputs.load_per_core<1)ok=false}}}process.exit(n>0&&ok?0:1)\"",
     "pass": "exit 0",

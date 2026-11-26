@@ -151,6 +151,9 @@ describe("providerLanes: an unreachable provider is retried, then deferred witho
     assert.deepEqual(rows, ["b1#fdrsbx-9"]);
     assert.ok(Math.abs(b.dayTotals().minutes - 120) / 120 <= 0.05);
     assert.equal(b.record(sandboxBudgetKey("b1", "fdrsbx-9"), { minutes: 10 }), false); // a smaller replay changes nothing
+    const before = b.dayTotals().minutes;
+    b.record(sandboxBudgetKey("b1", "fdrsbx-9", 99), { minutes: 7 }); // #6023: a rerun reusing the sandbox id adds its own usage
+    assert.equal(b.dayTotals().minutes, before + 7);
   });
 
   it("#5053 a 401 on status/result of a launched sandbox is retried, then ends sandbox.auth (capped), never engine-error", async () => {
@@ -669,6 +672,13 @@ describe("execution budget and sandbox cost (#4255)", () => {
     const a = openExecutionBudget({ budget: { dayMinutes: 15 }, file, now });
     assert.equal(a.record("b1#fdsbx-1#100", { minutes: 10, cost_usd: 1 }), true);
     assert.equal(a.record("b1#fdsbx-1#100", { minutes: 10, cost_usd: 1 }), false);
+    // #5987: cumulative samples of one sandbox are one entry holding the latest usage; the day sum tracks the log's minutes
+    const u = openExecutionBudget({ budget: {}, file: join(tmpDir("exec-up-"), "b.json"), now });
+    for (const m of [1, 2, 3, 5, 8, 10]) u.record("b2#fdsbx-2", { minutes: m, cost_usd: m / 10 });
+    u.record("b2#fdsbx-3", { minutes: 20, cost_usd: 2 });
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(u.file, "utf8")).days["2026-10-20"]).sort(), ["b2#fdsbx-2", "b2#fdsbx-3"]);
+    const logMinutes = 10 + 20;
+    assert.ok(Math.abs(u.dayTotals().minutes - logMinutes) <= logMinutes * 0.05);
     const b = openExecutionBudget({ budget: { dayMinutes: 15 }, file, now }); // a fresh daemon
     assert.deepEqual(b.dayTotals(), { ok: true, day: "2026-10-20", minutes: 10, cost_usd: 1 });
     assert.equal(b.admit({ minutes: 0, cost_usd: 0, running: { minutes: 0, cost_usd: 0 } }).ok, true);
@@ -1396,6 +1406,18 @@ describe("providerLanes: a halted batch keeps its sandbox for adopt (#5669)", ()
     assert.ok(ledgerFor(8).entries("sandbox").some((e) => e.value === "fake-8"), "ledger entry kept");
     const r = await l.adopt(8, { handle: { provider: "fake", id: "fake-8", issue: 8 } }, {});
     assert.equal(r.terminalReason, "merged");
+  });
+});
+
+describe("#5746 remote-mode host fallback and max_remote 0", () => {
+  it("hostFallbackAllowed: remote unset false, hybrid true, explicit true wins", () => {
+    assert.equal(hostFallbackAllowed({ mode: "remote" }), false);
+    assert.equal(hostFallbackAllowed({ mode: "hybrid" }), true);
+    assert.equal(hostFallbackAllowed({ mode: "remote", hostFallback: true }), true);
+  });
+  it("placeLane: remote mode with max_remote 0 stays remote (#5933 pauses starts, never the host)", () => {
+    assert.equal(placeLane({ exec: { mode: "remote", maxRemote: 0 } }).where, "remote");
+    assert.equal(placeLane({ exec: { mode: "remote", maxRemote: 2 } }).reason, "mode remote");
   });
 });
 

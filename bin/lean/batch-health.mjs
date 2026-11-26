@@ -13,6 +13,7 @@ import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { spawn as spawnProc } from "node:child_process";
 import { join } from "node:path";
 import { listBatches, openBatch, REQUEUABLE, writeAtomic } from "./batch.mjs";
+import { efficiencyLine, readEfficiency } from "./efficiency.mjs";
 
 export const DEFAULT_HEALTH = Object.freeze({ rootFailed: true, terminalShare: 0.5, stalled: true, checksMin: Object.freeze([15, 60]), issue: null, notifyCommand: null });
 /** #5469: a hold older than this many hours is flagged (`config.holdHours` overrides). */
@@ -224,6 +225,8 @@ export function batchStatusLines(root, id, { now = Date.now() } = {}) {
     const k = Array.isArray(g?.lanes) ? g.lanes.length : Number(g?.requeued) || 0;
     if (g?.agent) out.push(`  agent ${g.agent} restarted at ${g.at ?? "?"}; ${k} lane${k === 1 ? "" : "s"} requeued (sandbox.lost)${g.closed ? "" : ", waiting for the agent"}`);
   }
+  const eff = efficiencyLine(readEfficiency(b.dir)); // #5987: the efficiency ledger, when the daemon wrote one
+  if (eff) out.push(`  ${eff}`);
   return out;
 }
 
