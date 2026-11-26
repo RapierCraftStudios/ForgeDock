@@ -205,6 +205,18 @@ modules:
     authority: required
     token_cost: 900
 
+  - name: lean-review-finalize
+    glob: "scripts/review-finalize*"
+    path: modules/lean.md
+    authority: required
+    token_cost: 900
+
+  - name: lean-verify-phase-trail
+    glob: "scripts/verify-phase-trail*"
+    path: modules/lean.md
+    authority: required
+    token_cost: 900
+
   - name: lean-review-roster
     glob: "scripts/review-roster*"
     path: modules/lean.md
