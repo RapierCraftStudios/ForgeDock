@@ -902,12 +902,17 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
   it("#5983: unitless re-host that hangs still exits via the last-resort timer", async () => {
     const dir = tmpDir("schedd-bound3-"), exits = [];
     let version = "1.51.0";
-    await startDaemon({ dir, root: join(dir, "batches"), log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => null,
+    const d = await startDaemon({ dir, root: join(dir, "batches"), log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => null,
       exit: (c) => exits.push(c), hardExitMs: 100, respawn: () => {}, probe: async () => false, successorMs: 30, successorPollMs: 10,
       rehost: () => new Promise(() => {}), runBatch: async () => ({}) });
-    version = "1.52.0";
-    await until(() => exits.length > 0);
-    assert.deepEqual(exits, [1]);
+    try {
+      version = "1.52.0";
+      await until(() => exits.length > 0);
+      assert.deepEqual(exits, [1]);
+    } finally {
+      // the mocked exit leaves the daemon's timers and socket alive: close it (bounded, the re-host never settles) so the test file can exit
+      await Promise.race([d.close(), new Promise((r) => setTimeout(r, 1000).unref())]);
+    }
   });
 
   it("#5984 handover: settled() outlives closed until the successor is spawned and probed (CLI exits only after it)", async () => {
