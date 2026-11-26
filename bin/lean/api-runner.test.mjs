@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
 import { runApiCall, buildApiRequest, apiCostUsd, ApiRunnerError } from "./api-runner.mjs";
 import { summarizeApiRoute, compare, formatApiReport } from "./api-report.mjs";
@@ -68,7 +68,7 @@ describe("#5821 api report and parity", () => {
     assert.ok(c.after.cache_write_share < c.before.cache_write_share);
     assert.match(formatApiReport(c), /before: 1 issues, 3 fresh CLI sessions \(3\.00\/issue\)/);
     assert.equal(summarizeApiRoute([]).issues, 0);
-    writeFileSync(join(mkdtempSync(join(tmpdir(), "rep-")), "x"), "");
+    writeFileSync(join(tmpDir("rep-"), "x"), "");
   });
   it("parity: compares blocking findings of two replies", async () => {
     const t = (...ids) => JSON.stringify({ rows: ids.map((id) => ({ id, status: "fail" })) });
@@ -79,7 +79,7 @@ describe("#5821 api report and parity", () => {
   });
   it("parity sample: replays a directory of past-PR prompts and reports the match rate", async () => {
     const t = (...ids) => JSON.stringify({ rows: ids.map((id) => ({ id, status: "fail" })) });
-    const d = mkdtempSync(join(tmpdir(), "par-")); writeFileSync(join(d, "pr1.txt"), "same"); writeFileSync(join(d, "pr2.txt"), "differs");
+    const d = tmpDir("par-"); writeFileSync(join(d, "pr1.txt"), "same"); writeFileSync(join(d, "pr2.txt"), "differs");
     const samples = loadSamples([d]); assert.equal(samples.length, 2);
     const out = await replaySample({ samples, runCli: async (p) => ({ text: t("R1") }), runApi: async (p) => ({ text: p === "differs" ? t("R1", "R2") : t("R1") }) });
     assert.equal(out.total, 2); assert.equal(out.matched, 1); assert.equal(out.rate, 0.5);
