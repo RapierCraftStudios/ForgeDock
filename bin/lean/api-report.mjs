@@ -8,6 +8,8 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
+/** The audit expects 35-45% lower cost per merged issue; measured on real runs, not asserted. */
+export const COST_GAIN_TARGET = [0.35, 0.45];
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
 /** Summary of the rows (issues = distinct issue numbers seen; merged = those with `merged:true` rows or all when none marks it). */
@@ -28,12 +30,15 @@ export function summarizeApiRoute(rows) {
 /** Rows split at `cutoff` (ISO timestamp) into before and after summaries. */
 export function compare(rows, cutoff) {
   const t = Date.parse(cutoff);
-  return { before: summarizeApiRoute(rows.filter((r) => Date.parse(r.ts) < t)), after: summarizeApiRoute(rows.filter((r) => Date.parse(r.ts) >= t)) };
+  const before = summarizeApiRoute(rows.filter((r) => Date.parse(r.ts) < t)), after = summarizeApiRoute(rows.filter((r) => Date.parse(r.ts) >= t));
+  const gain = before.cost_usd_per_issue > 0 ? 1 - after.cost_usd_per_issue / before.cost_usd_per_issue : null;
+  return { before, after, cost_gain: gain, meets_target: gain == null ? null : gain >= COST_GAIN_TARGET[0] };
 }
 
 export function formatApiReport(c) {
   const line = (n, s) => `${n}: ${s.issues} issues, ${s.fresh_cli_sessions} fresh CLI sessions (${s.fresh_cli_sessions_per_issue.toFixed(2)}/issue), ${s.api_calls} API calls, cache-write share ${(s.cache_write_share * 100).toFixed(0)}%, $${s.cost_usd_per_issue.toFixed(2)}/issue`;
-  return `${line("before", c.before)}\n${line("after", c.after)}`;
+  const gain = c.cost_gain == null ? "n/a" : `${(c.cost_gain * 100).toFixed(0)}% (target ${COST_GAIN_TARGET[0] * 100}-${COST_GAIN_TARGET[1] * 100}%)`;
+  return `${line("before", c.before)}\n${line("after", c.after)}\ncost gain per issue: ${gain}`;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
