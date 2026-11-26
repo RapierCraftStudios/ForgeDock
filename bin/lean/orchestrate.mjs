@@ -136,14 +136,15 @@ import { laneSize, SIZES } from "./budget.mjs";
 import { requeueKey, REQUEUABLE } from "./batch.mjs";
 import { makeCapWait } from "./capwait.mjs";
 import { mapLimit } from "./pmap.mjs";
-import { quotaRequeue } from "./rotator.mjs";
+import { quotaRequeue, nextAccountAfterAuthFailure } from "./rotator.mjs";
+import { holdExpiryWarnings } from "./limits.mjs";
 import { joinsDecomposed, addsEpicChildren, selectChildren, edgeText, DEFAULT_POLL_S } from "./autochildren.mjs";
 import { formatOverload } from "./hostload.mjs";
 import { normalizeStacking, planAdmissible, stackAdmissible } from "./stacking.mjs";
 import { lackedTools } from "./toolplace.mjs";
 import { openPrerequisites } from "./prereq.mjs";
 import { makeController, classifyRepo, formatConcurrency } from "./concurrency.mjs";
-import { admitInput, breach, recordFailure, markEscalated, NO_NEW_INPUT } from "./attempts.mjs";
+import { admitInput, breach, recordFailure, blockerSignature, markEscalated, NO_NEW_INPUT } from "./attempts.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
@@ -184,6 +185,12 @@ export const ENGINE_ERROR_RELAUNCHES = 1;
 export const AGENT_LOST_MIN = 3;
 export const AGENT_LOST_WINDOW_MS = 60000;
 export const AGENT_LOST_REQUEUE_MS = 60000;
+// #5988: a backend.auth outage is probed every AUTH_PROBE_MS, holds admissions at most AUTH_ESCALATE_MS, then escalates once.
+export const AUTH_PROBE_MS = 5 * 60000;
+export const AUTH_ESCALATE_MS = 30 * 60000;
+export const HOLD_RAMP_STEP_MS = 30000; // #5988: hold-expiry release ramp: one more lane per step
+/** #5988: a cause that belongs to one placement host: errors are counted per (signature, agent), not batch-wide. */
+const hostSignature = (r, detail) => (/\bsandbox\.exited\b/.test(`${r?.code ?? ""} ${detail ?? ""}`) ? "sandbox.exited" : null);
 export const HOST_BUSY_RETRY_S = 60;
 // #4528: a busy host or a full sandbox pool is a wait, not a failure: requeued after its retry-in, never capped.
 // A lane that could not be resolved because gh/git failed (network blip) is the same kind of wait (#4791).
@@ -292,6 +299,7 @@ export function deferPolicy(r, { now, deferrals = 0, maxDeferrals = DEFAULT_MAX_
 const STOP_RETRY_MS = 15 * 1000;
 const STOP_TIMEOUT_MS = 120 * 1000;
 
+const OVERLOAD_RECOVERY_MAX_MS = 30 * 60 * 1000; // #5749: longest an env.validate_timeout recovery waits for the host to stop being overloaded
 const cancellableSleep = (ms, signal) => new Promise((res) => {
   const t = setTimeout(res, ms);
   signal?.addEventListener("abort", () => { clearTimeout(t); res(); }, { once: true });
@@ -343,7 +351,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), blockedRefreshMs = 60000, onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, usageRows = null, repoSlug = null, repoOf = null, getAdded = null, getRequeued = null, reconcile = null, select = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000, getClearBreaker = null, consumeClearBreaker = null, ackClearBreaker = null,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null, preflight = null, baseProbe = null,
-  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, heldFacts = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getPause = null, expirePause = null, getHoldInfo = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, suspendLane = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
+  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, markRecovering = null, onExit = null, issueLabels = null, heldFacts = null, issueState = null, getCancelled = null, getHeld = null, expireHolds = null, getPause = null, expirePause = null, getHoldInfo = null, authProbe = null, onEscalate = null, quarantineAgent = null, reseedCache = null, suspendLane = null, getBlocked = null, trusted = null, getGates = null, stopLane = null, releaseLease = null, stopRetryMs = STOP_RETRY_MS, stopTimeoutMs = STOP_TIMEOUT_MS,
   estimate = null, starveMs = DEFAULT_STARVE_MS, setupConcurrency = DEFAULT_SETUP_CONCURRENCY, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null,
   getChildren = null, autoChildren = null, baseWait = null, rotator = null, stacking = "off", readPrReady = null, transientRetries = DEFAULT_TRANSIENT_RETRIES, overload = null, version = null, onInterrupted = null, envHold = null, envIssue = null, logicalDeps = null,
   train = null, trainEveryMs = DEFAULT_TRAIN_EVERY_MS, attempts = null }) {
@@ -359,6 +367,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const keptBoxes = toMap(saved?.kept); // #6008: issue -> {issue, since, phase}: sandboxes kept for adopt (no dispatcher lease)
   const runRecs = toMap(saved?.running); // issue -> {startedAt, lane, pid?}: persisted so a restart can adopt the lane
   const pending = [...(saved?.pending ?? [])];
+  const selMatched = new Set(saved?.selMatched ?? []); // #6029: issues the selector has matched (persisted: a resumed runner keeps the leave provenance)
   const notBefore = toMap(saved?.notBefore);
   const requeues = toMap(saved?.requeues);
   const deferrals = toMap(saved?.deferrals);
@@ -384,6 +393,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const ehMaxMs = Number(envHold?.maxMs) > 0 ? Number(envHold.maxMs) : ENV_HOLD_MAX_MS;
   const ehWatchMs = Number(envHold?.watchMs) > 0 ? Number(envHold.watchMs) : ENV_WATCH_MS;
   const curVersion = () => { try { return envHold?.version?.() ?? version ?? null; } catch { return version ?? null; } };
+  const vmm2 = (x) => (/^v?(\d+\.\d+)/.exec(String(x ?? "")) ?? [])[1] ?? null;
+  const agentVersionOf = async () => { try { return (await envHold?.agentVersion?.()) ?? null; } catch { return null; } };
+  const curEnvValues = () => { try { return envHold?.envValues?.() ?? null; } catch { return null; } }; // #5931
   const curEnv = () => { try { return envHold?.envFingerprint?.() ?? null; } catch { return null; } };
   const missingTools = async (tools) => { if (typeof envHold?.missingTools !== "function") return null; try { const m = await envHold.missingTools(tools); return Array.isArray(m) ? m : null; } catch { return null; } };
   const checked = toMap(saved?.prefilter); // issue -> pre-filter result
@@ -391,6 +403,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const enqueued = toMap(saved?.enqueued); // #4409: issue -> when it last entered the queue (starvation guard)
   const heads = new Set(saved?.heads ?? []); // #4409: decomposed sub-issues not started yet: the head of their priority band
   let errorTimes = [...(saved?.errorTimes ?? [])];
+  const ceilingK = () => { let k = null; try { k = getParallel?.(); } catch { k = null; } return Number.isInteger(k) && k >= 1 ? k : parallel; }; // #5988: declared early: refreshHeld reads it
+  const holdWarned = new Set(); let holdRamp = null; // #5988: declared early: the hoisted refreshHeld reads them from finish/recovery callbacks
   // #5859: agent restarts of this batch (one record each, shown by `status --batch`) and the lanes already requeued as `sandbox.lost`
   const agentRestarts = [...(saved?.agentRestarts ?? [])];
   const lostOnce = new Set(saved?.lostRequeued ?? []); // a lane lost again after its requeue is an ordinary engine-error
@@ -452,7 +466,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const rec = recovering.get(n);
     if (rec?.code === OUTCOME_CODES.ENV_TOOL_MISSING && rec.where === "remote" && !rec.toolNoRecipe && (rec.attempt ?? 1) <= 1 && !budgetLocal) return { where: "remote", reason: "retry remotely after sandbox provisioning" };
     // #5652: with host fallback off (execution.host_fallback / host.role: orchestrator) the host is orchestrator-only: no re-placement here
-    if (hostFallbackOn() && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
+    // #5931: a credentials block pinned the issue to the host (ledger hostPin): applied on readmit whatever host fallback says
+    if (ledgers.get(n)?.hostPin) return { where: "local", reason: "host pin: ops_credentials block" };
+    if (hostFallbackOn() && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_ENGINE_SKEW].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
     // #5371: a mechanical recovery never repeats the placement of the run that failed (a remote sandbox env defect recurs there), and a remote validate failure is rerun on the host
     if (recovering.get(n)?.code === ENV_VALIDATE_PLACEMENT || (MECHANICAL_CODES.includes(recovering.get(n)?.code) && recovering.get(n)?.where === "remote")) {
       if (hostFallbackOn()) return { where: "local", reason: `different placement: recovering ${rec.code} off the remote run` };
@@ -485,7 +501,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #5592: env.tool_missing repeats are the same defect when the same tools are missing, whatever else the detail says (probe lines, ids, paths vary per run)
   const toolsOf = (d) => { const m = /(?:host|sandbox) is missing ([^\n]+?), so validate command/i.exec(String(d ?? "")); return m ? m[1].split(/\s*,\s*/).sort().join(",") : null; };
   const envSig = (code, d) => (code === OUTCOME_CODES.ENV_TOOL_MISSING ? toolsOf(d) : null) ?? sigOf(d);
-  const ENV_ALL_CODES = [...REPEAT_ENV_CODES, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE]; // #5755
+  const ENV_ALL_CODES = [...REPEAT_ENV_CODES, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_ENGINE_SKEW]; // #5755, #5931
   const envKey = (code, d) => `${code}|${code === OUTCOME_CODES.ENV_TOOL_MISSING && toolsOf(d) ? toolsOf(d) : failureSignature(code, d).split("|").slice(1).join("|")}`;
   const maxFor = (cls) => (cls === "mechanical" ? mechMax : recoveryMax);
   const classUsed = toMap(saved?.recoveryClasses); // `${issue}:${class}` -> recovery lanes launched in that class
@@ -529,7 +545,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       ...(requeueApplied.size ? { requeueApplied: [...requeueApplied], requeued: toObj(requeuedInfo) } : {}),
       ...(relabelled.size ? { relabelled: [...relabelled] } : {}), ...(cancelled ? { cancelled } : {}), ...(train ? { train: train.snapshot() } : {}),
       ...(estimate ? { estimates: toObj(estimates), enqueued: toObj(enqueued) } : {}), ...(heads.size ? { heads: [...heads] } : {}),
-      ...(engineSigs.size ? { engineSigs: toObj(engineSigs) } : {}), ...(heldSigs.size ? { heldSigs: toObj(heldSigs) } : {}), ...(deterministic.size ? { deterministicSigs: [...deterministic] } : {}), ...(toolReadmits.size ? { toolReadmits: [...toolReadmits] } : {}), ...(select ? { select } : {}), ...(readmit.size ? { readmit: toObj(readmit) } : {}), ...(envSigs.size ? { envSigs: toObj(envSigs) } : {}), ...(ledgers.size ? { attempts: toObj(ledgers) } : {}) });
+      ...(engineSigs.size ? { engineSigs: toObj(engineSigs) } : {}), ...(heldSigs.size ? { heldSigs: toObj(heldSigs) } : {}), ...(deterministic.size ? { deterministicSigs: [...deterministic] } : {}), ...(toolReadmits.size ? { toolReadmits: [...toolReadmits] } : {}), ...(select ? { select } : {}), ...(readmit.size ? { readmit: toObj(readmit) } : {}), ...(envSigs.size ? { envSigs: toObj(envSigs) } : {}), ...(ledgers.size ? { attempts: toObj(ledgers) } : {}), ...(selMatched.size ? { selMatched: [...selMatched] } : {}) });
   };
   const update = (row) => { store?.log?.(row); onUpdate(row); };
   // #5978 R11: a merge into a staging lane branch does not fire `Closes`: the seam closes the issue and folds its post-deploy checks into the release rollup.
@@ -894,6 +910,51 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #5859: sandboxes of one pool agent ending without a result in a burst (AGENT_LOST_MIN within AGENT_LOST_WINDOW_MS) are an agent/VM
   // restart: `sandbox.lost`, requeued once (after `remote.agentHealthy(agent)` answers, when the provider has it), never counted by the
   // breaker or the engine-error relaunch. Lanes of the burst that settled as engine-errors first are rolled back. One batch event each.
+  // #5988: one backend.auth outage at a time: probed on a clock, rotated, escalated once; `authPass` runs every loop pass.
+  let authOutage = null;
+  const authPass = async () => {
+    const o = authOutage; if (!o) return;
+    const t = now();
+    if (!o.escalated && t - o.since >= AUTH_ESCALATE_MS) {
+      o.escalated = true;
+      const detail = `backend.auth: the claude login has failed for ${Math.round((t - o.since) / 60000)} min (accounts tried: ${[...o.failed].join(", ") || "none"}); admissions no longer held, operator action needed`;
+      try { holds.clear(o.key); } catch { /* fail-open */ }
+      for (const m of o.issues) notBefore.delete(m);
+      for (const f of o.failed) limitedAccounts.delete(f);
+      update({ issue: null, outcome: "auth-escalation", detail });
+      try { await onEscalate?.({ detail, issues: [...o.issues], batch: batchId ?? null }); } catch { /* advisory */ }
+      return;
+    }
+    if (o.escalated || !authProbe || t < o.nextProbe) return;
+    const next = nextAccountAfterAuthFailure(rotator, o.last ? [o.last] : []); // the account after the one that failed last
+    let ok = false; try { ok = Boolean((await authProbe({ account: next, configDir: next ? rotator?.configDir?.(next) ?? null : null }))?.ok); } catch { ok = false; }
+    if (ok) {
+      try { holds.clear(o.key); } catch { /* fail-open */ }
+      for (const m of o.issues) notBefore.delete(m);
+      for (const f of o.failed) limitedAccounts.delete(f);
+      authOutage = null;
+      update({ issue: null, outcome: "auth-resumed", detail: `backend.auth recovered after ${Math.round((t - o.since) / 60000)} min; admissions resumed${next ? ` on account ${next}` : ""}` });
+    } else {
+      if (next) o.last = next;
+      o.nextProbe = t + AUTH_PROBE_MS;
+    }
+  };
+  // #5988: engine-errors with one host-bound signature on one agent are counted per (signature, agent): at the breaker's threshold only that
+  // agent is quarantined (its cache reseeded once); the batch breaker never sees them, so unaffected agents keep admitting.
+  const QUARANTINE_REQUEUES = 3, quarantineRequeues = new Map(), scopedSeen = new Map(), quarantined = new Map(), reseeded = new Set(); // quarantined: key -> until
+  const scopedEngineError = async (agent, sig) => {
+    const t = now(), key = `${sig}|${agent}`, windowMs = breaker.window_min * 60000, win = [...(scopedSeen.get(key) ?? []).filter((x) => t - x < windowMs), t];
+    scopedSeen.set(key, win);
+    if (quarantined.get(key) > t) return { quarantined: true };
+    if (win.length >= breaker.errors) {
+      quarantined.set(key, t + windowMs);
+      if (!reseeded.has(agent)) { reseeded.add(agent); try { await reseedCache?.({ agent, signature: sig }); } catch { /* advisory */ } }
+      try { await quarantineAgent?.({ agent, signature: sig, errors: win.length }); } catch { /* advisory */ }
+      update({ issue: null, outcome: "agent-quarantine", detail: `agent ${agent} quarantined: ${win.length} engine-errors (${sig}) within ${breaker.window_min} min; other agents keep admitting` });
+      return { quarantined: true };
+    }
+    return { quarantined: false };
+  };
   const lostSeen = new Map(); // agent -> [{n, at, err, ee, tr, sig}]: lost lanes settled as ordinary engine-errors in the window
   const openRestart = (agent, t) => agentRestarts.find((g) => g.agent === agent && !g.closed && t - g.last < AGENT_LOST_WINDOW_MS);
   const markLost = (agent, n, row, why) => {
@@ -934,9 +995,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #5986: a failed lane lands in the issue's ledger; a lifetime-budget breach escalates once (FORGE:ESCALATION, needs-human) and parks the row.
   const recordAttempt = async (n, row, r) => {
     try {
+      if (row.placement?.where === "remote" && r?.engineVersion) attempts.noteSandboxVersion?.(r.engineVersion); // #5931: the version the lane ran feeds the input hash
       const hash = (await attempts.hash?.(n)) ?? null;
       let l = ledgers.get(n) ?? (await attempts.load?.(n)) ?? null;
-      l = recordFailure(l, { signature: failureSignature(row.code ?? r?.code, row.detail), hash, spend: Number(row.cost_usd) || 0, run: r?.runUrl ?? null });
+      l = recordFailure(l, { signature: failureSignature(row.code ?? r?.code, row.detail), hash, spend: Number(row.cost_usd) || 0, run: r?.runUrl ?? null,
+        blocker: blockerSignature({ code: row.code ?? r?.code, detail: row.detail, contractHash: r?.contractHash ?? null, engineVersion: r?.engineVersion ?? (row.placement?.where === "remote" ? null : curVersion()), placement: row.placement?.where ?? null, env: curEnvValues() }) });
       const b = breach(l, attempts.cfg);
       if (b && !l.escalated) {
         l = markEscalated(l);
@@ -1035,6 +1098,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         alternative: kind === "engine" ? "relaunch into the same engine-error, or end engine-error and wait for a manual --requeue" : "launch a recovery that fails the same way, or end needs-human and wait for a manual --requeue" });
       update(final);
     };
+    // #5931: a remote lane that ran another engine version than the host is an environment outcome, never conformance (gates fixed in the host version still fire there)
+    const ranVersion = r?.engineVersion ?? /ForgeDock\s*[·-]\s*v?(\d+\.\d+(?:\.\d+)?)/.exec(String(r?.banner ?? row.detail ?? ""))?.[1] ?? null;
+    if (ranVersion && row.placement?.where === "remote") row.engineVersion = String(ranVersion); // R3: the engine that actually ran stays on the row
+    const vmm = (v) => (/^v?(\d+\.\d+)/.exec(String(v ?? "")) ?? [])[1] ?? null;
+    if (row.placement?.where === "remote" && ranVersion && vmm(curVersion()) && vmm(ranVersion) !== vmm(curVersion()) && ["needs-human", "failed", "invalid", "budget-exceeded"].includes(row.outcome)) {
+      row.code = OUTCOME_CODES.ENV_ENGINE_SKEW;
+      row.detail = `${OUTCOME_CODES.ENV_ENGINE_SKEW}: the sandbox ran engine v${ranVersion}, the host is v${curVersion()}; not a conformance result. Place it locally or upgrade the agent.\n${String(row.detail ?? "")}`;
+      if (ehOn) return holdEnv({ kind: "env", sig: `${OUTCOME_CODES.ENV_ENGINE_SKEW}|${ranVersion}|${curVersion()}`, why: `sandbox engine v${ranVersion} differs from the host v${curVersion()}` });
+    }
     if (row.outcome === "dependency-open" && depList.length) {
       // #4387: a parked dependency is not pulled in again (fail-open on an unreadable label).
       let parked;
@@ -1127,12 +1199,21 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
             if (!(Number.isFinite(rotAt) && rotAt > now())) rotAt = null;
           }
           // #5203: no account has headroom: the hold lasts until the earliest reset across accounts, not this lane's own reset.
-          const holdMs = usage && rotAt !== null ? rotAt - now() : pol.delayMs;
+          let holdMs = usage && rotAt !== null ? rotAt - now() : pol.delayMs;
+          if (r?.code === "backend.auth") { // #5988: probe every 5 min, never hold past the 30 min escalation, rotate to the next account
+            const t0 = now();
+            if (!authOutage) authOutage = { since: t0, nextProbe: t0 + AUTH_PROBE_MS, failed: new Set(), escalated: false, key: r?.backendId ?? identity(), issues: new Set() };
+            authOutage.issues.add(n);
+            try { const cur = authOutage.escalated ? null : rotator?.current?.(); if (cur) { authOutage.failed.add(cur); authOutage.last = cur; limitedAccounts.set(cur, t0 + AUTH_PROBE_MS); try { rotator.markLimited?.(cur, t0 + AUTH_PROBE_MS); } catch { /* best effort */ } } } catch { /* fail-open */ }
+            holdMs = Math.min(holdMs, AUTH_PROBE_MS);
+            if (t0 - authOutage.since >= AUTH_ESCALATE_MS) { await authPass(); holdMs = 0; }
+          }
           if (rq) {
             delayMs = rq.delayMs;
             // #5095 + #5094: the pool account's own hold (not the host's) still routes hybrid lanes local until its reset.
             try { const pool = remote?.identity?.(); if (!rq.rotated && pool && r?.backendId === pool) holds.set(pool, now() + pol.delayMs, `batch ${batchId ?? "?"} #${n}`); } catch { /* fail-open */ }
-          } else try { holds.set(r?.backendId ?? identity(), rotAt ?? now() + holdMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
+          } else if (holdMs > 0 || r?.code !== "backend.auth") try { holds.set(r?.backendId ?? identity(), rotAt ?? now() + holdMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
+          else delayMs = AUTH_PROBE_MS; // #5988: escalated: no hold; the lane retries as its own probe
           const q = quota.get(n) ?? { cost_usd: 0, minutes: 0, rotations: 0 };
           const resumeAt = usage ? now() + (rq ? rq.delayMs : holdMs) : Math.max(now() + (rq ? rq.delayMs : pol.delayMs), rotAt ?? 0);
           quota.set(n, { cost_usd: Math.round(((Number(q.cost_usd) || 0) + (Number(row.cost_usd) || 0)) * 1e6) / 1e6, minutes: Math.round(((Number(q.minutes) || 0) + (Number(row.minutes) || 0)) * 10) / 10,
@@ -1148,6 +1229,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         return;
       }
       row.detail = `gave up after ${deferrals.get(n) ?? 0} deferrals: ${r?.detail ?? r?.code ?? ""}`;
+    }
+    // #6081: a held issue whose lane died without a result was stopped by the operator (SIGTERM / kill / sandbox stop), not by the engine:
+    // a hold row, no engine-error, no breaker count, no relaunch budget spent; the issue waits pending for --release.
+    if (row.outcome === "engine-error" && !cancelled && (r?.lostWithoutResult || /exited without a result|interrupted by SIG/i.test(String(r?.detail ?? ""))) && (refreshHeld(), opHeld.has(n))) {
+      requeue(n, 0); done(); save();
+      decided({ issue: n, what: `#${n} stopped while held by the operator; not an engine-error, not counted toward the breaker`, why: firstLine(row.detail) || "lane ended without a result", alternative: "count it as an engine-error and relaunch" });
+      update({ ...row, outcome: "hold", detail: `#${n} stopped by operator hold: ${firstLine(row.detail) || "lane ended without a result"}` });
+      return;
     }
     const la = row.outcome === "engine-error" && r?.lostWithoutResult && !cancelled && !lostOnce.has(n) ? (r.agent ?? r.sandbox?.agent ?? null) : null;
     let lostNow = null;
@@ -1168,7 +1257,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       lostSeen.set(la, [...win, lostNow]);
     }
     if (row.outcome === "engine-error") {
-      const errAt = noteEngineError(r?.detail);
+      const ag = r?.agent ?? r?.sandbox?.agent ?? null, hs = ag && breaker ? hostSignature(r, row.detail) : null;
+      const sc = hs ? await scopedEngineError(ag, hs) : null;
+      const qn = sc?.quarantined ? (quarantineRequeues.get(n) ?? 0) + 1 : 0; // a lane waits out the quarantine a bounded number of times, then counts as an ordinary engine-error (batch breaker included)
+      if (sc?.quarantined && qn <= QUARANTINE_REQUEUES) { quarantineRequeues.set(n, qn); // #5988: an agent in quarantine: its lane waits and is requeued without a relaunch or breaker count; unaffected agents keep admitting
+        requeue(n, AGENT_LOST_REQUEUE_MS); done(); save();
+        update({ ...row, outcome: "requeued", detail: `requeued: agent ${ag} is quarantined (${hs}); retried in ${Math.round(AGENT_LOST_REQUEUE_MS / 1000)}s` });
+        return;
+      }
+      const errAt = hs && !sc?.quarantined ? undefined : noteEngineError(r?.detail);
       if (lostNow) lostNow.err = errAt;
       // #5161: a transient failure (gateway 5xx, reset) waits out the outage with backoff instead of the single immediate relaunch.
       if (transientMax > 0 && isTransientEngineError(row.detail)) {
@@ -1279,6 +1376,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       // #5652: a remote lane's tool/capability end is not recovered on the host when host fallback is off; the lane message names the fix
       const noHostRecovery = !hostFallbackOn() && row.placement?.where === "remote" && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(row.code);
       if (noHostRecovery) decided({ issue: n, what: `no host re-placement for ${row.code}: host fallback is off (execution.host_fallback / host.role: orchestrator)`, why: firstLine(row.detail), alternative: "re-place the lane on the host" });
+      // #5749: an env.validate_timeout is host load, so its recovery lane is not started while the host is overloaded (it would time out again)
+      if (overload && row.code === ENV_VALIDATE_TIMEOUT && classifyNeedsHuman(facts) === "recoverable" && used < max) {
+        const isOver = () => { try { return overload()?.overloaded === true; } catch { return false; } };
+        const t0 = now();
+        if (isOver()) {
+          decided({ issue: n, what: `recovery for ${row.code} deferred: the host is overloaded`, why: firstLine(row.detail) || row.code, alternative: "start the recovery lane under load and time out again" });
+          while (isOver() && now() - t0 < OVERLOAD_RECOVERY_MAX_MS) await sleep(Math.max(pollMs, 1));
+        }
+      }
       // #5979: failure.repeated is a typed park (not in RECOVERABLE_CODES): never relaunched, reported parked below
       if (!repeatEnv && !noHostRecovery && !sameHostReplay && row.code !== OUTCOME_CODES.FAILURE_REPEATED && classifyNeedsHuman(facts) === "recoverable" && used < max) {
         // #5727: the first remote end on a tool no recipe can install, before any build work, is re-placed on the host without spending an attempt
@@ -1374,7 +1480,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         if (!["merged", "invalid", "deferred"].includes(gone?.outcome)) gone = null; // #4920: deferred = another lane owns the issue (lease or open PR on GitHub)
       }
       // #5526: a hold placed since the pass read is honoured at launch: the issue goes back to pending, no lane
-      if (!cancelled && !halted) { refreshHeld(); refreshPause(); if (opHeld.has(n) || opPause) { running.delete(n); runRecs.delete(n); releaseSlot(n); endRemote(n); requeue(n, 0); save(); return; } }
+      if (!cancelled && !halted) { refreshHeld(); refreshPause(); if (opHeld.has(n) || opPause) { await null; /* #6081: track() registers this promise after the sync prefix; delete after it, or the entry leaks and the runner never ends */ running.delete(n); runRecs.delete(n); releaseSlot(n); endRemote(n); requeue(n, 0); save(); return; } }
       if (halted) return; // #4454: stopped before launch; no pid, so a resume queues it again
       let r;
       if (cancelled) r = { terminalReason: "deferred", code: "run.interrupted", cost_usd: 0, detail: "cancelled before launch" }; // #4376
@@ -1483,7 +1589,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // the `getAdded` path below; closed or moved pending issues leave; ended deferred/held/engine-error/conformance rows are requeued
   // through `drainRequeues` by policy (reconcile.mjs). Same DAG, priority and lane rules as an operator `--add`/`--requeue`.
   let nextReconcile = 0, parkedDigest = "";
-  const selFresh = [], autoRequeues = [], selMatched = new Set(); // #6022: issues the selector has matched in this run
+  const selFresh = [], autoRequeues = []; // #6022: selMatched (declared with the restores) = issues the selector has matched
   const reconcileTick = async () => {
     if (!reconcile) return;
     const t = now();
@@ -1494,18 +1600,20 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const labels = new Map((open ?? []).map((o) => [o.number, o.labels ?? []]));
     if (open) {
       const { join, leave } = diffSelection({ open, members: [...set], pending, running, results, matched: selMatched });
+      const matchedBefore = selMatched.size;
       for (const o of open) selMatched.add(o.number);
       selFresh.push(...join);
       for (const n of leave) {
         pending.splice(pending.indexOf(n), 1);
         skip(n, "left the selector: closed or moved");
       }
-      if (leave.length) save();
+      if (leave.length || selMatched.size > matchedBefore) save();
     }
     for (const e of envSigs.values()) if (Number.isInteger(e.number) && !set.has(e.number)) selFresh.push(e.number); // R7: the engine-filed env.* issue joins the order
     let base = null;
     try { base = (await reconcile.base?.()) ?? null; } catch { base = null; }
-    const { requeue, parked } = readmitDue({ results, state: readmit, now: t, version: reconcile.version?.() ?? null, base, labels: (n) => labels.get(n) ?? [] });
+    const agentV = await agentVersionOf(); // R6: the agent that would run the lane, so an agent upgrade re-admits
+    const { requeue, parked } = readmitDue({ results, state: readmit, now: t, version: agentV ? `${reconcile.version?.() ?? ""}|agent=${agentV}` : reconcile.version?.() ?? null, base, labels: (n) => labels.get(n) ?? [] });
     for (const q of requeue) autoRequeues.push({ issue: q.issue, at: `reconcile-${t}`, reason: q.reason, by: "reconcile" });
     const digest = needsDecisionDigest(parked);
     if (digest !== parkedDigest) {
@@ -1682,10 +1790,19 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (!getHeld) return;
     if (expireHolds) { // #5469: a hold past its expiry is released here; the diff below then admits it. A dead owner session is an alert.
       let due = []; try { due = expireHolds() ?? []; } catch { due = []; }
+      if (due.length > 1) holdRamp = { at: now() };
+      if (due.length > 1) concEmit({ event: "concurrency", change: "hold-release", k: conc.operating("light"), ceiling: ceilingK(), factor: "hold expiry", inputs: { released: due.length } }); // #5988: the release is paced by K(), never all at once
       for (const e of due) {
         decided({ issue: null, what: `hold on #${e.issue} expired (held by ${e.owner} since ${e.since}${e.reason ? `: ${e.reason}` : ""}); re-admitted`, why: "hold expiry (--hold --for)", alternative: "hold it again" });
         update({ issue: null, outcome: "hold-expired", detail: `#${e.issue} (${e.owner}, since ${e.since})` });
         if (e.ownerGone) update({ issue: null, outcome: "hold-alert", detail: `#${e.issue}: the hold owner session (${e.owner}) is gone; the hold expired and the issue was re-admitted` });
+      }
+    }
+    if (expireHolds) { // #5988: one alert per hold at T-30 min
+      let info = null; try { info = getHoldInfo?.() ?? null; } catch { info = null; }
+      for (const w of holdExpiryWarnings(info, { now: now(), warned: holdWarned })) {
+        holdWarned.add(w.key);
+        update({ issue: null, outcome: "hold-alert", detail: `#${w.issue}: the hold expires at ${w.expiresAt} (in ${Math.round(w.inMs / 60000)} min); release or extend it, or it re-admits through the concurrency controller` });
       }
     }
     let got = [];
@@ -1803,8 +1920,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       let l = ledgers.get(n) ?? null;
       if (!l) { l = (await attempts.load?.(n)) ?? null; if (l) ledgers.set(n, l); }
       if (!l) return true;
-      const hash = (await attempts.hash?.(n)) ?? null, a = admitInput(l, hash, attempts.cfg);
-      if (a.ok) return true;
+      const hash = (await attempts.hash?.(n)) ?? null, a = admitInput(l, hash, attempts.cfg, { engineVersion: curVersion(), placement: placeOf(n)?.where ?? null, env: curEnvValues() });
+      if (a.ok) { if (a.reason) update({ issue: n, event: "readmit.signature_changed", detail: `readmitted: ${a.reason}`, batch: batchId ?? null }); return true; }
       const key = `${n}|${hash}|${a.code}`;
       if (!refusedNoted.has(key)) {
         refusedNoted.add(key);
@@ -1857,7 +1974,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       }
       let why = null;
       if (h.envIssue && typeof envIssue?.isClosed === "function") { let c = false; try { c = (await envIssue.isClosed(h.envIssue)) === true; } catch { c = false; } if (c) why = `env issue #${h.envIssue} closed`; }
-      if (!why && v && h.version && v !== h.version) why = `engine version changed v${h.version} → v${v}`;
+      // R6/R8: a remote lane runs on a pool agent, so its engine is the agent's, not this host's. While every placeable agent is below the engine
+      // the lane needs, the hold stays; an agent upgrade (not the orchestrator's) is the trigger.
+      const av = r.placement?.where === "remote" ? await agentVersionOf() : null;
+      if (av) {
+        const needMM = vmm2(v), ranV = String(h.sig ?? "").startsWith(`${OUTCOME_CODES.ENV_ENGINE_SKEW}|`) ? h.sig.split("|")[1] : null;
+        if (ranV) { if (vmm2(av) === needMM && vmm2(av) !== vmm2(ranV)) why = `agent engine upgraded v${ranV} → v${av}`; }
+        else if (needMM && vmm2(av) === needMM && v && h.version && v !== h.version) why = `engine version changed v${h.version} → v${v}`;
+      } else if (!why && v && h.version && v !== h.version) why = `engine version changed v${h.version} → v${v}`;
       if (why) { /* env issue closed */ } else if (fp && h.env && fp !== h.env) why = "batch env changed (--set-env)";
       else if (h.tools?.length && !toolReadmits.has(`${n}|${h.sig}`) && (await missingTools(h.tools))?.length === 0) { why = `${h.tools.join(", ")} now found on the host`; toolReadmits.add(`${n}|${h.sig}`); }
       if (why) { if (!(await gateAdmit(n))) continue; engineSigs.delete(n); releaseHeld(n, true, `re-admitted: ${why}`); continue; }
@@ -1947,12 +2071,12 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     if (back.size) save();
   };
-  const ceilingK = () => { let k = null; try { k = getParallel?.(); } catch { k = null; } return Number.isInteger(k) && k >= 1 ? k : parallel; };
   // #5985: K is the ceiling; the controller's operating point (and a lower heavy-lane cap) sits under it. A pool with no load/memory data leaves K unchanged.
   // #5985: light/heavy per lane (its repo's recent cpu_avg from usage-history rows, array or getter); heavy lanes have their own concurrent cap
   const laneClassOf = (n) => { let rows = null; try { rows = typeof usageRows === "function" ? usageRows() : usageRows; } catch { rows = null; } let repo = repoSlug; try { repo = repoOf?.(n) ?? repoSlug; } catch { repo = repoSlug; } return rows && repo ? classifyRepo(rows, repo) : "light"; };
   const heavyFull = (n) => { if (laneClassOf(n) !== "heavy") return false; let h = 0; for (const m of running.keys()) if (m !== n && laneClassOf(m) === "heavy") h++; if (h < conc.heavyLimit()) return false; if (!heavyHeldHit) { heavyHeldHit = true; concEmit({ event: "concurrency", change: "heavy-cap", k: conc.operating("light"), ceiling: ceilingK(), factor: "heavy cap", inputs: { heavy_limit: conc.heavyLimit() } }); } return true; };
-  const K = () => { conc.setCeiling(ceilingK()); return conc.operating("light"); };
+  // #5988: a hold expiry releasing several issues re-admits them on a ramp (one more lane per HOLD_RAMP_STEP_MS), as new work ramps, not all at once.
+  const K = () => { conc.setCeiling(ceilingK()); const k = conc.operating("light"); if (!holdRamp) return k; const step = 1 + Math.floor((now() - holdRamp.at) / HOLD_RAMP_STEP_MS); if (step >= k) { holdRamp = null; return k; } return step; };
   // #5836: one train poll (throttled): a merged PR becomes a merged row; a red, conflicting or moved-head PR is handed back as a
   // needs-human row through the normal settle path, so in-batch recovery requeues a fix lane.
   let lastTrainTick = -Infinity;
@@ -2029,6 +2153,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       baseHit.clear();
       refreshHeld();
       refreshPause();
+      await authPass(); // #5988
       await refreshBlocked();
       await refreshBaseWaits();
       checkGates();
@@ -2170,8 +2295,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       // #4685: a breaker tripped only by link failures (a router restart) closes itself after a cooldown
       if (tripped?.transport && now() - tripped.at >= TRANSPORT_COOLDOWN_MS) { tripped = null; errorTimes = []; transportErrors = 0; save(); }
       // #5978: a standing order's breaker closes itself after a cooldown when the failures were environmental and the pool is healthy
-      if (tripped && reconcile && !tripped.transport) {
-        let healthy = true; try { healthy = reconcile.poolHealthy ? reconcile.poolHealthy() !== false : true; } catch { healthy = true; }
+      if (tripped && !tripped.transport) { // #6042: every batch, not only a standing order
+        let healthy = true; try { healthy = reconcile?.poolHealthy ? reconcile.poolHealthy() !== false : true; } catch { healthy = true; }
         const d = decideAutoReset({ tripped, now: now(), cooldownMs: BREAKER_COOLDOWN_MS, environmental: tripped.environmental === true, poolHealthy: healthy });
         if (d.reset) {
           tripped = null; errorTimes = []; transportErrors = 0; save();
@@ -2192,6 +2317,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           if (d.clear && wasTripped) continue; // admission ran before this check: re-run the pass so the cleared batch resumes instead of falling to the "nothing runnable" skip
         }
       }
+      // #6042: a breaker pauses admission; it ends the run only when nothing can clear it (a non-environmental trip with no hosted clear channel)
+      const breakerClearable = Boolean(tripped && pending.length && !cancelled && !budgetStop && !signal?.aborted && (tripped.environmental || tripped.transport || getClearBreaker));
+      if (tripped && !running.size && breakerClearable) { await nap(pollMs); continue; }
       if (tripped && !running.size) { await drainAdds(); break; } // breaker: let running lanes finish, keep the rest pending for a resume
       if (cancelled && !running.size) { await drainAdds(); break; } // #4376: cancel: the rest end held for a resume
       if (budgetStop && !running.size) { await drainAdds(); break; } // execution budget (stop): the same, the rest end held
@@ -2229,7 +2357,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (running.size && envWaiting()) wake = Math.min(wake ?? ehWatchMs, ehWatchMs); // #5805: re-check engine/env holds while lanes run
       if (train?.size()) wake = Math.min(wake ?? trainEveryMs, Math.max(0, trainEveryMs - (now() - lastTrainTick))); // #5836
       if (reconcile && running.size) wake = Math.min(wake ?? reconcile.everyMs ?? RECONCILE_MS, reconcile.everyMs ?? RECONCILE_MS); // #5978
-      if (tripped) wake = getClearBreaker ? Math.min(wake ?? pollMs, pollMs) : null;
+      if (tripped) wake = getClearBreaker || tripped.environmental || tripped.transport ? Math.min(wake ?? pollMs, pollMs) : null;
       if (getCancelled && running.size && (!cancelled || [...running.keys()].some((n) => { const x = stopSent.get(n); return x && !(x.accepted && x.reported); }))) wake = Math.min(wake ?? pollMs, pollMs); // #5241: a cancel keeps polling a lane whose stop is unconfirmed // #4376: notice a cancel while lanes run
       if (running.size) {
         if (wake === null) await race(running.values());

@@ -79,7 +79,7 @@ export function batchVerdicts(root, { now = Date.now(), windowMin = DEFAULT_STAL
       const b = openBatch(root, id);
       if (!b.readPlan()?.daemon || b.isTerminal()) continue;
       const state = b.store.peek(), stall = evaluateDispatchStall(state, { held: b.readHeld(), parallel: b.readParallel(), hosted: false, paused: b.readPause?.() ?? null, lastProgressMs: b.lastProgressMs(), now, windowMin, lanesAliveMs: lanesAlive(b, state) });
-      const decision = stall ? decideStallAction(stall, { recovery: readHealth(b.dir)?.stallRecovery ?? null, hosted: false }) : null;
+      const decision = stall ? decideStallAction(stall, { recovery: readHealth(b.dir)?.stallRecovery ?? null, hosted: false, now, windowMin }) : null;
       out.push(batchVerdict(id, stall, decision));
     } catch { /* one unreadable batch has no verdict */ }
   }
@@ -288,7 +288,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     if (closing) return;
     let b, st;
     try { b = openBatch(root, id); if (b.readReport() || b.readCancel() || !b.pendingIssues().length) return; st = b.store.load(); } catch { return; }
-    if (st?.breaker && !st.breaker.transport) return; // a tripped breaker holds the batch for an operator --resume (a re-host would stop again at once)
+    if (st?.breaker && !st.breaker.transport && !st.breaker.environmental) return; // a tripped breaker holds the batch for an operator --resume (a re-host would stop again at once)
     const at = Math.min(...b.pendingIssues().map((n) => Number(st?.notBefore?.[n]) || Infinity));
     if (!Number.isFinite(at)) return; // nothing waits on the clock: a deliberate hold stays for --resume
     if (at <= Date.now()) return; // the run that just ended already saw this retry-at pass and did not admit: re-hosting would loop every second
@@ -315,7 +315,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       const b = openBatch(root, id);
       if (b.readCancel()) return;
       const st = b.store.load();
-      if (st?.breaker && !st.breaker.transport) return;
+      if (st?.breaker && !st.breaker.transport && !st.breaker.environmental) return;
       sig = JSON.stringify([b.unrunAdds(), b.unrunRequeues().map((e) => e.issue ?? e)]);
       if (!b.unrunAdds().length && !b.unrunRequeues().length) { rehostedUnrun.delete(id); return; }
     } catch { return; }
@@ -676,7 +676,8 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
         // ready set is recovered once (health.json stallRecovery survives a daemon restart), a repeat alerts with the probed cause.
         let probe = null;
         try { probe = plan.env ? probeEnv(mergeEnv(process.env, plan.env)) : null; } catch { probe = null; }
-        const decision = decideStallAction(stall, { recovery: readHealth(b.dir)?.stallRecovery ?? null, probe, hosted: isHosted });
+        const decision = decideStallAction(stall, { recovery: readHealth(b.dir)?.stallRecovery ?? null, probe, hosted: isHosted, now, windowMin: stallMin });
+        if (decision.action === "wait") continue; // #6082: a capacity wait or a recovery still inside its backoff
         if (decision.action === "alert") {
           if (recordStallAlert(b, stall, { cause: decision.cause })) log(`schedd: batch ${id} needs you: ${stall.detail}${decision.cause ? `; probed: ${decision.cause}` : ""}`);
           continue;

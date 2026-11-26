@@ -5,7 +5,7 @@
  * NEEDS_HUMAN text posts nothing; a changed FACTS or DEPENDENCY is edited in place; a changed NEEDS_HUMAN is a new comment
  * (statuscomment.mjs header: a new comment notifies a person, an edit does not, and issuewatch keys on the newest one). Pure.
  */
-import { IN_PLACE_MARKERS } from "./statuscomment.mjs";
+import { IN_PLACE_MARKERS, contractKeyOf } from "./statuscomment.mjs";
 
 /** Markers whose changed state is PATCHed rather than posted again. */
 export const PATCH_MARKERS = Object.freeze(IN_PLACE_MARKERS.filter((m) => m !== "FORGE:NEEDS_HUMAN"));
@@ -32,10 +32,15 @@ export function findLast(comments, marker, trusted = () => true) {
   return null;
 }
 
-/** `{action: "skip"|"patch"|"create", prior}` for posting `body` under `marker` given the issue's comments. */
-export function decidePost({ marker, body, comments, trusted }) {
-  const prior = findLast(comments, marker, trusted);
+/**
+ * `{action: "skip"|"patch"|"create", prior}` for posting `body` under `marker` given the issue's comments. #5931: with a `contractHash`
+ * the prior is the newest comment keyed to that hash and every in-place marker (NEEDS_HUMAN too) is edited in place; a changed hash is a new comment.
+ */
+export function decidePost({ marker, body, comments, trusted, contractHash = null }) {
+  const keyed = !!contractHash && IN_PLACE_MARKERS.includes(marker);
+  const list = Array.isArray(comments) ? comments : [];
+  const prior = keyed ? findLast(list.filter((c) => contractKeyOf(c?.body) === String(contractHash).replace(/[^\w]/g, "")), marker, trusted) : findLast(comments, marker, trusted);
   if (!prior) return { action: "create", prior: null };
   if (normalizeState(prior.body) === normalizeState(body)) return { action: "skip", prior };
-  return { action: PATCH_MARKERS.includes(marker) ? "patch" : "create", prior };
+  return { action: keyed || PATCH_MARKERS.includes(marker) ? "patch" : "create", prior };
 }

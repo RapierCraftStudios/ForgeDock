@@ -26,14 +26,14 @@ import { budgetReportLine, releaseRuns, detectBudget, readCiPolicy } from "./ci-
 import { parseNightlyConfig, readNightly, blocksRelease, fileNightlyRed } from "./release-nightly.mjs";
 import { parseBudgetConfig, applyOnExceed, waveReport, trailingMedian, historyFromRoot, gateHistoryFromRoot, releaseMinutes } from "./release-minutes.mjs";
 import { cutSnapshot, writeRecord, checkChain, verifyRelease, defaultBehind, DEFAULT_PATTERN } from "./release-snapshot.mjs";
-import { createReleaseLedger, writeRelease, readLedger, acquireLease, heartbeat } from "./release-ledger.mjs";
+import { createReleaseLedger, writeRelease, readLedger, acquireLease, heartbeat, recordReleaseRound } from "./release-ledger.mjs";
 import { fenced, epochTrailer } from "./release-fence.mjs";
 import { holdCheck, exemptionsSection, runControl, VERBS as CONTROL_VERBS } from "./release-control.mjs";
 import { parseFlakeConfig, classifyFailure, planRerun, flakeEntry, recordFlakes, readFlakes, isDeployWorkflow } from "./release-flakes.mjs";
 import { readActive } from "./release-ledger.mjs";
 import { statusFromCli, policyFromYaml } from "./release-status.mjs";
 import { parseFixConfig } from "./release-fixloop.mjs";
-import { hostPreflightStep, markReadyStep, parsePreflightConfig } from "./release-preflight.mjs";
+import { hostPreflightStep, markReadyStep, stagingHealthStep, parsePreflightConfig } from "./release-preflight.mjs";
 import { roleRefusal } from "./release-credentials.mjs";
 import { mergeGuard } from "./release-gate.mjs";
 
@@ -130,7 +130,7 @@ const snapshotKeys = (r) => {
 export const isSnapshot = (config) => config?.mode === "snapshot";
 
 /** `{rehearsal}` / `{preflight}` only when configured, so the config of a repo without them keeps its shape. */
-const optKeys = (r) => { const rehearsal = parseRehearsalConfig(r), preflight = parsePreflightConfig(r); return { ...(rehearsal ? { rehearsal } : {}), ...(preflight ? { preflight } : {}) }; };
+const optKeys = (r) => { const rehearsal = parseRehearsalConfig(r), preflight = parsePreflightConfig(r); return { ...(r?.allow_red_staging === true || String(r?.allow_red_staging).toLowerCase() === "true" ? { allowRedStaging: true } : {}), ...(rehearsal ? { rehearsal } : {}), ...(preflight ? { preflight } : {}) }; };
 
 const json = (s) => JSON.parse(String(s || "null"));
 
@@ -143,10 +143,26 @@ export async function bundleList({ io, repo, head, base }) {
 
 const bundleBody = (list) => `## Release bundle\n\n${list.length ? list.map((p) => `- #${p.number} ${p.title}`).join("\n") : "_No merged PRs found since the last release._"}\n`;
 
+/** #6013: one `state.rounds` entry per distinct head and outcome (a resume does not double-count). */
+function noteRound(ctx, r) {
+  const { state, io } = ctx;
+  if ((state.rounds ?? []).some((x) => x.head === r.head && x.outcome === r.outcome)) return;
+  const at = new Date(io.now?.() ?? Date.now()).toISOString();
+  recordReleaseRound(state, { ...r, startedAt: at, endedAt: at });
+  ctx.save();
+}
+
 async function preflightStep(ctx) {
   const { io, repo, state, staging } = ctx;
   // Snapshot mode: lanes keep merging to staging; the release is cut from a fixed SHA, so nothing is refused or held (#5276).
-  if (isSnapshot(ctx.config)) return { snapshot: true, held: 0 };
+  const health = await stagingHealthStep(ctx);
+  if (health.refused) {
+    state.knownFailures = health.failed;
+    noteRound(ctx, { head: health.head, outcome: "red-staging", cause: health.failed.some((f) => f.cause === "regression") || !health.failed.length ? "regression" : "runner" });
+    ctx.save(); return { refused: health.refused, failed: health.failed }; }
+  state.knownFailures = health.failed ?? [];
+  const warn = health.warning ? { warning: health.warning } : {};
+  if (isSnapshot(ctx.config)) return { snapshot: true, held: 0, ...warn };
   const lanes = await io.runningLanes(repo);
   if (lanes.length) return { refused: `lanes of ${repo} are running (${lanes.map((l) => `${l.batch}#${l.issue}`).join(", ")}); wait or cancel them` };
   const open = json(await io.gh(["pr", "list", "--repo", repo, "--base", staging, "--state", "open", "--json", "number"])) ?? [];
@@ -159,7 +175,7 @@ async function preflightStep(ctx) {
     ctx.save();
     await io.setParallel(b.id, 1);
   }
-  return { held: state.held.length };
+  return { held: state.held.length, ...warn };
 }
 
 /** Restore every held batch to its recorded K; best effort, recorded as it goes. */
@@ -185,14 +201,15 @@ async function snapshotPrStep(ctx) {
   }
   const { branch } = state.release;
   const found = json(await io.gh(["pr", "list", "--repo", repo, "--base", def, "--head", branch, "--state", "open", "--json", "number,headRefOid,url"]))?.[0];
-  if (found) return { pr: found.number, head: found.headRefOid, url: found.url, reused: true, branch };
+  if (found) { noteRound(ctx, { pr: found.number, head: found.headRefOid, outcome: "cut" }); return { pr: found.number, head: found.headRefOid, url: found.url, reused: true, branch }; }
   const list = state.releaseBundle ?? [];
-  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", branch, "--title", `Release: ${branch} -> ${def}`, "--body", bundleBody(list) + await exemptionBody(ctx)])).trim();
+  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", branch, "--title", `Release: ${branch} -> ${def}`, "--body", bundleBody(list) + await exemptionBody(ctx) + await scorecardBody(ctx)])).trim();
   const n = Number(/\/pull\/(\d+)/.exec(url)?.[1]);
   if (!Number.isSafeInteger(n)) throw new Error(`gh pr create returned no PR url: ${url}`);
   state.steps["release-pr"] = { done: false, result: { pr: n } }; // writeRecord reads the PR number from here
   await writeRecord(ctx);
   const v = json(await io.gh(["pr", "view", String(n), "--repo", repo, "--json", "headRefOid"]));
+  noteRound(ctx, { pr: n, head: v?.headRefOid, outcome: "cut" });
   return { pr: n, head: v?.headRefOid, url, reused: false, bundle: list.length, branch };
 }
 
@@ -202,11 +219,21 @@ async function releasePrStep(ctx) {
   const found = json(await io.gh(["pr", "list", "--repo", repo, "--base", def, "--head", staging, "--state", "open", "--json", "number,headRefOid,url"]))?.[0];
   if (found) return { pr: found.number, head: found.headRefOid, url: found.url, reused: true };
   const list = await bundleList({ io, repo, head: staging, base: def });
-  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", staging, "--title", `Release: ${staging} -> ${def}`, "--body", bundleBody(list) + await exemptionBody(ctx), ...(ctx.config.preflight ? ["--draft"] : [])])).trim();
+  const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", staging, "--title", `Release: ${staging} -> ${def}`, "--body", bundleBody(list) + await exemptionBody(ctx) + await scorecardBody(ctx), ...(ctx.config.preflight ? ["--draft"] : [])])).trim();
   const n = Number(/\/pull\/(\d+)/.exec(url)?.[1]);
   if (!Number.isSafeInteger(n)) throw new Error(`gh pr create returned no PR url: ${url}`);
   const v = json(await io.gh(["pr", "view", String(n), "--repo", repo, "--json", "headRefOid"]));
   return { pr: n, head: v?.headRefOid, url, reused: false, bundle: list.length };
+}
+
+/** The per-release scorecard (#6084) as a PR-body section with its regressions line; "" on any error (never blocks the PR). */
+async function scorecardBody({ io, repo, state }) {
+  try {
+    const sc = io.scorecard ? await io.scorecard({ repo, release: state.release?.version ?? state.id }) : await (await import("../stats/scorecard.mjs")).gatherScorecard({ repo, release: state.release?.version ?? state.id }, { gh: io.gh, useCache: false });
+    if (!sc) return "";
+    const { renderScorecard } = await import("../stats/scorecard.mjs");
+    return `\n\n${renderScorecard(sc)}\n`;
+  } catch { return ""; }
 }
 
 /** The live operator exemptions as a PR-body section (#5568, I20); "" when unmanaged, none, or `_active` is unreadable. */
@@ -311,7 +338,8 @@ async function promotionStep(ctx) {
   if (gate.deployGate === "failure" && ctx.config.managed && io.git) { // #5568: policy loaded lazily (release-config imports this module)
     const { readPolicy } = await import("./release-config.mjs");
     const policy = readPolicy({ io, defaultBranch: ctx.def }).policy;
-    await rerunInfraFlakes({ io, repo, head, fence: ctx.fence, policy });
+    const rr = await rerunInfraFlakes({ io, repo, head, fence: ctx.fence, policy });
+    if (rr.reran.length) noteRound(ctx, { pr, head, outcome: "rerun-flake", cause: "flake" }); // #6013: a rerun that clears an infra failure is a flake round
   }
   const cmd = `gh pr merge ${pr} --repo ${repo} --merge --match-head-commit ${head}`;
   if (!opts.merge && !ctx.config.autoMerge) { io.print(`GATE_PASS on #${pr}. Merge when ready:\n  ${cmd}`); return { stopped: true, why: "GATE_PASS; promotion is opt-in (--merge or release.auto_merge)", cmd, head, gate }; }

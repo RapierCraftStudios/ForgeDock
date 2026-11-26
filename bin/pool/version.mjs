@@ -27,15 +27,42 @@ export function versionOf(root = repoRoot) {
 export const laneImageTag = (version) => `forgedock-lane:${version}`;
 export const laneBuildArgs = (version) => ({ FORGEDOCK_VERSION: version });
 
+/** Numeric dotted-version compare (1.10 > 1.9): negative, 0 or positive; null when either side is not a version. */
+export function cmpVersion(a, b) {
+  const parts = (v) => (typeof v === "string" && /^v?\d+(\.\d+)*/.test(v.trim()) ? v.trim().replace(/^v/, "").split(/[-+]/)[0].split(".").map(Number) : null);
+  const x = parts(a), y = parts(b);
+  if (!x || !y) return null;
+  for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] ?? 0) - (y[i] ?? 0); if (d) return d; }
+  return 0;
+}
+
+/** Agents (from the router /status view) whose lane engine is below the target version: [{name, version}]. */
+export const agentsLeftBehind = (agents, target) => (agents ?? []).filter((a) => a?.ok !== false && cmpVersion(a?.engine_version, target) < 0).map((a) => ({ name: a.name, version: a.engine_version }));
+export const leftBehindLine = (rows, target) => `agents left behind on an older engine (target ${target}): ${rows.map((r) => `${r.name} ${r.version}`).join(", ")}`;
+
+/** Ask the local router which agents lag the target engine; [] when the router is unreachable. */
+async function fetchLeftBehind(configPath) {
+  try {
+    const cfg = JSON.parse(readFileSync(configPath, "utf8"));
+    const base = `http://${cfg.listen.host}:${cfg.listen.port}`;
+    const { call } = await import("./http.mjs");
+    const [st, v] = await Promise.all([call(base, "GET", "/status", { token: cfg.forgedock_token }), call(base, "GET", "/version", { token: cfg.forgedock_token })]);
+    return { target: v.data?.version, rows: agentsLeftBehind(st.data?.agents, v.data?.version) };
+  } catch { return { target: undefined, rows: [] }; }
+}
+
 /**
  * `forgedock update` hook: push the new code and lane image to every enrolled agent. A no-op on hosts without a
- * pool router config; never throws (a failed push must not fail the update). Returns "skipped" | "upgraded" | "failed".
+ * pool router config; never throws (a failed push must not fail the update). Returns "skipped" | "upgraded" | "failed";
+ * agents still on an older engine afterwards are named through `warn` (and `onLeftBehind`).
  */
-export async function upgradeAgentsAfterUpdate({ configPath = process.env.COMPUTESHARE_CONFIG ?? join(homedir(), ".config/computeshare/router.json"), runPoolCli, warn = console.warn } = {}) {
+export async function upgradeAgentsAfterUpdate({ configPath = process.env.COMPUTESHARE_CONFIG ?? join(homedir(), ".config/computeshare/router.json"), runPoolCli, warn = console.warn, leftBehind = fetchLeftBehind, onLeftBehind } = {}) {
   if (!existsSync(configPath)) return "skipped";
   try {
     const run = runPoolCli ?? (await import("./cli.mjs")).runPoolCli;
     await run(["upgrade", "--config", configPath]);
+    const { target, rows } = await leftBehind(configPath);
+    if (rows.length) { warn(leftBehindLine(rows, target)); onLeftBehind?.(rows); }
     return "upgraded";
   } catch (e) {
     warn(`pool upgrade after update failed: ${e.message}`);

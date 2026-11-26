@@ -42,6 +42,7 @@ function fakeIo(world = {}) {
       throw new Error(`unexpected gh ${j}`);
     },
   };
+  if (w.scorecard) io.scorecard = w.scorecard;
   return io;
 }
 const ok = async () => ({ ok: true });
@@ -189,6 +190,19 @@ describe("release job (#5211)", () => {
     const b = await promote({ releasePr: [] });
     const create = b.io.calls.find((c) => c[1] === "create");
     assert.ok(create && create.includes("--head") && create.includes("staging") && create.includes("main"));
+  });
+
+  it("#6084: the release PR body carries the scorecard with regressions; a scorecard failure still creates the PR", async () => {
+    const body = (c) => c[c.indexOf("--body") + 1];
+    const sc = { release: "v2", against: "v1", minN: 10, values: { first_pass_rate: 0.5 }, previous: { first_pass_rate: 0.9 }, verdicts: { first_pass_rate: "regressed" }, regressions: ["first_pass_rate"] };
+    const a = await promote({ releasePr: [], scorecard: async () => sc });
+    const withCard = body(a.io.calls.find((c) => c[1] === "create"));
+    assert.match(withCard, /Release scorecard v2/);
+    assert.match(withCard, /Regressions vs v1: first-pass merge rate/);
+    const b = await promote({ releasePr: [], scorecard: async () => { throw new Error("boom"); } });
+    const create = b.io.calls.find((c) => c[1] === "create");
+    assert.ok(create);
+    assert.doesNotMatch(body(create), /scorecard/i);
   });
 
   it("R5: a killed job resumes from the last completed step", async () => {
@@ -592,5 +606,23 @@ describe("release start|go routing (#5571)", () => {
     assert.ok(out.every((l) => /unmanaged/.test(l)) && gh.every((a) => a[0] === "repo"));
     await assert.rejects(releaseFromCli(["go"], opts([], [])), /release id/);
     await assert.rejects(releaseFromCli(["start", "--wave", "x"], opts([], [])), /--wave/);
+  });
+});
+
+describe("preflight staging-health gate (#6013)", () => {
+  const snap = { mode: "snapshot" };
+  const world = (runs) => ({ pm: (a) => (a[0] === "api" && /check-runs/.test(a[1]) ? JSON.stringify(runs) : undefined) });
+  it("refuses a snapshot cut on a red staging head and proceeds when green", async () => {
+    const mod = await import("./release.mjs");
+    const root = tmp(), id = newReleaseId();
+    const base = (io) => ({ io, repo: REPO, root, mounts: DISK, id, opts: {}, config: snap, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ "release-pr": ok, review: ok, fixes: ok, promotion: ok, "post-merge": ok }) });
+    const reds = await mod.runRelease(base(fakeIo(world([{ name: "black", status: "completed", conclusion: "failure", text: "" }]))));
+    assert.equal(reds.status, "refused");
+    assert.match(JSON.stringify(reds), /black/);
+    const saved = JSON.parse(readFileSync(join(root, id, "state.json"), "utf8").toString());
+    assert.equal(saved.rounds[0].outcome, "red-staging");
+    assert.equal(saved.rounds[0].cause, "regression");
+    const green = await mod.runRelease({ ...base(fakeIo(world([{ name: "black", status: "completed", conclusion: "success", text: "" }]))), id: newReleaseId() });
+    assert.notEqual(green.status, "refused");
   });
 });

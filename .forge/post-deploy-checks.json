@@ -168,6 +168,18 @@
     "timeout": 120,
     "for": "7d"
   },
+  "5731-R6-alterlab-live-python-pin": {
+    "run": "test \"$(gh api \"repos/{owner}/{repo}/issues/comments?since=$(date -u -d '3 days ago' +%Y-%m-%dT%H:%M:%SZ)&per_page=100\" --paginate --jq '[.[]|select(.body|startswith(\"<!-- FORGE:TRAJECTORY -->\"))|select(.body|contains(\"interpreters used:\"))|select(.body|contains(\"in-range alternatives not tried\")|not)]|length' | awk '{s+=$1} END{print s+0}')\" -eq 0",
+    "pass": "exit 0",
+    "timeout": 120,
+    "for": "14d"
+  },
+  "5731-R7-alterlab-run-41009-replay": {
+    "run": "cd \"${FORGE_REPLAY_DIR:-.}\" && node --test --test-concurrency=1 --test-name-pattern='5731' bin/lean/depcache.test.mjs",
+    "pass": "exit 0",
+    "timeout": 300,
+    "for": "14d"
+  },
   "5923-no-egress-timeout-after-pin": {
     "run": "test \"$(gh api \"repos/{owner}/{repo}/issues/comments?since=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)&per_page=100\" --paginate --jq '[.[]|select(.body|contains(\"FORGE\") and contains(\"sandbox.egress_timeout\"))]|length' | awk '{s+=$1} END{print s+0}')\" -eq 0",
     "pass": "exit 0",

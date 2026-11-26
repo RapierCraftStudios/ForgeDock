@@ -333,3 +333,20 @@ The lean lane assigns each issue an arm (sha1 of id and issue number over the ra
 runs per arm with the metrics of `--by version`; a metric under min n is null and so is any target that needs it, never a
 pass. `targets_met` is true only when every target is met. `--require-met` (with `--experiment`) prints the same report but exits 1 unless `targets_met` is true (0 otherwise; 2 without `--experiment`), so a post-deploy check can gate on it (#4634). The report, `scripts/bench-lightlane.mjs aggregate` and
 `scripts/eval-gate-scorecard.mjs` share one record: `{schema: "forge.bench.v1", source, arms, targets}`.
+
+## Per-release scorecard (`forgedock scorecard`, forge#6084)
+
+`forgedock scorecard --repo owner/repo --release vX [--json] [--min-n N]` prints a per-release table computed from the
+GitHub register (telemetry records; no LLM, no network beyond `gh`), compared with the previous known release. The
+release flow appends the same table, with a `Regressions vs <prev>: ...` line, to the release PR body; if the scorecard
+cannot be computed the section is left out and the PR is still created.
+
+Metrics (each `n/a` when its source is absent or its sample is below min n, default 10; verdicts reuse the `--by version`
+rule and tolerances): first-pass merge rate (merged runs with no remediation and at most one builder attempt),
+operator interventions per batch (batch rows), needs-human by LANE_AUDIT class (genuine vs pipeline), queue, active and
+wait minutes per merged lane, minutes (wall p50) and $ per merge, revert rate, rework rate (merged runs that needed
+remediation), share of requirements covered by tests (merged runs whose requirements were all verified) and stuck issues
+(runs with more than one builder attempt).
+
+Batch rows are read from the local batch logs (`~/.forge/batches/*/state.json`, interventions = applied requeues of the repo's batches). The scorecard is published in the release PR body (the release notes). LANE_AUDIT and failure-census are read from trusted issue comments that start with `<!-- FORGE:LANE_AUDIT v1 -->` or `<!-- FORGE:FAILURE_CENSUS v1 -->` and carry a fenced `json` block (one object or an array): LANE_AUDIT `{issue, release?, class: genuine|pipeline}`, failure-census `{issue, release?, class?, reverted?}` (`reverted` feeds the revert rate; a census `class` counts as an audit when no LANE_AUDIT covers the issue). They are optional inputs: they are not on every base, so without them
+the dependent metrics report `n/a` rather than a guess.

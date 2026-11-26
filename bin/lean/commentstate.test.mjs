@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { normalizeState, findLast, decidePost } from "./commentstate.mjs";
-import { IN_PLACE_MARKERS } from "./statuscomment.mjs";
+import { IN_PLACE_MARKERS, contractKey } from "./statuscomment.mjs";
 
 const body = (m, text, cost = "0.10") => `<!-- ${m} -->\n${text}\n\n_cost $${cost}, tokens 1 in / 2 out_`;
 const url = "https://github.com/o/r/issues/1#issuecomment-5";
@@ -29,4 +29,15 @@ describe("post only on a state change (#5979)", () => {
     assert.equal(findLast([{ body: "<!-- FORGE:FACTS -->\na" }, { body: "<!-- FORGE:FACTS -->\nb" }], "FORGE:FACTS").body.endsWith("b"), true);
     assert.equal(normalizeState(body("M", "a  b 1e0c3e45")), normalizeState(body("M", "a b", "5")));
   });
+});
+
+describe("#5931 in-place per contract hash", () => {
+  for (const m of ["FORGE:NEEDS_HUMAN", "FORGE:FACTS", "FORGE:AMENDMENT-STATE"]) {
+    it(`${m}: edited in place at the same contract hash, a new comment when the hash changes`, () => {
+      assert.ok(IN_PLACE_MARKERS.includes(m));
+      const comments = [{ body: `${body(m, "old")}\n${contractKey("c1")}`, url }];
+      assert.equal(decidePost({ marker: m, body: body(m, "new"), comments, contractHash: "c1" }).action, "patch");
+      assert.equal(decidePost({ marker: m, body: body(m, "new"), comments, contractHash: "c2" }).action, "create");
+    });
+  }
 });
