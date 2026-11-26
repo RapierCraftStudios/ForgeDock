@@ -255,21 +255,22 @@ export async function rerunInfraFlakes({ io, repo, head, fence, policy }) {
     const cfg = parseFlakeConfig(policy);
     if (!fence?.lctx || !(cfg.rerunBudgetMin > 0)) return out;
     const prior = await readFlakes(fence.lctx), done = prior.filter((f) => f.rerun).map((f) => `${f.sha}:${f.check}`);
-    const runs = json(await io.gh(["run", "list", "--repo", repo, "--commit", head, "--status", "failure", "--json", "databaseId,name", "--limit", "20"])) ?? [];
+    const runs = json(await io.gh(["run", "list", "--repo", repo, "--commit", head, "--status", "failure", "--json", "databaseId,name,attempt", "--limit", "20"])) ?? [];
     const at = new Date(io.now?.() ?? Date.now()).toISOString(), entries = [];
     let spentMin = 0;
     for (const r of runs) {
       const log = String(await io.gh(["run", "view", String(r.databaseId), "--repo", repo, "--log-failed"]).catch(() => "")).slice(-20_000);
       const c = classifyFailure(log);
-      const [d] = planRerun({ jobs: [{ key: `${head}:${r.name}`, name: r.name, class: c.class }], done, spentMin, budgetMin: cfg.rerunBudgetMin });
+      const [d] = planRerun({ jobs: [{ key: `${head}:${r.name}`, name: r.name, class: c.class, attempt: r.attempt }], done, spentMin, budgetMin: cfg.rerunBudgetMin });
       if (d.rerun) {
         const f = await fenced(fence, { action: "rerun", key: `rerun-failed:${r.databaseId}` }, () => io.gh(["run", "rerun", String(r.databaseId), "--repo", repo, "--failed"]));
         if (f.refused) { out.skipped.push({ name: r.name, why: f.refused }); continue; }
         out.reran.push(r.name);
-      } else out.skipped.push({ name: r.name, why: d.why });
-      entries.push(flakeEntry({ check: r.name, signature: c.signature, kind: c.class === "infra" ? "infra" : "decision", sha: head, runIds: [r.databaseId], at, rerun: d.rerun }));
+      } else out.skipped.push({ name: r.name, why: d.why, ...(d.capped ? { capped: true } : {}) });
+      entries.push(flakeEntry({ check: r.name, signature: c.signature, kind: c.class === "infra" ? "infra" : "decision", sha: head, runIds: [r.databaseId], at, rerun: d.rerun, attempt: r.attempt, reuseForfeited: d.rerun }));
     }
-    await recordFlakes(fence.lctx, entries.filter((e) => e.kind === "infra"));
+    // #6014: a rerun entry carries the attempt count and the forfeited reuse; a cap refusal is a visible decision entry, never an infra one
+    await recordFlakes(fence.lctx, entries.filter((e) => e.kind === "infra" || e.attempt != null && !e.rerun && out.skipped.some((s) => s.capped && s.name === e.check)));
   } catch { /* best effort */ }
   return out;
 }

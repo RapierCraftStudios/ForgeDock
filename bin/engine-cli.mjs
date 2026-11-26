@@ -521,7 +521,8 @@ export function readRelayCaps(env = process.env) {
 export function readHostFallback(cwd = process.cwd()) {
   let hostRole = null;
   try { hostRole = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.host?.role ?? null; } catch { /* unreadable: role unset */ }
-  return hostFallbackAllowed({ hostFallback: readExecution(cwd)?.hostFallback ?? null, hostRole });
+  const exec = readExecution(cwd);
+  return hostFallbackAllowed({ hostFallback: exec?.hostFallback ?? null, hostRole, mode: exec?.mode ?? null });
 }
 export function readExecution(cwd = process.cwd()) {
   try {
@@ -2201,7 +2202,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
           try { execBudget.record(sandboxBudgetKey(batch.id, sb.id ?? n, rec?.handle?.startedAt ?? rec?.startedAt ?? null), sb); } catch { /* the batch total still counts it */ }
           Promise.resolve(emitSbx({ event: "SANDBOX_USAGE", issue: n, provider: sb.provider, sandbox_id: sb.id, minutes: sb.minutes, cost_usd: sb.cost_usd, batch: batch.id })).catch(() => {});
         },
-      }, { exec, readOverride: batch.readExecution, place, onChange: (e) => sink.line(`execution: live placement ${e.mode}, max_remote ${e.maxRemote}`) });
+      }, { exec, readOverride: batch.readExecution, place, onChange: (e) => sink.line(`execution: live placement ${e.mode}, max_remote ${e.maxRemote}`),
+        // #5746: a live max_remote left below the pinned value is announced once after FORGEDOCK_MAX_REMOTE_WARN_HOURS (default 6)
+        belowPinnedHours: Number(process.env.FORGEDOCK_MAX_REMOTE_WARN_HOURS) || undefined,
+        onBelowPinned: (w) => sink.line(`WARNING: execution: live max_remote ${w.maxRemote} has been below the pinned ${w.pinned} for over ${w.hours}h (forgedock orchestrate --set-max-remote ${batch.id} ${w.pinned} restores it)`) });
       sink.line(`execution: ${hybrid ? "hybrid" : "remote"} via ${provider.name}, max_remote ${exec.maxRemote}`);
     } else {
       lanes = withPlacement(batchMod.detachedLanes({ batch, cwd, env: laneEnv, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs, spawnFn: laneSpawn }));
@@ -2239,8 +2243,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const schedMod = await import("./lean/sched.mjs");
   const registry = deps.sched !== undefined ? deps.sched : schedMod.openSched(schedMod.schedDir());
   const overload = deps.overload !== undefined ? deps.overload : registry ? liveOverload(readAdmission(cwd)) : null; // #5174
-  const labelNames = async (n) => {
-    if (!labelsOf.has(n)) labelsOf.set(n, (JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "labels"])).labels ?? []).map((x) => x.name));
+  const labelNames = async (n, { fresh = false } = {}) => { // #5893: `fresh` re-reads (the readmit decision); the cache serves placement
+    if (fresh || !labelsOf.has(n)) labelsOf.set(n, (JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "labels"])).labels ?? []).map((x) => x.name));
     return labelsOf.get(n);
   };
   let budget = {};
@@ -2452,6 +2456,16 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       onInterrupted: deps.onInterrupted ?? (async (n) => leanIo.gh(["issue", "edit", String(n), "-R", repo, "--remove-label", "workflow:building"]).catch(() => {})),
       // #4387: an out-of-set dependency labelled needs-human is not pulled into the batch
       issueLabels: labelNames,
+      // #5893: a held needs-human root is released only when the label's removal event post-dates the newest FORGE:NEEDS_HUMAN comment
+      heldFacts: deps.heldFacts ?? (async (n) => {
+        const ev = JSON.parse(await leanIo.gh(["api", `repos/${repo}/issues/${n}/events`, "--paginate", "--jq", "[.[] | select(.event==\"unlabeled\" and .label.name==\"needs-human\") | .created_at]"]).then((o) => `[${String(o).replace(/\]\s*\[/g, ",").replace(/^\s*\[|\]\s*$/g, "")}]`));
+        const cs = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "comments"])).comments ?? [];
+        const blk = cs.filter((c) => String(c.body ?? "").includes("<!-- FORGE:NEEDS_HUMAN"));
+        const last = blk[blk.length - 1];
+        const ask = cs.filter((c) => /FORGE:ASK key=/.test(String(c.body ?? ""))).pop();
+        const t = (x) => Date.parse(x);
+        return { removedAt: Math.max(...ev.map(t), -Infinity), blockedAt: last ? t(last.createdAt) : NaN, askKey: ask ? (/FORGE:ASK key=([^\s>]+)/.exec(String(ask.body))?.[1] ?? "") : "" };
+      }),
       // #5986: per-issue attempts ledger and input-hash admission (off under the test seams)
       ...((deps.attempts !== undefined ? deps.attempts : testDeps ? null : true) ? { attempts: deps.attempts !== undefined ? deps.attempts : makeAttemptsSeam({ gh: (a) => leanIo.gh(a), repo, engineVersion: ENGINE_VERSION, sandboxVersion: scheddMod.readInstalledVersion?.() ?? null, cfg: { maxAttempts: orch.maxAttemptsPerIssue, maxIdentical: orch.maxIdenticalSignature } }) } : {}),
       // #4725: a closed (completed) dependency is satisfied even when it still carries a stale needs-human label

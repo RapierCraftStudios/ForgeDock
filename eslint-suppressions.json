@@ -86,7 +86,7 @@
   },
   "bin/lean/orchestrate.mjs": {
     "no-use-before-define": {
-      "count": 13
+      "count": 12
     }
   },
   "bin/lean/orphan-pr.test.mjs": {
