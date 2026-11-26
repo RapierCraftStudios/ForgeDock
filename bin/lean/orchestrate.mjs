@@ -1234,7 +1234,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     // a hold row, no engine-error, no breaker count, no relaunch budget spent; the issue waits pending for --release.
     if (row.outcome === "engine-error" && !cancelled && (r?.lostWithoutResult || /exited without a result|interrupted by SIG/i.test(String(r?.detail ?? ""))) && (refreshHeld(), opHeld.has(n))) {
       requeue(n, 0); done(); save();
-      decided({ issue: n, what: `#${n} stopped while held (${heldByOperator(n)}); not an engine-error, not counted toward the breaker`, why: firstLine(row.detail) || "lane ended without a result", alternative: "count it as an engine-error and relaunch" });
+      decided({ issue: n, what: `#${n} stopped while held by the operator; not an engine-error, not counted toward the breaker`, why: firstLine(row.detail) || "lane ended without a result", alternative: "count it as an engine-error and relaunch" });
       update({ ...row, outcome: "hold", detail: `#${n} stopped by operator hold: ${firstLine(row.detail) || "lane ended without a result"}` });
       return;
     }
