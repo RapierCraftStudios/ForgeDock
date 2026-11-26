@@ -326,7 +326,8 @@ async function promotionStep(ctx) {
   if (gate.deployGate === "failure" && ctx.config.managed && io.git) { // #5568: policy loaded lazily (release-config imports this module)
     const { readPolicy } = await import("./release-config.mjs");
     const policy = readPolicy({ io, defaultBranch: ctx.def }).policy;
-    await rerunInfraFlakes({ io, repo, head, fence: ctx.fence, policy });
+    const rr = await rerunInfraFlakes({ io, repo, head, fence: ctx.fence, policy });
+    if (rr.reran.length) noteRound(ctx, { pr, head, outcome: "rerun-flake", cause: "flake" }); // #6013: a rerun that clears an infra failure is a flake round
   }
   const cmd = `gh pr merge ${pr} --repo ${repo} --merge --match-head-commit ${head}`;
   if (!opts.merge && !ctx.config.autoMerge) { io.print(`GATE_PASS on #${pr}. Merge when ready:\n  ${cmd}`); return { stopped: true, why: "GATE_PASS; promotion is opt-in (--merge or release.auto_merge)", cmd, head, gate }; }
