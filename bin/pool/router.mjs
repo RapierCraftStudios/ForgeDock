@@ -259,6 +259,16 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     return out;
   }
 
+  const repoCfg = (spec) => cfg.repos?.[spec?.repo?.slug] ?? {};
+  /** #5886: a spec naming an account is placed only on that account's agents; without one, any enrolled agent (as before). */
+  const inAccount = (c, spec) => typeof spec?.account !== "string" || own(agents(), c.name)?.account === spec.account;
+  /** #6041: per-repo placement. `repos.<slug>.agents` (honoured only when a non-empty string array) is an allowlist; `exclude_agents` subtracts from it. Unset = any agent, as before. */
+  const names = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
+  const placeable = (c, spec) => {
+    if (!inAccount(c, spec)) return false;
+    const rc = repoCfg(spec), allow = names(rc.agents);
+    return (!allow.length || allow.includes(c.name)) && !names(rc.exclude_agents).includes(c.name);
+  };
   /** Agent liveness for the scheduler (#4547): an agent is online when it answers and is not paused. */
   async function status(repo) {
     const caps = (await capacities()).filter((c) => placeable(c, repo ? { repo: { slug: repo } } : null));
@@ -267,7 +277,6 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   }
 
   /** Per-repo extras: the gitignored forge.yaml, and a private Docker daemon (with a bigger reservation) when enabled. */
-  const repoCfg = (spec) => cfg.repos?.[spec?.repo?.slug] ?? {};
   // Placement counts the (small) reservation; `limit` is each container's hard burst cap (burst model, when configured).
   const sizeFor = (spec) => {
     const docker = Boolean(repoCfg(spec).docker), dind = cfg.dind ?? { cpus: 1, mem_gb: 2 };
@@ -359,15 +368,6 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     try { const r = await agentCall(a, method, path, body, 120000); return { status: r.status, body: agentBody(r, name) }; }
     catch (e) { return { status: 502, body: { error: `agent ${name} unreachable: ${e.message}` } }; }
   }
-  /** #5886: a spec naming an account is placed only on that account's agents; without one, any enrolled agent (as before). */
-  const inAccount = (c, spec) => typeof spec?.account !== "string" || own(agents(), c.name)?.account === spec.account;
-  /** #6041: per-repo placement. `repos.<slug>.agents` (honoured only when a non-empty string array) is an allowlist; `exclude_agents` subtracts from it. Unset = any agent, as before. */
-  const names = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
-  const placeable = (c, spec) => {
-    if (!inAccount(c, spec)) return false;
-    const rc = repoCfg(spec), allow = names(rc.agents);
-    return (!allow.length || allow.includes(c.name)) && !names(rc.exclude_agents).includes(c.name);
-  };
   async function launch(spec) {
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id)) return { status: 400, body: { error: "spec.id required ([A-Za-z0-9._-], max 128)" } };
     const known = own(sbx(), spec.id);
