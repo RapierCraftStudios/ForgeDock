@@ -2504,10 +2504,22 @@ describe("#6051 frozen defer/post-deploy rows are follow-ups, not omissions", ()
     assert.deepEqual(out.contract.requirements.map((r) => r.disposition), ["post-deploy", "deliver"]);
     assert.deepEqual(out.converted.map((c) => c.id), ["R1"]);
   });
-  it("an amendment citing a frozen decision is weighed against it", () => {
+  it("an amendment citing a frozen decision is weighed against it: a backed narrowing is no omission, an unbacked or missing one is", () => {
     const am = (text) => ({ ...k, requirements: k.requirements.map((r) => (r.id === "R1" ? { ...r, amendment: { text, why: "w" } } : r)) });
-    const cov = { ...rows, issue_coverage: [{ quote: Q1, contract_ids: ["R1"], status: "narrowed" }, ...good.issue_coverage.slice(1)] };
-    assert.match(decide(cov, { ...kctx, contract: am("narrowed per K1") }).failures[0].detail, /frozen decision K1/);
-    assert.match(decide(cov, { ...kctx, contract: am("narrowed per K9") }).failures[0].detail, /amendment not accepted/);
+    const cov = (status) => ({ ...rows, issue_coverage: [{ quote: Q1, contract_ids: ["R1"], status }, ...good.issue_coverage.slice(1)] });
+    const backed = decide(cov("narrowed"), { ...kctx, contract: am("narrowed per K1") });
+    assert.equal(backed.state, "conforms");
+    assert.deepEqual(backed.decisionBacked.map((x) => x.decision), ["K1"]);
+    assert.ok(codes(decide(cov("narrowed"), { ...kctx, contract: am("narrowed per K9") })).includes("conformance.omission"));
+    assert.ok(codes(decide(cov("missing"), { ...kctx, contract: am("narrowed per K1") })).includes("conformance.omission"));
+  });
+  it("6051 replay of the 5749 shape (R4 delivered, R12 deferred, R5 amended citing K1) yields no omission rows", () => {
+    const Q4 = "Fixture: a defer row stays tracked.", Q5 = "Metric: the rate stays under 5% over a real batch.";
+    const kk = { ...C, decisions: [{ id: "K1", choice: "x" }], requirements: [C.requirements[0], { id: "R4", quote: Q4, disposition: "deliver", amendment: { text: "narrowed per K1", why: "w" } }, { id: "R12", quote: Q5, disposition: "post-deploy", bucket: "post-deploy", check: "c1", why: "prod" }] };
+    const rv = { ...good, issue_coverage: [{ quote: Q1, contract_ids: ["R1"], status: "covered" }, { quote: Q4, contract_ids: ["R4"], status: "narrowed" }, { quote: Q5, contract_ids: ["R12"], status: "missing" }, good.issue_coverage[2]],
+      requirements: [good.requirements[0], { id: "R4", status: "implemented", evidence: "src/search.js:7", validated_by: "V1" }, { id: "R12", status: "post-deploy", evidence: "", validated_by: "", deferral_ok: true }] };
+    const d = decide(rv, { ...ctx, contract: kk, issueText: `${ISSUE}\n${Q4}\n${Q5}` });
+    assert.equal(d.state, "conforms", JSON.stringify(d.failures));
+    assert.ok(!codes(d).includes("conformance.omission"));
   });
 });

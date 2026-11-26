@@ -1710,11 +1710,12 @@ export function decide(raw, ctx) {
   const citedDecision = (r) => (ctx.contract.decisions ?? []).find((d) => d?.id && new RegExp(`\\b${d.id}\\b`).test(`${r.amendment?.text ?? ""} ${r.amendment?.why ?? ""}`));
   const notAccepted = (r) => { if (!r) return ""; const d = citedDecision(r); return `${d ? `amendment cites frozen decision ${d.id} ("${String(d.choice ?? "").slice(0, 120)}"), judged against it` : "amendment not accepted"} (${r.id} amended to "${String(r.amendment.text).slice(0, 200)}"): `; };
   const named = (c) => { const ids = Array.isArray(c?.contract_ids) ? c.contract_ids : []; const reqs = ctx.contract.requirements ?? []; return ids.length ? reqs.filter((r) => ids.includes(r.id)) : reqs.filter((r) => r.quote === c?.quote); };
-  const followUps = [];
+  const followUps = [], decisionBacked = [];
   for (const c of rv.issue_coverage) if (c.misclassified === true) f.push({ code: C.CONFORMANCE_OMISSION, detail: `guidance row misclassified: "${c.quote}" is a symptom or success criterion, judge it as binding${c.note ? ` (${c.note})` : ""}` });
   else if (c.status !== "covered" && !guidanceCoverage(c, ctx.contract)) {
     const rows = named(c);
     if (rows.length && rows.every((r) => r.disposition === "defer" || r.disposition === "post-deploy")) followUps.push({ quote: c.quote, ids: rows.map((r) => r.id) }); // #6051: a frozen defer/post-deploy row is a tracked follow-up, not an omission
+    else if (c.status === "narrowed" && rows.some((r) => r.amendment?.text && citedDecision(r))) decisionBacked.push({ quote: c.quote, ids: rows.map((r) => r.id), decision: citedDecision(rows.find((r) => r.amendment?.text && citedDecision(r))).id }); // #6051: a narrowing the amendment backs with a frozen decision is weighed against it, not an omission; a missing row still is one
     else f.push({ code: C.CONFORMANCE_OMISSION, detail: `${notAccepted(amendedOf(c.contract_ids))}issue requirement ${c.status}: "${c.quote}"${c.note ? ` (${c.note})` : ""}` });
   }
   for (const r of ctx.contract.requirements) {
@@ -1745,10 +1746,10 @@ export function decide(raw, ctx) {
   }
   for (const p of rv.preserve ?? []) if (p.status !== "intact") f.push({ code: C.CONFORMANCE_PRESERVE_VIOLATED, detail: `${p.id} ${p.status}${p.evidence ? ` (${p.evidence})` : ""}${p.note ? `: ${p.note}` : ""}` });
   for (const r of rv.regressions ?? []) f.push({ code: C.CONFORMANCE_REGRESSION, detail: `${r?.at ?? "?"}: ${r?.failure ?? ""}` });
-  if (f.length) return { state: "nonconforming", failures: f, inconsistent: rv.verdict === "CONFORMS", review: rv, converted, followUps };
+  if (f.length) return { state: "nonconforming", failures: f, inconsistent: rv.verdict === "CONFORMS", review: rv, converted, followUps, decisionBacked };
   // A NONCONFORMING verdict with every row passing gives the builder nothing to fix: re-ask the reviewer.
   if (rv.verdict !== "CONFORMS") return { state: "review.inconsistent", failures: [{ code: C.REVIEW_INCONSISTENT, detail: "verdict NONCONFORMING with no failing row" }], missing: ["verdict"], review: rv };
-  return { state: "conforms", failures: [], review: rv, converted, followUps };
+  return { state: "conforms", failures: [], review: rv, converted, followUps, decisionBacked };
 }
 
 /** The ids (or sections) a targeted re-ask must fill: requirement ids without a valid row, issue_coverage problems, ...; [] when complete. */
