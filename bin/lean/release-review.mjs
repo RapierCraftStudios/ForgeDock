@@ -286,7 +286,10 @@ export async function fixStep(ctx) {
       continue;
     }
     // #5779: with blocking findings in hand the fix round starts now (completed runs go into the brief); else the wait is bounded
-    const jobs = r.ciFailing > 0 ? await seam.failedJobs({ pr: r.pr, head: r.head, wait: !r.blocking?.length }) : [];
+    const seen = r.ciFailing > 0 ? await seam.failedJobs({ pr: r.pr, head: r.head, wait: !r.blocking?.length }) : [];
+    // #6013: failures the staging-health gate named earlier ride along in the same brief, so all fixes are dispatched together.
+    const known = (ctx.state.knownFailures ?? []).filter((k) => !seen.some((j) => j.name === k.name)).map((k) => ({ name: k.name, conclusion: "failure", log: `failed on staging (${k.cause})` }));
+    const jobs = Object.assign([...seen, ...known], { pending: seen.pending });
     const rec = collectFindings({ head: r.head, jobs, findings: r.items ?? [], guards: r.guards ?? [] });
     const b = blockingOf(rec);
     if (!b.ci.length && !b.review.length && !b.guards.length && !r.blocking?.length && jobs.pending?.length) return blocked(`required checks of #${r.pr} still running (${jobs.pending.join(", ")}), with no failure to fix yet; re-run the release once CI finishes`);
