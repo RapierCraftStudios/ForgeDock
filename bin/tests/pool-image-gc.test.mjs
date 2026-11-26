@@ -114,7 +114,9 @@ async function updateTo(from, to, images) {
   codeTree(root, from); codeTree(src, to);
   const tgz = join(work, "bundle.tgz"); execFileSync("tar", ["-czf", tgz, "-C", src, "."]);
   const docker = fakeDocker({ images });
-  docker.build = async (_dir, tag) => { for (const t of [tag, laneToolsTag(tag, ["a"]), laneToolsTag(tag, ["b"])]) docker.images.add(t); };
+  docker.builds = [];
+  docker.build = async (_dir, tag) => { docker.builds.push(tag); for (const t of [tag, laneToolsTag(tag, ["a"]), laneToolsTag(tag, ["b"])]) docker.images.add(t); };
+  docker.hasImage = async (t) => docker.images.has(t); // the self-update build is skipped only when the image is really present
   const agent = agentOf(docker, { code_root: root });
   const oldFetch = globalThis.fetch, oldExit = process.exit;
   const exited = new Promise((resolve) => { process.exit = () => resolve(); });
@@ -136,4 +138,12 @@ test("selfUpdate never removes the image it just built, even when it is older th
   const docker = await updateTo("0.0.4", "0.0.1", [...family("0.0.2"), ...family("0.0.3"), ...family("0.0.4")]);
   assert.ok(docker.images.has(laneImageTag("0.0.1")), "rollback image survives the prune");
   assert.ok(docker.images.has(laneImageTag("0.0.4")), "running image survives");
+});
+
+test("selfUpdate skips the lane-image build when the target image is already present (pre-seeded, 2026-11-26)", async () => {
+  const docker = await updateTo("0.0.4", "0.0.5", [...family("0.0.4"), laneImageTag("0.0.5")]);
+  assert.deepEqual(docker.builds, [], "no build for a pre-seeded image");
+  assert.ok(docker.images.has(laneImageTag("0.0.5")));
+  const fresh = await updateTo("0.0.4", "0.0.5", [...family("0.0.4")]);
+  assert.deepEqual(fresh.builds, [laneImageTag("0.0.5")], "an absent image is still built");
 });

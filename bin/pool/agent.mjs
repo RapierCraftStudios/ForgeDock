@@ -940,7 +940,10 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       if (want.image !== running.image || want.version !== running.version) {
         const nextImage = cfg.image && cfg.image !== "computeshare-lane:1" ? cfg.image : laneImageTag(want.version);
         log.info?.(`rebuilding ${nextImage} (${running.version}/${running.image} -> ${want.version}/${want.image})`);
-        await buildWithRetry(() => docker.build(join(next, "pool", "image"), nextImage, laneBuildArgs(want.version)), { log }); // #5919
+        // 2026-11-26: a host pre-seeded with the image (docker load from another host) skips the build: on a slow or memory-tight
+        // host the build itself is the risk (an upgrade build coincided with a host crash)
+        if (await docker.hasImage?.(nextImage)) log.info?.(`${nextImage} already present; no build`);
+        else await buildWithRetry(() => docker.build(join(next, "pool", "image"), nextImage, laneBuildArgs(want.version)), { log }); // #5919
       }
       await pruneLaneImages([laneImageTag(want.version)]);
       await prepullImages();
