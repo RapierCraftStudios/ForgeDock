@@ -10173,6 +10173,27 @@ describe("#5992 verify.guard_bypass: a lane clear of the red guard's files proce
   });
 });
 
+describe("R2 guard_bypass never discards lane-owned failures", () => {
+  const setup = (rc) => {
+    const w = world(), git = w.io.git;
+    w.io.runCommand = async ({ command, cwd }) => ({ rc: rc(command, String(cwd).includes("basered-")), output: "bare 429 at app/routers/listing_feeds.py" });
+    w.io.git = async (a, o) => a[0] === "log" && a.includes("--format=%H%x1f%s%x1f%b") ? `${"a".repeat(40)}\x1ffeat: feeds (#39805)\x1f` : a[0] === "diff" && a.includes("--name-only") ? "docs/readme.md\n" : git(a, o);
+    return w;
+  };
+  const verify = { invariants: ["bash scripts/guard.sh", "bash scripts/other-guard.sh"], guardBypass: true };
+  it("a guard that is red only in the lane alongside a base-red guard does not bypass", async () => {
+    const w = setup((c, onBase) => (c.includes("other-guard") ? (onBase ? 0 : 1) : 1));
+    const r = await run(w, { verify });
+    assert.notEqual(r.terminalReason, "merged", "lane-broken guard is not discarded");
+    assert.equal(r.events?.some?.((e) => e.event === "BASE_RED_BYPASS") ?? false, false);
+  });
+  it("every failure base-red still bypasses", async () => {
+    const w = setup(() => 1);
+    const r = await run(w, { verify });
+    assert.notEqual(r.code, "base.red", "bypassed");
+  });
+});
+
 describe("#6008 lease/hold/pause guard before push and merge (kept sandbox)", () => {
   // admission reads (first two) see no state; every later read sees `scenario`
   const guarded = (scenario) => { const w = world(); w.leaseWrites = []; let reads = 0;

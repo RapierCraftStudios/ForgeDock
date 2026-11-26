@@ -3199,7 +3199,7 @@ export async function runCore(o) {
       }
       if (!baseRed.length) return null;
       const att = await attributeBaseRed({ failed: baseRed, git, base });
-      if (bypass) { // #5992: a lane clear of the guarded surface goes on; the guard is re-run on the merged tree at merge (the base-sync post-merge gate)
+      if (bypass && baseRed.length === failed.length) { // R2: bypass only when every failed command is base-red; non-guard or lane-broken failures stay the lane's. #5992: a lane clear of the guarded surface goes on; the guard is re-run on the merged tree at merge (the base-sync post-merge gate)
         let laneFiles = [];
         try { laneFiles = String(await git(["diff", "--name-only", `${base}...HEAD`])).split("\n"); } catch { /* no diff: no bypass */ }
         if (bypassesGuard({ laneFiles, att })) {

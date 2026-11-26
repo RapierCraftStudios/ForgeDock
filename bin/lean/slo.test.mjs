@@ -10,9 +10,10 @@ const codes = (o) => evaluateSlo(eff(o), DEFAULT_SLO).map((b) => b.code);
 const fakeGh = () => { const calls = []; return { calls, gh: async (a) => { calls.push(a); return a[1] === "list" ? "[]" : a[1] === "create" ? "https://github.com/x/y/issues/42\n" : ""; } }; };
 
 describe("#5987 SLOs", () => {
-  it("defaults and file_issues on", () => {
+  it("defaults and file_issues off unless explicitly true", () => {
     const c = parseSloConfig({});
-    assert.equal(c.fileIssues, true); assert.equal(c.repeatMax, 3); assert.equal(c.concurrencyMin, 0.6);
+    assert.equal(c.fileIssues, false); assert.equal(DEFAULT_SLO.fileIssues, false);
+    assert.equal(parseSloConfig({ orchestrate: { slo: { file_issues: "yes" } } }).fileIssues, false); assert.equal(c.repeatMax, 3); assert.equal(c.concurrencyMin, 0.6);
     assert.equal(parseSloConfig({ orchestrate: { slo: { file_issues: "true", repeat_max: "5", attempts_max: "bad" } } }).repeatMax, 5);
     assert.equal(parseSloConfig({ orchestrate: { file_issues: "true" } }).fileIssues, true);
     assert.equal(parseSloConfig({ orchestrate: { slo: { file_issues: "false" } } }).fileIssues, false);
@@ -39,6 +40,13 @@ describe("#5987 SLOs", () => {
     const f = fakeGh(), b = evaluateSlo(eff({ interventionsPerDay: 9 }), DEFAULT_SLO);
     const r = await fileSloIssues({ eff: eff(), breaches: b, gh: f.gh, cfg: { ...DEFAULT_SLO, fileIssues: false }, now: 1e9 });
     assert.equal(f.calls.length, 0); assert.deepEqual(r.slo.sigs, {});
+  });
+
+  it("posted bodies carry no local path", async () => {
+    const f = fakeGh(), cfg = { ...DEFAULT_SLO, fileIssues: true }, b = evaluateSlo(eff({ interventionsPerDay: 9 }), cfg);
+    await fileSloIssues({ eff: eff(), breaches: b, gh: f.gh, cfg, now: 1e12, reportPath: "/home/u/.forge/introspect/x.txt" });
+    assert.ok(f.calls.some((c) => c[1] === "create"));
+    assert.ok(!f.calls.some((c) => c.join(" ").includes("/home/u")), "reportPath never posted");
   });
 
   it("one issue per signature, a re-breach inside 6 h is silent, after 6 h a counter comment, 24 h green closes", async () => {
