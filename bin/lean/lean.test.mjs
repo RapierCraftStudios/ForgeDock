@@ -6852,12 +6852,19 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     assert.equal(builders(w).length, 2, "no builder fix round spent on a base failure");
   });
 
-  it("#5913 a lane whose diff touches the failing guard's files is not deferred on base.red", async () => {
-    const w = world({ changed: ["app/routers/listing_feeds.py", "test/foo.test.js"] });
+  it("#5913 a lane whose diff touches the failing guard's files and makes it pass on the lane tree is not deferred on base.red", async () => {
+    const w = world({ changed: ["app/routers/listing_feeds.py", "test/foo.test.js"] }); let laneRuns = 0;
+    w.io.runCommand = async ({ cwd }) => (/basered-/.test(cwd) ? { rc: 1, output: "bare 429 at app/routers/listing_feeds.py" } : ++laneRuns === 1 ? { rc: 1, output: "bare 429 at app/routers/listing_feeds.py" } : { rc: 0, output: "" });
+    const r = await run(w, { verify: { invariants: ["bash scripts/guard.sh"] } });
+    assert.notEqual(r.code, "base.red"); assert.ok(laneRuns >= 2, "the guard was re-run on the lane tree");
+  });
+
+  it("#5913 a lane that touches the guard's files but still fails it is deferred on base.red and names the owner escape", async () => {
+    const w = world({ changed: ["app/routers/listing_feeds.py"] });
     w.io.runCommand = async () => ({ rc: 1, output: "bare 429 at app/routers/listing_feeds.py" });
     const r = await run(w, { verify: { invariants: ["bash scripts/guard.sh"] } });
-    assert.notEqual(r.code, "base.red"); assert.equal(r.code, "ci.red", "still gated: a guard that keeps failing blocks the merge");
-    assert.equal(w.merges.length, 0);
+    assert.equal(r.code, "base.red"); assert.equal(w.merges.length, 0);
+    assert.match(JSON.stringify(r), /--owner-requested/);
   });
 
   it("#5913 diffTouchesGuard is true only when a changed file is named by the failing guard", () => {

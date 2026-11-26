@@ -3078,14 +3078,17 @@ export async function runCore(o) {
       const baseRuns = await heavyStep("precheck", () => runOnBase({ commands: g.map((f) => f.command), git, runCommand: io.runCommand, mergeBase: base, cwd: wt, env: laneEnv(), timeoutMs: vcfg.precheckTimeoutSeconds * 1000 }));
       const { baseRed } = classifyBaseRed({ failed: g, baseRuns });
       if (!baseRed.length) return null;
-      // #5913: a lane whose own diff touches the failing guard's files is the base fix; deferring it behind the red it repairs is circular. It stays gated: the builder fix rounds run and a guard still failing at the end blocks the merge (ci.red).
+      // #5913: a lane whose own diff touches the failing guard's files may be the base fix; deferring it behind the red it repairs is circular. Skip the deferral only when the guard re-run on the lane tree passes.
       const changedNow = String(await git(["diff", "--name-only", `${base}...HEAD`]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean);
-      if (diffTouchesGuard({ changed: changedNow, failed: baseRed })) { T.decisions.push(`Guard command(s) ${baseRed.map((f) => `\`${f.command}\``).join(", ")} also fail on ${base}, but this lane changes the files the failure names; not deferred (base.red), the guard must pass here`); return null; }
+      if (diffTouchesGuard({ changed: changedNow, failed: baseRed })) {
+        const reruns = await heavyStep("precheck", async () => { const out = []; for (const f of baseRed) { try { out.push(await io.runCommand({ command: f.command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() })); } catch { out.push({ rc: 1 }); } } return out; });
+        if (reruns.every((r) => r?.rc === 0)) { T.decisions.push(`Guard command(s) ${baseRed.map((f) => `\`${f.command}\``).join(", ")} fail on ${base} but pass on this lane's tree (the lane changes the files the failure names); not deferred (base.red)`); return null; }
+      }
       const att = await attributeBaseRed({ failed: baseRed, git, base });
       const cmds = baseRed.map((f) => f.command), n = await reportBaseRed({ ghc: ghw, repo, base, att, laneIssue: issue, commands: cmds });
       T.decisions.push(`Guard command(s) ${cmds.map((c) => `\`${c}\``).join(", ")} also fail on ${base}${att ? ` (last change ${att.sha.slice(0, 12)}${att.issue ? `, #${att.issue}` : ""})` : ""}; lane deferred behind ${n ? `#${n}` : "the base fix"}; if this lane fixes it, change the guard's files or land it through review-finalize merge-gate --manual-pr --owner-requested`);
       ev({ event: "BASE_RED", commands: cmds, sha: att?.sha ?? null, issue: att?.issue ?? null, tracked: n });
-      return await finish("deferred", `base ${base} is red on guard command(s) ${cmds.join(", ")}; deferred behind ${n ? `#${n}` : "the base fix"}`, { code: OUTCOME_CODES.BASE_RED, retryInSeconds: 900 }, OUTCOME_CODES.BASE_RED);
+      return await finish("deferred", `base ${base} is red on guard command(s) ${cmds.join(", ")}; deferred behind ${n ? `#${n}` : "the base fix"} (owner escape: review-finalize merge-gate --manual-pr --owner-requested)`, { code: OUTCOME_CODES.BASE_RED, retryInSeconds: 900 }, OUTCOME_CODES.BASE_RED);
     }
     const structureLine = structureNote(structure);
 
