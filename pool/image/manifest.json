@@ -1,0 +1,25 @@
+{
+  "tools": [
+    { "name": "git", "binary": "git", "kind": "apt", "package": "git" },
+    { "name": "curl", "binary": "curl", "kind": "apt", "package": "curl" },
+    { "name": "jq", "binary": "jq", "kind": "apt", "package": "jq" },
+    { "name": "shellcheck", "binary": "shellcheck", "kind": "apt", "package": "shellcheck" },
+    { "name": "xvfb", "binary": "xvfb-run", "kind": "apt", "package": "xvfb" },
+    { "name": "postgresql-client", "binary": "psql", "kind": "apt", "package": "postgresql-client" },
+    { "name": "redis-tools", "binary": "redis-cli", "kind": "apt", "package": "redis-tools" },
+    { "name": "gh", "binary": "gh", "kind": "apt", "package": "gh" },
+    { "name": "docker", "binary": "docker", "kind": "apt", "package": "docker-ce-cli" },
+    { "name": "python3", "binary": "python3", "kind": "apt", "package": "python3" },
+    { "name": "python3.12", "binary": "python3.12", "kind": "apt", "package": "python3" },
+    { "name": "yq", "binary": "yq", "kind": "download", "marker": "/usr/local/bin/yq" },
+    { "name": "node", "binary": "node", "kind": "download", "marker": "nodejs.org/dist" },
+    { "name": "corepack", "binary": "corepack", "kind": "npm", "package": "corepack" },
+    { "name": "forgedock", "binary": "forgedock", "kind": "npm", "package": "forgedock" },
+    { "name": "claude", "binary": "claude", "kind": "npm", "package": "@anthropic-ai/claude-code" },
+    { "name": "uv", "binary": "uv", "kind": "download", "marker": "astral.sh/uv" },
+    { "name": "poetry", "binary": "poetry", "kind": "uv-tool", "package": "poetry" },
+    { "name": "python3.11", "binary": "python3.11", "kind": "uv-python", "package": "3.11" },
+    { "name": "python3.13", "binary": "python3.13", "kind": "uv-python", "package": "3.13" },
+    { "name": "playwright-chromium", "binary": "chromium", "kind": "playwright", "package": "chromium" }
+  ]
+}

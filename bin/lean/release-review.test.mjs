@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { reviewStep, fixStep, missingReviewers, SPEC_PANEL, MAX_DELTA_PASSES, realSeam, withIntegrityMarker, TEST_GATE_SKIP_NO_TESTS, testGatePrompt, integrationTestCount, resolveSkillName } from "./release-review.mjs";
+import { reviewStep, fixStep, missingReviewers, SPEC_PANEL, MAX_DELTA_PASSES, realSeam, withIntegrityMarker, TEST_GATE_SKIP_NO_TESTS, testGatePrompt, integrationTestCount, resolveSkillName, mapLimit, reviewMaxParallel, defaultReviewParallel, REVIEW_NICE } from "./release-review.mjs";
 import { readFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { reviewStagingJson, classifyChecks, cancelOnlyChecks } from "../review-staging.mjs";
@@ -12,7 +12,7 @@ const manifest = (head, delta = null) => ({ pr: 7, headSha: head, bundle: [1, 2]
 const fin = (extra = {}) => ({ code: 0, data: { head: H1, toFile: [], notes: [], ...extra }, lines: [] });
 
 /** Seam fake: `heads` is what headOf answers in turn; `fins` what finalize answers in turn. */
-function fakeSeam({ heads = [H1], fins = [fin()], summary, lanes = [], jobs = [], gatePlan = { clusters: 1, skill: "forgedock:test-gate" } } = {}) {
+function fakeSeam({ heads = [H1], fins = [fin()], summary, lanes = [], jobs = [], gatePlan = { clusters: 1, skill: "forgedock:test-gate" }, maxParallel = 2 } = {}) {
   const log = [], agents = [], gateSaved = [], agentCalls = [];
   let h = 0, f = 0, l = 0, n = 100;
   return {
@@ -25,6 +25,7 @@ function fakeSeam({ heads = [H1], fins = [fin()], summary, lanes = [], jobs = []
     markLaunched: (file, domains) => log.push(["launched", domains]),
     saveTestGate: (pr, text) => { gateSaved.push(text); return "/sd/7_test_gate_output.txt"; },
     testGatePlan: async () => gatePlan,
+    maxParallel: () => maxParallel,
     runAgent: async (a) => { agentCalls.push(a); agents.push(a.role + (a.prompt.includes("findings block required") ? ":reask" : "")); return { text: "ok" }; },
     fileIssue: async ({ item }) => { log.push(["file", item.title]); return n++; },
     failedJobs: async () => jobs,
@@ -36,6 +37,35 @@ function fakeSeam({ heads = [H1], fins = [fin()], summary, lanes = [], jobs = []
   };
 }
 const ctx = (seam, steps = {}) => ({ io: { review: seam }, repo: "o/r", def: "main", staging: "staging", state: { steps: { "release-pr": { result: { pr: 7 } }, ...steps } }, save() {} });
+
+describe("#6098 reviewer fan-out is capped and niced", () => {
+  it("mapLimit never has more than the cap in flight and keeps order", async () => {
+    let live = 0, peak = 0;
+    const out = await mapLimit([1, 2, 3, 4, 5, 6, 7, 8], 3, async (x) => { live++; peak = Math.max(peak, live); await new Promise((r) => setTimeout(r, 5)); live--; return x * 2; });
+    assert.equal(peak, 3); assert.deepEqual(out, [2, 4, 6, 8, 10, 12, 14, 16]);
+  });
+  it("review.max_parallel is read from forge.yaml; the default is max(2, cores/2)", () => {
+    assert.equal(reviewMaxParallel("a: 1\nreview:\n  depth:\n    x: 1\n  max_parallel: 3 # cap\nother:\n  max_parallel: 9\n"), 3);
+    assert.equal(reviewMaxParallel("other:\n  max_parallel: 9\n"), null);
+    assert.equal(reviewMaxParallel("review:\n  max_parallel: 0\n"), null);
+    assert.equal(defaultReviewParallel(4), 2); assert.equal(defaultReviewParallel(2), 2); assert.equal(defaultReviewParallel(16), 8);
+  });
+  it("the panel never runs more reviewers at once than the cap", async () => {
+    const s = fakeSeam({ maxParallel: 2 });
+    let live = 0, peak = 0;
+    s.runAgent = async (a) => { live++; peak = Math.max(peak, live); await new Promise((r) => setTimeout(r, 5)); live--; return { text: "ok" }; };
+    await reviewStep(ctx(s));
+    assert.ok(SPEC_PANEL.length + 1 > 2, "the panel is larger than the cap");
+    assert.equal(peak, 2);
+  });
+  it("reviewer processes are lowered to nice 19 / ionice idle on spawn", async () => {
+    let spec = null;
+    const real = realSeam({ repo: "o/r", def: "main", env: {}, cwd: "/tmp", makeRunner: () => async (a) => { spec = a; return { text: "" }; } });
+    await real.runAgent({ role: "release-review-security", issue: 7, prompt: "p" });
+    assert.equal(typeof spec.onSpawn, "function"); assert.equal(REVIEW_NICE, 19);
+    assert.equal(spec.onSpawn({ pid: -1 }), false); // an invalid pid is a no-op, never a throw
+  });
+});
 
 describe("reviewStep", () => {
   it("reviewer sessions run the release job's own forgedock build", async () => {
@@ -164,6 +194,17 @@ describe("fixStep", () => {
     assert.deepEqual(s.log.slice(0, 3), [["fix-issue"], ["lane", 100, "staging"], ["pre", H1]]);
     assert.equal(r.verdict, "APPROVE FOR DEPLOY");
     assert.equal(c.state.fixloop.heads[H2].rounds, 1, "the round is counted per head sha");
+  });
+
+  it("#6013: failures the staging-health gate named ride in the one fix brief with the release-PR round's failures", async () => {
+    const s = fakeSeam({ heads: [H2], jobs: [{ name: "lint", conclusion: "failure", log: "bad" }] });
+    let brief = "";
+    s.fileFixIssue = async (a) => { brief = a.brief; return 100; };
+    const c = ctx(s, { review: { result: { ...failed, ciFailing: 1 } } });
+    c.state.knownFailures = [{ name: "black", cause: "regression" }, { name: "lint", cause: "regression" }];
+    await fixStep(c);
+    assert.match(brief, /ci:black/);
+    assert.equal((brief.match(/ci:lint/g) ?? []).length, 1);
   });
 
   it("is bounded: one round (ci.fix.max_rounds default 1), then HELD with an owner ask for a non-flake, non-regression failure", async () => {

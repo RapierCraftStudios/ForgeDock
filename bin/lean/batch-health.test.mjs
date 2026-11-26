@@ -288,25 +288,34 @@ describe("#5806 setup/dispatch stall: 3-min threshold, one auto-recovery, then a
     assert.match(d.cause, /batch env: gh, git not resolvable on the batch env PATH \(1 entry: \/bogus\)/);
   });
 
-  it("a recovery is recorded once (health.json + FORGE:DECISION in batch.log); the same stall again alerts and never loops", () => {
+  it("a recovery is recorded (health.json + FORGE:DECISION in batch.log); a repeat waits out the backoff, then is recovered again (#6082)", () => {
     const root = tmpDir("stall-recover-"), b = openBatch(root, "b1");
     b.writePlan({ daemon: true, repo: "o/r" });
-    const s = at(4);
+    const s = at(4), ok = { ok: true, detail: "batch env PATH resolves gh, git, node" };
     const text = recordStallRecovery(b, s, { action: "resume", now: NOW });
     assert.match(text, /^FORGE:DECISION batch b1 stall-recovery: resume the batch/);
     assert.match(readFileSync(join(b.dir, "batch.log"), "utf8"), /FORGE:DECISION batch b1 stall-recovery/);
     const rec = readHealth(b.dir).stallRecovery;
     assert.deepEqual([rec.sig, rec.action, rec.count], ["1,2,3,4", "resume", 1]);
     // the daemon restarted meanwhile: the decision reads health.json, not memory
-    const again = decideStallAction(s, { recovery: rec, hosted: true, probe: { ok: true, detail: "batch env PATH resolves gh, git, node" } });
-    assert.equal(again.action, "alert");
-    assert.match(again.cause, /stalled again after auto-recovery \(resume at .+\); batch env PATH resolves gh, git, node/);
-    assert.equal(recordStallAlert(b, s, { now: NOW, cause: again.cause }), true);
-    assert.equal(recordStallAlert(b, s, { now: NOW, cause: again.cause }), false, "one alert per ready set");
-    const h = readHealth(b.dir);
-    assert.match(h.alert, /\n {2}probed: stalled again after auto-recovery/);
-    assert.equal(h.stall.cause, again.cause);
-    assert.ok(summaryLines(root, { now: NOW }).some((l) => /DISPATCH STALLED .*stalled again after auto-recovery/.test(l)));
+    const early = decideStallAction(s, { recovery: rec, hosted: true, probe: ok, now: NOW + 60_000 });
+    assert.equal(early.action, "wait", "inside the backoff nothing acts and nothing alerts");
+    const later = decideStallAction(s, { recovery: rec, hosted: true, probe: ok, now: NOW + 4 * 60_000 });
+    assert.equal(later.action, "restart-daemon", "the same stall persisting past the backoff is healed again, no operator");
+    assert.equal(decideStallAction(s, { recovery: { ...rec, count: 3 }, hosted: false, now: NOW + 3 * 3600_000 }).action, "resume");
+  });
+
+  it("a pool-capacity stall only waits: no recovery, no alert (#6082)", () => {
+    const s = { code: "pool-capacity", reason: "pool full", ready: [1], detail: "waiting on pool capacity" };
+    assert.equal(decideStallAction(s, { hosted: true }).action, "wait");
+    assert.equal(decideStallAction(s, { hosted: false, recovery: { sig: "1", at: "x", action: "resume", count: MAX_STALL_RECOVERIES } }).action, "wait");
+  });
+
+  it("an alert names the stall code, not always dispatch-stalled (#6082)", () => {
+    const root = tmpDir("stall-code-"), b = openBatch(root, "b1");
+    b.writePlan({ daemon: true, repo: "o/r" });
+    recordStallAlert(b, { ...at(4), code: "pool-capacity" }, { now: NOW });
+    assert.match(readHealth(b.dir).alert, /BATCH UNHEALTHY b1 \(pool-capacity\)/);
   });
 
   it("a batch that spent MAX_STALL_RECOVERIES alerts even on a new ready set", () => {
@@ -404,6 +413,25 @@ describe("#5938 stall verdict is re-evaluated: full K, recovery lanes, pool capa
     assert.equal(batchVerdict("b1", null), "batch b1: healthy");
     assert.match(batchVerdict("b1", s, { action: "resume" }, { acted: true }), /stalled -> action resume/);
     assert.match(batchVerdict("b1", s, { action: "alert", cause: "no gh" }), /stalled -> no action, needs you \(no gh;/);
+  });
+});
+
+describe("#5988: a second restart for the same stall cause is refused", () => {
+  const stall = (ready, gates) => ({ code: "dispatch-stalled", ready, gates, detail: "stalled" });
+  it("a different ready set with the same cause waits out the backoff and the diagnosis is recorded", () => {
+    const root = tmpDir("stallcause");
+    mkdirSync(join(root, "b1"), { recursive: true });
+    const batch = { id: "b1", dir: join(root, "b1") };
+    const first = decideStallAction(stall([1, 2], ["base.red"]), { recovery: null, hosted: true });
+    assert.equal(first.action, "restart-daemon");
+    recordStallRecovery(batch, stall([1, 2], ["base.red"]), { action: first.action, sig: first.sig });
+    const rec = readHealth(batch.dir).stallRecovery;
+    assert.equal(rec.cause, "dispatch-stalled[base.red]");
+    assert.deepEqual(rec.gates, ["base.red"]);
+    const again = decideStallAction(stall([3], ["base.red"]), { recovery: rec, hosted: true });
+    assert.equal(again.action, "wait", "#6082: inside the backoff");
+    assert.equal(decideStallAction(stall([3], ["base.red"]), { recovery: rec, hosted: true, now: Date.now() + 3600_000 }).action, "restart-daemon", "#6082: after it, healed again");
+    assert.equal(decideStallAction(stall([3], []), { recovery: rec, hosted: true }).action, "wait", "backoff is per batch");
   });
 });
 

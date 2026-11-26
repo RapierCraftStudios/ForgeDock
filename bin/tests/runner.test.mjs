@@ -50,6 +50,8 @@ import {
   resolveConfiguredCliTimeout,
   runCommand,
   isClaudeCliAvailable,
+  cliProbeTimedOut,
+  spawnTargetMissing,
   CLI_PROBE_OUTPUT_SENTINEL,
   parseProbeOutput,
   selectResolvedCliPath,
@@ -1678,6 +1680,14 @@ describe("runCliBackend env scrub (issue #2021)", () => {
 // ---------------------------------------------------------------------------
 
 describe("runCliBackend spawnFn seam (issue #2033)", () => {
+  it("drops NUL bytes from the prompt so the spawn never throws on argv (2026-11-26)", () => {
+    let argv = null, input = null;
+    const spawnFn = (_bin, a, opts) => { argv = a; input = opts?.input ?? null; return { status: 0, stdout: "ok", stderr: "", error: undefined }; };
+    runCliBackend({ spec: loadCommandSpec(COMMANDS_DIR, "work-on"), userMessage: "Issue #1: bad\0byte", args: ["1"], cwd: TMP, logger: { log: () => {} }, bin: "claude", spawnFn });
+    const all = [...(argv ?? []), String(input ?? "")].join(" ");
+    assert.ok(!all.includes("\0"), "no NUL reaches argv or stdin");
+    assert.ok(all.includes("badbyte"));
+  });
   it("uses the injected spawnFn instead of the real spawnSync, and forwards argv/opts", () => {
     let capturedBin, capturedArgv, capturedOpts;
     const spawnFn = (bin, argv, opts) => {
@@ -1758,7 +1768,7 @@ describe("runCliBackend spawnFn seam (issue #2033)", () => {
     assert.throws(
       () => runCliBackend({
         spec: loadCommandSpec(COMMANDS_DIR, "work-on"), userMessage: "Execute: /work-on 4021", args: ["4021"],
-        cwd: TMP, logger: { log: () => {} }, bin: "claude", spawnFn,
+        cwd: TMP, logger: { log: () => {} }, bin: "/nonexistent-5844/claude", spawnFn,
       }),
       (err) => err.code === "ENOENT",
     );
@@ -3126,6 +3136,60 @@ describe("isClaudeCliAvailable", () => {
 // the bare name, and (b) runCliBackend(), given that resolved path as `bin`,
 // succeeds even when the injected spawnFn is wired to fail on the bare
 // "claude" name specifically.
+describe("#5844 probe timeout and ENOENT classification", () => {
+  const timeoutErr = () => Object.assign(new Error("spawnSync ETIMEDOUT"), { code: "ETIMEDOUT", killed: true, signal: "SIGTERM" });
+  it("probe timeout is not cached as unavailable", () => {
+    const cwd = tmpDir("forgedock-cli-5844-");
+    try {
+      const execImpl = mock.fn(() => { throw timeoutErr(); });
+      assert.equal(isClaudeCliAvailable(cwd, { execImpl }), false);
+      assert.equal(cliProbeTimedOut(cwd), true);
+      assert.equal(execImpl.mock.callCount(), 2, "one retry");
+      assert.ok(execImpl.mock.calls[1].arguments[1].timeout > execImpl.mock.calls[0].arguments[1].timeout);
+      isClaudeCliAvailable(cwd, { execImpl });
+      assert.equal(execImpl.mock.callCount(), 4, "a second call re-probes: nothing was cached");
+      assert.equal(isClaudeCliAvailable(cwd, { execImpl: () => "1.2.3" }), true);
+      assert.equal(cliProbeTimedOut(cwd), false);
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  });
+  it("a timeout followed by success on the retry reports available", () => {
+    const cwd = tmpDir("forgedock-cli-5844-");
+    try {
+      let n = 0;
+      const execImpl = () => { if (n++ === 0) throw timeoutErr(); return "1.2.3"; };
+      assert.equal(isClaudeCliAvailable(cwd, { execImpl }), true);
+      assert.equal(cliProbeTimedOut(cwd), false);
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  });
+  it("a non-timeout probe failure is still cached as unavailable", () => {
+    const cwd = tmpDir("forgedock-cli-5844-");
+    try {
+      const execImpl = mock.fn(() => { throw Object.assign(new Error("exit 1"), { status: 1 }); });
+      assert.equal(isClaudeCliAvailable(cwd, { execImpl }), false);
+      assert.equal(isClaudeCliAvailable(cwd, { execImpl }), false);
+      assert.equal(execImpl.mock.callCount(), 1);
+      assert.equal(cliProbeTimedOut(cwd), false);
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  });
+  it("ENOENT is deterministic only when the CLI is absent", () => {
+    const enoent = () => ({ status: null, error: Object.assign(new Error("spawn claude ENOENT"), { code: "ENOENT" }) });
+    const run = (env) => {
+      const prev = process.env.PATH;
+      process.env.PATH = env;
+      try { return runCliBackend({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: tmpDir("core-5844-"), bin: "claude", logger: { log() {} }, spawnFn: enoent }); }
+      finally { process.env.PATH = prev; }
+    };
+    const dir = tmpDir("core-5844-path-");
+    try {
+      writeFileSync(join(dir, "claude"), "");
+      assert.throws(() => run(dir), (e) => e.spawnDeterministic !== true && e.code === "CLI_SPAWN_TRANSIENT" && e.spawnErrno === "ENOENT");
+      assert.throws(() => run(join(dir, "nowhere")), (e) => e.spawnDeterministic === true && e.code === "ENOENT");
+      assert.equal(spawnTargetMissing("claude", { PATH: "C:\\bin;C:\\tools", PATHEXT: ".EXE;.CMD" }, { platform: "win32", existsImpl: (f) => /tools.claude\.CMD$/.test(f) }), false);
+      assert.equal(spawnTargetMissing("claude", { PATH: "C:\\bin", PATHEXT: ".EXE" }, { platform: "win32", existsImpl: () => false }), true);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
 describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issue #2741)", () => {
   it("resolves and caches the shell-validated absolute path, not the bare command name", () => {
     const shimPath = "/home/user/.npm/_npx/abc123/node_modules/.bin/claude";
@@ -4054,6 +4118,32 @@ describe("#5762 CLI failure facts and err.cliFailed", () => {
     const e = run('{"duration_api_ms":0,"stop_reason":"stop_sequence","session_id":"x","total_cost_usd":0,');
     assert.equal(e.cliFailed, true);
     assert.equal(e.authFailure, undefined);
+  });
+});
+
+describe("#6105 an API-terminated session carries its id and is err.apiError", () => {
+  const run = (stdout) => {
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"), userMessage: "Execute: /work-on 6105", args: ["6105"],
+        cwd: TMP, logger: { log: () => {} }, bin: "claude",
+        spawnFn: () => ({ status: 1, signal: null, stdout, stderr: "", error: undefined }),
+      });
+    } catch (err) { thrown = err; }
+    return thrown;
+  };
+  it("is_error with terminal_reason api_error after real API time: apiError, session id and reason kept, not cliFailed", () => {
+    const e = run(JSON.stringify({ is_error: true, terminal_reason: "api_error", session_id: "sess-abc", duration_api_ms: 1920000, num_turns: 50, result: "API Error: 500" }));
+    assert.equal(e.apiError, true);
+    assert.equal(e.cliSessionId, "sess-abc");
+    assert.equal(e.cliTerminalReason, "api_error");
+    assert.equal(e.cliFailed, undefined);
+  });
+  it("a login failure, a usage limit, a non-API reason or a non-error envelope is never apiError", () => {
+    assert.equal(run(JSON.stringify({ is_error: true, terminal_reason: "api_error", session_id: "s", duration_api_ms: 5, result: "Please run /login" })).apiError, undefined);
+    assert.equal(run(JSON.stringify({ is_error: true, terminal_reason: "max_turns", session_id: "s", duration_api_ms: 5, result: "x" })).apiError, undefined);
+    assert.equal(run(JSON.stringify({ is_error: false, terminal_reason: "api_error", session_id: "s", duration_api_ms: 5, result: "x" })).apiError, undefined);
   });
 });
 

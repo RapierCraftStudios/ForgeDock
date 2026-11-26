@@ -14,7 +14,7 @@ function parseArgs(argv) {
     const t = argv[i];
     const take = () => { if (i + 1 >= argv.length) throw new Error(`${t} needs a value`); return argv[++i]; };
     if (t === '--repo') o.repo = take(); else if (t === '--base') o.base = take(); else if (t === '--base-branch') o.baseBranch = take();
-    else if (t === '--head-branch') o.headBranch = take(); else if (t === '--files') o.files = take().split(/[\n ]+/).filter(Boolean);
+    else if (t === '--head-branch') o.headBranch = take(); else if (t === '--release-branch') o.releaseBranch = take(); else if (t === '--files') o.files = take().split(/[\n ]+/).filter(Boolean);
     else if (t === '--files-from') o.files = fs.readFileSync(take(), 'utf8').split('\n').filter(Boolean);
     else if (t === '--out') o.out = take(); else if (t === '--plan') o.planFile = take(); else if (t === '--no-cache') o.noCache = true;
     else if (t === '--budget-minutes') o.budgetMinutes = Number(take()); else if (t === '--max-parallel') o.maxParallel = Number(take());

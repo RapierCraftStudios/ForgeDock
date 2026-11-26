@@ -29,6 +29,7 @@ import { parseForgeYaml } from "./forge-utils.mjs";
 import { selftestGate, readMarkerComments } from "./lean/selftest-gate.mjs";
 import { gateByRef } from "./lean/acceptance.mjs";
 import { DEFAULT_FEATURE_PATTERN } from "./lean/lane.mjs";
+import { attemptGuard } from "./lean/release-flakes.mjs";
 import { requiredChecksRead } from "./lean/effects.mjs";
 
 const INSTALL_ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -568,11 +569,18 @@ export function cancelOnlyChecks(checks, required = []) {
 
 const CI_POLL_MS = 20_000, CI_POLL_MAX = 45;
 
-/** One `gh run rerun` per cancelled run of the cancel-only required checks, then wait until none of them is pending. @returns the re-read checks, or `checks` when nothing could be rerun. */
+/** One `gh run rerun --failed` per cancelled run of the cancel-only required checks (#6014: never past RERUN_ATTEMPT_CAP reruns of a run), then wait until none of them is pending. @returns the re-read checks, or `checks` when nothing could be rerun. */
 async function rerunCancelled(io, c, pr, env, checks, only) {
   const ids = [...new Set(only.map((k) => /\/actions\/runs\/(\d+)/.exec(k.link)?.[1]).filter(Boolean))];
-  if (!ids.length) return checks;
-  for (const id of ids) await io.run("gh", ["run", "rerun", id, "-R", c.ghRepo], { env, cwd: io.cwd });
+  const todo = [];
+  for (const id of ids) {
+    const v = await io.run("gh", ["run", "view", id, "--json", "attempt", "-R", c.ghRepo], { env, cwd: io.cwd });
+    let attempt = null; try { attempt = v.code === 0 ? JSON.parse(v.stdout)?.attempt : null; } catch { /* unreadable: the guard allows an unknown attempt */ }
+    const g = attemptGuard({ attempt });
+    if (g.allow) todo.push(id); else io.err?.(`rerun of run ${id} refused: ${g.why}`);
+  }
+  if (!todo.length) return checks;
+  for (const id of todo) await io.run("gh", ["run", "rerun", id, "--failed", "-R", c.ghRepo], { env, cwd: io.cwd });
   const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   const names = new Set(only.map((k) => k.name));
   let cur = checks;

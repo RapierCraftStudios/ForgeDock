@@ -38,25 +38,33 @@ describe("#5986 attempts ledger in the batch runner", () => {
     assert.deepEqual(r.rows.map((x) => x.outcome), ["merged", "merged"], "root and its held dependent");
   });
 
-  it("the 3rd identical-signature failure escalates once and stops; counters survive resumes (state.json)", async () => {
+  it("the 2nd identical-signature failure escalates once with one comment and stops; counters survive resumes (state.json)", async () => {
     const store = memStore(), h = { v: "H1" }, a = seam(h);
     await run(store, a, async () => FAIL);
-    h.v = "H2"; await run(store, a, async () => FAIL);
     assert.equal(a.notes.filter((n) => n.code === "escalate").length, 0);
-    h.v = "H3"; const third = await run(store, a, async () => FAIL);
-    assert.equal(third.rows[0].outcome, "needs-human");
+    h.v = "H2"; const second = await run(store, a, async () => FAIL);
+    assert.equal(second.rows[0].outcome, "needs-human");
     assert.equal(a.notes.filter((n) => n.code === "escalate").length, 1, "one escalation");
-    assert.equal(store.peek().attempts[1].attempts, 3);
-    assert.equal(store.peek().attempts[1].signatures.length, 3);
+    assert.equal(store.peek().attempts[1].attempts, 2);
+    assert.equal(store.peek().attempts[1].signatures.length, 2);
     let ran = 0;
-    const again = await run(store, a, async () => { ran++; return MERGED; }); // same hash H3, label removed
+    const again = await run(store, a, async () => { ran++; return MERGED; }); // same hash H2, label removed
     assert.equal(ran, 0);
     assert.equal(again.rows[0].outcome, "needs-human");
     assert.equal(a.notes.filter((n) => n.code === "escalate").length, 1, "still one escalation");
-    h.v = "H4";
+    h.v = "H3";
     assert.equal((await run(store, a, async () => MERGED)).rows[0].outcome, "merged", "a new input hash readmits");
   });
-
+  it("#5931 a remote lane on another engine version ends env.engine_skew, never conformance", async () => {
+    const store = memStore();
+    const rows = await orchestrate({ issues: [1], parallel: 1, pollMs: 5, store, version: "1.63.0",
+      envHold: { version: () => "1.63.0", maxMs: 1, watchMs: 1 },
+      runOne: async () => ({ terminalReason: "needs-human", code: "recurrence.design_missing", detail: "gate fired", engineVersion: "1.61.2" }),
+      remote: { max: 2, isRemote: () => true, admit: () => ({ ok: true }), onBudget: "stop", costPerMinute: 0 } });
+    assert.equal(rows[0].code, "env.engine_skew");
+    assert.match(rows[0].detail, /env\.engine_skew/);
+    assert.equal(rows[0].outcome, "held");
+  });
   it("an engine-error that breaches the lifetime attempts cap ends needs-human (escalated)", async () => {
     const store = memStore(), h = { v: "H1" }, a = seam(h, { cfg: { maxAttempts: 1, maxIdentical: 5 } });
     const r = await run(store, a, async () => ({ terminalReason: "engine-error", detail: "boom" }));

@@ -56,6 +56,12 @@ describe("pool_auth shared resolver (#5131)", () => {
 });
 
 describe("pool_version", () => {
+  it("pool_version detail recommends pool upgrade --wait on a shared host", () => {
+    for (const [a, cli] of [["0.37.0", "1.39.0"], ["1.60.1", "1.61.1"]]) {
+      const c = checkPoolVersion({ exec: pool, cliVersion: cli, agents: [{ name: "a1", ok: true, version: a }] });
+      assert.match(c.detail, /pool upgrade --wait/); assert.match(c.detail, /shared/);
+    }
+  });
   const ver = (agentVersion, cli = "1.39.0") => checkPoolVersion({ exec: pool, cliVersion: cli, agents: [{ name: "a1", ok: true, version: agentVersion }, { name: "a2", ok: true, version: cli }] });
   it("a different major fails, naming the agent, image version, CLI version and upgrade command", () => {
     const c = ver("0.37.0", "1.39.0");

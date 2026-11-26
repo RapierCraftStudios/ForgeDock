@@ -178,3 +178,20 @@ test("abandoned .part uploads are swept and uploads are size-capped (#5970)", ()
   assert.throws(() => chunk("d".repeat(64), 0, 2), { status: 413 }); // total cap (1 + 10 + 2 > 12)
   assert.ok(!existsSync(join(dir, `${"d".repeat(64)}.part`)));
 });
+
+test("concurrent uploaders of the same bundle each get their own part file and both finish (2026-11-26 seed 409/422 bursts)", async () => {
+  const dir = tmpDir("seed-conc-");
+  const seed = makeMirrorSeed({ seedDir: dir, runnerFor: () => async () => "" });
+  const bundle = Buffer.from("identical bundle bytes built by two lanes in the same second");
+  const upload = createHash("sha256").update(bundle).digest("hex");
+  const half = bundle.length >> 1, parts = [bundle.subarray(0, half), bundle.subarray(half)];
+  const chunk = (uploader, offset, buf) => seed.chunk({ slug: SLUG, upload, uploader, offset, data_b64: buf.toString("base64"), sha256: createHash("sha256").update(buf).digest("hex") });
+  assert.equal(chunk("fdrsbx-a", 0, parts[0]).offset, half);
+  assert.equal(chunk("fdrsbx-b", 0, parts[0]).offset, half, "the second lane's first chunk is not an offset mismatch");
+  assert.equal(chunk("fdrsbx-a", half, parts[1]).offset, bundle.length);
+  assert.equal(chunk("fdrsbx-b", half, parts[1]).offset, bundle.length);
+  assert.equal((await seed.finish({ slug: SLUG, upload, uploader: "fdrsbx-a", finish: { size: bundle.length } })).ok, true);
+  assert.equal((await seed.finish({ slug: SLUG, upload, uploader: "fdrsbx-b", finish: { size: bundle.length } })).ok, true, "finishing one lane does not delete the other lane's upload");
+  assert.deepEqual(readdirSync(dir).filter((n) => n.endsWith(".part")), []);
+  assert.equal((await seed.tips({ slug: SLUG, upload, uploader: "fdrsbx-c" })).upload_offset, 0);
+});

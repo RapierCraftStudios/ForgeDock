@@ -17,13 +17,14 @@ const MERGED = { terminalReason: "merged", pr: 9 };
 
 /** A runner whose every pass costs 12 s of injected time; `req` is the pending request `at` (or null), made `reqAfterMs` after the trip. */
 const slowRun = async ({ reqAfterMs }) => {
-  let t = 1_000_000, tripAt = null, req = null, consumed = 0; const acks = [], calls = [];
+  let t = 1_000_000, tripAt = null, req = null, consumed = 0; const acks = [], calls = [], ac = new AbortController();
   const script = { 1: [EE("boom A")], 2: [EE("boom B")], 3: [MERGED] };
-  const rows = await orchestrate({ issues: [1, 2, 3], parallel: 1, readBody: async () => "", now: () => t, store: memStore(), pollMs: 12000, breaker: { errors: 2, window_min: 10 },
+  const rows = await orchestrate({ issues: [1, 2, 3], parallel: 1, readBody: async () => "", now: () => t, store: memStore(), pollMs: 12000, breaker: { errors: 2, window_min: 10 }, signal: ac.signal,
     sleep: async (ms) => { t += Math.max(12000, Number(ms) || 0); },
     runOne: async (n) => { calls.push(n); t += 12000; return script[n][0]; },
     onUpdate: (u) => { if (u.outcome === "breaker" && tripAt === null) { tripAt = t; req = tripAt + reqAfterMs; } },
-    getClearBreaker: () => req, consumeClearBreaker: () => { req = null; consumed++; }, ackClearBreaker: (i) => acks.push(i) });
+    getClearBreaker: () => req, consumeClearBreaker: () => { req = null; consumed++; if (reqAfterMs < 0) ac.abort(); }, // #6042: a trip kept closed by a stale request waits for an operator; the test ends it
+    ackClearBreaker: (i) => acks.push(i) });
   return { rows, acks, calls, consumed };
 };
 

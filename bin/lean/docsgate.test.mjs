@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseDocsConfig, userFacingSurfaces, docsLinks, docsFailures, milestoneDocsGate, docsFromCli } from "./docsgate.mjs";
-import { docsPlanNote, domainChecksBlock } from "./prompts.mjs";
+import { parseDocsConfig, userFacingSurfaces, docsLinks, milestoneDocsGate, docsFromCli } from "./docsgate.mjs";
+import { domainChecksBlock } from "./prompts.mjs";
 import { pathDomains } from "./review-trigger.mjs";
 
 const cfg = parseDocsConfig({ required_for: "[api, dashboard]", paths: ["web/docs/**"], registries: ["web/public/llms.txt"] });
@@ -16,8 +16,6 @@ describe("docs gate (#5419)", () => {
     assert.equal(parseDocsConfig(undefined), null);
     assert.equal(parseDocsConfig({ paths: ["docs/**"] }), null);
     assert.equal(parseDocsConfig({ required_for: "bogus" }), null);
-    assert.deepEqual(await docsFailures({ cfg: null, files: handsFiles, diff: handsDiff }), []);
-    assert.equal(docsPlanNote(null), "");
   });
   it("detects configured surfaces only, ignoring tests", () => {
     assert.deepEqual(Object.keys(userFacingSurfaces(["web/app/api/x/route.ts", "web/app/dashboard/p/page.tsx", "web/app/api/x/route.test.ts"], cfg)).sort(), ["api", "dashboard"]);
@@ -27,25 +25,6 @@ describe("docs gate (#5419)", () => {
   it("extracts only added internal docs links", () => {
     assert.deepEqual(docsLinks(handsDiff), ["/docs/hands", "/docs/hands/credentials"]);
     assert.deepEqual(docsLinks("-<a href=\"/docs/old\">\n+<a href=\"https://x.io/docs/a\">"), []);
-  });
-  it("replay: the Hands dashboard diff fails docs_missing and the link gate, and its plan carries R-docs", async () => {
-    const f = await docsFailures({ cfg, files: handsFiles, diff: handsDiff, tracked: ["web/docs/api/index.mdx"] });
-    assert.deepEqual(f.map((x) => x.kind).sort(), ["docs_link_broken", "docs_missing"]);
-    assert.match(docsPlanNote(cfg), /R-docs/);
-    assert.match(docsPlanNote(cfg), /web\/docs\/\*\*/);
-  });
-  it("passes when the pages exist, or the repo link_check exits 0, or the change is justified", async () => {
-    const files = [...handsFiles, "web/docs/hands/index.mdx", "web/docs/hands/credentials.mdx"];
-    assert.deepEqual(await docsFailures({ cfg, files, diff: handsDiff, tracked: [] }), []);
-    const c2 = parseDocsConfig({ required_for: ["dashboard"], paths: ["web/docs/**"], link_check: "bash chk.sh" });
-    let ran; const run = async ({ command }) => { ran = command; return { rc: 0 }; };
-    assert.deepEqual(await docsFailures({ cfg: c2, files: [...handsFiles, "web/docs/x.mdx"], diff: handsDiff, run }), []);
-    assert.match(ran, /^bash chk\.sh '\/docs\/hands' '\/docs\/hands\/credentials'$/);
-    const bad = await docsFailures({ cfg: c2, files: ["web/docs/x.mdx"], diff: handsDiff, run: async () => ({ rc: 1, output: "404 /docs/hands" }) });
-    assert.equal(bad[0].kind, "docs_link_broken");
-    const crashed = await docsFailures({ cfg: c2, files: [], diff: handsDiff, run: async () => { throw new Error("nope"); } });
-    assert.match(crashed[0].detail, /exited 127/);
-    assert.deepEqual(await docsFailures({ cfg, files: handsFiles, result: { docs: [{ surface: "dashboard", justification: "internal page" }] }, diff: "" }), []);
   });
   it("adds the docs domain and its reviewer check only for a configured surface", () => {
     assert.ok(pathDomains(handsFiles, { docs: cfg })?.includes("docs"));

@@ -11,11 +11,12 @@ import { startRouter } from "./router.mjs";
 import { dockerCli } from "./docker.mjs";
 import { readSecret } from "./store.mjs";
 import { call as httpCall } from "./http.mjs";
+import { agentsLeftBehind, leftBehindLine } from "./version.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const loadJson = (p) => JSON.parse(readFileSync(p, "utf8"));
 
-const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB --agent-url URL | --outbound | --one-liner] | status [--json] [--account A] | link <user_code> [--account A] | policy <agent> [--cpus N --mem GB --idle-only --pause --resume-policy] | limit <agent> --lanes N|none | pause | resume | uninstall [--yes] | upgrade [agent] | remove <agent>  [--config path]";
+const USAGE = "usage: forgedock pool router [install] | enroll [--cpus N --mem GB --agent-url URL | --outbound | --one-liner] | status [--json] [--account A] | link <user_code> [--account A] | policy <agent> [--cpus N --mem GB --idle-only --pause --resume-policy] | limit <agent> --lanes N|none | pause | resume | uninstall [--yes] | upgrade [agent] [--wait [--timeout S] | --now] | remove <agent>  [--config path]";
 const HELP_FLAGS = ["--help", "-h"];
 // Flags each verb accepts: `value` flags consume the next token, `bool` flags stand alone. Anything else dash-prefixed is rejected (#5008).
 const VERB_FLAGS = {
@@ -27,7 +28,7 @@ const VERB_FLAGS = {
   pause: { value: ["--config"], bool: [] },
   resume: { value: ["--config"], bool: [] },
   uninstall: { value: [], bool: ["--yes"] },
-  upgrade: { value: ["--config"], bool: [] },
+  upgrade: { value: ["--config", "--timeout"], bool: ["--now", "--wait"] },
   remove: { value: ["--config"], bool: [] },
   limit: { value: ["--config", "--lanes"], bool: [] },
   enroll: { value: ["--config", "--cpus", "--mem", "--agent-url"], bool: ["--outbound", "--one-liner"] },
@@ -63,19 +64,21 @@ const num = (x) => (Number.isFinite(x) ? String(Math.round(x * 10) / 10) : "-");
 /** #5885: one row per host: used/borrowable/total cpus and memory, lane counts, pause state and why lanes are throttled or drained. */
 export function statusTable(agents) {
   const withAccount = agents.some((a) => a.account); // #5886: the column appears only when an agent has an account
-  const head = ["HOST", ...(withAccount ? ["ACCOUNT"] : []), "CPUS used/borrow/total", "MEM GB used/borrow/total", "ACTIVE", "THROTTLED", "PAUSED", "REASON"];
+  const withEngine = agents.some((a) => a.engine_version); // the ENGINE column appears only when an agent reports its lane engine
+  const head = ["HOST", ...(withAccount ? ["ACCOUNT"] : []), "CPUS used/borrow/total", "MEM GB used/borrow/total", "ACTIVE", "THROTTLED", "PAUSED", ...(withEngine ? ["ENGINE"] : []), "REASON"];
   const rows = agents.map((a) => {
     const name = a.name ?? a.host ?? "?";
     const acct = withAccount ? [a.account ?? "-"] : [];
-    if (a.ok === false) return [name, ...acct, "-", "-", "-", "-", "-", `unreachable${a.error ? `: ${a.error}` : ""}`];
+    if (a.ok === false) return [name, ...acct, "-", "-", "-", "-", ...(withEngine ? ["-"] : []), "-", `unreachable${a.error ? `: ${a.error}` : ""}`];
     const used = (tot, free) => (Number.isFinite(tot) && Number.isFinite(free) ? tot - Math.max(0, free) : null);
     const borrow = (b, free) => num(b ?? free);
     const paused = a.owner_paused ? "owner" : a.paused ? (a.pending_resize ? "resize" : "yes") : "no";
     const why = [a.owner_paused ? "paused by owner" : null, a.paused && !a.owner_paused && a.pending_resize ? "draining for resize" : null,
+      Number.isInteger(a.lane_target) ? `lane target ${a.lane_target}/${a.lane_ceiling ?? "-"}` : null, a.draining && !a.owner_paused && !a.pending_resize ? `draining: ${a.draining_reason ?? "yes"}` : null,
       a.idle_gate ? `owner busy: ${a.idle_gate}` : null, a.last_drain ? `last drain ${a.last_drain.sandbox} at ${a.last_drain.at}: ${a.last_drain.reason}` : null].filter(Boolean).join("; ");
     return [name, ...acct, `${num(used(a.cpus_total, a.cpus_free))}/${borrow(a.cpus_borrowable, a.cpus_free)}/${num(a.cpus_total)}`,
       `${num(used(a.mem_total_gb, a.mem_free_gb))}/${borrow(a.mem_borrowable_gb, a.mem_free_gb)}/${num(a.mem_total_gb)}`,
-      String(a.active ?? "-"), String(a.throttled ?? 0), paused, why || "-"];
+      String(a.active ?? "-"), String(a.throttled ?? 0), paused, ...(withEngine ? [a.engine_version ? `${a.engine_version}${a.engine_skew ? " SKEW" : ""}` : "-"] : []), why || "-"];
   });
   const w = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
   return [head, ...rows].map((r) => r.map((c, i) => (i === r.length - 1 ? c : c.padEnd(w[i]))).join("  ")).join("\n");
@@ -267,12 +270,38 @@ export async function runPoolCli(argv, deps = {}) {
       // Push the current code (and lane image, when its recipe changed) to one agent or all of them.
       const cfg = routerConfig();
       const base = `http://${cfg.listen.host}:${cfg.listen.port}`;
-      const only = rest.find((x) => !x.startsWith("--") && x !== flag("config"));
-      const list = (await call(base, "GET", "/agents", { token: cfg.forgedock_token })).data?.agents ?? [];
+      const only = rest.find((x) => !x.startsWith("--") && x !== flag("config") && x !== flag("timeout"));
+      const now = rest.includes("--now"), wait = rest.includes("--wait");
+      const timeoutS = flag("timeout") === undefined ? 1800 : Number(flag("timeout"));
+      if (!Number.isFinite(timeoutS) || timeoutS < 0) throw new Error("usage: --timeout takes a number of seconds");
+      const sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+      const clock = deps.now ?? Date.now;
+      const agentsNow = async () => (await call(base, "GET", "/agents", { token: cfg.forgedock_token })).data?.agents ?? [];
+      const list = await agentsNow();
       for (const a of list.filter((x) => !only || x.name === only)) {
-        const r = await call(base, "POST", `/agents/${encodeURIComponent(a.name)}/upgrade`, { token: cfg.forgedock_token, timeoutMs: 30000 });
+        // The pool host is shared: upgrading restarts the agent under live sandboxes, so refuse unless asked (--wait drains, --now forces).
+        let active = a.active;
+        if (Number(active) > 0 && wait && !now) {
+          const deadline = clock() + timeoutS * 1000;
+          while (Number(active) > 0) {
+            if (clock() >= deadline) throw new Error(`${a.name}: still ${active} active sandbox(es) after ${timeoutS}s; not upgraded`);
+            await sleep(deps.pollMs ?? 10000);
+            active = (await agentsNow()).find((x) => x.name === a.name)?.active;
+          }
+        } else if (Number(active) > 0 && !now) {
+          throw new Error(`${a.name}: ${active} active sandbox(es) on this shared host; not upgraded. Use --wait to wait for idle, or --now to force.`);
+        }
+        const r = await call(base, "POST", `/agents/${encodeURIComponent(a.name)}/upgrade`, { body: now ? { force: true } : undefined, token: cfg.forgedock_token, timeoutMs: 30000 });
+        if (r.status === 409) throw new Error(`${a.name}: ${r.data?.active ?? "some"} active sandbox(es); not upgraded (HTTP 409)`);
         console.log(`${a.name}: HTTP ${r.status} ${JSON.stringify(r.data)}`);
       }
+      // R5: name the agents still on an older engine once the pushes are done (an agent restarts asynchronously, so this can lag briefly).
+      const behind = deps.leftBehind ? await deps.leftBehind(base, cfg) : deps.call ? [] : await (async () => { // a custom `call` seam is a fixture without /status
+        const get = (p) => httpCall(base, "GET", p, { token: cfg.forgedock_token }).catch(() => null);
+        const target = (await get("/version"))?.data?.version;
+        return agentsLeftBehind((await get("/status"))?.data?.agents, target).map((r) => ({ ...r, target }));
+      })();
+      if (behind.length) console.log(leftBehindLine(behind, behind[0].target));
       break;
     }
     case "remove": {

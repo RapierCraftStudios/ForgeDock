@@ -304,6 +304,13 @@ export function assertOpenCodeNativeRuntime({
 const CLI_AVAILABILITY_CACHE_TTL_MS = 60_000;
 const CLI_AVAILABILITY_CACHE_MAX_SIZE = 100;
 const cliAvailabilityCache = new Map();
+// #5844: cwds whose last probe timed out (host load). A timeout says nothing about absence, so it is never written to
+// the cache above; this marker lets callers tell "busy" from "absent". Cleared by the next probe that gets an answer.
+const cliProbeTimeouts = new Set();
+const CLI_PROBE_RETRY_FACTOR = 3;
+const isProbeTimeout = (err) => err?.code === "ETIMEDOUT" || err?.killed === true || err?.signal === "SIGTERM";
+/** True when the last probe for `cwd` timed out instead of answering (#5844). */
+export const cliProbeTimedOut = (cwd = process.cwd()) => cliProbeTimeouts.has(cwd);
 // Windows path types emitted by npm's shim generator. Native executables are
 // directly spawnable; .cmd/.bat files must be resolved to their trusted native
 // target before spawning because Node cannot exec them with shell:false.
@@ -668,21 +675,31 @@ export function isClaudeCliAvailable(
   let available;
   let cliPath = null;
   let version = null;
+  const probe = (timeout) => execImpl(
+    `${resolveCmd} && echo ${CLI_PROBE_OUTPUT_SENTINEL} && claude --version`,
+    { cwd, stdio: ["ignore", "pipe", "ignore"], encoding: "utf-8", timeout },
+  );
+  let raw;
   try {
-    const raw = execImpl(
-      `${resolveCmd} && echo ${CLI_PROBE_OUTPUT_SENTINEL} && claude --version`,
-      {
-      cwd,
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf-8",
-      timeout: CLI_PROBE_TIMEOUT_MS,
-      },
-    );
+    try {
+      raw = probe(CLI_PROBE_TIMEOUT_MS);
+    } catch (err) {
+      if (!isProbeTimeout(err)) throw err;
+      raw = probe(CLI_PROBE_TIMEOUT_MS * CLI_PROBE_RETRY_FACTOR); // #5844: one longer retry under host load
+    }
     available = true;
     cliPath = selectResolvedCliPath(parseProbeOutput(raw), { platform, existsImpl });
     version = parseCliVersion(raw);
-  } catch {
+    cliProbeTimeouts.delete(cwd);
+  } catch (err) {
     available = false;
+    if (isProbeTimeout(err)) {
+      // #5844: still timed out: not evidence of absence, so no negative cache entry
+      cliProbeTimeouts.add(cwd);
+      cliAvailabilityCache.delete(cwd);
+      return false;
+    }
+    cliProbeTimeouts.delete(cwd);
   }
   // Re-inserting an existing key moves it to the end of Map's iteration
   // order (delete+set), so eviction below always drops the true oldest
@@ -1387,8 +1404,11 @@ export function redactCliText(text) {
 /**
  * forge#5762: the facts a failed CLI run reports: `result` and `is_error` (redacted, capped) and whether the CLI never
  * reached the API (`duration_api_ms` 0, read from the raw text when the envelope is cut off). Never throws.
- * @returns {{cliResult?:string, cliIsError?:boolean, cliApiMs?:number}}
+ * @returns {{cliResult?:string, cliIsError?:boolean, cliApiMs?:number, cliTerminalReason?:string, cliSessionId?:string}}
  */
+/** #6105: terminal reasons of a session the API cut short (overload, 5xx, stream reset): transient, the session itself is fine to resume. */
+const API_TERMINAL_RE = /^(api_error|overloaded(_error)?|server_error|internal_server_error|service_unavailable|stream_(reset|error|interrupted)|connection_(reset|error))$/i;
+export const isApiTerminalReason = (r) => typeof r === "string" && API_TERMINAL_RE.test(r.trim());
 export function cliFailureFacts(stdout) {
   const env = parseCliEnvelope(stdout);
   const facts = {};
@@ -1396,6 +1416,8 @@ export function cliFailureFacts(stdout) {
     if (typeof env.result === "string") facts.cliResult = sanitizeAndCap(redactCliText(env.result), MAX_CLI_RESULT_LEN);
     if (typeof env.is_error === "boolean") facts.cliIsError = env.is_error;
     if (typeof env.duration_api_ms === "number") facts.cliApiMs = env.duration_api_ms;
+    if (typeof env.terminal_reason === "string") facts.cliTerminalReason = sanitizeAndCap(env.terminal_reason, 80); // #6105
+    if (typeof env.session_id === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(env.session_id)) facts.cliSessionId = env.session_id; // #6105: what `--resume` takes
   } else if (typeof stdout === "string") {
     const m = /"duration_api_ms"\s*:\s*(\d+)/.exec(stdout.slice(0, 4096));
     if (m) facts.cliApiMs = Number(m[1]);
@@ -1607,6 +1629,21 @@ export function promptGoesViaStdin(prompt, otherArgs = [], platform = process.pl
 }
 
 /** forge#4129: spawn errnos that fail the same way on every rerun (argv too big, binary missing or not executable). */
+/**
+ * #5844: true only when `bin` is genuinely absent: a path that does not exist, or a bare name found on no PATH entry
+ * (x PATHEXT on win32). Decides whether an ENOENT spawn error is deterministic.
+ */
+export function spawnTargetMissing(bin, env = process.env, { platform = process.platform, existsImpl = existsSync } = {}) {
+  if (typeof bin !== "string" || !bin) return true;
+  if (/[\\/]/.test(bin)) return !existsImpl(bin);
+  const win = platform === "win32";
+  const sepr = win ? ";" : ":";
+  const exts = win ? ["", ...(env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)] : [""];
+  for (const dir of String(env.PATH ?? env.Path ?? "").split(sepr).filter(Boolean)) {
+    for (const ext of exts) if (existsImpl(join(dir, bin + ext))) return false;
+  }
+  return true;
+}
 export const DETERMINISTIC_SPAWN_ERRNOS = Object.freeze(["E2BIG", "ENOENT", "EACCES", "ENOEXEC", "ENAMETOOLONG"]);
 
 export function runCliBackend({
@@ -1661,6 +1698,10 @@ export function runCliBackend({
   // `mkdtempSync` succeeds — before `writeFileSync` runs — so a failure in
   // `writeFileSync` still leaves `tmpDir` set and the already-created
   // directory gets cleaned up.
+  // 2026-11-26: a NUL byte in the prompt (from a file read or tool output) made the spawn throw "args[1] must be a string without null bytes"
+  // (engine-error, lane held); NULs carry no meaning in a prompt, so they are dropped from both the prompt and the system prompt
+  if (typeof userMessage === "string" && userMessage.includes("\0")) userMessage = userMessage.replace(/\0/g, "");
+  if (typeof systemPrompt === "string" && systemPrompt.includes("\0")) systemPrompt = systemPrompt.replace(/\0/g, "");
   let tmpDir = null;
   // forge#4129: a prompt over the argv bound is sent on stdin instead of as the `--print` argument.
   // forge#4763: the other argv (flags, system-prompt file path) counts toward the Windows command-line cap.
@@ -1791,6 +1832,11 @@ export function runCliBackend({
       if (["EAGAIN", "ENOMEM", "EMFILE"].includes(result.error.code)) {
         error.spawnErrno = result.error.code;
         error.code = "CLI_SPAWN_TRANSIENT";
+      } else if (result.error.code === "ENOENT" && !spawnTargetMissing(bin, childEnv)) {
+        // #5844: ENOENT while the binary resolves (or the cwd vanished) is not proof the CLI is absent: transient,
+        // so the engine relaunches instead of ending needs-human cli.spawn_failed
+        error.spawnErrno = "ENOENT";
+        error.code = "CLI_SPAWN_TRANSIENT";
       } else if (DETERMINISTIC_SPAWN_ERRNOS.includes(result.error.code)) {
         // forge#4129: certain to fail again on a rerun; flagged so callers do not retry it. E2BIG (argv too large) gets
         // its own code; ENOENT and the other errnos keep theirs (forge#4021 contract).
@@ -1906,6 +1952,8 @@ export function runCliBackend({
       // forge#5762: keep the CLI's own result text; an exit that never reached the API and is no login or limit is transient.
       Object.assign(err, cliFailureFacts(stdout));
       if (!err.usageLimit && !err.authFailure && err.cliApiMs === 0 && result.status === 1) err.cliFailed = true;
+      // forge#6105: a session that did real work and then ended is_error with an API terminal reason can be resumed by id (never a relaunch)
+      if (!err.usageLimit && !err.authFailure && !err.cliFailed && err.cliIsError === true && isApiTerminalReason(err.cliTerminalReason)) err.apiError = true;
       if (resetAt) {
         err.resetAt = resetAt;
         // forge#2524: also attach a machine-usable epoch-ms timestamp so

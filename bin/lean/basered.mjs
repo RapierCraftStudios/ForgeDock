@@ -43,6 +43,13 @@ export function baseRedPaths(rows = []) {
   return { src: src.slice(0, 20), tests: tests.slice(0, 20) };
 }
 
+/** #5913: true when the lane's changed files include a file the failing guard names (guarded code first, else its tests): the lane is then the base fix, not a bystander. */
+export function diffTouchesGuard({ changed = [], failed = [] } = {}) {
+  const { src, tests } = baseRedPaths(failed);
+  const have = new Set((changed ?? []).map((f) => String(f).trim().replace(/^\.\//, "")).filter(Boolean));
+  return [...src, ...tests].some((p) => have.has(p));
+}
+
 /** Issue number a commit stands for: a closing keyword, else an `issue-N` branch name (merge commit), else the last `(#N)` of the subject. */
 export function issueOf(subject = "", body = "") {
   const text = `${subject}\n${body}`;
@@ -212,4 +219,23 @@ export function bypassesGuard({ laneFiles = [], att = null } = {}) {
   const lane = (laneFiles ?? []).map((f) => String(f).trim().replace(/^\.\//, "")).filter(Boolean);
   if (!surface.length || !lane.length) return false;
   return !lane.some((f) => surface.some((s) => f === s || f.startsWith(`${s}/`)));
+}
+
+/**
+ * #6049: one issue per required release check the lane cannot run (lane-check parity gap), deduped by a hidden marker
+ * keyed on the context name: an open or recent issue gets no second copy. Never throws; returns the issue numbers filed.
+ */
+export async function reportParityGaps({ ghc, repo, release, gaps = [] }) {
+  const filed = [];
+  for (const g of gaps) {
+    const key = `<!-- FORGE:PARITY_GAP ${String(g.context).replace(/[^\w .:/()-]/g, "_")} -->`;
+    try {
+      if ((await findKeyed({ ghc, repo, key })).length) continue;
+      const body = `${key}\n## Lane-check parity gap\nThe required check \`${g.context}\` on \`${release}\` has no lane equivalent, so a lane cannot catch its failures before the release PR: ${g.reason}.`;
+      const url = String(await ghc(["issue", "create", "-R", repo, "--title", `ci: required release check ${g.context} has no lane pre-PR check`.slice(0, 120), "--body", body])).trim();
+      const n = url.match(/\/issues\/(\d+)/);
+      if (n) filed.push(Number(n[1]));
+    } catch { /* best effort */ }
+  }
+  return filed;
 }
