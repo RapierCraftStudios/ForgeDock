@@ -2257,19 +2257,20 @@ export async function runCore(o) {
       let out = "";
       try { out = String(await ghc(["api", "--paginate", `repos/${repo}/issues/${issue}/comments`, "--jq", ".[] | {body, author_association, user: {type: .user.type, login: .user.login}}"])); } catch { return null; }
       let found = null;
-      const amendLog = []; // #4899: trusted FORGE:AMENDMENT payloads in order, bound to a contract hash
+      const amendLog = [], rewritePosted = []; // #4899: trusted FORGE:AMENDMENT payloads in order, bound to a contract hash
       for (const l of out.split("\n")) {
         let c; try { c = JSON.parse(l); } catch { continue; }
         if (!isTrustedComment(c)) continue;
         const b = String(c?.body ?? "");
         const am = parseAmendmentsComment(b);
         if (am) amendLog.push(am);
+        if (b.includes("rewrite-validate")) rewritePosted.push(b); // #5920: audit comments already posted
         if (!b.startsWith("<!-- FORGE:CONTRACT -->")) { if (found && b.trim() && !b.trimStart().startsWith("<!-- FORGE:")) found.humanAfter = true; continue; }
         const fc = parseContractComment(b);
         if (fc && contractHash(fc.text) === fc.hash) found = { ...fc, humanAfter: false };
       }
       if (found) {
-        const seen = new Set(); found.amendments = [];
+        const seen = new Set(); found.amendments = []; found.rewritePosted = rewritePosted;
         for (const st of amendLog) if (st.contract === found.hash) for (const a of st.amendments) { const k = JSON.stringify(a); if (!seen.has(k)) { seen.add(k); found.amendments.push(a); } }
       }
       return found;
@@ -2452,6 +2453,21 @@ export async function runCore(o) {
           } else {
             frozen = fc.contract; hash = fc.hash; priorAmendments = fc.amendments ?? []; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`);
             ev({ event: "CONTRACT_REUSED", hash, recover: recover?.code ?? null, resumed: Boolean(resumed) }); // #5811: no pre-contract session; routing is next
+            freezeTracked = (await depOwnerOf()).files;
+            const rw = freezeRewrites(structuredClone(frozen)); // #5920: the freeze-time rewrites (validate.recipes, venv, CI env) apply to a reused contract too; only commands are adopted
+            const swaps = [];
+            const swap = (id, o, n) => { if (o && typeof o.command === "string" && typeof n?.command === "string" && n.command !== o.command) { swaps.push({ id, from: o.command, to: n.command }); o.command = n.command; } };
+            frozen = structuredClone(frozen);
+            for (const v of Array.isArray(frozen.validate) ? frozen.validate : []) swap(v?.id, v, (rw.validate ?? []).find((x) => x?.id === v?.id));
+            swap("repro_test", frozen.repro_test, rw.repro_test);
+            if (swaps.length) { // audit-only comment (no AMENDMENT-STATE, so a later reuse never replays it); the rewrite is deterministic and re-derived each reuse
+              const why = `rewrite of frozen contract ${hash} on reuse (#5920)`;
+              const body = renderAmendments(swaps.map((x) => ({ kind: "rewrite-validate", target: x.id, why: `${why}: \`${x.from}\` -> \`${x.to}\`` })));
+              T.decisions.push(`Reused contract ${hash}: ${swaps.map((x) => x.id).join(", ")} rewritten at reuse`);
+              if (!(fc.rewritePosted ?? []).some((c) => c.includes(body))) {
+                try { await post("FORGE:AMENDMENT", body); } catch (e) { T.anomalies.push(`FORGE:AMENDMENT comment not posted: ${String(e?.message ?? e).slice(0, 160)}`); }
+              }
+            }
             const ad = applyRequirementDecisions(frozen, trustedComments); // #5547: a structured operator decision amends the frozen row
             if (ad.applied.length) { frozen = deferChecklessPostDeploy(ad.contract).contract; T.decisions.push(`FORGE:DECISION applied to the frozen contract: ${ad.applied.join(", ")} tracked post-deploy`); }
           }
