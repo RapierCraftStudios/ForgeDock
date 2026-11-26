@@ -26,7 +26,7 @@ import { budgetReportLine, releaseRuns, detectBudget, readCiPolicy } from "./ci-
 import { parseNightlyConfig, readNightly, blocksRelease, fileNightlyRed } from "./release-nightly.mjs";
 import { parseBudgetConfig, applyOnExceed, waveReport, trailingMedian, historyFromRoot, gateHistoryFromRoot, releaseMinutes } from "./release-minutes.mjs";
 import { cutSnapshot, writeRecord, checkChain, verifyRelease, defaultBehind, DEFAULT_PATTERN } from "./release-snapshot.mjs";
-import { createReleaseLedger, writeRelease, readLedger, acquireLease, heartbeat } from "./release-ledger.mjs";
+import { createReleaseLedger, writeRelease, readLedger, acquireLease, heartbeat, recordReleaseRound } from "./release-ledger.mjs";
 import { fenced, epochTrailer } from "./release-fence.mjs";
 import { holdCheck, exemptionsSection, runControl, VERBS as CONTROL_VERBS } from "./release-control.mjs";
 import { parseFlakeConfig, classifyFailure, planRerun, flakeEntry, recordFlakes, readFlakes } from "./release-flakes.mjs";
@@ -143,11 +143,23 @@ export async function bundleList({ io, repo, head, base }) {
 
 const bundleBody = (list) => `## Release bundle\n\n${list.length ? list.map((p) => `- #${p.number} ${p.title}`).join("\n") : "_No merged PRs found since the last release._"}\n`;
 
+/** #6013: one `state.rounds` entry per distinct head and outcome (a resume does not double-count). */
+function noteRound(ctx, r) {
+  const { state, io } = ctx;
+  if ((state.rounds ?? []).some((x) => x.head === r.head && x.outcome === r.outcome)) return;
+  const at = new Date(io.now?.() ?? Date.now()).toISOString();
+  recordReleaseRound(state, { ...r, startedAt: at, endedAt: at });
+  ctx.save();
+}
+
 async function preflightStep(ctx) {
   const { io, repo, state, staging } = ctx;
   // Snapshot mode: lanes keep merging to staging; the release is cut from a fixed SHA, so nothing is refused or held (#5276).
   const health = await stagingHealthStep(ctx);
-  if (health.refused) { state.knownFailures = health.failed; ctx.save(); return { refused: health.refused, failed: health.failed }; }
+  if (health.refused) {
+    state.knownFailures = health.failed;
+    noteRound(ctx, { head: health.head, outcome: "red-staging", cause: health.failed.some((f) => f.cause === "regression") || !health.failed.length ? "regression" : "runner" });
+    ctx.save(); return { refused: health.refused, failed: health.failed }; }
   const warn = health.warning ? { warning: health.warning } : {};
   if (isSnapshot(ctx.config)) return { snapshot: true, held: 0, ...warn };
   const lanes = await io.runningLanes(repo);
@@ -188,7 +200,7 @@ async function snapshotPrStep(ctx) {
   }
   const { branch } = state.release;
   const found = json(await io.gh(["pr", "list", "--repo", repo, "--base", def, "--head", branch, "--state", "open", "--json", "number,headRefOid,url"]))?.[0];
-  if (found) return { pr: found.number, head: found.headRefOid, url: found.url, reused: true, branch };
+  if (found) { noteRound(ctx, { pr: found.number, head: found.headRefOid, outcome: "cut" }); return { pr: found.number, head: found.headRefOid, url: found.url, reused: true, branch }; }
   const list = state.releaseBundle ?? [];
   const url = String(await io.gh(["pr", "create", "--repo", repo, "--base", def, "--head", branch, "--title", `Release: ${branch} -> ${def}`, "--body", bundleBody(list) + await exemptionBody(ctx)])).trim();
   const n = Number(/\/pull\/(\d+)/.exec(url)?.[1]);
@@ -196,6 +208,7 @@ async function snapshotPrStep(ctx) {
   state.steps["release-pr"] = { done: false, result: { pr: n } }; // writeRecord reads the PR number from here
   await writeRecord(ctx);
   const v = json(await io.gh(["pr", "view", String(n), "--repo", repo, "--json", "headRefOid"]));
+  noteRound(ctx, { pr: n, head: v?.headRefOid, outcome: "cut" });
   return { pr: n, head: v?.headRefOid, url, reused: false, bundle: list.length, branch };
 }
 
