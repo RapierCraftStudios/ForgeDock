@@ -2959,7 +2959,7 @@ export async function runCore(o) {
             ev({ event: "RECOVERY_BASE_SYNC", base, behind, result: "conflict", files: conflicted.slice(0, 20) });
             return await needsHuman(`The branch conflicts with ${base} in ${conflicted.slice(0, 20).join(", ")}; the recovery's checks were not run on the stale tree (a conflicting base is not a check failure); nothing merged.`, OUTCOME_CODES.BASE_CONFLICT);
           }
-        } else if (!merged) { await git(["merge", "--abort"]).catch(() => {}); T.anomalies.push(`Recovery base-sync did not merge ${base} (${behind} commit(s) behind, no conflict files); checks run on the branch as it is`); }
+        } else if (!merged) { await git(["merge", "--abort"]).catch(() => {}); T.anomalies.push(`Recovery base-sync could not merge ${base} (${behind} commit(s) behind, no conflict files); checks run on the branch as it is`); }
         if (merged) {
           ev({ event: "RECOVERY_BASE_SYNC", base, behind, result: "merged" });
           T.decisions.push(`Recovery: merged ${base} (${behind} commit(s) behind) before re-running the checks`);
