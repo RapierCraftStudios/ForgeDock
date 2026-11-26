@@ -52,6 +52,9 @@ describe("#5987 introspect schedule", () => {
     fs.writeFileSync(join(cwd, "forge.yaml"), "orchestrate:\n  slo:\n    file_issues: false\n");
     assert.equal((await runIntrospect({ cwd, home, run, gh })).action, "disabled");
     assert.equal(calls.length, 0);
+    fs.rmSync(join(cwd, "forge.yaml"));
+    assert.equal((await runIntrospect({ cwd, home, run, gh })).action, "disabled", "no forge.yaml: default does not file");
+    assert.equal(calls.length, 0);
     fs.writeFileSync(join(cwd, "forge.yaml"), "orchestrate:\n  slo:\n    file_issues: true\n");
     const a = await runIntrospect({ cwd, home, run, gh });
     assert.equal(a.action, "create"); assert.equal(a.issue, 9);
@@ -59,6 +62,6 @@ describe("#5987 introspect schedule", () => {
     const c = await runIntrospect({ cwd, home, run: async () => "adequate 70%", gh });
     assert.equal(c.action, "comment"); assert.equal(c.issue, 9);
     assert.equal(calls.filter((x) => x[1] === "create").length, 1);
-    assert.match(calls.at(-1).at(-1), /report: .*introspect/);
+    assert.doesNotMatch(calls.at(-1).at(-1), /report: |\.forge\/introspect|\/introspect\//, "no local path posted");
   });
 });

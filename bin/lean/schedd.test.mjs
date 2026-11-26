@@ -541,6 +541,25 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await d.close(); }
   });
 
+  it("R3: efficiencyTick reads forge.yaml from plan.cwd (not the daemon cwd) and spawns introspect there", async () => {
+    const dir = tmpDir("schedd-slo-cwd-"), root = join(dir, "batches"), repo = join(dir, "repo"), id = "b20261126-000000-6025", ghCalls = [], spawned = [];
+    mkdirSync(repo, { recursive: true });
+    const b = openBatch(root, id);
+    b.writePlan({ daemon: true, repo: "o/r", cwd: repo, created: new Date().toISOString() });
+    b.store.save({ v: 1, order: [1], results: {}, running: {}, pending: [], parallel: 2 });
+    b.writeReport({ done: true });
+    const start = () => startDaemon({ dir, root, runBatch: async () => ({}), log: () => {}, resumeOnStart: false, stallCheckMs: 50, sloGh: async (a) => { ghCalls.push(a); return "[]"; }, introspect: (i, cwd) => spawned.push([i, cwd]) });
+    writeFileSync(join(repo, "forge.yaml"), "orchestrate:\n  slo:\n    file_issues: false\n");
+    let d = await start();
+    try { await new Promise((r) => setTimeout(r, 600)); } finally { await d.close(); }
+    assert.deepEqual(spawned, [], "file_issues false in plan.cwd is honored");
+    assert.equal(ghCalls.length, 0);
+    writeFileSync(join(repo, "forge.yaml"), "orchestrate:\n  slo:\n    file_issues: true\n");
+    d = await start();
+    try { await until(() => spawned.length === 1, 8000); } finally { await d.close(); }
+    assert.deepEqual(spawned[0], [id, repo], "introspect runs on the batch repo");
+  });
+
   it("#5938: a stored stall clears within one tick (STALL CLEARED) once the batch is at K; status shows running/K and the split; the watchdog verdict is healthy", async () => {
     const dir = tmpDir("schedd-stall-clear-"), root = join(dir, "batches"), id = "b20261122-000000-5938", lines = [];
     const b = openBatch(root, id);

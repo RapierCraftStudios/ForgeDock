@@ -626,17 +626,18 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   async function efficiencyTick(b, plan, state, { now, reported, cancelled }) {
     try {
       if (cancelled || !state) return;
+      const repoCwd = plan.cwd ?? process.cwd();
       let cfg;
-      try { cfg = parseSloConfig(parseForgeYaml(readFileSync(join(process.cwd(), "forge.yaml"), "utf8"))); } catch { cfg = parseSloConfig({}); }
+      try { cfg = parseSloConfig(parseForgeYaml(readFileSync(join(repoCwd, "forge.yaml"), "utf8"))); } catch { cfg = parseSloConfig({}); }
       const ceiling = b.readParallel() ?? Number(state.parallel ?? plan.parallel) ?? 0, running = Object.keys(state.running ?? {}).length;
       const sample = reported ? null : { t: now, running, ceiling: Number.isFinite(ceiling) ? ceiling : running, ready: (state.pending ?? []).length, ...((c) => (c ? { cause: c } : {}))(b.readPause?.() ? "auth-pause" : idleCause(b.readLog(), now) ?? (b.readHeld().length ? "hold" : undefined)) };
-      const r = await ledgerPass({ batch: b, sample, cfg, gh: sloGh ?? sloGhDefault, now, repo: plan.repo ?? null, operator: operatorEvents(b.dir), compute: computeEfficiency, readEff: readEfficiency, writeEff: writeEfficiency, reportPath: cfg.fileIssues ? introspectReportPath(process.cwd()) : null });
+      const r = await ledgerPass({ batch: b, sample, cfg, gh: sloGh ?? sloGhDefault, now, repo: plan.repo ?? null, operator: operatorEvents(b.dir), compute: computeEfficiency, readEff: readEfficiency, writeEff: writeEfficiency, reportPath: cfg.fileIssues ? introspectReportPath(repoCwd) : null });
       if (r?.actions?.length) log(`schedd: slo ${r.actions.map((a) => `${a.op} ${a.sig} #${a.issue}`).join(", ")}`);
       const mark = join(b.dir, "introspect.json");
       if (reported && cfg.fileIssues && !existsSync(mark)) {
         writeEfficiency(b.dir, { ...r.eff, introspect: { at: new Date(now).toISOString() } });
         writeFileSync(mark, JSON.stringify({ at: new Date(now).toISOString() }) + "\n", { mode: 0o600 });
-        (introspect ?? ((id) => spawn(process.execPath, [join(fileURLToPath(new URL("..", import.meta.url)), "introspect-schedule.mjs"), "--run"], { stdio: "ignore", detached: true, windowsHide: true }).unref()))(b.id);
+        (introspect ?? ((id, cwd) => spawn(process.execPath, [join(fileURLToPath(new URL("..", import.meta.url)), "introspect-schedule.mjs"), "--run"], { cwd, stdio: "ignore", detached: true, windowsHide: true }).unref()))(b.id, repoCwd);
       }
     } catch { /* advisory */ }
   }

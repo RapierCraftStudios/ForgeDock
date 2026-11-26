@@ -3,12 +3,12 @@
 /**
  * Batch efficiency SLOs (#5987): `orchestrate.slo.*` thresholds with defaults, breach evaluation over an efficiency.json ledger
  * (efficiency.mjs), and the filer that turns a breach into one rolling `engine-gap` issue per signature `slo:<code>:<repo>`.
- * Filing is default-on (`orchestrate.slo.file_issues: false` opts out); breaches are always recorded in efficiency.json.
+ * Filing is opt-in (`orchestrate.slo.file_issues: true` enables; default off, nothing is posted off-host); breaches are always recorded in efficiency.json.
  * The filer takes an injected `gh(args) -> stdout`, appends a counter comment on a re-breach at most once per 6 h, and closes the
  * issue after 24 h green. Its state lives in efficiency.json (`slo.sigs`), so a daemon restart neither re-files nor re-comments.
  */
 export const DEFAULT_SLO = Object.freeze({ concurrencyMin: 0.6, concurrencyMinutes: 30, repeatMax: 3, attemptsMax: 2, commentsMax: 20, interventionsMax: 6,
-  phaseRatioMax: 1.5, capacityRefusalsMax: 20, idleShareMax: 0.2, fileIssues: true, repo: "RapierCraftStudios/ForgeDock", label: "engine-gap" });
+  phaseRatioMax: 1.5, capacityRefusalsMax: 20, idleShareMax: 0.2, fileIssues: false, repo: "RapierCraftStudios/ForgeDock", label: "engine-gap" });
 export const SLO_UPDATE_MS = 6 * 3_600_000;
 export const SLO_CLOSE_GREEN_MS = 24 * 3_600_000;
 const SNAKE = { concurrencyMin: "concurrency_min", concurrencyMinutes: "concurrency_minutes", repeatMax: "repeat_max", attemptsMax: "attempts_max", commentsMax: "comments_max",
@@ -21,7 +21,7 @@ export function parseSloConfig(yaml) {
   const out = { ...DEFAULT_SLO };
   for (const [k, snake] of Object.entries(SNAKE)) { const v = s[snake] ?? s[`slo_${snake}`]; if (v !== undefined && String(v).trim() !== "" && Number.isFinite(Number(v)) && Number(v) >= 0) out[k] = Number(v); }
   const f = s.file_issues ?? s.slo_file_issues;
-  out.fileIssues = f === undefined || String(f).trim().toLowerCase() !== "false";
+  out.fileIssues = f !== undefined && String(f).trim().toLowerCase() === "true";
   const repo = String(s.repo ?? s.slo_repo ?? "").trim();
   if (/^[\w.-]+\/[\w.-]+$/.test(repo)) out.repo = repo;
   return out;
@@ -45,11 +45,11 @@ export function evaluateSlo(eff, cfg = DEFAULT_SLO, { repo = eff?.repo ?? "unkno
   return out;
 }
 
-const body = (eff, b, { count = 1, reportPath = null } = {}) => [
+const body = (eff, b, { count = 1 } = {}) => [
   `<!-- forge-slo: ${b.sig} -->`, `**SLO breach \`${b.code}\`** (batch \`${eff.batch}\`, repo \`${eff.repo}\`), occurrence ${count}`, "",
   "| field | value |", "| --- | --- |", `| evidence | ${b.detail.replace(/\|/g, "/")} |`, `| window | 24 h to ${eff.at} (concurrency ${eff.concurrency?.windowMin} min) |`,
   `| offending issues | ${b.issues.length ? b.issues.map((n) => `#${n}`).join(", ") : "none named"} |`, `| suggested cause | ${b.cause || "unknown"} |`,
-  `| signature | \`${b.sig}\` |`, ...(reportPath ? [`| introspect report | ${reportPath} |`] : [])].join("\n");
+  `| signature | \`${b.sig}\` |`].join("\n");
 
 /**
  * Apply the filing rules. Returns `{slo, actions}` where `slo` is the next `slo.sigs` state (persist it in efficiency.json).
@@ -111,7 +111,7 @@ export async function fileIntrospect({ report, scope, gh, cfg = DEFAULT_SLO, pri
   const { createHash } = await import("node:crypto");
   const hash = createHash("sha1").update(text).digest("hex").slice(0, 12);
   if (prior?.hash === hash) return { action: "unchanged", hash, issue: prior.issue ?? null };
-  const body = `<!-- forge-slo: ${sig} -->\n**fd-introspect** (${scope})${reportPath ? `\n\nreport: ${reportPath}` : ""}\n\n\`\`\`\n${text.slice(0, 6000)}\n\`\`\``;
+  const body = `<!-- forge-slo: ${sig} -->\n**fd-introspect** (${scope})\n\n\`\`\`\n${text.slice(0, 6000)}\n\`\`\``;
   try {
     let found = null;
     try { found = JSON.parse(String(await gh(["issue", "list", "--repo", cfg.repo, "--label", cfg.label, "--state", "open", "--search", `"${sig}" in:body`, "--json", "number,body"])) || "[]").find((i) => String(i.body ?? "").includes(sig)); } catch { found = null; }

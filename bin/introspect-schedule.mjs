@@ -3,8 +3,8 @@
 /**
  * Daily `fd-introspect --file-issues` (#5987): the lean-lane test-quality trend (`forgedock stats --conformance-outcomes`) run on a
  * systemd user timer, with a tagged cron entry as the fallback, modelled on gc-schedule.mjs. Installed by `doctor --fix` and
- * `forgedock init`. Findings are filed (deduped against open issues and prior reports) unless `orchestrate.slo.file_issues: false`
- * is set; `enabled` false removes the entry. All I/O is injected (`exec`, `fs`). Never throws.
+ * `forgedock init`. Findings are filed (deduped against open issues and prior reports) only when `orchestrate.slo.file_issues: true`
+ * is set (opt-in); `enabled` false removes the entry. All I/O is injected (`exec`, `fs`). Never throws.
  */
 import * as nodeFs from "node:fs";
 import { createHash } from "node:crypto";
@@ -74,7 +74,7 @@ export async function installIntrospectSchedule({ enabled = true, cwd = process.
 
 /**
  * One introspect run: `forgedock stats --conformance-outcomes`, its report saved under `<home>/.forge/introspect/`, then filed
- * (deduped, see slo.fileIntrospect) when `orchestrate.slo.file_issues` is on. State `filed.json` holds the last filed report hash.
+ * (deduped, see slo.fileIntrospect) when `orchestrate.slo.file_issues: true` (opt-in, default off); the local report path is never posted. State `filed.json` holds the last filed report hash.
  */
 export async function runIntrospect({ cwd = process.cwd(), home = homedir(), fs = nodeFs, run = async () => String((await pexec(process.execPath, [forgedockBin(), "stats", "--conformance-outcomes"], { cwd, timeout: 300000, maxBuffer: 8 << 20 })).stdout), gh = async (a) => String((await pexec("gh", a, { timeout: 30000 })).stdout), now = Date.now() } = {}) {
   try {
@@ -87,7 +87,7 @@ export async function runIntrospect({ cwd = process.cwd(), home = homedir(), fs 
     if (!cfg.fileIssues) return { action: "disabled", reportPath };
     const stateFile = join(dir, `filed-${scope}.json`);
     let prior = null; try { prior = JSON.parse(fs.readFileSync(stateFile, "utf8")); } catch { prior = null; }
-    const r = await fileIntrospect({ report, scope, gh, cfg, prior, reportPath });
+    const r = await fileIntrospect({ report, scope, gh, cfg, prior });
     if (r.hash && ["create", "comment"].includes(r.action)) fs.writeFileSync(stateFile, JSON.stringify({ hash: r.hash, issue: r.issue }));
     return { ...r, reportPath };
   } catch (e) { return { action: "failed", detail: String(e?.message ?? e).slice(0, 200) }; }
