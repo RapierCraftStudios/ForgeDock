@@ -145,3 +145,31 @@ t6014("#6014: attempt cap refuses a third rerun, records attempt and forfeited r
   assert6014.equal(e.attempt, 2); assert6014.match(e.reuse_forfeited, /reuse forfeited/);
   assert6014.equal("attempt" in flakeEntry({ check: "c", kind: "infra", at: "t" }), false);
 });
+
+describe("classifyFailedStep and deploy-class reruns (#6015)", async () => {
+  const { classifyFailedStep, isDeployWorkflow } = await import("./release-flakes.mjs");
+  const L = (step, msg) => `deploy\t${step}\t2026-01-01T00:00:00Z ${msg}`;
+  it("names the class and transience of the failed step", () => {
+    const k = (o) => { const r = classifyFailedStep(o); return [r.class, r.transient]; };
+    assert.deepEqual(k({ log: L("Decrypt secrets", "sops: failed to decrypt") }), ["secrets", false]);
+    assert.deepEqual(k({ log: L("Deploy via SSH", "ssh: connect to host h port 22: Connection timed out ETIMEDOUT") }), ["ssh", false]);
+    assert.deepEqual(k({ log: L("Migration Rehearsal", "ECONNRESET") }), ["rehearsal", false]);
+    assert.deepEqual(k({ log: L("Run migrations", "failed") }), ["migration", false]);
+    assert.deepEqual(k({ log: L("Pull images", "ECONNRESET") }), ["infra", true]);
+    assert.deepEqual(k({ log: L("Build", "tsc error") }), ["deterministic", false]);
+    assert.deepEqual(k({ log: "", reason: "LIVE_CHECK failed" }), ["live-check", false]);
+    assert.deepEqual(k({ log: "", reason: "the run set DEPLOY_FREEZE" }), ["freeze", false]);
+    assert.equal(classifyFailedStep({ steps: [{ name: "Deploy via SSH", conclusion: "failure" }], log: "" }).step, "Deploy via SSH");
+  });
+  it("matches no deploy class for ordinary CI names", () => {
+    assert.equal(isDeployWorkflow("Migration Rehearsal"), true); assert.equal(isDeployWorkflow("Deploy production"), true);
+    assert.equal(isDeployWorkflow("unit"), false); assert.equal(isDeployWorkflow("lint"), false);
+  });
+  it("rerunInfraFlakes skips deploy-class runs", async () => {
+    const calls = [];
+    const io = { now: () => NOW, api: async () => ({}), gh: async (a) => { calls.push(a); return a[1] === "list" ? JSON.stringify([{ databaseId: 5, name: "Deploy production" }]) : "Unable to upload artifact"; } };
+    const fence = { lctx: { io, repo: "o/r", credential: "driver" }, lease: { holder: "A", epoch: 1, release: "r1" }, record: async () => {}, now: () => "t" };
+    const r = await rerunInfraFlakes({ io, repo: "o/r", head: "abc", fence, policy: { ci: { rerun_budget_min: 30 } } });
+    assert.deepEqual(r.reran, []); assert.match(r.skipped[0].why, /deploy-class/); assert.equal(calls.filter((c) => c[1] === "rerun").length, 0);
+  });
+});

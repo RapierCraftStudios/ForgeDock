@@ -200,3 +200,17 @@ describe("forgedock pool (#4544)", () => {
     await assert.rejects(poolFromCli(["bogus"], { poolDeps: {} }), /usage: forgedock pool/);
   });
 });
+
+describe("#6062 statusTable usage and queue columns", () => {
+  const base = { name: "w1", cpus_total: 8, cpus_free: 4, mem_total_gb: 16, mem_free_gb: 8, active: 1 };
+  it("shows used vs admitted and queue p50/p95, '-' when absent", async () => {
+    const { statusTable } = await import("../pool/cli.mjs");
+    const lines = statusTable([
+      { ...base, usage_summary: { lanes: 1, admitted: { cpus: 4, mem_gb: 8 }, used: { cpu_avg: 1.5, mem_avg_gb: 3 } }, queue_wait: { p50_ms: 2000, p95_ms: 9000 } },
+      { ...base, name: "w2" }, { name: "w3", ok: false }]).split("\n");
+    assert.match(lines[0], /USED cpu\/mem vs admitted\s+QUEUE p50\/p95 s/);
+    assert.match(lines[1], /1\.5\/3 vs 4\/8\s+2\/9$/);
+    assert.match(lines[2], /-\s+-$/);
+    assert.match(lines[3], /unreachable\s+-\s+-$/);
+  });
+});

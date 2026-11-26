@@ -14,6 +14,7 @@ import { repoRoot, versionOf, laneImageTag, laneBuildArgs } from "./version.mjs"
 import { jsonStore } from "./store.mjs";
 import { makeWarm } from "./warm.mjs";
 import { resolveLaneImage, laneImageNow, laneToolsTag, isLaneToolsTagOf } from "./lane-tools.mjs";
+import { projectLayerTag, projectLayerImageNow, isProjectLayerTagOf } from "./project-layer.mjs";
 import { hostDiskFree, hostMemFree, ensureNatPin, netState } from "./health.mjs";
 import { laneDiskUsedGb, planDiskCap, fstrimDue, runFstrim } from "./disk.mjs";
 import { step as laneStep, drainState, pressured } from "./lane-target.mjs";
@@ -69,6 +70,15 @@ export function liveHeadroom(cfg = {}) {
   } catch { return { ok: true }; }
 }
 export const dindName = (name) => `${name}-dind`;
+/** #6062: rolls usageView rows up for one worker: admitted (reserved) vs used (summed lane avg and peak) and the utilization ratios. Read-only; null ratios when nothing is reserved. */
+export function usageSummary(rows) {
+  const f = (x) => Math.round(x * 100) / 100, list = (rows ?? []).filter((r) => r && r.reserved);
+  const sum = (g) => f(list.reduce((a, r) => a + (Number.isFinite(g(r)) ? g(r) : 0), 0));
+  const admitted = { cpus: sum((r) => r.reserved.cpus), mem_gb: sum((r) => r.reserved.mem_gb) };
+  const used = { cpu_avg: sum((r) => r.cpu_avg), cpu_peak: sum((r) => r.cpu_peak), mem_avg_gb: sum((r) => r.mem_avg_gb), mem_peak_gb: sum((r) => r.mem_peak_gb) };
+  const ratio = (u, d) => (d > 0 ? f(u / d) : null);
+  return { lanes: list.length, admitted, used, utilization: { cpu: ratio(used.cpu_avg, admitted.cpus), mem: ratio(used.mem_avg_gb, admitted.mem_gb) } };
+}
 export const workVolume = (name) => `cs-work-${name.replace(/^cs-/, "")}`;
 /** #5696: the lane worktree is a plain dir on the cache volume (one mount), so depcache hardlinks never hit EXDEV. */
 export const workDirOf = (name) => `/cache/work/${name.replace(/^cs-/, "")}`;
@@ -122,6 +132,13 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const stateDir = cfg.state_dir;
   const store = jsonStore(join(stateDir, "state.json"), { sandboxes: {} });
   const sb = () => store.data.sandboxes;
+  const usageView = (r) => {
+    const u = r.usage; const f = (x) => Math.round(x * 100) / 100;
+    return u?.samples ? { reserved: { cpus: r.cpus, mem_gb: r.mem_gb }, cpu_avg: f(u.cpu_sum / u.samples), cpu_peak: f(u.cpu_peak), mem_avg_gb: f(u.mem_sum / u.samples), mem_peak_gb: f(u.mem_peak), samples: u.samples } : null;
+  };
+  let pendingResize = null;
+  const view = (r) => ({ id: r.id, state: r.state, issue: r.issue, cpus: r.cpus, mem_gb: r.mem_gb, started_at: new Date(r.startedAt).toISOString(), ...(r.error ? { error: r.error } : {}), ...(r.diskPaused ? { status_detail: "paused (disk)" } : {}), ...(r.memPaused ? { status_detail: "paused (host memory)" } : {}), ...(r.diskPressure ? { code: "sandbox.disk_pressure", status_detail: "stopped (disk pressure): worktree kept for resume" } : {}) });
+  let warm; // assigned below once launch/destroy exist
   const activeRecs = () => Object.values(sb()).filter((s) => s.state !== "exited");
   // Sandbox ids come from requests: read own keys only, so "__proto__" or "constructor" never resolves to an inherited member (#4566).
   const own = (id) => (typeof id === "string" && Object.hasOwn(sb(), id) ? sb()[id] : warm.byAlias(id)); // #4912: a claimed warm sandbox also answers to its lane id
@@ -441,11 +458,12 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const active = Object.values(sb()).filter((s) => s.state !== "exited").length;
     const e = effectiveCapacity();
     const h = live(cfg);
-    return { host: cfg.name ?? hostname(), ...running, vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.log && upgrade.state === "failed" ? { upgrade_log: upgrade.log } : {}), ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10, ...(i.depcache_bytes ? { depcache_gb: Object.fromEntries(Object.entries(i.depcache_bytes).map(([k, b]) => [k, Math.round(b / 107374182.4) / 10])) } : {}) }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...throttleView(h), ...diskView(), ...laneDiskView(), ...hostDiskView(active), ...hostMemView(), ...heavyView(), runners: Object.entries(runners()).map(([name, r]) => ({ name, label: r.label })), net: (() => { const rx = netRx(now()); const n = readNet(); return rx ? { ...(n ?? {}), ...rx } : n; })(), paused: Boolean(cfg.paused || ownerPaused || policyPaused), owner_paused: ownerPaused, ...laneTargetView(), ...(Number.isFinite(h?.load_per_core) ? { load_per_core: h.load_per_core } : {}), ...(Number.isFinite(h?.mem_available_gb) ? { mem_available_gb: h.mem_available_gb } : {}), live: h, usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
+    return { host: cfg.name ?? hostname(), usage_summary: usageSummary(Object.values(sb()).filter((r) => r.state !== "exited").map(usageView)), ...running, vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.log && upgrade.state === "failed" ? { upgrade_log: upgrade.log } : {}), ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10, ...(i.depcache_bytes ? { depcache_gb: Object.fromEntries(Object.entries(i.depcache_bytes).map(([k, b]) => [k, Math.round(b / 107374182.4) / 10])) } : {}) }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...throttleView(h), ...diskView(), ...laneDiskView(), ...hostDiskView(active), ...hostMemView(), ...heavyView(), runners: Object.entries(runners()).map(([name, r]) => ({ name, label: r.label })), net: (() => { const rx = netRx(now()); const n = readNet(); return rx ? { ...(n ?? {}), ...rx } : n; })(), paused: Boolean(cfg.paused || ownerPaused || policyPaused), owner_paused: ownerPaused, ...laneTargetView(), ...(Number.isFinite(h?.load_per_core) ? { load_per_core: h.load_per_core } : {}), ...(Number.isFinite(h?.mem_available_gb) ? { mem_available_gb: h.mem_available_gb } : {}), live: h, usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
   }
 
   /** The image a spec's lanes run (the per-repo lane_tools tag when tools are listed), without building it. */
-  const envImageOf = (spec) => (spec.lane_tools?.length ? laneToolsTag(spec.image ?? image, spec.lane_tools) : (spec.image ?? image));
+  const laneBaseOf = (spec) => (spec.lane_tools?.length ? laneToolsTag(spec.image ?? image, spec.lane_tools) : (spec.image ?? image));
+  const envImageOf = (spec) => (spec.project_deps?.hash ? projectLayerTag(laneBaseOf(spec), spec.project_deps.hash) : laneBaseOf(spec));
   const envEnsured = new Map(); // cache volume -> last ensure start
   /**
    * env.snapshots: start the snapshot helper for the repo, at most once per ENV_ENSURE_GAP_MS and one at a time per cache
@@ -470,7 +488,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const envFile = join(dir, `${name}.env`); // the JIT config is a credential: an 0600 env file, never argv
     writeFileSync(envFile, `ACTIONS_RUNNER_INPUT_JITCONFIG=${jitconfig}\n`, { mode: 0o600 });
     try {
-      await docker.run(["--rm", "--name", `cs-runner-${name}`.slice(0, 120), "--label", RUNNER_LABEL, "--label", `computeshare.runner.label=${label}`, "--cpus", String(cpus), "--memory", "2048m", "--env-file", envFile, cfg.runner_image ?? "ghcr.io/actions/actions-runner:latest", "/home/runner/run.sh"]);
+      await docker.run(["--rm", "--name", `cs-runner-${name}`.slice(0, 120), "--label", RUNNER_LABEL, "--label", `computeshare.runner.label=${label}`, "--cpus", String(cpus), "--memory", `${Math.round(mem_gb * 1024)}m`, "--env-file", envFile, cfg.runner_image ?? "ghcr.io/actions/actions-runner:latest", "/home/runner/run.sh"]);
     } finally { rmSync(envFile, { force: true }); }
     runners()[name] = { label, cpus, mem_gb, startedAt: now() }; store.save();
     return { status: 201, body: { name, state: "running" } };
@@ -548,6 +566,14 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       if (st.building) return { status: 503, body: { error: `lane image ${st.tag} building`, code: "lane_tools.building" }, retryAfter: LANE_BUILD_RETRY_AFTER_S };
       if (st.failed) return { status: 422, body: { error: st.failed, code: "lane_tools.build_failed" } };
     }
+    // #6038: the project-deps layer builds in the background; a launch never waits for it and runs the lane image meanwhile.
+    let projectImage = null;
+    if (spec.project_deps?.hash) {
+      try {
+        const st = await projectLayerImageNow({ deps: spec.project_deps, baseImage: laneBaseOf(spec), docker });
+        if (st.image && st.image !== laneBaseOf(spec)) projectImage = st.image;
+      } catch (e) { log.warn?.(`project layer: ${String(e.message).slice(0, 200)}`); }
+    }
     // Last refusal point passed: only now stop borrowed lanes (#5897), a launch refused above must not have drained any.
     if (prio === "reserved") {
       for (const r of tiers().act.filter((s) => prioOf(s) === "borrow")) await throttle(r, SHARES().throttled); // throttle every borrower first,
@@ -578,7 +604,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const cacheMount = ["-v", `${rec.cacheVolume}:/cache`];
     try {
       // #5650: a repo's lane_tools select a derived image (built once per tool list); none keeps spec.image ?? image.
-      const laneImage = spec.lane_tools?.length ? await resolveLaneImage({ tools: spec.lane_tools, baseImage: spec.image ?? image, docker }) : (spec.image ?? image);
+      const toolsImage = spec.lane_tools?.length ? await resolveLaneImage({ tools: spec.lane_tools, baseImage: spec.image ?? image, docker }) : (spec.image ?? image);
+      const laneImage = projectImage ?? toolsImage; // #6038: the project layer sits on the tools image, or is skipped (base) while building
       if (withDocker) {
         // Private Docker daemon per sandbox (never the host socket). The lane joins its network namespace, so ports the
         // project's compose stack publishes are on the lane's localhost, and the API listens on loopback only. Both share
@@ -626,9 +653,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     return { status: 201, body: view(rec) };
   }
 
-  const view = (r) => ({ id: r.id, state: r.state, issue: r.issue, cpus: r.cpus, mem_gb: r.mem_gb, started_at: new Date(r.startedAt).toISOString(), ...(r.error ? { error: r.error } : {}), ...(r.diskPaused ? { status_detail: "paused (disk)" } : {}), ...(r.memPaused ? { status_detail: "paused (host memory)" } : {}), ...(r.diskPressure ? { code: "sandbox.disk_pressure", status_detail: "stopped (disk pressure): worktree kept for resume" } : {}) });
 
-  const warm = makeWarm({ store, sb, own, now, launch, destroy: (id, why) => destroy(id, why), view, log });
+  warm = makeWarm({ store, sb, own, now, launch, destroy: (id, why) => destroy(id, why), view, log });
 
   async function refresh(r) {
     if (r.state === "exited") return r;
@@ -694,7 +720,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       const keepN = Math.max(1, Number(cfg.keep_lane_images ?? 2) || 2);
       const keep = [...bases.slice(0, keepN), laneImageTag(running.version), image, ...alsoKeep];
       for (const t of tags) {
-        if (keep.some((b) => isLaneToolsTagOf(t, b)) || inUse.has(t)) continue;
+        if (keep.some((b) => isLaneToolsTagOf(t, b) || isProjectLayerTagOf(t, b)) || inUse.has(t)) continue;
         try { await docker.removeImage(t); log.info?.(`removed superseded lane image ${t}`); } catch (e) { log.warn?.(`rmi ${t}: ${String(e.stderr || e.message).slice(0, 200)}`); }
       }
     } catch (e) { log.warn?.(`lane image prune: ${String(e.stderr || e.message).slice(0, 200)}`); }
@@ -1014,11 +1040,6 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     }
     store.save();
   }
-  const usageView = (r) => {
-    const u = r.usage; const f = (x) => Math.round(x * 100) / 100;
-    return u?.samples ? { reserved: { cpus: r.cpus, mem_gb: r.mem_gb }, cpu_avg: f(u.cpu_sum / u.samples), cpu_peak: f(u.cpu_peak), mem_avg_gb: f(u.mem_sum / u.samples), mem_peak_gb: f(u.mem_peak), samples: u.samples } : null;
-  };
-  let pendingResize = null;
   async function resize(body) {
     const int = (v, lo, hi) => (Number.isInteger(v) && v >= lo && v <= hi ? v : null);
     const cpus = int(body.cpus, 1, 256), mem = int(body.mem_gb, 1, 1024), vmCpus = int(body.vm_cpus ?? body.cpus, 1, 256), vmMem = int(body.vm_mem_gb ?? (body.mem_gb + 2), 2, 1024);

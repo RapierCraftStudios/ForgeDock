@@ -2492,7 +2492,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       issueLabels: labelNames,
       // #5893: a held needs-human root is released only when the label's removal event post-dates the newest FORGE:NEEDS_HUMAN comment
       heldFacts: deps.heldFacts ?? (async (n) => {
-        const ev = JSON.parse(await leanIo.gh(["api", `repos/${repo}/issues/${n}/events`, "--paginate", "--jq", "[.[] | select(.event==\"unlabeled\" and .label.name==\"needs-human\") | .created_at]"]).then((o) => `[${String(o).replace(/\]\s*\[/g, ",").replace(/^\s*\[|\]\s*$/g, "")}]`));
+        // #6102: one timestamp per line, so empty pages add nothing (joined per-page arrays broke on an empty page)
+        const ev = String(await leanIo.gh(["api", `repos/${repo}/issues/${n}/events`, "--paginate", "--jq", ".[] | select(.event==\"unlabeled\" and .label.name==\"needs-human\") | .created_at"])).split("\n").map((l) => l.trim()).filter(Boolean);
         const cs = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "comments"])).comments ?? [];
         const blk = cs.filter((c) => String(c.body ?? "").includes("<!-- FORGE:NEEDS_HUMAN"));
         const last = blk[blk.length - 1];

@@ -533,7 +533,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     return closing;
   };
   // #5966: a self-initiated stop (version handover, stall recovery). Under a systemd unit the process exits non-zero after a bounded
-  // drain so `Restart=` starts the successor (a hard timer fires even if close() hangs); without a unit it starts the successor and
+  // drain so `Restart=` starts the successor (a hard bound fires even if close() hangs; path-scoped, see selfStop, #5983); without a unit it starts the successor and
   // waits for it to listen, retrying once, then exits non-zero instead of lingering as an unreachable zombie.
   const defaultProbe = () => new Promise((r) => {
     if (process.platform === "win32") return r(true);
@@ -555,9 +555,13 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     stopCode = 1;
     const underUnit = ["active", "activating"].includes(unit());
     let hard;
-    if (exit) { hard = setTimeout(() => { log(`schedd: stop did not finish within ${hardExitMs} ms, exiting`); exit(1); }, hardExitMs); hard.unref?.(); }
+    // Path-scoped bound: under a unit it covers the whole stop (close only); unitless it covers close(), then a last-resort bound
+    // outlasts the two successor waits and the re-host (a flat hardExitMs equals the sum of those phases and would exit unhosted).
+    const arm = (ms, what) => { if (!exit) return undefined; const t = setTimeout(() => { log(`schedd: ${what} did not finish within ${ms} ms, exiting`); exit(1); }, ms); t.unref?.(); return t; };
+    hard = arm(hardExitMs, "stop");
     try {
       await close();
+      if (!underUnit && exit) { clearTimeout(hard); hard = arm(2 * successorMs + 2 * successorPollMs + hardExitMs, "successor handover"); }
       const spawnOnce = () => { try { respawnFn?.(); } catch (e) { log(`schedd: respawn failed: ${e?.message ?? e}`); } };
       spawnOnce();
       if (probeFn && !underUnit) {

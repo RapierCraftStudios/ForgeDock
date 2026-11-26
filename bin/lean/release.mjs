@@ -29,7 +29,7 @@ import { cutSnapshot, writeRecord, checkChain, verifyRelease, defaultBehind, DEF
 import { createReleaseLedger, writeRelease, readLedger, acquireLease, heartbeat, recordReleaseRound } from "./release-ledger.mjs";
 import { fenced, epochTrailer } from "./release-fence.mjs";
 import { holdCheck, exemptionsSection, runControl, VERBS as CONTROL_VERBS } from "./release-control.mjs";
-import { parseFlakeConfig, classifyFailure, planRerun, flakeEntry, recordFlakes, readFlakes } from "./release-flakes.mjs";
+import { parseFlakeConfig, classifyFailure, planRerun, flakeEntry, recordFlakes, readFlakes, isDeployWorkflow } from "./release-flakes.mjs";
 import { readActive } from "./release-ledger.mjs";
 import { statusFromCli, policyFromYaml } from "./release-status.mjs";
 import { parseFixConfig } from "./release-fixloop.mjs";
@@ -286,6 +286,7 @@ export async function rerunInfraFlakes({ io, repo, head, fence, policy }) {
     const at = new Date(io.now?.() ?? Date.now()).toISOString(), entries = [];
     let spentMin = 0;
     for (const r of runs) {
+      if (isDeployWorkflow(r.name)) { out.skipped.push({ name: r.name, why: "deploy-class: handled by release-deploy recover" }); continue; } // #6015: never a log-regex rerun
       const log = String(await io.gh(["run", "view", String(r.databaseId), "--repo", repo, "--log-failed"]).catch(() => "")).slice(-20_000);
       const c = classifyFailure(log);
       const [d] = planRerun({ jobs: [{ key: `${head}:${r.name}`, name: r.name, class: c.class, attempt: r.attempt }], done, spentMin, budgetMin: cfg.rerunBudgetMin });

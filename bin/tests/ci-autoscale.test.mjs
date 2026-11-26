@@ -179,6 +179,14 @@ test("agent POST /runners: labelled, capped, jitconfig via env-file, counted in 
   assert.equal(agent.capacity().mem_free_gb, before.mem_free_gb);
 });
 
+test("agent POST /runners: the container memory cap matches the requested mem_gb (#6103)", async () => {
+  const { agent, ran } = agentFixture();
+  assert.equal((await call(agent, "POST", "/runners", { name: "ci-4g", label: "alterlab-ci", jitconfig: "QUJD", cpus: 1, mem_gb: 4 })).status, 201);
+  const args = ran[0];
+  assert.equal(args[args.indexOf("--memory") + 1], "4096m");
+  assert.equal(agent.capacity().mem_free_gb, agentFixture().agent.capacity().mem_free_gb - 4);
+});
+
 test("agent refuses a runner without capacity; netRx reports MB/s between samples", async () => {
   const { agent, ran } = agentFixture({ allow_mem_gb: 1 });
   assert.equal((await call(agent, "POST", "/runners", { name: "ci-1", label: "l", jitconfig: "QUJD", cpus: 1, mem_gb: 2 })).status, 503);

@@ -13,11 +13,12 @@
  */
 import { fenced } from "./release-fence.mjs";
 import { buildDispatchArgs } from "./release-control.mjs";
-import { INFRA_SIGNATURES } from "./release-flakes.mjs";
+import { INFRA_SIGNATURES, classifyFailedStep } from "./release-flakes.mjs";
+import { BLOCKER_LABEL } from "./release-rehearsal.mjs";
 import { verifyStep, verifyConfigured } from "./release-verify.mjs";
 import { engineOn, runStages } from "./deploy-stages.mjs";
 
-export const BOUNDS = { pollMs: 10_000, runPollMs: 20_000, defaultStageS: 3600, rerunMax: 2, maxAttempts: 3 };
+export const BOUNDS = { pollMs: 10_000, runPollMs: 20_000, defaultStageS: 3600, rerunMax: 2, maxAttempts: 3, failureMax: 2 };
 const json = (s) => JSON.parse(String(s || "null"));
 const blocked = (reason) => ({ blocked: true, reason });
 const tail = (s, n = 400) => String(s ?? "").trim().slice(-n);
@@ -103,6 +104,25 @@ export function classifyDeploy(log, sigs) {
   return /migrat/i.test(log) ? "migration" : "deterministic";
 }
 
+/** #6015: one open tracking issue per release+sha (marker lookup, then create or comment), filed before any rerun. @returns the issue url or number. */
+async function recordDeployIssue(ctx, fails, latest) {
+  const { io, repo, state } = ctx, st = state.deploy;
+  const mark = `<!-- FORGE:DEPLOY_FAILURE release=${ctx.fence?.lease?.release ?? state.id ?? "-"} sha=${st.merge ?? "-"} -->`;
+  const line = (f, i) => `${i + 1}. run ${f.runId}: class \`${f.class}\`, step \`${f.step ?? "unknown"}\`\n\n\`\`\`\n${f.excerpt}\n\`\`\``;
+  if (!st.issue) {
+    const open = json(await io.gh(["issue", "list", "--repo", repo, "--label", BLOCKER_LABEL, "--state", "open", "--limit", "100", "--json", "number,body"])) ?? [];
+    const found = open.find((i) => String(i.body ?? "").includes(mark));
+    if (found) st.issue = String(found.number);
+  }
+  if (st.issue) {
+    if (st.issueCommented !== latest.runId + ":" + latest.rerunsAt) await io.gh(["issue", "comment", st.issue, "--repo", repo, "--body", `Deploy failure ${fails.length}:\n${line(latest, fails.length - 1)}`]);
+  } else {
+    st.issue = String(await io.gh(["issue", "create", "--repo", repo, "--label", BLOCKER_LABEL, "--title", `release-blocker: deploy failed at ${String(st.merge ?? "").slice(0, 12)}`, "--body", `${mark}\nProduction deploy failed; the engine reruns only a transient class once and stops after 2 failures.\n\n${fails.map(line).join("\n\n")}\n`])).trim();
+  }
+  st.issueCommented = latest.runId + ":" + latest.rerunsAt; ctx.save();
+  return st.issue;
+}
+
 const hold = (reason, kind) => ({ blocked: `${reason} (owner ask: decide rollback or fix; label needs-agent when no host is attached)`, hold: { kind, label: "needs-agent" } });
 
 /**
@@ -116,10 +136,20 @@ async function recover(ctx, d, run, why, freezeNow, b, workflow) {
   if (freezeNow) return { blocked: `${why}; ${d.freeze_variable} is set, so the engine never reruns or redispatches the deploy (I26): roll back, or a human runs the workflow with override_freeze` };
   if (!run || !["failure", "timed_out", "cancelled"].includes(run.conclusion)) return { blocked: `${why}; nothing to rerun (a run that finished without changing live is not retried)` };
   if (run.conclusion === "cancelled" && await superseded({ io, repo, workflow }, run)) return { blocked: `${why}; run ${run.databaseId} was cancelled by a newer run of the concurrency group: expected, not rerun` };
-  if (st.reruns >= rerunMax || st.attempts >= maxAttempts) return { blocked: `${why}; recovery spent (${st.reruns}/${rerunMax} reruns, ${st.attempts}/${maxAttempts} actions): hand off to the rollback ladder (#5563)` };
   let log = ""; try { log = String(await io.gh(["run", "view", String(run.databaseId), "--repo", repo, "--log-failed"])); } catch { /* unreadable log: not transient */ }
-  const cls = classifyDeploy(log, rec.signatures);
-  if (cls !== "transient") return hold(`${why}; ${cls === "migration" ? "migration failure" : "deterministic build failure"}, never retried blindly: ${tail(log, 200)}`, cls);
+  const c = classifyFailedStep({ log, sigs: rec.signatures });
+  const cls = c.class === "infra" ? "transient" : c.class === "migration" ? "migration" : "deterministic";
+  const fails = (st.failures ??= []);
+  if (!fails.length || fails[fails.length - 1].rerunsAt !== st.reruns) fails.push({ class: c.class, step: c.step, runId: run.databaseId, excerpt: c.excerpt, rerunsAt: st.reruns }); // a resume with no rerun in between is the same failure
+  ctx.save();
+  let issue; try { issue = await recordDeployIssue(ctx, fails, fails[fails.length - 1]); } catch (e) { return { blocked: `${why}; could not file the deploy tracking issue (${tail(e?.message, 120)}), so nothing is rerun` }; }
+  const at = issue ? ` (tracking issue ${issue})` : "";
+  const cap = Math.min(b.failureMax ?? BOUNDS.failureMax, BOUNDS.failureMax); // never raised by deploy.recovery
+  if (fails.length >= cap) return hold(`${why}; the deploy failed ${fails.length} times, stopping${at}: recovery spent, hand off to the rollback ladder (#5563); ${fails.map((f) => `${f.class}/${f.step ?? "?"}`).join(", ")}`, "deploy-failed");
+  if (st.reruns >= Math.min(rerunMax, BOUNDS.rerunMax) || st.attempts >= maxAttempts) return { blocked: `${why}; recovery spent (${st.reruns}/${rerunMax} reruns, ${st.attempts}/${maxAttempts} actions)${at}: hand off to the rollback ladder (#5563)` };
+  if (cls !== "transient") return hold(`${why}; ${c.class} failure at step ${c.step ?? "?"}, never retried blindly${at}: ${tail(log, 200)}`, c.class === "migration" ? "migration" : c.class === "deterministic" ? "deterministic" : c.class);
+  if ((st.rerunClasses ??= []).includes(c.class)) return hold(`${why}; ${c.class} already rerun once${at}`, "deploy-failed");
+  st.rerunClasses.push(c.class);
   st.reruns += 1; st.attempts += 1; ctx.save(); // counted before the act: a crash can only spend budget, never exceed it
   const f = await fenced(ctx.fence, { action: "rerun", key: idemKey(ctx, `rerun:${run.databaseId}:${st.reruns}`) }, () => io.gh(["run", "rerun", String(run.databaseId), "--repo", repo, "--failed"]));
   if (f.refused) return { blocked: `rerun ${f.refused}` };

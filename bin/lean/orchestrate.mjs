@@ -2507,7 +2507,7 @@ export function formatTable(rows) {
  */
 export function phasesOf(r, rec) {
   if (!r?.phases || typeof r.phases !== "object" || !Object.keys(r.phases).length) return null;
-  return { ...(Number.isFinite(rec?.queueMs) && rec.queueMs > 0 ? { queue_wait: { ms: Math.round(rec.queueMs) } } : {}), ...r.phases };
+  return { ...(Number.isFinite(rec?.queueMs) && rec.queueMs > 0 ? { queue_wait: { ms: Math.round(rec.queueMs), ...((r.sandbox?.agent ?? r.agent) ? { worker: r.sandbox?.agent ?? r.agent } : {}) } } : {}), ...r.phases };
 }
 
 export function formatWaitSummary(rows, heavyStats = null) {
