@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseFlakeConfig, classifyFailure, detectSameShaFlip, flakeEntry, planRerun, repeatedFlakes, fileFlakeIssue, canQuarantine, activeQuarantines, shouldWriteMarker, isUnskippable, recordFlakes, UNSKIPPABLE_CLASSES } from "./release-flakes.mjs";
+import { parseFlakeConfig, classifyFailure, detectSameShaFlip, flakeEntry, planRerun, attemptGuard, RERUN_ATTEMPT_CAP, repeatedFlakes, fileFlakeIssue, canQuarantine, activeQuarantines, shouldWriteMarker, isUnskippable, recordFlakes, UNSKIPPABLE_CLASSES } from "./release-flakes.mjs";
 import { rerunInfraFlakes } from "./release.mjs";
 
 const NOW = Date.parse("2026-11-12T00:00:00Z"), DAY = 86_400_000;
@@ -128,4 +128,20 @@ describe("quarantineReport (#5710)", async () => {
     assert.deepEqual(quarantineReport(all, { mode: "non-blocking" }, now).map((x) => x.blocking), [false, true, true]);
     assert.deepEqual(quarantineReport(all, { mode: "off" }, now), []);
   });
+});
+
+import { test as t6014 } from "node:test";
+import assert6014 from "node:assert/strict";
+t6014("#6014: attempt cap refuses a third rerun, records attempt and forfeited reuse", () => {
+  assert6014.equal(RERUN_ATTEMPT_CAP, 2);
+  assert6014.equal(attemptGuard({ attempt: 2 }).allow, true);
+  assert6014.equal(attemptGuard({ attempt: 3 }).allow, false);
+  assert6014.equal(attemptGuard({ attempt: 5 }).allow, false);
+  assert6014.equal(attemptGuard({ attempt: null }).allow, true);
+  const [a, b] = planRerun({ jobs: [{ key: "x", class: "infra", attempt: 3 }, { key: "y", class: "infra", attempt: 2 }], budgetMin: 30 });
+  assert6014.equal(a.rerun, false); assert6014.match(a.why, /attempt 3/);
+  assert6014.equal(b.rerun, true);
+  const e = flakeEntry({ check: "c", kind: "infra", at: "t", rerun: true, attempt: 2, reuseForfeited: true });
+  assert6014.equal(e.attempt, 2); assert6014.match(e.reuse_forfeited, /reuse forfeited/);
+  assert6014.equal("attempt" in flakeEntry({ check: "c", kind: "infra", at: "t" }), false);
 });

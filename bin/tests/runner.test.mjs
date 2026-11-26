@@ -50,6 +50,8 @@ import {
   resolveConfiguredCliTimeout,
   runCommand,
   isClaudeCliAvailable,
+  cliProbeTimedOut,
+  spawnTargetMissing,
   CLI_PROBE_OUTPUT_SENTINEL,
   parseProbeOutput,
   selectResolvedCliPath,
@@ -1758,7 +1760,7 @@ describe("runCliBackend spawnFn seam (issue #2033)", () => {
     assert.throws(
       () => runCliBackend({
         spec: loadCommandSpec(COMMANDS_DIR, "work-on"), userMessage: "Execute: /work-on 4021", args: ["4021"],
-        cwd: TMP, logger: { log: () => {} }, bin: "claude", spawnFn,
+        cwd: TMP, logger: { log: () => {} }, bin: "/nonexistent-5844/claude", spawnFn,
       }),
       (err) => err.code === "ENOENT",
     );
@@ -3126,6 +3128,60 @@ describe("isClaudeCliAvailable", () => {
 // the bare name, and (b) runCliBackend(), given that resolved path as `bin`,
 // succeeds even when the injected spawnFn is wired to fail on the bare
 // "claude" name specifically.
+describe("#5844 probe timeout and ENOENT classification", () => {
+  const timeoutErr = () => Object.assign(new Error("spawnSync ETIMEDOUT"), { code: "ETIMEDOUT", killed: true, signal: "SIGTERM" });
+  it("probe timeout is not cached as unavailable", () => {
+    const cwd = tmpDir("forgedock-cli-5844-");
+    try {
+      const execImpl = mock.fn(() => { throw timeoutErr(); });
+      assert.equal(isClaudeCliAvailable(cwd, { execImpl }), false);
+      assert.equal(cliProbeTimedOut(cwd), true);
+      assert.equal(execImpl.mock.callCount(), 2, "one retry");
+      assert.ok(execImpl.mock.calls[1].arguments[1].timeout > execImpl.mock.calls[0].arguments[1].timeout);
+      isClaudeCliAvailable(cwd, { execImpl });
+      assert.equal(execImpl.mock.callCount(), 4, "a second call re-probes: nothing was cached");
+      assert.equal(isClaudeCliAvailable(cwd, { execImpl: () => "1.2.3" }), true);
+      assert.equal(cliProbeTimedOut(cwd), false);
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  });
+  it("a timeout followed by success on the retry reports available", () => {
+    const cwd = tmpDir("forgedock-cli-5844-");
+    try {
+      let n = 0;
+      const execImpl = () => { if (n++ === 0) throw timeoutErr(); return "1.2.3"; };
+      assert.equal(isClaudeCliAvailable(cwd, { execImpl }), true);
+      assert.equal(cliProbeTimedOut(cwd), false);
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  });
+  it("a non-timeout probe failure is still cached as unavailable", () => {
+    const cwd = tmpDir("forgedock-cli-5844-");
+    try {
+      const execImpl = mock.fn(() => { throw Object.assign(new Error("exit 1"), { status: 1 }); });
+      assert.equal(isClaudeCliAvailable(cwd, { execImpl }), false);
+      assert.equal(isClaudeCliAvailable(cwd, { execImpl }), false);
+      assert.equal(execImpl.mock.callCount(), 1);
+      assert.equal(cliProbeTimedOut(cwd), false);
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  });
+  it("ENOENT is deterministic only when the CLI is absent", () => {
+    const enoent = () => ({ status: null, error: Object.assign(new Error("spawn claude ENOENT"), { code: "ENOENT" }) });
+    const run = (env) => {
+      const prev = process.env.PATH;
+      process.env.PATH = env;
+      try { return runCliBackend({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: tmpDir("core-5844-"), bin: "claude", logger: { log() {} }, spawnFn: enoent }); }
+      finally { process.env.PATH = prev; }
+    };
+    const dir = tmpDir("core-5844-path-");
+    try {
+      writeFileSync(join(dir, "claude"), "");
+      assert.throws(() => run(dir), (e) => e.spawnDeterministic !== true && e.code === "CLI_SPAWN_TRANSIENT" && e.spawnErrno === "ENOENT");
+      assert.throws(() => run(join(dir, "nowhere")), (e) => e.spawnDeterministic === true && e.code === "ENOENT");
+      assert.equal(spawnTargetMissing("claude", { PATH: "C:\\bin;C:\\tools", PATHEXT: ".EXE;.CMD" }, { platform: "win32", existsImpl: (f) => /tools.claude\.CMD$/.test(f) }), false);
+      assert.equal(spawnTargetMissing("claude", { PATH: "C:\\bin", PATHEXT: ".EXE" }, { platform: "win32", existsImpl: () => false }), true);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
 describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issue #2741)", () => {
   it("resolves and caches the shell-validated absolute path, not the bare command name", () => {
     const shimPath = "/home/user/.npm/_npx/abc123/node_modules/.bin/claude";
