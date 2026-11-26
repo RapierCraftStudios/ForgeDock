@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { runRelease, withStubs, readReleaseConfig, newReleaseId } from "./release.mjs";
-import { parsePreflightConfig, markReadyStep, coStartCi } from "./release-preflight.mjs";
+import { parsePreflightConfig, markReadyStep, coStartCi, stagingHealthStep } from "./release-preflight.mjs";
 import { fixStep } from "./release-review.mjs";
 
 const DISK = [{ mount: "/", type: "ext4" }];
@@ -126,5 +126,46 @@ describe("co-start CI (#5567)", () => {
     const r = await coStartCi({ io: { gh }, repo: REPO, config: { fix: { coStart: true, fullRunWorkflow: "full.yml" } } }, { pr: 9 });
     assert.deepEqual(r, { ready: true, wasDraft: true, fullRun: true });
     assert.ok(calls.some((c) => c.startsWith("pr ready")) && calls.some((c) => c.startsWith("workflow run full.yml")));
+  });
+});
+
+describe("staging-health gate (#6013)", () => {
+  const checks = (list) => ({ ...fakeIo(), gh: async (a) => (a[1].includes("/check-runs") ? JSON.stringify(list) : `${HEAD}\n`) });
+  const ctxOf = (io, config = {}) => ({ io, repo: REPO, staging: "staging", config });
+  const red = [
+    { name: "black", status: "completed", conclusion: "failure", text: "would reformat" },
+    { name: "suite", status: "completed", conclusion: "failure", text: "ECONNRESET while pulling image" },
+    { name: "lint", status: "completed", conclusion: "success", text: "" },
+  ];
+
+  it("refuses a red head naming every failed check with its cause", async () => {
+    const r = await stagingHealthStep(ctxOf(checks(red)));
+    assert.match(r.refused, /black \(regression\)/);
+    assert.match(r.refused, /suite \(runner\)/);
+    assert.equal(r.failed.length, 2);
+  });
+  it("R3: names failed checks that lane merges do not require as a parity gap", async () => {
+    const io = { ...fakeIo(), gh: async (a) => (a[1].includes("/check-runs") ? JSON.stringify(red) : a[1].includes("required_status_checks") ? JSON.stringify(["suite"]) : `${HEAD}\n`) };
+    const r = await stagingHealthStep(ctxOf(io));
+    assert.deepEqual(r.parityGap, ["black"]);
+    assert.match(r.refused, /parity gap.*black/);
+  });
+  it("proceeds on green; refuses pending; override proceeds with a warning", async () => {
+    assert.equal((await stagingHealthStep(ctxOf(checks([{ name: "a", status: "completed", conclusion: "success" }])))).ok, true);
+    const pend = await stagingHealthStep(ctxOf(checks([{ name: "slow", status: "in_progress", conclusion: null }])));
+    assert.match(pend.refused, /pending: slow/);
+    const o = await stagingHealthStep(ctxOf(checks(red), { allowRedStaging: true }));
+    assert.equal(o.ok, true);
+    assert.match(o.warning, /allow_red_staging/);
+    assert.equal(readReleaseConfig("release:\n  allow_red_staging: true\n").allowRedStaging, true);
+  });
+  it("N known failures resolve in 2 rounds: gate refuses once, then the cut proceeds", async () => {
+    let fixed = false, cuts = 0;
+    const io = { ...fakeIo(), gh: async (a) => (a[1].includes("/check-runs") ? JSON.stringify(fixed ? [] : red) : `${HEAD}\n`) };
+    const one = await stagingHealthStep(ctxOf(io));
+    assert.equal(one.failed.length, 2); // round 1: all failures named together, no snapshot cut
+    fixed = true; // one batched fix merged
+    if ((await stagingHealthStep(ctxOf(io))).ok) cuts++; // round 2
+    assert.equal(cuts, 1);
   });
 });

@@ -31,7 +31,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    busy host → `deferred` / `host.busy`, before any lease or GitHub call.
    #5421: free disk is the third GC trigger. `diskLow` (`admission.mjs`) compares `host.freeMb` of the worktree root and `~/.forge`
    (`host.hygienePaths`) with forge.yaml `hygiene.min_free_gb` (default 5, 0 = off); `nearCeiling({minFreeGb})` counts it, so the
-   orchestrate `beforeAdmit` runs owned GC. `guardHeavyDisk` (`effects.mjs`) wraps `io.heavy`: below the threshold it runs GC once and,
+   orchestrate `beforeAdmit` runs owned GC. #6081: a held issue whose lane ended without a result (operator stop) is requeued as a `hold` row, never an engine-error or a breaker count; `run-issue` teardown on SIGTERM is bounded by `FORGEDOCK_TEARDOWN_MS` (default 30 s). `guardHeavyDisk` (`effects.mjs`) wraps `io.heavy`: below the threshold it runs GC once and,
    if still low, refuses the heavy step with `DISK_LOW` (`heavyAcquire` rethrows only that code). `hygiene.schedule` installs a
    systemd user timer or cron entry (`gc-schedule.mjs`, by `doctor --fix` / `init`) running `gc --apply`. Lanes get
    `COMPOSE_PROJECT_NAME=forgedock-lane-<issue>`; gc owns compose volumes/containers of that project.
@@ -178,6 +178,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    (`readSelfReview`, `compareSelfReview`) + `lean.mjs` wiring log `SELF_REVIEW` or `SELF_REVIEW_MISSING` after the
    implement session (fixed results only) and, once on the first reviewer judgement (`conforms|nonconforming`),
    `SELF_REVIEW_AGREED|SELF_REVIEW_DISAGREED`. Run log only: never a failure, no runner call, no phase.
+   #5749: freeze-time runnability. `preflight.mjs` `hostOnlyProblems` rejects host-only validate/repro commands (`legion-run`, `ssh <host>`, `/home/<user>/` paths) and unbounded CPU busy loops: one correction round, then `contract.invalid` before any build. `lane-tools.mjs` has a `yaml` recipe (PyYAML); `vite` and `forgedock` get no recipe (manifest/owned deps, #5747/#5727; a forgedock recipe would break the toolNoRecipe re-placement). A failing declared check's `verify.precheck_block` message carries its `quietFailure` output tail. `orchestrate.mjs` does not start an `env.validate_timeout` recovery lane while `overload()` reports the host overloaded (waits at most 30 min, one decided row).
 6a. **Declared check commands** (#4240) — forge.yaml `learned.test_commands`
    (`engine-cli.mjs` `readPrecheckCommands`) run in the worktree after the build
    commit via `io.runCommand` (`bash -c`, `verify.precheck_timeout_seconds`,
@@ -694,6 +695,8 @@ stores; install/repair commands get the lane's toolchain env (#4347: a pm only t
 resolves; no pin, no shim or a failed toolchain step means the host PATH); `forgedock gc --deps` reaps; `FORGE_DEPCACHE=0` opts out. See `decisions/4220-shared-dep-cache.md`.
 
 #5651: for a Python project with a declared range, `pythonFor` returns the in-range interpreter (poetry runs under it as `<py> -m poetry env use|install`, so its resolver never runs on the host default python; poetry missing from that interpreter is `env.tool_missing`; uv uses `uv venv --python`) or, when none is found, `prepare` stops with a failed row coded `env.tool_missing` naming the range, the interpreters probed and how to provide one; the out-of-range default python3 is never used silently. `depInstallFailures` blocks on that code regardless of changed files.
+#5731: `pythonFor` prefers the repo's own pin (`.python-version`, else the first CI `python-version`; `pyHint`) over an in-range default `python3`, also for projects whose pyproject declares no range; a hinted minor missing from PATH and `uv python find` is provisioned with `uv python install`. `prepareOne` retries an install that fails with a build/wheel incompatibility (`PY_BUILD_RE`) once per remaining in-range interpreter (at most 3 tried); the failed reason names the interpreters tried. keyOf is unchanged when no hint exists. A failed python install is reported `env.setup_failed`, naming the interpreters used and the in-range alternatives not tried. A build-incompatibility install failure is cached as a negative result per (lock hash, interpreter) key (`<eco>-<key>.failed.json`, 6h), so a later prepare skips that failing install.
+
 
 `depcache.mjs` `linkOrCopy` (#4909) copies a file when the hardlink fails with EXDEV, so a cache on another filesystem is still a `hit`. `capwait.mjs` holds a lane refused for capacity (`sandbox.capacity`) until the pool reports `free > 0` and banks the wait as `waits.queue`.
 
@@ -3780,10 +3783,43 @@ Filing: `file_issues` is **opt-in, default off** (only an explicit `file_issues:
 - `backend.auth`: `orchestrate` probes the login every `AUTH_PROBE_MS` (5 min) through an injectable `authProbe`, resumes at once on success, and on failure tries the next rotator account (`rotator.nextAccountAfterAuthFailure`, tried first on resume). After `AUTH_ESCALATE_MS` (30 min) it escalates once (`auth-escalation` row, `onEscalate` notify + one issue comment). The pause no longer runs to the quoted reset; rate_limited/quota.exhausted holds keep their known-reset delay.
 - Holds: `limits.holdExpiryWarnings` lists hold-info entries within `HOLD_EXPIRY_WARN_MS` (T-30 min) of `expiresAt`, once per expiry; `refreshHeld` posts one `hold-alert` each and releases expired holds through the concurrency controller, so expiry re-admits at its pace. `--hold` on more than 10 issues needs `--ttl`/`--for` (`engine.holdTtlRefusal`) and prints `holdResumePlan`.
 - Breaker: engine-errors are keyed by signature plus agent (generalising the `lostSeen` window of #5859). A tripped key quarantines only that agent (`quarantineAgent`) and reseeds the cache once (`reseedCache`), emits `agent-quarantine`, and keeps admitting other work; the batch breaker and `--clear-breaker` are unchanged.
-- Stall recovery: `recordStallRecovery` stores the `dispatch-stalled` cause plus gates (`stallCause`); `decideStallAction` refuses a second restart for the same cause and alerts instead.
+- Stall recovery: `recordStallRecovery` stores the `dispatch-stalled` cause plus gates (`stallCause`); `decideStallAction` (#6082) waits out a doubling backoff after a recovery, then recovers again up to `MAX_STALL_RECOVERIES` before alerting; a `pool-capacity` stall only waits.
 
 ## Lease/hold/pause guard and kept sandboxes (#6008)
 
 - A lane dispatched with a batch id re-reads its FORGE:STATE before every non-delete `git push` and before `gh pr merge` (`suspensionGuard`, `bin/lean/lean.mjs`). A missing or expired lease, a lease of another batch, or the dispatcher's `suspend` marker (`reason` held/paused/kept for adopt) ends the lane `deferred` with `lane.suspended`; the sandbox stays for adopt. No readable state, or no batch id (interactive `run-issue`), is not guarded. `renew()` does not renew under a `suspend` marker.
 - The dispatcher writes the marker (`suspendLane`, `suspendMarker` in `bin/engine-cli.mjs`): when a kept sandbox is recorded (halted, `sandbox.unreachable`, `sandbox.auth`; `providerLanes` `suspendKept`), when a kept issue is held (`--hold`) or its batch paused (`--pause`); cleared on release, unpause and adopt (`resumeKept`). Held/paused batches still admit nothing, including deferred issues whose retry timer fires (`isReady`, launch re-read); `--hold <id> pending` holds every pending and backing-off issue.
 - Kept sandboxes are recorded in `state.kept` (issue, since, phase) and listed by `orchestrate --status` and `pool status` (table section and `kept_sandboxes` in `--json`) via `keptSandboxes` (`bin/lean/batch.mjs`).
+
+## Release-branch lane checks (#6049)
+
+- The pre-PR CI precheck (`bin/lean/ci-precheck.mjs`) also reads the required checks of the release branch (the first default branch, skipped when it equals the lane base) and passes it to `scripts/ci-local` as `--release-branch`. The github-actions adapter then counts a workflow with `pull_request` to, or `push` on, that branch as a gate, so release-only formatter and suite-wiring jobs are selected with the why `required check "X" on release branch`. Without a release branch the plan is unchanged.
+- `CI_PRECHECK_PARITY` lists the required release checks the lane cannot run (no job maps, or the job is heavy, excluded or unrunnable). The first round files one issue per gap, deduped by the hidden marker `FORGE:PARITY_GAP <context>` (`reportParityGaps` in `bin/lean/basered.mjs`). It never blocks the PR.
+
+## Lane audit at unhappy terminals (#6076)
+
+- `finish()` in `bin/lean/lean.mjs` calls `runLaneAudit` (`bin/lean/lane-audit.mjs`) once at needs-human (including PARKED), engine-error and a final budget/ci-pending terminal, after the terminal post. The call is wrapped in try/catch and `runLaneAudit` never throws, so an audit cannot change the terminal reason or code.
+- It posts one `FORGE:LANE_AUDIT` comment: a JSON audit `{key, issue, terminal, signature, class, owner, action, active, fixed_in_later, status: proposed|confirmed, stamp}`. `stamp` = engine version, build sha, agent version, image tag, forge.yaml hash, batch id, attempt. Idempotent: keyed on issue + attempt + signature, so a rerun posts nothing.
+- `bin/lean/lane-audit-signatures.mjs` is the data table `{id, class (genuine|pipeline|spec|env|pool), owner, action, match(evidence), introduced_in, fixed_in}`, seeded from #6072. A match whose `fixed_in` is later than the lane's engine version is `fixed_in_later`: not active, and the gap seam is not called. No LLM is involved in classification.
+- Seams: `lane-audit-gap.mjs` (`auditGap`, called for active pipeline/env/pool findings; filled by #6078) and `lane-audit-llm.mjs` (`classifyWithLlm`, called for unmatched evidence; filled by #6079). Both are no-ops returning null.
+
+## Entry 2026-11-26 — remote heavy backend, quota-aware workers (#6047)
+`heavy.mjs` `runWrapped` uses `acquireRemote` when `CS_HEAVY_BASE` is set (the pool agent's per-sandbox token route; only set when the
+agent runs with `elastic_lanes`): acquire polls while denied, a timer renews the lease, release is best effort, and an unreachable or
+erroring agent (or a wait past `max_wait_s`) fails open. Without it the local `heavy.json` semaphore is used as before. The shims wrap
+installs, validate commands and prechecks, so those lane steps take a token with no lane-level wiring. `quotaCores` (`admission.mjs`) reads
+cgroup v2 `cpu.max` / v1 `cfs_quota_us`/`cfs_period_us` (fallback `CS_CPU_QUOTA` from the pool) and returns min(VM cores, quota);
+`verifyParallelism` and the heavy shim use it for `FORGE_HOST_PARALLELISM`.
+
+## Entry 2026-11-26 — scorecard section in the release PR (#6084)
+`snapshotPrStep` and `releasePrStep` (`bin/lean/release.mjs`) append `scorecardBody` to the release PR body: the per-release scorecard of
+`bin/stats/scorecard.mjs` (`gatherScorecard` over the injected `io.gh`, or `io.scorecard`) rendered as a table with a `Regressions vs <prev>: ...`
+line. It is best effort: any error yields an empty section and the PR is still created. PR reuse, title, bundle and exemption sections are unchanged.
+`forgedock scorecard --repo R --release vX` prints the same table (no LLM); LANE_AUDIT-dependent metrics are n/a when that source is absent.
+
+## Entry 2026-11-26 — gate cut (#6083, `devdocs/decisions/6083-gate-cut.md`)
+
+`conformance.mjs` `ADVISORY_CODES`/`ADVISORY_KINDS`/`ADVISORY_KIND_PREFIXES` now cover the shape, environment and reviewer-opinion rules (scope creep, deferral rows; the no-status row stays a blocking `requirement_no_status` with its targeted resume (#6058), e2e/ui-browser unverified, `env.*` and validate-missing/timeout/env/drift/invalid-command, repro env and mutation, guard_broken, reviewer `review_unimplemented` rows, page/design/outcome-evidence/prod-parity, seams, preserve, route, coupled, relaxation, activation); `splitAdvisory` records them through `noteAdvisory` and `engine.conformance_kinds: <code>=enforce` re-promotes one. Deleted: amendment grammar validation and its correction round (invalid amendments are not applied), `substitute-validate`, `check_unknown` (precheck and freeze), hotspot/counter growth, recurrence design routing (`recurrence.mjs` keeps only `parseRecurrenceConfig` hot areas and `pathsOverlap`), docs-freshness forcing in lanes, the CI-budget annotation gate, and the `engine.validate_result_lost` park (anomaly, lane continues). Blocking set unchanged: test_missing/test_weak, validate_failed, repro red-green, source_deliverable_untouched, regression, omission, ci.red, DCO, builder.blocked/no_commit, base-conflict.
+
+## Entry 2026-11-26 — lane recovery: targeted no-status resume, API-error session resume, precheck output and recovery base-sync (#6058, #6105, #6107)
+`conformance.mjs` tags a deliver requirement without a status row `kind: "requirement_no_status"` (`reqId`, `quote`; code unchanged); `conformanceResumePrompt` names each id with its quote, and a still-skipped requirement parks `The builder did not address R#` with `kind` and `requirements` on the result. `runner.mjs` keeps the envelope's `terminal_reason`/`session_id` (`cliTerminalReason`, `cliSessionId`) and sets `err.apiError` for transient API terminations; `builder()` resumes the same session after `API_RESUME_BACKOFF_MS` (20 s, 60 s, 180 s; events `API_ERROR_RESUME`, `RUN_TERMINAL.api_resumes`), then defers `backend.cli_failed`. `precheck.mjs` `checkFailureTail` + `redactSecrets` put the failing check's name and last 40 lines (redacted) in every precheck park and in a `PRECHECK_FAILED` event. A `ci.red` recovery merges the fetched base before running checks; an unresolvable conflict ends `base.conflict`. Tests: `lean.test.mjs` "#6058", "#6105", "#6107"; `lane-recovery.test.mjs`; `tests/runner.test.mjs` "#6105". Decision: `devdocs/decisions/6058-6105-6107-lane-recovery.md`.

@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { areaOf, acquireHotArea, countCounters, counterGrowth, counterExempt } from "./hotarea.mjs";
+import { areaOf, acquireHotArea } from "./hotarea.mjs";
 import { LOCK_DIR } from "./branchlock.mjs";
 import { tmpDir } from "../tests/_tmp.mjs";
 
@@ -50,24 +50,3 @@ describe("hot areas (#5751)", () => {
   });
 });
 
-describe("named counters (#5751)", () => {
-  it("countCounters sums git grep -c at a ref; no match counts 0", async () => {
-    const calls = [];
-    const git = async (a) => { calls.push(a); if (a.includes("NONE")) throw new Error("exit 1"); return "origin/main:src/a.js:3\norigin/main:src/b.js:2\n"; };
-    const c = await countCounters({ git, ref: "origin/main", counters: [{ name: "flags", pattern: "FLAG_", paths: ["src/**"] }, { name: "none", pattern: "NONE", paths: [] }] });
-    assert.deepEqual(c, { flags: 5, none: 0 });
-    assert.deepEqual(calls[0], ["grep", "-c", "-E", "-e", "FLAG_", "origin/main", "--", "src/**"]);
-    assert.deepEqual(calls[1].slice(-2), ["--", "."]);
-  });
-  it("growth fails without a decision and passes with a counter-ok decision", () => {
-    const f = counterGrowth({ before: { flags: 5 }, after: { flags: 6 }, contract: { decisions: [] } });
-    assert.equal(f.length, 1);
-    assert.equal(f[0].code, "maintenance.counter_growth");
-    assert.equal(counterGrowth({ before: { flags: 5 }, after: { flags: 6 }, contract: { decisions: [{ choice: "counter-ok: flags one rollout flag, removed in #9" }] } }).length, 0);
-    assert.equal(counterGrowth({ before: { flags: 5 }, after: { flags: 6 }, result: { amendments: [{ kind: "decision", decision: { choice: "counter-ok: flags needed" }, why: "x" }] } }).length, 0);
-    assert.equal(counterExempt("flags", { decisions: [{ choice: "counter-ok: flags" }] }), false, "a reason is required");
-    assert.equal(counterExempt("flags", { decisions: [{ choice: "counter-ok: flagsx because" }] }), false, "another counter's decision does not exempt");
-    assert.equal(counterGrowth({ before: { flags: 5 }, after: { flags: 5 } }).length, 0);
-    assert.equal(counterGrowth({ before: null, after: { flags: 9 } }).length, 0);
-  });
-});

@@ -66,3 +66,23 @@ describe("--by / --post-metrics parsing (#4628)", () => {
     assert.throws(() => parseArgs(["--by", "version", "--post-metrics", "x"]), /PR number/);
   });
 });
+
+describe("ledger snapshot rounds (#6013)", () => {
+  it("reports rounds per release, wall time and cause counts, and trends rounds", async () => {
+    const { computeReleaseLedger, LEDGER_METRICS, ledgerTable } = await import("./release.mjs");
+    const ledger = [
+      { pr: 1, snapshots: 3, wallMin: 90, causes: { regression: 2, flake: 1, runner: 0 } },
+      { pr: 2, snapshots: 1, wallMin: 30, causes: { regression: 0, flake: 0, runner: 1 } },
+      { pr: 3, snapshots: 0, wallMin: 0, causes: { regression: 0, flake: 0, runner: 0 } },
+    ];
+    const r = computeReleaseLedger({ repo: "o/r", sinceMs: 0, untilMs: 1, base: "main", prs: [], runs: [], jobs: {}, ledger }, {});
+    assert.equal(r.metrics.snapshot_rounds_per_release_p50, 2);
+    assert.equal(r.metrics.snapshot_rounds_per_release_max, 3);
+    assert.equal(r.metrics.snapshot_wall_min_total, 120);
+    assert.deepEqual([r.metrics.snapshot_rounds_regression, r.metrics.snapshot_rounds_flake, r.metrics.snapshot_rounds_runner], [2, 1, 1]);
+    assert.ok(LEDGER_METRICS.some((d) => d.key === "snapshot_rounds_per_release_p50" && d.end === 2), "trended against a target");
+    const row = ledgerTable(r.metrics).find((x) => x.key === "snapshot_rounds_per_release_p50");
+    assert.equal(row.today, 2);
+    assert.equal(row.status, "end-met");
+  });
+});

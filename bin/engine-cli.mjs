@@ -54,6 +54,7 @@ import { OUTCOME_CODES } from "./engine/outcome-codes.mjs";
 import { USER_ERRORS } from "./help-text.mjs";
 import * as batchHealth from "./lean/batch-health.mjs";
 import { makeAttemptsSeam } from "./lean/attempts.mjs";
+import { cmpVersion } from "./pool/version.mjs";
 import * as _autoChildren from "./lean/autochildren.mjs";
 
 /**
@@ -530,6 +531,10 @@ export function readExecution(cwd = process.cwd()) {
     return sec && typeof sec === "object" ? parseExecution(sec) : undefined;
   } catch { return undefined; }
 }
+/** R2: forge.yaml `execution.min_lane_engine` (a version string such as 1.67); undefined when unset or unreadable. */
+export function readMinLaneEngine(cwd = process.cwd()) {
+  try { const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.execution?.min_lane_engine ?? "").trim(); return /^v?\d+(\.\d+)*$/.test(v) ? v.replace(/^v/, "") : undefined; } catch { return undefined; }
+}
 /** #5748: forge.yaml sets a valid `execution.mode` (even `local`): the explicit opt-out from the public-repo default. */
 export function executionModeExplicit(cwd = process.cwd()) {
   try { return ["local", "remote", "hybrid"].includes(String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.execution?.mode ?? "").trim()); } catch { return false; }
@@ -656,7 +661,7 @@ export function readEnvConfig(cwd = process.cwd()) {
     let appPages = false; // #5428: default-on trigger: the repo tracks Next app/**/page.* files
     try { appPages = String(execFileSync("git", ["ls-files", "--", "*page.*"], { cwd, encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"] })).split("\n").some((f) => PAGE_RE.test(f)); } catch { /* not a git checkout: off */ }
     const pg = parsePagesConfig(y?.pages, { hasAppPages: appPages }); // #5428: forge.yaml pages: (off for repos without pages)
-    const rc = y?.recurrence && typeof y.recurrence === "object" ? parseRecurrenceConfig({ ...y.recurrence, hot_areas: readYamlMap(cwd, "recurrence", "hot_areas"), counters: readYamlMap(cwd, "recurrence", "counters") }) : null; // #5751: forge.yaml recurrence: (absent: the engine defaults)
+    const rc = y?.recurrence && typeof y.recurrence === "object" ? parseRecurrenceConfig({ ...y.recurrence, hot_areas: readYamlMap(cwd, "recurrence", "hot_areas") }) : null; // #5751: forge.yaml recurrence: (absent: the engine defaults)
     const dg = parseDesignConfig(y?.design); // #5330: forge.yaml design: (system always read; routes/gate opt in the design gate)
     const kb = typeof e.sparse_max_kb === "string" && /^\d+$/.test(e.sparse_max_kb.trim()) ? Number(e.sparse_max_kb) : e.sparse_max_kb;
     return { ...(s(e.toolchain) ? { toolchainOverride: s(e.toolchain) } : {}), ...(s(e.setup) ? { envSetup: s(e.setup) } : {}),
@@ -1128,7 +1133,12 @@ export async function runFromCli(argv, deps = {}) {
       if (interrupted) return;
       interrupted = true;
       let r = null;
-      try { r = teardown ? await teardown(sig) : null; } catch { r = null; }
+      // #6081: a teardown that hangs (a builder child that ignores SIGTERM, a blocked git call) must not leave the lane alive after the operator stop:
+      // bounded, then the lane reports and exits anyway.
+      const bound = Number(deps.teardownMs ?? process.env.FORGEDOCK_TEARDOWN_MS) > 0 ? Number(deps.teardownMs ?? process.env.FORGEDOCK_TEARDOWN_MS) : 30000;
+      let timer;
+      try { r = teardown ? await Promise.race([teardown(sig), new Promise((res) => { timer = setTimeout(() => res(null), bound); })]) : null; } catch { r = null; }
+      clearTimeout(timer);
       try { report({ ...(r ?? {}), terminalReason: "deferred", code: OUTCOME_CODES.RUN_INTERRUPTED, detail: r?.detail ?? `interrupted by ${sig}` }); } catch { /* exit anyway */ }
       console.log(`issue #${issue} → deferred (interrupted by ${sig})`);
       exit(128 + SIGNO[sig]);
@@ -2104,6 +2114,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const prefetchOf = new Map(); // issue -> the frozen contract's relayable read-only commands (#4778), filled by readBody
   let execForNeeds = null;
   let poolUsage = []; // #5985: pool usage-history rows (cpu_avg per repo), refreshed in the background; classify lanes light/heavy
+  let agentEngine = null;
   let lanes, remote = null, execBudget = null, execConf = null, hybrid = false;
   const execMode = () => (deps.execution !== undefined ? deps.execution : readExecution(cwd))?.mode ?? "local";
   if (deps.leanModule) {
@@ -2142,7 +2153,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       return l.runOne(n, ln, ctx);
     }, adopt: l.adopt });
     const execMod = await import("./lean/execution.mjs");
-    const exec = deps.execution !== undefined ? deps.execution : await withPublicDefault(readExecution(cwd), { cwd, repo, gh: (a) => leanIo.gh(a, { cwd }), deps }); // #5748
+    const exec0 = deps.execution !== undefined ? deps.execution : await withPublicDefault(readExecution(cwd), { cwd, repo, gh: (a) => leanIo.gh(a, { cwd }), deps }); // #5748
+    const minLane = readMinLaneEngine(cwd); // R2: execution.min_lane_engine, unset = lower-engine agents are a fallback
+    const exec = exec0 && minLane && exec0.minLaneEngine === undefined ? { ...exec0, minLaneEngine: minLane } : exec0;
     execForNeeds = exec ?? null;
     hybrid = exec?.mode === "hybrid" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1;
     let remoteStop = null; // #4612: the sandbox provider's checkpoint stop, used only when the cancel asks for it
@@ -2160,6 +2173,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         ...(deps.now ? { now: deps.now } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}),
         logTail: (h) => { try { return readFileSync(batch.logFile(h.issue), "utf8").slice(-4000); } catch { return ""; } } }); // #4866: a clone failure in the lane log types sandbox.clone
       remoteStop = remoteLanes.stopLane;
+      agentEngine = async () => { // R6: the lane engine of the agent that would run a lane (the best placeable one)
+        const best = ((await provider.capacity?.())?.agents ?? []).filter((a) => a.ok && !a.paused).map((a) => a.engine_version).sort((a, b) => cmpVersion(b, a) ?? 0)[0];
+        return best ?? null;
+      };
       lanes = withPlacement(remoteLanes);
       {
         // #4255: once the budget refuses a remote lane, the rest run as detached host lanes. #4256: hybrid mixes both.
@@ -2372,6 +2389,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const envHold = deps.envHold !== undefined ? deps.envHold : testDeps ? null : {
     version: () => scheddMod.readInstalledVersion() ?? ENGINE_VERSION,
     envFingerprint: () => batchMod.envFingerprint(batch.readPlan()?.env),
+    envValues: () => batch.readPlan()?.env ?? null, // #5931
+    agentVersion: async () => (agentEngine ? agentEngine() : null), // R6: re-admission of a remote lane checks the agent that will run it
     missingTools: async (tools) => { const p = batch.readPlan()?.env, e = p ? scheddMod.mergeEnv(process.env, p) : env; return hostMissingTools(tools, { path: e.PATH ?? e.Path ?? "" }); },
   };
   // #4785: decisions and the frozen contract's validate commands too. #5824: one view per issue; the plan pass's view is
@@ -2482,7 +2501,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         return { removedAt: Math.max(...ev.map(t), -Infinity), blockedAt: last ? t(last.createdAt) : NaN, askKey: ask ? (/FORGE:ASK key=([^\s>]+)/.exec(String(ask.body))?.[1] ?? "") : "" };
       }),
       // #5986: per-issue attempts ledger and input-hash admission (off under the test seams)
-      ...((deps.attempts !== undefined ? deps.attempts : testDeps ? null : true) ? { attempts: deps.attempts !== undefined ? deps.attempts : makeAttemptsSeam({ gh: (a) => leanIo.gh(a), repo, engineVersion: ENGINE_VERSION, sandboxVersion: scheddMod.readInstalledVersion?.() ?? null, cfg: { maxAttempts: orch.maxAttemptsPerIssue, maxIdentical: orch.maxIdenticalSignature } }) } : {}),
+      ...((deps.attempts !== undefined ? deps.attempts : testDeps ? null : true) ? { attempts: deps.attempts !== undefined ? deps.attempts : makeAttemptsSeam({ gh: (a) => leanIo.gh(a), repo, engineVersion: ENGINE_VERSION, hostVersion: scheddMod.readInstalledVersion?.() ?? null, sandboxVersion: deps.sandboxVersion ?? null, cfg: { maxAttempts: orch.maxAttemptsPerIssue, maxIdentical: orch.maxIdenticalSignature } }) } : {}),
       // #4725: a closed (completed) dependency is satisfied even when it still carries a stale needs-human label
       // #5152: a NOT_PLANNED close labelled workflow:merged, or a decomposition whose sub-issues all closed, is delivered: CLOSED
       issueState: async (n) => {
@@ -2946,6 +2965,44 @@ export async function decisionsFromCli(argv, deps = {}) {
   for (const { decision: d, dead } of rows) console.log(`${d.id}  #${d.issue ?? "?"}  ${d.choice}  [${d.anchors.join(", ")}]${dead.length ? `  stale: ${dead.join(", ")}` : ""}${d.supersedes ? `  supersedes ${d.supersedes}` : ""}`);
   if (!rows.length) console.log(rest.includes("--stale") ? "no stale decisions" : "no active decisions");
   return { rows };
+}
+
+/**
+ * `forgedock audits [--repo OWNER/NAME] [--version X | --since-version X] [--signature S] [--class C] [--active] [--json]` (#6077):
+ * queries the repo's FORGE:LANE_AUDIT comments (trusted authors only). `--active` = active, not fixed_in_later, current version
+ * (highest engine_version seen, or --version), grouped per signature with count and lanes. Read-only.
+ */
+export async function auditsFromCli(argv, deps = {}) {
+  const q = await import("./lean/lane-audit-query.mjs");
+  const { parseAudit, LANE_AUDIT_MARKER } = await import("./lean/lane-audit.mjs");
+  const usage = "usage: forgedock audits [--repo OWNER/NAME] [--version X | --since-version X] [--signature S] [--class C] [--active] [--json]";
+  const valued = new Set(["--repo", "--version", "--since-version", "--signature", "--class"]);
+  const opts = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (valued.has(a)) { if (argv[i + 1] == null || argv[i + 1].startsWith("--")) throw new Error(usage); opts[a] = argv[++i]; }
+    else if (a === "--active" || a === "--json") opts[a] = true;
+    else throw new Error(usage);
+  }
+  const run = deps.exec ?? (async (cmd, args) => String((await pexec(cmd, args, { maxBuffer: 64 * 1024 * 1024, timeout: 60000 })).stdout));
+  const repo = opts["--repo"] ?? String(await run("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"])).trim();
+  const jq = `.[] | select(.body | contains("<!-- ${LANE_AUDIT_MARKER}")) | {body, user, author_association, issue_url} | tojson`;
+  const lines = String(await run("gh", ["api", "--paginate", `repos/${repo}/issues/comments?per_page=100`, "--jq", jq])).split("\n").filter(Boolean);
+  const { isTrustedIssueComment } = await import("./lean/prefilter.mjs");
+  const audits = [];
+  for (const l of lines) {
+    try {
+      const c = JSON.parse(l);
+      if (!isTrustedIssueComment(c)) continue;
+      const a = parseAudit(c.body);
+      if (!a) continue;
+      audits.push({ ...a, issue: Number(/(\d+)$/.exec(c.issue_url ?? "")?.[1]) || a.issue || null });
+    } catch { /* skip a malformed comment */ }
+  }
+  const rows = q.filterAudits(audits, { version: opts["--version"], sinceVersion: opts["--since-version"], signature: opts["--signature"], class: opts["--class"] });
+  const out = opts["--active"] ? q.summarizeActive(rows, { currentVersion: opts["--version"] ?? q.highestVersion(audits) }) : rows;
+  console.log(opts["--json"] ? JSON.stringify(out, null, 2) : q.formatAudits(out, { active: Boolean(opts["--active"]) }));
+  return { rows: out };
 }
 
 /**

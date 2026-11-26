@@ -4021,7 +4021,7 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "first-run", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "close", "acceptance", "interfaces", "docs", "review-staging", "release", "intake", "gc", "env", "sandbox", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "fix-close-reasons", "guards", "triage", "probe", "close", "acceptance", "interfaces", "docs", "review-staging", "release", "intake", "gc", "env", "sandbox", "resume-stalled", "demo", "first-run", "doctor", "auth", "watch", "issue-watch", "prod-watch", "selftest", "labels", "config", "stats", "scorecard", "limits", "decisions", "audits", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
   "ci-step", "ci-hook", "tests",
   "version", "--version", "-v",
 ]);
@@ -4276,6 +4276,17 @@ switch (command) {
     try {
       const result = await orchestrateFromCli(restArgs);
       if (result && !result.ok) exitCode = 1;
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "audits": {
+    // #6077: query FORGE:LANE_AUDIT comments
+    const { auditsFromCli } = await import("./engine-cli.mjs");
+    try {
+      await auditsFromCli(restArgs);
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;
@@ -4622,6 +4633,11 @@ switch (command) {
   case "stats": {
     const { runStats } = await import("./stats/index.mjs");
     exitCode = await runStats(restArgs);
+    break;
+  }
+  case "scorecard": {
+    const { runScorecard } = await import("./stats/scorecard.mjs");
+    exitCode = await runScorecard(restArgs);
     break;
   }
   case "watch":
