@@ -6,7 +6,7 @@ import { orchestrate } from "./orchestrate.mjs";
 import { hostFallbackAllowed } from "./execution.mjs";
 
 // #5652: host re-placement of a remote lane's env.tool_missing / env.capability_remote end follows host.role / execution.host_fallback.
-const go = async (code, cfg) => {
+const go = async (code, cfg, rec = {}) => {
   const calls = [];
   const rows = await orchestrate({ issues: [5], parallel: 2, recovery: { maxAttempts: 1 }, readBody: async () => "",
     remote: { max: 2, isRemote: () => true, hostFallback: hostFallbackAllowed(cfg), place: () => ({ where: "remote", reason: "mode remote" }), admit: () => ({ ok: true }), onBudget: "stop", costPerMinute: 0 },
@@ -15,6 +15,18 @@ const go = async (code, cfg) => {
       return ctx.recover ? { terminalReason: "merged", pr: 9 } : { terminalReason: "needs-human", code, detail: "no tool", placement: { where: "remote" } };
     } });
   return { rows, calls };
+};
+
+// #5746: remote mode with host fallback off never re-places a mechanical recovery on the host
+const goMech = async (hostFallback) => {
+  const calls = [];
+  await orchestrate({ issues: [5], parallel: 2, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, readBody: async () => "",
+    remote: { max: 2, isRemote: () => true, hostFallback, admit: () => ({ ok: true }), onBudget: "stop", costPerMinute: 0 },
+    runOne: async (n, _l, ctx = {}) => {
+      calls.push(ctx.placement?.where);
+      return ctx.recover ? { terminalReason: "merged", pr: 9 } : { terminalReason: "needs-human", code: "env.repro_unrunnable", detail: "x", placement: { where: "remote" } };
+    } });
+  return calls;
 };
 
 describe("#5652 host fallback placement", () => {
@@ -37,6 +49,52 @@ describe("#5652 host fallback placement", () => {
   it("regression: a non-host code (ci.red-like) recovery is unaffected by host.role", async () => {
     const r = await go("env.repro_unrunnable", { hostRole: "orchestrator" });
     assert.ok(r.calls.length >= 1);
+  });
+  it("#5746: remote mode with nothing set disallows the host; hybrid keeps it; explicit true wins", () => {
+    assert.equal(hostFallbackAllowed({ mode: "remote" }), false);
+    assert.equal(hostFallbackAllowed({ mode: "hybrid" }), true);
+    assert.equal(hostFallbackAllowed({ mode: "remote", hostFallback: true }), true);
+    assert.equal(hostFallbackAllowed({ mode: "remote", fallbackLocal: true }), false);
+  });
+  it("#5746: a #5371 mechanical recovery with host_fallback false retries remotely, not on the host", async () => {
+    const calls = await goMech(false);
+    assert.ok(calls.length >= 2);
+    assert.ok(calls.every((w) => w !== "local"), JSON.stringify(calls));
+  });
+  it("#5746: with host fallback on the #5371 recovery still goes to the host", async () => {
+    const calls = await goMech(true);
+    assert.equal(calls[1], "local");
+  });
+  for (const [name, remoteCfg] of [
+    ["fallback_local with max_remote 0", { max: 0, fallbackLocal: true, offlineFallback: true, admit: () => ({ ok: true }), onBudget: "stop" }],
+    ["execution budget under on_budget local", { max: 2, admit: () => ({ ok: false, reason: "budget cap" }), onBudget: "local" }],
+  ]) {
+    it(`#5746: host_fallback false: ${name} never runs the lane on the host`, async () => {
+      const ac = new AbortController(), where = [];
+      const run = orchestrate({ issues: [5], parallel: 2, readBody: async () => "", pollMs: 5, signal: ac.signal,
+        remote: { isRemote: () => true, hostFallback: false, place: () => ({ where: "remote", reason: "mode remote" }), costPerMinute: 0, ...remoteCfg },
+        runOne: async (_n, _l, ctx = {}) => { where.push(ctx.placement?.where); return { terminalReason: "merged", pr: 1 }; } }).catch(() => {});
+      await new Promise((r) => setTimeout(r, 120));
+      ac.abort();
+      await Promise.race([run, new Promise((r) => setTimeout(r, 1000))]);
+      assert.ok(!where.includes("local"), JSON.stringify(where));
+    });
+  }
+  it("#5746: remote mode with nothing set ends a host-capability lane without a host re-placement", async () => {
+    const r = await go("env.capability_remote", { mode: "remote" });
+    assert.equal(r.calls.length, 1);
+  });
+  it("#5746: max_remote 0 holds the lane (no host run) and announces waiting", async () => {
+    const events = [], ac = new AbortController();
+    let ran = 0;
+    const run = orchestrate({ issues: [5], parallel: 2, readBody: async () => "", pollMs: 5, signal: ac.signal, decide: (d) => events.push(d.what),
+      remote: { max: 0, isRemote: () => true, hostFallback: false, place: () => ({ where: "remote", reason: "max_remote 0 (live override)", hold: true }), admit: () => ({ ok: true }), onBudget: "stop", costPerMinute: 0 },
+      runOne: async () => { ran++; return { terminalReason: "merged", pr: 1 }; } }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 150));
+    ac.abort();
+    await Promise.race([run, new Promise((r) => setTimeout(r, 1000))]);
+    assert.equal(ran, 0);
+    assert.ok(events.some((w) => /waiting: max_remote 0/.test(w)), JSON.stringify(events));
   });
 });
 

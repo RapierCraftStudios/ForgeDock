@@ -111,3 +111,17 @@ test("unchanged capacity and admissions when config is below the VM", async () =
   assert.equal(r.ok, 4); // slice-bound: min(4 cpus, 6 / 1.5)
   assert.equal(r.last.body.error, "no capacity");
 });
+
+test("the load refusal carries code pool.host_load and the agent view exposes load_per_core (#5985)", async () => {
+  const dir = tmpDir("cs-adm-");
+  const log = { info() {}, warn() {}, error() {} };
+  const live = () => ({ ok: false, reason: "load 2.4/core (> 2)", load_per_core: 2.4, mem_available_gb: 9 });
+  const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: dir, allow_cpus: 16, allow_mem_gb: 28, lease_ttl_s: 600, token: "t" }, { docker: fakeDocker({}), now: () => 1_000_000, log, live, vm: () => ({ cpus: 16, mem_gb: 11.7, swap_gb: 0 }) });
+  const r = await agent.launch({ spec: spec("l0"), cpus: 1, mem_gb: 0.4 });
+  assert.equal(r.status, 503);
+  assert.equal(r.body.code, "pool.host_load");
+  assert.equal(r.body.live.load_per_core, 2.4);
+  const c = agent.capacity();
+  assert.equal(c.load_per_core, 2.4);
+  assert.equal(c.mem_available_gb, 9);
+});

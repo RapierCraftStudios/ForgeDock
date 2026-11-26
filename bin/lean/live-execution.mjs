@@ -87,6 +87,31 @@ export function formatOverride(o) {
   return [s.maxRemote !== undefined ? `max_remote ${s.maxRemote}` : null, s.mode ? `placement ${s.mode}` : null].filter(Boolean).join(", ") || "no change";
 }
 
+/** #5933: what `--set-max-remote <id> 0` does on a remote batch; null unless the patch sets 0 without a placement change. */
+export function drainNote(patch) {
+  const s = sanitizeOverride(patch) ?? {};
+  return s.maxRemote === 0 && !s.mode ? "remote starts paused; nothing runs locally" : null;
+}
+
+/**
+ * #5735: the `--set-max-remote` note from the pool router's lane view (`httpTransport.agentLanes()`: {agents: [{name, used,
+ * ceiling|null}], total}): the remote lane total across batches, per-agent used/ceiling, and a leading warning when every
+ * listed agent has a ceiling and `n` exceeds their sum. null lanes -> null. Never throws.
+ */
+export function remoteLaneNote(n, lanes) {
+  try {
+    if (!lanes || typeof lanes !== "object") return null;
+    const list = Array.isArray(lanes.agents) ? lanes.agents.filter((a) => a && typeof a === "object") : [];
+    const ceil = (a) => (Number.isInteger(a.ceiling) && a.ceiling >= 0 ? a.ceiling : null);
+    const total = Number.isInteger(lanes.total) ? lanes.total : list.reduce((s, a) => s + (Number.isInteger(a.used) ? a.used : 0), 0);
+    const per = list.map((a) => `${a.name}: lanes ${Number.isInteger(a.used) ? a.used : 0}/${ceil(a) ?? "-"}`);
+    const lines = [`remote lanes across batches: ${total}${per.length ? ` (${per.join(", ")})` : ""}`];
+    const sum = list.length && list.every((a) => ceil(a) !== null) ? list.reduce((s, a) => s + ceil(a), 0) : null;
+    if (sum !== null && Number.isInteger(n) && n > sum) lines.unshift(`warning: max_remote ${n} exceeds the pool host lane ceiling ${sum}; lanes beyond it are deferred`);
+    return lines.join(String.fromCharCode(10));
+  } catch { return null; }
+}
+
 /**
  * Hybrid validation weight (#4256) that is computed only when first needed: `initial` (already computed) or `compute()`
  * started on the first `get()`; until it resolves (or when it fails) a light weight is used.
@@ -110,12 +135,25 @@ export function lazyWeight({ initial = null, compute = null } = {}) {
  * `placeLane` with the remote or hybrid facts); mode `local` places every new lane on the host. `onChange(exec)` is
  * called once each time the effective `{mode, maxRemote}` differs from the last one seen (the pinned one first).
  */
-export function liveRemote(base, { exec, readOverride = () => null, place, onChange = null }) {
+export const BELOW_PINNED_WARN_HOURS = 6;
+export function liveRemote(base, { exec, readOverride = () => null, place, onChange = null, onBelowPinned = null, belowPinnedHours = BELOW_PINNED_WARN_HOURS, now = Date.now }) {
   const keyOf = (e) => `${e.mode}|${e.maxRemote}`;
   let last = keyOf(effectiveExecution(exec, null));
+  let live = null; // the override applied by the last current() call
+  let belowSince = null, belowWarned = false; // #5746: since when a live max_remote has been below the pinned value
+  const noteBelow = () => {
+    const pinned = exec?.maxRemote;
+    if (!(live?.maxRemote !== undefined && Number.isInteger(pinned) && live.maxRemote < pinned)) { belowSince = null; belowWarned = false; return; }
+    const t = now();
+    belowSince ??= t;
+    const hours = Number(belowPinnedHours) > 0 ? Number(belowPinnedHours) : BELOW_PINNED_WARN_HOURS;
+    if (!belowWarned && t - belowSince > hours * 3600000) { belowWarned = true; try { onBelowPinned?.({ maxRemote: live.maxRemote, pinned, hours }); } catch { /* advisory */ } }
+  };
   const current = () => {
     let o = null;
     try { o = readOverride() ?? null; } catch { o = null; }
+    live = sanitizeOverride(o);
+    noteBelow();
     const e = effectiveExecution(exec, o);
     const k = keyOf(e);
     if (k !== last) { last = k; try { onChange?.(e); } catch { /* advisory */ } }
@@ -128,7 +166,13 @@ export function liveRemote(base, { exec, readOverride = () => null, place, onCha
       value: (n) => {
         const e = current();
         if (e.mode === "local") return { where: "local", reason: "live placement: local" };
-        return place(e, n);
+        const p = place(e, n);
+        // #5746: remote mode with no remote slots holds the lane when the host is not allowed; else names the real cause
+        if (e.mode === "remote" && p?.where === "local" && !(Number.isInteger(e.maxRemote) && e.maxRemote >= 1)) {
+          const reason = live?.maxRemote !== undefined ? "max_remote 0 (live override)" : "max_remote 0";
+          return base.hostFallback === false ? { where: "remote", reason, hold: true } : { ...p, reason };
+        }
+        return p;
       },
       enumerable: true, configurable: true, writable: true,
     },

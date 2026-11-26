@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { PACKAGE_STORES } from "./cache-sweep.mjs";
 
 /** #5757: work-dir and cache sweeps walk big trees (node_modules): 10 min, not the 120 s of a small rm. */
 export const SWEEP_TIMEOUT_MS = 10 * 60000;
@@ -58,6 +59,13 @@ export const dockerCli = {
     const out = await docker(["ps", "-a", "--format", "{{.Image}}"], { timeoutMs: 30000 });
     return out ? [...new Set(out.split("\n").filter(Boolean))] : [];
   },
+  /** #5891: freezes / thaws a container (its processes keep their state; the lane is paused, not failed). A gone container is not an error. */
+  async pause(name) { try { await docker(["pause", name], { timeoutMs: 20000 }); } catch (e) { if (!/No such container|already paused/i.test(e.stderr ?? "")) throw e; } },
+  async unpause(name) { try { await docker(["unpause", name], { timeoutMs: 20000 }); } catch (e) { if (!/No such container|not paused/i.test(e.stderr ?? "")) throw e; } },
+  /** #5891: dangling images (rebuildable) only; never a tagged or in-use one. */
+  async pruneImages() { return docker(["image", "prune", "-f"], { timeoutMs: 10 * 60000 }); },
+  /** #5891: package-manager caches inside a running sandbox (rebuildable); the worktree and lane state are untouched. Best effort. */
+  async pruneCaches(name) { try { await docker(["exec", name, "sh", "-c", `rm -rf ${PACKAGE_STORES.map((d) => `/cache/${d}`).join(" ")} 2>/dev/null; true`], { timeoutMs: 120000 }); } catch (e) { if (!/No such container|is not running|is paused/i.test(e.stderr ?? "")) throw e; } },
   /** #5884: removes this agent's stopped containers and dangling images only (`label` carries the agent id, #5881). */
   async containerPrune(label) { return docker(["container", "prune", "-f", ...[].concat(label).flatMap((l) => ["--filter", `label=${l}`])], { timeoutMs: 120000 }); },
   async imagePrune(label) { return docker(["image", "prune", "-f", ...[].concat(label).flatMap((l) => ["--filter", `label=${l}`])], { timeoutMs: 120000 }); },

@@ -66,3 +66,116 @@ export function hostDiskFree({ path = null, osrelease = readRelease, statfs = st
     return Number.isFinite(gb) ? { gb, path: drive } : null;
   } catch { return null; }
 }
+
+/**
+ * #5967: Windows host free physical memory and the vmmem working sets (other WSL/Hyper-V VMs), via powershell.exe over the interop
+ * socket. `{ free_gb, vmmem: [{name, gb}] }` (1 decimal), or null off WSL or on any error (absent means unknown: no gate). All I/O injectable.
+ */
+const PS_MEM = "$f=(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory; $v=@(Get-Process vmmem* -ErrorAction SilentlyContinue | ForEach-Object { @{ name=$_.ProcessName; bytes=$_.WorkingSet64 } }); @{ free_kb=$f; vmmem=$v } | ConvertTo-Json -Compress -Depth 3";
+export function hostMemFree({ osrelease = readRelease, run = winRun, env = process.env } = {}) {
+  try {
+    if (!/microsoft/i.test(String(osrelease() ?? ""))) return null;
+    const out = run("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", PS_MEM], env);
+    if (!out) return null;
+    const j = JSON.parse(String(out).trim());
+    const kb = Number(j?.free_kb);
+    if (!Number.isFinite(kb) || kb < 0) return null;
+    const vm = j.vmmem == null ? [] : Array.isArray(j.vmmem) ? j.vmmem : [j.vmmem];
+    return { free_gb: Math.round(kb / 104857.6) / 10, vmmem: vm.filter((p) => Number.isFinite(Number(p?.bytes))).map((p) => ({ name: String(p.name ?? "vmmem"), gb: Math.round(Number(p.bytes) / 107374182.4) / 10 })) };
+  } catch { return null; }
+}
+
+/** #5923: WSL mirrored networking gives the guest a narrow source-port slice; docker MASQUERADE must stay inside it or replies drop. */
+const DEFAULT_RANGE = [32768, 60999];
+const NAT_BRIDGE_FMT = '{{.Name}}|{{index .Options "com.docker.network.bridge.name"}}|{{range .IPAM.Config}}{{.Subnet}} {{end}}';
+const parseRange = (s) => { const m = /(\d+)\s+(\d+)/.exec(String(s ?? "")); return m ? [Number(m[1]), Number(m[2])] : null; };
+const narrow = (r) => Boolean(r) && (r[0] > DEFAULT_RANGE[0] || r[1] < DEFAULT_RANGE[1]);
+
+/** iptables arg lists (tcp and udp per subnet) pinning NAT source ports to `range` ([lo, hi]); subnets are {subnet, bridge}. */
+export function natPinRules(range, subnets) {
+  const [lo, hi] = range;
+  return subnets.flatMap(({ subnet, bridge }) => ["tcp", "udp"].map((proto) => ["-t", "nat", "-I", "POSTROUTING", "1", "-s", subnet, "!", "-o", bridge, "-p", proto, "-j", "MASQUERADE", "--to-ports", `${lo}-${hi}`]));
+}
+const checkArgs = (rule) => ["-t", "nat", "-C", "POSTROUTING", ...rule.slice(5)];
+
+/** Same rules as the installed script: the script text below is embedded verbatim in pool/install/install-agent.sh. */
+export function natPinScript() {
+  return `#!/bin/sh
+# cs-nat-portrange: pin docker NAT source ports to the guest ip_local_port_range (WSL mirrored networking)
+set -eu
+set -- $(sysctl -n net.ipv4.ip_local_port_range) || exit 0
+lo=$1; hi=$2
+[ "$lo" -gt 32768 ] || [ "$hi" -lt 60999 ] || exit 0
+docker network ls --filter driver=bridge -q | while read -r id; do
+  info=$(docker network inspect -f '${NAT_BRIDGE_FMT}' "$id") || continue
+  name=\${info%%|*}; rest=\${info#*|}; bridge=\${rest%%|*}; subnets=\${rest#*|}
+  if [ -z "$bridge" ]; then if [ "$name" = bridge ]; then bridge=docker0; else bridge="br-$(echo "$id" | cut -c1-12)"; fi; fi
+  for subnet in $subnets; do
+    case "$subnet" in *:*) continue ;; esac
+    for proto in tcp udp; do
+      iptables -t nat -C POSTROUTING -s "$subnet" ! -o "$bridge" -p "$proto" -j MASQUERADE --to-ports "$lo-$hi" 2>/dev/null ||
+        iptables -t nat -I POSTROUTING 1 -s "$subnet" ! -o "$bridge" -p "$proto" -j MASQUERADE --to-ports "$lo-$hi"
+    done
+  done
+done
+`;
+}
+export function natPinUnit() {
+  return `[Unit]
+Description=Pin docker NAT source ports to the WSL guest port range
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/cs-nat-portrange
+
+[Install]
+WantedBy=docker.service
+`;
+}
+
+/** Every bridge network docker has (default 172.17.0.0/16 plus each custom one) as [{subnet, bridge}] (IPv4 only). */
+export function bridgeSubnets({ run = sh } = {}) {
+  const out = [];
+  const ids = (run("docker", ["network", "ls", "--filter", "driver=bridge", "-q"]) ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
+  for (const id of ids) {
+    const info = (run("docker", ["network", "inspect", "-f", NAT_BRIDGE_FMT, id]) ?? "").trim();
+    const [name, opt, subs] = info.split("|");
+    if (subs === undefined) continue;
+    const bridge = opt || (name === "bridge" ? "docker0" : `br-${id.slice(0, 12)}`);
+    for (const subnet of subs.split(/\s+/).filter((s) => s && !s.includes(":"))) out.push({ subnet, bridge });
+  }
+  if (!out.length) out.push({ subnet: "172.17.0.0/16", bridge: "docker0" });
+  return out;
+}
+
+const guestRange = (run, read) => parseRange(run("sysctl", ["-n", "net.ipv4.ip_local_port_range"])) ?? (() => { try { return parseRange(read("/proc/sys/net/ipv4/ip_local_port_range")); } catch { return null; } })();
+const isWsl = (osrelease) => { try { return /microsoft/i.test(String(osrelease() ?? "")); } catch { return false; } };
+const isMirrored = (run, range) => { const m = run("wslinfo", ["--networking-mode"]); return m !== null ? /mirrored/i.test(m) : narrow(range); };
+
+/** Idempotent: `iptables -C` before `-I`, per rule. `{ applied, range }`, or null when not a mirrored WSL guest. */
+export function ensureNatPin({ run = sh, read = (p) => readFileSync(p, "utf8"), osrelease = readRelease } = {}) {
+  if (!isWsl(osrelease)) return null;
+  const range = guestRange(run, read);
+  if (!range || !isMirrored(run, range)) return null;
+  let applied = 0;
+  for (const rule of natPinRules(range, bridgeSubnets({ run }))) {
+    if (run("iptables", checkArgs(rule)) !== null) continue;
+    if (run("iptables", rule) !== null) applied++;
+  }
+  return { applied, range: `${range[0]}-${range[1]}` };
+}
+
+/** `/health` net block: `{ mirrored, port_range, nat_pin, degraded }`; degraded = mirrored without the pin. Off WSL: not mirrored, not degraded. */
+export function netState({ osrelease = readRelease, read = (p) => readFileSync(p, "utf8"), run = sh } = {}) {
+  const off = { mirrored: false, port_range: null, nat_pin: null, degraded: false };
+  try {
+    if (!isWsl(osrelease)) return off;
+    const range = guestRange(run, read);
+    if (!isMirrored(run, range)) return { ...off, port_range: range ? `${range[0]}-${range[1]}` : null };
+    const pinned = Boolean(range) && natPinRules(range, bridgeSubnets({ run })).every((r) => run("iptables", checkArgs(r)) !== null);
+    return { mirrored: true, port_range: range ? `${range[0]}-${range[1]}` : null, nat_pin: pinned, degraded: !pinned };
+  } catch { return off; }
+}

@@ -598,13 +598,22 @@ describe("review-staging --summary", () => {
       const w = await finalized({ ...run(after), required: ["CI"] });
       w.io.sleep = async () => {};
       await reviewStagingFromCli(["--summary", "--json"], w.io);
-      assert.deepEqual(w.gh.filter((a) => a[1] === "rerun"), [["run", "rerun", "777", "-R", "o/r"]]);
+      assert.deepEqual(w.gh.filter((a) => a[1] === "rerun"), [["run", "rerun", "777", "--failed", "-R", "o/r"]]);
       const d = JSON.parse(w.out.at(-1));
       assert.equal(d.ciFailing, ciFailing, after);
       assert.equal(d.ciCancelOnly, false);
     }
     const ck = [{ name: "CI", bucket: "cancel", link }, { name: "lint", bucket: "fail" }];
     assert.deepEqual(cancelOnlyChecks(ck, ["CI", "lint"]), [{ name: "CI", link }]);
+  });
+
+  it("#6014: a run already rerun twice is not rerun again and stays cancelled", async () => {
+    const link = "https://github.com/o/r/actions/runs/777/job/1";
+    const w = await finalized({ required: ["CI"], ciFn: (a) => a[1] === "view" ? { code: 0, stdout: JSON.stringify({ attempt: 3 }), stderr: "" } : { code: 0, stdout: JSON.stringify([{ name: "CI", bucket: "cancel", link }]), stderr: "" } });
+    w.io.sleep = async () => {};
+    assert.equal(await reviewStagingFromCli(["--summary", "--json"], w.io), 1);
+    assert.equal(w.gh.filter((a) => a[1] === "rerun").length, 0);
+    assert.equal(JSON.parse(w.out.at(-1)).ciCancelOnly, true);
   });
 
   it("a pending required check blocks (rerun poll timeout must not post GATE_PASS)", async () => {

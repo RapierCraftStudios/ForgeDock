@@ -304,6 +304,13 @@ export function assertOpenCodeNativeRuntime({
 const CLI_AVAILABILITY_CACHE_TTL_MS = 60_000;
 const CLI_AVAILABILITY_CACHE_MAX_SIZE = 100;
 const cliAvailabilityCache = new Map();
+// #5844: cwds whose last probe timed out (host load). A timeout says nothing about absence, so it is never written to
+// the cache above; this marker lets callers tell "busy" from "absent". Cleared by the next probe that gets an answer.
+const cliProbeTimeouts = new Set();
+const CLI_PROBE_RETRY_FACTOR = 3;
+const isProbeTimeout = (err) => err?.code === "ETIMEDOUT" || err?.killed === true || err?.signal === "SIGTERM";
+/** True when the last probe for `cwd` timed out instead of answering (#5844). */
+export const cliProbeTimedOut = (cwd = process.cwd()) => cliProbeTimeouts.has(cwd);
 // Windows path types emitted by npm's shim generator. Native executables are
 // directly spawnable; .cmd/.bat files must be resolved to their trusted native
 // target before spawning because Node cannot exec them with shell:false.
@@ -668,21 +675,31 @@ export function isClaudeCliAvailable(
   let available;
   let cliPath = null;
   let version = null;
+  const probe = (timeout) => execImpl(
+    `${resolveCmd} && echo ${CLI_PROBE_OUTPUT_SENTINEL} && claude --version`,
+    { cwd, stdio: ["ignore", "pipe", "ignore"], encoding: "utf-8", timeout },
+  );
+  let raw;
   try {
-    const raw = execImpl(
-      `${resolveCmd} && echo ${CLI_PROBE_OUTPUT_SENTINEL} && claude --version`,
-      {
-      cwd,
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf-8",
-      timeout: CLI_PROBE_TIMEOUT_MS,
-      },
-    );
+    try {
+      raw = probe(CLI_PROBE_TIMEOUT_MS);
+    } catch (err) {
+      if (!isProbeTimeout(err)) throw err;
+      raw = probe(CLI_PROBE_TIMEOUT_MS * CLI_PROBE_RETRY_FACTOR); // #5844: one longer retry under host load
+    }
     available = true;
     cliPath = selectResolvedCliPath(parseProbeOutput(raw), { platform, existsImpl });
     version = parseCliVersion(raw);
-  } catch {
+    cliProbeTimeouts.delete(cwd);
+  } catch (err) {
     available = false;
+    if (isProbeTimeout(err)) {
+      // #5844: still timed out: not evidence of absence, so no negative cache entry
+      cliProbeTimeouts.add(cwd);
+      cliAvailabilityCache.delete(cwd);
+      return false;
+    }
+    cliProbeTimeouts.delete(cwd);
   }
   // Re-inserting an existing key moves it to the end of Map's iteration
   // order (delete+set), so eviction below always drops the true oldest
@@ -1607,6 +1624,21 @@ export function promptGoesViaStdin(prompt, otherArgs = [], platform = process.pl
 }
 
 /** forge#4129: spawn errnos that fail the same way on every rerun (argv too big, binary missing or not executable). */
+/**
+ * #5844: true only when `bin` is genuinely absent: a path that does not exist, or a bare name found on no PATH entry
+ * (x PATHEXT on win32). Decides whether an ENOENT spawn error is deterministic.
+ */
+export function spawnTargetMissing(bin, env = process.env, { platform = process.platform, existsImpl = existsSync } = {}) {
+  if (typeof bin !== "string" || !bin) return true;
+  if (/[\\/]/.test(bin)) return !existsImpl(bin);
+  const win = platform === "win32";
+  const sepr = win ? ";" : ":";
+  const exts = win ? ["", ...(env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)] : [""];
+  for (const dir of String(env.PATH ?? env.Path ?? "").split(sepr).filter(Boolean)) {
+    for (const ext of exts) if (existsImpl(join(dir, bin + ext))) return false;
+  }
+  return true;
+}
 export const DETERMINISTIC_SPAWN_ERRNOS = Object.freeze(["E2BIG", "ENOENT", "EACCES", "ENOEXEC", "ENAMETOOLONG"]);
 
 export function runCliBackend({
@@ -1790,6 +1822,11 @@ export function runCliBackend({
       error.code = result.error.code;
       if (["EAGAIN", "ENOMEM", "EMFILE"].includes(result.error.code)) {
         error.spawnErrno = result.error.code;
+        error.code = "CLI_SPAWN_TRANSIENT";
+      } else if (result.error.code === "ENOENT" && !spawnTargetMissing(bin, childEnv)) {
+        // #5844: ENOENT while the binary resolves (or the cwd vanished) is not proof the CLI is absent: transient,
+        // so the engine relaunches instead of ending needs-human cli.spawn_failed
+        error.spawnErrno = "ENOENT";
         error.code = "CLI_SPAWN_TRANSIENT";
       } else if (DETERMINISTIC_SPAWN_ERRNOS.includes(result.error.code)) {
         // forge#4129: certain to fail again on a rerun; flagged so callers do not retry it. E2BIG (argv too large) gets
@@ -2150,6 +2187,7 @@ export async function runCliBackendAsync(opts) {
   let limitInfo = null;
   const ceiling = maxMs > 0 ? maxMs : o.timeout;
   let collected, idleInfo = null, ctxInfo = null, turnInfo = null;
+  let streamSessionId = null;
   const msgUsage = new Map(); // #4390: assistant message id -> its usage (a message spans several stream lines)
   const toolUses = new Map(); // #4410: tool_use id -> {msg, name, path, cmd}
   const sum = (k) => [...msgUsage.values()].reduce((a, u) => a + toFiniteUsageNumber(u[k]), 0);
@@ -2214,6 +2252,7 @@ export async function runCliBackendAsync(opts) {
       const noteLine = (line) => {
         if (!line.startsWith("{") || line.length > 4_000_000) return;
         let j; try { j = JSON.parse(line); } catch { return; }
+        if (typeof j?.session_id === "string" && j.session_id) streamSessionId = j.session_id; // #5829: a context stop names the session so it can be compacted
         if (j?.type === "result") resultLine = line;
         else if (j?.type === "user" && Array.isArray(j.message?.content)) {
           // #5346: a tool_result closes its edit; a ceiling crossed mid-edit stops the session at this safe point
@@ -2271,7 +2310,7 @@ export async function runCliBackendAsync(opts) {
   }
   if (ctxInfo) {
     const err = new Error(`claude CLI session reached ${ctxInfo.context} context tokens (ceiling ${contextMax}) after ${msgUsage.size} turn(s) and was stopped`);
-    err.code = "CLI_CONTEXT"; err.context = ctxInfo.context; err.contextMax = contextMax; err.turns = msgUsage.size; err.lastTool = ctxInfo.lastTool;
+    err.code = "CLI_CONTEXT"; err.sessionId = streamSessionId; err.context = ctxInfo.context; err.contextMax = contextMax; err.turns = msgUsage.size; err.lastTool = ctxInfo.lastTool;
     err.usage = streamUsage(); err.toolUses = [...toolUses.values()];
     throw err;
   }
