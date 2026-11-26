@@ -10,6 +10,20 @@ last_compacted: "2026-11-15"
 
 Rolling per-module knowledge log. Hard cap: 150 lines.
 
+## Entry 2026-11-26 — light lanes + heavy-phase tokens (#6047)
+Default-off `cfg.elastic_lanes` (pushed through the router `/policy` allowlist). On: a lane is admitted on its base reservation, and each
+heavy step leases a token from the agent: `POST /sandboxes/:id/heavy/acquire|release|renew` (sandbox credential, like `creds`/`relay`;
+agent-local, reached by the lane at `CS_HEAVY_BASE` via host.docker.internal, so no production ingress rule is involved, as in the relay
+entry above). Weight = max(`heavy_weight`, p90 repo history - base) from `estimateFor`, so docker lanes take a token sized from their own
+history. A grant needs base reservations + held tokens + weight within effective capacity and live MemAvailable; denied returns
+`{granted:false, retry_after_s}` and the client polls; the first holder is always granted. Tokens live in `store.data.heavy`, are refcounted
+per sandbox and expire with `heavy_ttl_s` (renewed by the client), on sandbox exit and on destroy. `projectedUse` becomes base + held
+tokens, `/capacity` adds `elastic_lanes`, `heavy_tokens`, `heavy_held`, `cpus_free_elastic`, `mem_free_gb_elastic` (the router places on
+these) and `lanes_ceiling_derived`. With no explicit ceiling (the router passes its `max_lanes` in the launch body) the agent refuses at the
+derived ceiling = default-weight tokens the host holds x `elastic_lane_factor` (3); an explicit `pool limit` or router.json `max_lanes` wins.
+Waiting phases hold no token so they already count only the base. Promotion of the flag (R13) needs the live measurement: >=2x lanes at the
+same peak memory, no rise in OOM kills or lane wall time. The lane env also gets `CS_CPU_QUOTA` (its `--cpus`).
+
 ## Entry 2026-11-24 — dispatcher-seeded repo mirrors (#5949)
 
 - A lane no longer depends on the pool host's own GitHub link. Agent `GET /mirrors?slug=&cache_key=[&upload=]` returns `{mirrors: {<slug>: {<ref>: <sha>} | "absent"}, upload_offset?}` (`bin/pool/agent.mjs`); `POST /mirrors/seed` takes a base64 chunk `{slug, cache_key, upload (bundle sha256), offset, data_b64, sha256}` (a wrong offset is 409 with the resume `offset`) or `{finish: {size}}`.

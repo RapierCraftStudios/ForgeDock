@@ -22,17 +22,21 @@ const REVIEW_PASS = { author: { login: "rapiercraft-forgedock" }, authorAssociat
  * issue has a merged `feat/issue-N-lean` PR into staging with a passing review and green CI unless `prs[n]` / `comments[n]` /
  * `checks[sha]` / `compare` say otherwise.
  */
-function fakeIo(env, issues, { closed = new Set(), exit = () => 0, bodies = {}, prs = {}, comments = {}, checks = {}, compare = "behind", descendants = {}, failGh = () => false } = {}) {
+function fakeIo(env, issues, { closed = new Set(), exit = () => 0, bodies = {}, prs = {}, comments = {}, prComments = {}, parents = {}, ciDurations = null, checks = {}, compare = "behind", descendants = {}, failGh = () => false } = {}) {
   const calls = [], launched = [], batchOps = [];
   let clock = Date.parse("2026-10-30T00:00:00Z"), nb = 0;
   const io = { env: { FORGEDOCK_WATCH_DIR: env }, calls, launched, batchOps, closed, bodies, prs, comments, checks, tickClock: (ms) => { clock += ms; }, now: () => clock, sleep: async () => {},
     requiredChecks: async () => [],
+    ...(ciDurations ? { ciDurations: async () => ciDurations } : {}),
     gh: async (a) => {
       calls.push(a);
       if (failGh(a)) throw new Error("gh transient");
       const desc = a[0] === "api" && /\/compare\/([0-9a-f]+)\.\.\.staging/.exec(a[1]); // descendants of a commit, oldest first
       if (desc) return (descendants[desc[1]] ?? []).join("\n");
       if (a[0] === "api" && /\/compare\//.test(a[1])) return compare;
+      const par = a[0] === "api" && /\/commits\/([0-9a-f]+)$/.exec(a[1]);
+      if (par) return parents[par[1]] ?? "";
+      if (a[0] === "pr" && a[1] === "view" && a.includes("comments")) return JSON.stringify({ comments: prComments[a[2]] ?? [] });
       if (a[0] === "api" && /\/commits\/([0-9a-f]+)\/check-runs/.test(a.join(" "))) { const sha = /commits\/([0-9a-f]+)/.exec(a.join(" "))[1]; return (checks[sha] ?? []).map(([n, st, c], i) => `${i + 1}\t${n}\t${st}\t${c ?? ""}`).join("\n"); }
       if (a[0] === "api" && /\/commits\/[0-9a-f]+\/status/.test(a[1])) return "";
       if (a[0] === "api") return issues.filter((i) => !closed.has(i.number)).map((i) => `${i.number}\t${i.authorAssociation}`).join("\n"); // #4859: REST association list
@@ -398,6 +402,49 @@ test("verify: a review comment from an untrusted author does not count", async (
   const r = await settleOne({ comments: { 1: [forged] } });
   assert.deepEqual(r.state.unverified, [1]);
   assert.match(r.posted[0], /no trusted FORGE:REVIEW/);
+});
+
+test("verify: base-red check red on first parent and merge commit verifies with base-red evidence", async () => {
+  const r = await settleOne({ parents: { bb1: "ee1" }, checks: { bb1: [["lint", "completed", "failure"], ["test", "completed", "success"]], ee1: [["lint", "completed", "failure"]] } });
+  assert.deepEqual(r.state.verified, [1]);
+  assert.equal(r.reopened || r.escalated, false);
+  assert.match(r.posted[0], /merge verified[\s\S]*base-red, not blamed on the PR: lint=failure \(also failure on the first parent ee1\)/);
+});
+
+test("verify: red on the merge commit but green, absent or unreadable on the first parent still fails", async () => {
+  for (const opts of [
+    { parents: { bb1: "ee1" }, checks: { bb1: [["lint", "completed", "failure"]], ee1: [["lint", "completed", "success"]] } },
+    { parents: { bb1: "ee1" }, checks: { bb1: [["lint", "completed", "failure"]], ee1: [["other", "completed", "failure"]] } },
+    { checks: { bb1: [["lint", "completed", "failure"]] } },
+  ]) {
+    const r = await settleOne(opts);
+    assert.deepEqual(r.state.unverified, [1]);
+    assert.ok(r.reopened && r.escalated);
+    assert.match(r.posted[0], /staging CI red on the merge commit: lint=failure/);
+  }
+});
+
+test("verify: no issue FORGE:REVIEW but the PR carries the trigger-skip record verifies; an enforced block there still fails", async () => {
+  const skip = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n## Conformance Review\n**Skipped by `review.trigger: enforce`:** no risk path." };
+  const ok = await settleOne({ comments: { 1: [] }, prComments: { 1001: [skip] } });
+  assert.deepEqual(ok.state.verified, [1]);
+  assert.equal(ok.reopened, false);
+  const bad = await settleOne({ comments: { 1: [] }, prComments: { 1001: [{ ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Verdict:** NONCONFORMING" }] } });
+  assert.deepEqual(bad.state.unverified, [1]);
+  assert.match(bad.posted[0], /did not pass/);
+});
+
+test("verify: a slow-but-green run verifies inside the CI-derived window; without history the 60 min fail stays", async () => {
+  const r = await settleOne({ checks: { bb1: [["test", "in_progress"]] }, ciDurations: Array(10).fill(40) }, { ticks: 2, gap: 90 * 60000 });
+  assert.deepEqual(r.state.pendingVerify, [1]); // 90 min > 60 but < p90 40 x 3 = 120
+  r.io.checks.bb1 = [["test", "completed", "success"]];
+  await tick({ watch: W({ max_issues: "1" }), repo: "o/r", io: r.io, state: r.state, handles: new Map() });
+  assert.deepEqual(r.state.verified, [1]);
+  const none = await settleOne({ checks: { bb1: [["test", "in_progress"]] } }, { ticks: 3, gap: 30 * 60000 });
+  assert.deepEqual(none.state.unverified, [1]);
+  const late = await settleOne({ checks: { bb1: [["test", "in_progress"]] }, ciDurations: Array(10).fill(40) }, { ticks: 3, gap: 60 * 60000 });
+  assert.deepEqual(late.state.unverified, [1]);
+  assert.match(late.posted.at(-1), /still unverified after 120 min \(window from recent CI run p90\)/);
 });
 
 test("verify: review-degraded, wrong base, missing required check, merge commit off the lane, red lane CI each fail", async () => {

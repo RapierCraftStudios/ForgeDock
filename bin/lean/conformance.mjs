@@ -1586,6 +1586,9 @@ export function prodOnlyE2e(quote) {
 const LIVE_INFRA_RE = /\b(?:live|paid|remote)\s+(?:benchmarks?|runs?|infra(?:structure)?|hosts?)\b|\bbench(?:mark)?[\w.-]*\.(?:mjs|js|py|sh)\b|\bre-?run\b[^.]{0,60}\bbench(?:mark)?\b|\b(?:sandbox pool|(?:remote|rented|cloud|gpu) (?:infra|hosts?|runners?|clusters?|boxe?s?|machines?|gpus?|pool)|on (?:a|the) (?:remote|rented|cloud|gpu) \w+)\b|\bsynthetic load\b|\b\d+\s*[×x]\s*(?:nproc|cores?|cpus?)\b|\bCPU hogs?\b|\bhost[- ]level (?:load|run)\b|\b[≤<]=?\s*[\d.]+\s*[×x]\s*(?:the\s+)?(?:control\s+)?cost\b/i;
 /** #5524: production observation windows without a URL: a metric/alert window, "at the next <weekday>", current volume, a prod host. */
 const PROD_WINDOW_RE = /\b(?:over|for|within|across)\s+(?:the\s+(?:last|next)\s+)?\d+\s*(?:h|hrs?|hours?|d|days?|w|weeks?|min|minutes?)\b|\bat the next (?:mon|tues?|wednes|thurs?|fri|sat(?:ur)?|sun)(?:day)?\b|\bat current (?:volume|traffic|load)\b|\bon (?:OVH|prod(?:uction)?)\b|\b\w*Slo\w*Burn\w*\b|\bSLO\b|\b(?:does not|doesn't|did not) fire\b/i;
+/** #6051: a metric / replay / production-measurement criterion ("Metric: ... stays under X% over a real batch"): measured on real traffic after deploy, not by the lane. */
+const METRIC_REPLAY_RE = /^\s*(?:\*\*)?metric\b\s*(?:\*\*)?\s*:|\bover (?:a|the) (?:real|production|live) (?:batch|traffic|corpus|sample|inputs?|runs?)\b|\b(?:replay|replays|replayed)\b[^.]{0,80}\b(?:real|recorded|production|prod)\b|\b(?:real|recorded|production|prod)\b[^.]{0,80}\breplay\b/i;
+export function metricReplayRow(quote) { return METRIC_REPLAY_RE.test(String(quote ?? "")); }
 /**
  * #5468: rewrite production-only e2e/manual rows (deliver or defer; only `only` ids when given) to `post-deploy` with a generated
  * check id. Pure; returns {contract, converted:[{id, check, entry}]}. A row with no probeable URL becomes a checkless post-deploy row (check: null).
@@ -1593,6 +1596,10 @@ const PROD_WINDOW_RE = /\b(?:over|for|within|across)\s+(?:the\s+(?:last|next)\s+
 export function autoPostDeployE2e(contract, only = null) {
   const converted = [];
   const requirements = (Array.isArray(contract?.requirements) ? contract.requirements : []).map((r) => {
+    if (["deliver", "defer"].includes(r?.disposition) && !wantsE2e(r) && !isGuidance(r) && !(only && !only.includes(r.id)) && !isOutOfBand(r) && metricReplayRow(r.quote)) { // #6051: a measurement over real production inputs is a checkless post-deploy row (outcome evidence), as #5524
+      converted.push({ id: r.id, check: null, entry: null });
+      return { ...r, disposition: "post-deploy", bucket: "post-deploy", local_infeasible_why: "the criterion is a metric or replay over real production inputs, measured after deploy", why: "metric/replay/production-measurement criterion: tracked post-deploy as outcome evidence, not a lane deliverable (#6051)" };
+    }
     if (!["deliver", "defer"].includes(r?.disposition) || !wantsE2e(r) || (only && !only.includes(r.id)) || isOutOfBand(r) || !prodOnlyE2e(r.quote)) return r;
     const g = e2eCheckFor(r.id, r.quote);
     if (!g && LIVE_INFRA_RE.test(String(r.quote))) { // #5547: needs a paid/remote/host-level run: a checkless row for the orchestrator (its why names spend and a third-party host so deferChecklessPostDeploy routes it)
@@ -1699,9 +1706,18 @@ export function decide(raw, ctx) {
   if (!comp.complete) return { state: "review.incomplete", failures: comp.problems.map((d) => ({ code: C.REVIEW_INCOMPLETE, detail: d })), missing: comp.missing, review: rv };
   const f = [], converted = [];
   const amendedOf = (ids) => (ctx.contract.requirements ?? []).find((r) => r.amendment?.text && (ids ?? []).includes(r.id));
-  const notAccepted = (r) => (r ? `amendment not accepted (${r.id} amended to "${String(r.amendment.text).slice(0, 200)}"): ` : "");
+  // #6051: an amendment citing a frozen decision (D#/K#) is weighed against it, not rejected outright
+  const citedDecision = (r) => (ctx.contract.decisions ?? []).find((d) => d?.id && new RegExp(`\\b${d.id}\\b`).test(`${r.amendment?.text ?? ""} ${r.amendment?.why ?? ""}`));
+  const notAccepted = (r) => { if (!r) return ""; const d = citedDecision(r); return `${d ? `amendment cites frozen decision ${d.id} ("${String(d.choice ?? "").slice(0, 120)}"), judged against it` : "amendment not accepted"} (${r.id} amended to "${String(r.amendment.text).slice(0, 200)}"): `; };
+  const named = (c) => { const ids = Array.isArray(c?.contract_ids) ? c.contract_ids : []; const reqs = ctx.contract.requirements ?? []; return ids.length ? reqs.filter((r) => ids.includes(r.id)) : reqs.filter((r) => r.quote === c?.quote); };
+  const followUps = [], decisionBacked = [];
   for (const c of rv.issue_coverage) if (c.misclassified === true) f.push({ code: C.CONFORMANCE_OMISSION, detail: `guidance row misclassified: "${c.quote}" is a symptom or success criterion, judge it as binding${c.note ? ` (${c.note})` : ""}` });
-  else if (c.status !== "covered" && !guidanceCoverage(c, ctx.contract)) f.push({ code: C.CONFORMANCE_OMISSION, detail: `${notAccepted(amendedOf(c.contract_ids))}issue requirement ${c.status}: "${c.quote}"${c.note ? ` (${c.note})` : ""}` });
+  else if (c.status !== "covered" && !guidanceCoverage(c, ctx.contract)) {
+    const rows = named(c);
+    if (rows.length && rows.every((r) => r.disposition === "defer" || r.disposition === "post-deploy")) followUps.push({ quote: c.quote, ids: rows.map((r) => r.id) }); // #6051: a frozen defer/post-deploy row is a tracked follow-up, not an omission
+    else if (c.status === "narrowed" && rows.some((r) => r.amendment?.text && citedDecision(r))) decisionBacked.push({ quote: c.quote, ids: rows.map((r) => r.id), decision: citedDecision(rows.find((r) => r.amendment?.text && citedDecision(r))).id }); // #6051: a narrowing the amendment backs with a frozen decision is weighed against it, not an omission; a missing row still is one
+    else f.push({ code: C.CONFORMANCE_OMISSION, detail: `${notAccepted(amendedOf(c.contract_ids))}issue requirement ${c.status}: "${c.quote}"${c.note ? ` (${c.note})` : ""}` });
+  }
   for (const r of ctx.contract.requirements) {
     if (isGuidance(r)) continue; // #5750: the outcome rows are judged, never whether the proposal was followed
     const row = rv.requirements.find((x) => x.id === r.id);
@@ -1730,10 +1746,10 @@ export function decide(raw, ctx) {
   }
   for (const p of rv.preserve ?? []) if (p.status !== "intact") f.push({ code: C.CONFORMANCE_PRESERVE_VIOLATED, detail: `${p.id} ${p.status}${p.evidence ? ` (${p.evidence})` : ""}${p.note ? `: ${p.note}` : ""}` });
   for (const r of rv.regressions ?? []) f.push({ code: C.CONFORMANCE_REGRESSION, detail: `${r?.at ?? "?"}: ${r?.failure ?? ""}` });
-  if (f.length) return { state: "nonconforming", failures: f, inconsistent: rv.verdict === "CONFORMS", review: rv, converted };
+  if (f.length) return { state: "nonconforming", failures: f, inconsistent: rv.verdict === "CONFORMS", review: rv, converted, followUps, decisionBacked };
   // A NONCONFORMING verdict with every row passing gives the builder nothing to fix: re-ask the reviewer.
   if (rv.verdict !== "CONFORMS") return { state: "review.inconsistent", failures: [{ code: C.REVIEW_INCONSISTENT, detail: "verdict NONCONFORMING with no failing row" }], missing: ["verdict"], review: rv };
-  return { state: "conforms", failures: [], review: rv, converted };
+  return { state: "conforms", failures: [], review: rv, converted, followUps, decisionBacked };
 }
 
 /** The ids (or sections) a targeted re-ask must fill: requirement ids without a valid row, issue_coverage problems, ...; [] when complete. */
