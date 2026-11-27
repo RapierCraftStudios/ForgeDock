@@ -40,7 +40,7 @@ export const OUTCOME_CODES = Object.freeze({
   BACKEND_CLI_FAILED: "backend.cli_failed", // forge#5762: the claude CLI exited 1 without reaching the API and it was no login failure; a transient retry, never the account hold
   QUOTA_EXHAUSTED: "quota.exhausted", // forge#5236: no account has capacity (every login at its ceiling); deferred until the earliest reset, never backend.auth
   HOST_BUSY: "host.busy",
-  GH_UNAVAILABLE: "gh.unavailable", // forge#4157: `gh` unreachable after retries during the --repo identity check; run deferred, nothing posted; #5990: also the dispatcher read path (milestone read in resolveLane)
+  GH_UNAVAILABLE: "gh.unavailable", // forge#4157: `gh` unreachable after retries during the --repo identity check; run deferred, nothing posted
   GH_AUTH: "gh.auth", // forge#4662: gh answered HTTP 401 and one token refresh did not fix it; run deferred, a rerun resumes
   MERGE_TRANSIENT: "merge.transient",
   PUSH_TRANSIENT: "push.transient",

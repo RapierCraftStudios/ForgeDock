@@ -538,11 +538,8 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
       return prs.filter((p) => p?.headRefName !== me).flatMap((p) => (p?.files ?? []).map((f) => String(f?.path ?? "")));
     } catch { return []; }
   };
-  // #5990: the dispatcher's read gh runs under nice so a busy host keeps its event loop; spawns are counted by the reader
-  const readGh = process.platform === "win32" ? run("gh") : async (args, opts = {}) => run("nice")(["-n", "10", "gh", ...args], opts);
   return {
     ghCache: (root) => makeGhCache({ root }),
-    readGh,
     gh: run("gh"), git: run("git"), docker: run("docker"), killGroup: async (pid, marker) => killLedgerPid(pid, marker), ledger: (opts) => makeLedger(opts), runTmp: makeRunTmp(), host: makeHostProbe(), heavy: guardHeavyDisk(makeHeavyIo({ host: makeHostProbe() }), { host: makeHostProbe(), minFreeGb: async () => (await import("../gc.mjs")).readHygiene(process.cwd()).min_free_gb, gc: async () => { const g = await import("../gc.mjs"); return g.runOwnedGc({ probes: g.makeGcProbes({ cwd: process.cwd() }), hygiene: g.readHygiene(process.cwd()), budgetMs: 60000 }); } }), projector: makeProjector({ gh: base.gh }, { repo }), runner: makeLeanRunner({ subagentModel }), waitCiGreen: base.waitCiGreen,
     /** Shared dependency cache (#4220): the repo's own package manager, argv only, bounded by the cache's timeout. */
     deps: makeDepCache({ exec: async (cmd, args, { cwd, env, timeoutMs } = {}) => String((await pexec(cmd, args, { cwd, env: { ...process.env, ...(env ?? {}) }, timeout: timeoutMs ?? 0, maxBuffer: 100 * 1024 * 1024 })).stdout) }),
