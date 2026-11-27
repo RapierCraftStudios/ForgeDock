@@ -1109,6 +1109,8 @@ describe("core work-on", () => {
     const pd = (summary) => code(world({ result: { status: "blocked", summary, block: { kind: "human", why: "product-decision" } } }));
     assert.equal(await pd("the yaml lane-tools recipe lives in the engine, so the lane cannot install it"), "env.tool_missing");
     assert.equal(await rb("no Python 3.11 interpreter in the sandbox (only 3.12.3)"), "env.tool_missing");
+    assert.equal(await pd("needs a user-approved merge of staging (CLAUDE.md forbids agent git merge)"), "base.conflict"); // #6137
+    assert.equal(await pd("needs a user-approved merge of staging, plus owner approval of the Stripe pricing"), "builder.blocked");
     assert.equal(await pd("needs Stripe approval before the pricing change ships"), "builder.blocked");
     assert.equal(await rb("needs the production API key and credentials from the owner"), "builder.blocked");
     assert.equal(await rb("this lane has no sops/age key", { ...remote, hostCaps: undefined }), "builder.blocked");
@@ -2701,7 +2703,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 2750: #5750 (outcome vs guidance rows). 2650: #5557 (classification record line) on top of the base's growth. 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule). 1675 (hotspot case): #5284 (rubric prod_parity clause). 2375/1825: #5345 (self-check and pitfall lines).
-    assert.ok(approxTokens(plan) <= 2750, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    assert.ok(approxTokens(plan) <= 2800, `plan prompt with hotspots is ${approxTokens(plan)} tokens`); // 2800: #6137 (base merge is base-sync)
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 2075, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 2075 tokens`); // 2075: #5979 (substitute-validate and out-of-band from the shared amendment schema); 2025: #5752 (mechanism supersedes, negative examples, outcome evidence) // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule) // 1925: #5760 (CI budget rule)
   });
 
@@ -10232,6 +10234,14 @@ describe("#5749 freeze-time runnability: host-only commands, recipes, check tail
     assert.equal(r.code, "env.tool_missing"); assert.equal(r.terminalReason, "needs-human");
     assert.ok(prepared.length >= 2, "deps prepared at setup and once more after the missing tool");
     assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 0, "no builder resume");
+  });
+  it("#6138 a module missing at run time (isolated interpreter) is installed system-wide once, then env.tool_missing, never ci.red", async () => {
+    const w = world(); const cmds = [];
+    w.io.runCommand = async ({ command }) => { cmds.push(command); return /pip install/.test(command) ? { rc: 0, output: "" } : { rc: 1, output: "Traceback\nModuleNotFoundError: No module named 'yaml'" }; };
+    const r = await atIdleLoad(() => run(w, { precheck: { commands: ["python3 -I check.py"] }, verify: { ...parseVerify({}), precheckBlock: true } }));
+    assert.equal(r.code, "env.tool_missing");
+    const installs = cmds.filter((c) => /pip install/.test(c));
+    assert.equal(installs.length, 1); assert.doesNotMatch(installs[0], /--user/);
   });
   it("#6094 a check that fails in a test file the diff does not touch is rerun once: green on rerun is no fix round; red twice stays ci.red", async () => {
     const out = "not ok 3 - ten concurrent\n  location: '/w/bin/tests/mirror-script.test.mjs:48:3'";

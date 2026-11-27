@@ -34,6 +34,24 @@ export function envGapBlockCode(why, text) {
   return null;
 }
 
+const BASE_MERGE_RE = /\b(?:merge|merging|merged|sync|syncing|rebase|rebasing|update|updating|bring(?:ing)?)\b[^.\n]{0,50}\b(?:staging|main|master|develop|trunk|the base(?: branch)?|base branch|upstream|origin\/\w+)\b|\b(?:staging|main|master|the base(?: branch)?|base branch)\b[^.\n]{0,40}\b(?:merge|merged|into (?:the |this |my |our )?(?:lane|branch|worktree))\b/i;
+const APPROVAL_NOISE_RE = /\b(?:user|owner|human|operator)[- ]?(?:approved|approval)\b|\bapprov(?:al|ed|e)\b|CLAUDE\.md[^.\n]{0,60}\b(?:forbids?|prohibits?|disallows?|says|rule)\b[^.\n]{0,40}/gi;
+
+/**
+ * #6137: merging the base into the lane's own branch is the engine's base-sync, never a human gate. A human block whose only
+ * reason is such a merge (a repo rule against agents merging is meant for PRs and protected branches) is a mechanical base-sync.
+ * Other human signals (spend, credentials, a PR merge, promotion to main) keep the block human.
+ * @param {string} why
+ * @param {string} text
+ */
+export function baseMergeOnlyBlock(why, text) {
+  if (String(why) !== "product-decision") return false;
+  const s = String(text ?? "");
+  if (!BASE_MERGE_RE.test(s)) return false;
+  if (/\b(?:pull request|PR)\b[^.\n]{0,20}\bmerge|\bmerge\b[^.\n]{0,20}\b(?:PR|pull request)\b|\bpromot|\brelease\b|\b(?:to|into) (?:main|production|prod)\b/i.test(s)) return false;
+  return !HUMAN_SIGNAL_RE.test(s.replace(APPROVAL_NOISE_RE, " "));
+}
+
 /** The failed check results (`{command, rc, output}`) whose output names a missing tool. */
 export function toolGapFailures(failed = []) {
   return failed.filter((f) => CHECK_TOOL_GAP_RE.test(String(f?.output ?? "")));

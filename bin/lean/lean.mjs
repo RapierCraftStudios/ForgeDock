@@ -36,7 +36,7 @@ import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mj
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
 import { loadImageManifest, manifestProvides } from "../pool/image-manifest.mjs";
-import { hasRecipe, installLaneTools, genericInstallCommands, RECIPES } from "../pool/lane-tools.mjs";
+import { hasRecipe, installLaneTools, genericInstallCommands, missingPythonModules, RECIPES } from "../pool/lane-tools.mjs";
 import { testRunnerProblems, hostOnlyProblems, preflightProbes, preflightProblems, hostEnvDefects, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, manifestDepOwner, collectOnlyCommand, collectImportMiss, contractCommands } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
@@ -56,7 +56,7 @@ import { renderInvestigation, renderImplementation, renderReview, renderPrBody, 
 import { parseVerifierConfig, pickVerifierModel, changedSymbols, callersOf, verifierBudget, verifierPrompt, parseVerifierFindings, findingsToFailures, renderVerifierNote, VERIFIER_SYSTEM } from "./verifier.mjs";
 import { computeTrigger, riskPathHits, TRIGGER_MODES, pathDomains, parseEnforceDomains } from "./review-trigger.mjs";
 import { hostCapabilityBlock, contractHostNeeds } from "./execution.mjs";
-import { envGapBlockCode, toolGapFailures, packageDirsMissingDeps, failureOutsideDiff } from "./envgap.mjs"; // #6106
+import { baseMergeOnlyBlock, envGapBlockCode, toolGapFailures, packageDirsMissingDeps, failureOutsideDiff } from "./envgap.mjs"; // #6106
 
 const MISSING_TOOL_RE = /command not found|not found in PATH|no such file or directory.*\b(?:docker|promtool)\b|\b(?:docker|promtool)\b[^\n]{0,80}(?:not (?:installed|found|available)|no such file|cannot connect|daemon)|cannot connect to the docker daemon|no docker daemon|no module named|ModuleNotFoundError|\bENOENT\b[^\n]{0,60}spawn/i;
 /** #4685: true when a builder's block summary names a missing tool or module (environment), not a credential. */
@@ -1516,6 +1516,10 @@ export async function runCore(o) {
     if (b.kind === "human" && b.why === "credentials" && o.placement?.where === "remote" && missingToolBlock(s)) {
       // #4685: a tool the sandbox lacks (docker, promtool, a Python module) is an environment gap the host recovers, never a credential.
       return await needsHuman(`Remote sandbox lacks a validate tool (Builder is blocked (credentials)): ${s}\n\nNot a credential: the lane is recovered where the tool exists.`, OUTCOME_CODES.ENV_TOOL_MISSING);
+    }
+    if (b.kind === "human" && baseMergeOnlyBlock(b.why, s)) { // #6137: merging the base into the lane's own branch is the engine's base-sync, never a human gate
+      T.decisions.push(`Builder block (${b.why}) reclassified to base-sync: it only asks for a merge of the base into the lane branch`);
+      return await needsHuman(`Base merge, not a human decision (Builder reported blocked (${b.why})): ${s}\n\nMerging ${base} into the lane's own branch is the engine's base-sync: the lane is recovered with the base merged.`, OUTCOME_CODES.BASE_CONFLICT);
     }
     if (b.kind === "human") { // #6106: a missing tool/interpreter/recipe/package/sandbox capability is an env gap that recovers, whatever reason the builder typed; genuine human reasons stay human
       const envCode = envGapBlockCode(b.why, s);
@@ -2977,6 +2981,7 @@ export async function runCore(o) {
       // #6106: dependencies for every package the checks touch are prepared before the checks run; a missing tool afterwards is env, not ci.red
       let depsReprovisioned = false;
       const flakeReran = new Set();
+      const pyModTried = new Set(); // #6138
       const reprovisionDeps = async (why) => {
         if (depsReprovisioned || !io.deps?.prepare) return false;
         depsReprovisioned = true;
@@ -3027,6 +3032,15 @@ export async function runCore(o) {
         { // #6106: every failed check died on a missing tool/binary (not on its own assertion): prepare dependencies once and rerun, then it is env.tool_missing
           const gap = toolGapFailures(failed);
           if (gap.length && gap.length === failed.length) {
+            { // #6138: the probe passed but the run still lacks a module (isolated interpreter ignores user site): install it system-wide once, rerun, then it is env
+              const mods = missingPythonModules(gap.map((f) => f.output).join("\n")).filter((m) => !pyModTried.has(m));
+              if (mods.length && io.runCommand) {
+                const root = process.getuid?.() === 0;
+                for (const m of mods) { pyModTried.add(m); for (const command of genericInstallCommands({ kind: "python-module", tool: m }, { root })) await io.runCommand({ command, cwd: wt, timeoutMs: 600000, env: laneEnv() }).catch(() => null); }
+                ev({ event: "PRECHECK_PYTHON_MODULE_INSTALL", modules: mods });
+                round--; continue;
+              }
+            }
             if (await reprovisionDeps("check failed on a missing tool")) { round--; continue; }
             ev({ event: "PRECHECK_TOOL_MISSING", commands: gap.map((f) => f.command) });
             return await needsHuman(`Environment error (not a check failure): declared check command(s) could not run because a tool or binary is missing, even after the dependencies were prepared; nothing merged: ${names}${failTail(gap)}`, OUTCOME_CODES.ENV_TOOL_MISSING);

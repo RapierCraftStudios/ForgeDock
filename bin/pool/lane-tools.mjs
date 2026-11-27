@@ -90,6 +90,10 @@ const PYPI = { yaml: "PyYAML", PIL: "Pillow", cv2: "opencv-python-headless", bs4
 const SAFE = /^@?[A-Za-z0-9][A-Za-z0-9._/+-]*$/;
 /** Debian/Ubuntu package stems where the import name differs (python3-<stem>). */
 const APT_PY = { PIL: "pil", cv2: "opencv", bs4: "bs4", sklearn: "sklearn", dateutil: "dateutil", jwt: "jwt", dotenv: "dotenv", serial: "serial", git: "git", magic: "magic" };
+/** Python modules a failed run's output reports missing (`No module named 'yaml'`, top-level name only). */
+export function missingPythonModules(output) {
+  return [...new Set([...String(output ?? "").matchAll(/No module named ['"]?([A-Za-z0-9_]+)/gi)].map((m) => m[1]))];
+}
 export function genericInstallCommands(miss, { root = true } = {}) {
   const tool = String(miss?.tool ?? "").trim();
   if (!tool || !SAFE.test(tool) || tool.includes("..") || (miss.kind === "command" && manifestProvides(IMAGE, tool))) return [];
@@ -98,7 +102,10 @@ export function genericInstallCommands(miss, { root = true } = {}) {
     const mod = tool.split(".")[0], pkg = PYPI[mod] ?? mod;
     // 2026-11-26: lane images may ship python3 without pip; the distro package (python3-<module>) is the fallback
     const deb = `python3-${(APT_PY[mod] ?? mod).toLowerCase().replace(/_/g, "-")}`;
-    return [`python3 -m pip install --user --quiet ${pkg} || python3 -m pip install --user --quiet --break-system-packages ${pkg} || (${su(`apt-get update -qq && apt-get install -y --no-install-recommends ${deb} && rm -rf /var/lib/apt/lists/*`)})`];
+    // #6138: install into the interpreter the validate runs, system-wide (no --user: `python3 -I` ignores user site-packages), then the distro package
+    const pip = `python3 -m pip install --quiet --break-system-packages ${pkg} || python3 -m pip install --quiet ${pkg}`;
+    const apt = `apt-get update -qq && apt-get install -y --no-install-recommends ${deb} && rm -rf /var/lib/apt/lists/*`;
+    return [root ? `${pip} || (${apt})` : `${su(pip)} || (${su(apt)})`];
   }
   if (miss.kind === "node-module") return [`npm install --no-save --no-audit --no-fund ${tool}`];
   if (miss.kind === "command" && !tool.includes("/")) return [su(`apt-get update -qq && apt-get install -y --no-install-recommends ${tool} && rm -rf /var/lib/apt/lists/*`)];
