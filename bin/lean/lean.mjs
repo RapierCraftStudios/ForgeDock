@@ -2948,27 +2948,33 @@ export async function runCore(o) {
     }
     // #6107: a ci.red recovery must not judge a stale tree: the base's current head is merged in before any check runs. A conflict
     // the engine cannot resolve deterministically ends base.conflict (recoverable), never ci.red for a branch that is only behind.
-    if (recover?.code === OUTCOME_CODES.CI_RED && !isSplit && io.runCommand) {
+    // #6153: the same sync runs for an env.tool_missing recovery, and once more when a precheck round fails on a branch that is behind
+    // its base (the base may have fixed the failing guard script): the lane's own stale copy of a check never decides a verdict.
+    let precheckBaseSynced = false;
+    const syncBaseForChecks = async (why) => { // -> {ended} (a terminal result), {merged: true} (rerun the checks) or {merged: false}
+      if (precheckBaseSynced || isSplit || !io.runCommand) return { merged: false };
       try { await git(["fetch", "origin", lane]); } catch { /* offline: the local ref */ }
       const behind = Number(String(await git(["rev-list", "--count", `HEAD..${base}`]).catch(() => "0")).trim()) || 0;
-      if (behind > 0) {
-        let merged = true, conflicted = [];
-        try { await git(["merge", "--no-edit", base]); } catch { merged = false; conflicted = String(await git(["diff", "--name-only", "--diff-filter=U"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean); }
-        if (!merged && conflicted.length) {
-          const bm = o.baseMerge, cr = io.conflictResolve && bm && Object.values(bm).some((v) => v?.length) ? await io.conflictResolve({ cwd: wt, files: conflicted, cfg: bm }).catch(() => null) : null;
-          if (cr?.resolved?.length && !(cr.remaining ?? []).length) { try { await git(["commit", "--no-edit"]); merged = true; } catch { /* abort below */ } }
-          if (!merged) {
-            await git(["merge", "--abort"]).catch(() => {});
-            ev({ event: "RECOVERY_BASE_SYNC", base, behind, result: "conflict", files: conflicted.slice(0, 20) });
-            return await needsHuman(`The branch conflicts with ${base} in ${conflicted.slice(0, 20).join(", ")}; the recovery's checks were not run on the stale tree (a conflicting base is not a check failure); nothing merged.`, OUTCOME_CODES.BASE_CONFLICT);
-          }
-        } else if (!merged) { await git(["merge", "--abort"]).catch(() => {}); T.anomalies.push(`Recovery base-sync could not merge ${base} (${behind} commit(s) behind, no conflict files); checks run on the branch as it is`); }
-        if (merged) {
-          ev({ event: "RECOVERY_BASE_SYNC", base, behind, result: "merged" });
-          T.decisions.push(`Recovery: merged ${base} (${behind} commit(s) behind) before re-running the checks`);
-          files = await changedFiles();
+      if (behind <= 0) return { merged: false };
+      precheckBaseSynced = true;
+      let merged = true, conflicted = [];
+      try { await git(["merge", "--no-edit", base]); } catch { merged = false; conflicted = String(await git(["diff", "--name-only", "--diff-filter=U"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean); }
+      if (!merged && conflicted.length) {
+        const bm = o.baseMerge, cr = io.conflictResolve && bm && Object.values(bm).some((v) => v?.length) ? await io.conflictResolve({ cwd: wt, files: conflicted, cfg: bm }).catch(() => null) : null;
+        if (cr?.resolved?.length && !(cr.remaining ?? []).length) { try { await git(["commit", "--no-edit"]); merged = true; } catch { /* abort below */ } }
+        if (!merged) {
+          await git(["merge", "--abort"]).catch(() => {});
+          ev({ event: "RECOVERY_BASE_SYNC", base, behind, result: "conflict", why, files: conflicted.slice(0, 20) });
+          return { ended: await needsHuman(`The branch conflicts with ${base} in ${conflicted.slice(0, 20).join(", ")}; the checks were not judged on the stale tree (a conflicting base is not a check failure); nothing merged.`, OUTCOME_CODES.BASE_CONFLICT) };
         }
-      }
+      } else if (!merged) { await git(["merge", "--abort"]).catch(() => {}); T.anomalies.push(`Base-sync before the checks could not merge ${base} (${behind} commit(s) behind, no conflict files); checks judged on the branch as it is`); return { merged: false }; }
+      ev({ event: "RECOVERY_BASE_SYNC", base, behind, result: "merged", why });
+      T.decisions.push(`Merged ${base} (${behind} commit(s) behind) ${why}`);
+      files = await changedFiles();
+      return { merged: true };
+    };
+    if ((recover?.code === OUTCOME_CODES.CI_RED || recover?.code === OUTCOME_CODES.ENV_TOOL_MISSING) && !isSplit && io.runCommand) {
+      const sy = await syncBaseForChecks("before the recovery's first check run"); if (sy.ended) return sy.ended;
     }
     let ciCommands = await ciPrecheckPlan(0);
     const pickChecks = () => planPrecheck({ testMap, files, learned: [...learnedCommands, ...ciCommands], maxMinutes: o.precheck?.maxMinutes, verify: vcfg });
@@ -3028,6 +3034,10 @@ export async function runCore(o) {
         const names = failed.map((f) => `\`${f.command}\` (exit ${f.rc})`).join(", ");
         // #5749/#6107: the park names each failing check and carries the last ~40 lines of its output, secrets redacted (run log too)
         const failTail = (fs) => { const rows = fs.map((f) => ({ name: ciDerived.get(f.command)?.name ?? null, command: f.command, rc: f.rc, tail: checkFailureTail(f, { name: ciDerived.get(f.command)?.name }) })); ev({ event: "PRECHECK_FAILED", round, checks: rows.map(({ name, command, rc, tail }) => ({ name, command, rc, tail })) }); return rows.map((r) => r.tail).join(""); };
+        { // #6153: a failing check on a branch behind its base is rerun once on the merged tree before it is classified (the base may have fixed the guard script)
+          const sy = await syncBaseForChecks(`after a failing check, before classifying it (the base may have fixed the check's script)`); if (sy.ended) return sy.ended;
+          if (sy.merged) { picked = pickChecks(); round--; continue; }
+        }
         if (isSplit) return await needsHuman(`Declared check command(s) fail on the refactor:split move (no builder edits a split); nothing merged: ${names}${failTail(failed)}`, OUTCOME_CODES.CI_RED);
         { // #6106: every failed check died on a missing tool/binary (not on its own assertion): prepare dependencies once and rerun, then it is env.tool_missing
           const gap = toolGapFailures(failed);
