@@ -182,3 +182,9 @@ The router ships agents only `AGENT_BUNDLE_PATHS` (`package.json`, `bin/pool`, `
 - `status()` agents carry `engine_version` and `engine_skew` (below the target); `pool status` shows an ENGINE column and `SKEW`. `pool upgrade` and `forgedock update` name agents still on an older engine.
 - The orchestrator re-admits an engine-held remote lane on the agent's engine (`envHold.agentVersion`, from the router status), not its own.
 
+## Lane image distribution (#6166)
+
+- `publish.yml` pushes `ghcr.io/rapiercraftstudios/forgedock-lane:<version>` (and `:r-<recipe hash>`, linux/amd64) after each release. The package must be public.
+- `bin/pool/lane-image.mjs` `provideLaneImage` (self-update and `ensureImage`): present locally, else `docker pull` + retag to `forgedock-lane:<version>` after checking the `forgedock.recipe` label equals `versionOf().image`, else the local build (today's path). Mismatched pulls are removed.
+- Pull and build are retried once under temporary `/etc/hosts` IPv4 pins on an IPv6 dial error (`cannot assign requested address`, `network is unreachable`); pins are marked `# forgedock-ipv4-pin` and removed afterwards.
+- Seed a host by hand: `docker pull ghcr.io/rapiercraftstudios/forgedock-lane:<version> && docker tag ... forgedock-lane:<version>`. Decision: `devdocs/decisions/6166-prebuilt-lane-image.md`.
