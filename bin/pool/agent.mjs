@@ -6,7 +6,7 @@ const LANE_BUILD_RETRY_AFTER_S = 300;
 import { randomBytes } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, statfsSync, lstatSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, statfsSync, lstatSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { cpus, hostname } from "node:os";
 import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
@@ -36,6 +36,8 @@ export function netRx(now = Date.now(), read = () => readFileSync("/proc/net/dev
   } catch { return null; }
 }
 const LOG_CHUNK = 256 * 1024;
+const RUNS_IN_SANDBOX = "/root/.forge/runs/."; // #6117: where the lane engine writes its run log (docker cp source)
+const RUNLOG_MAX = 20 * 1024 * 1024, TAIL_LINES = 200, GRAVE_LOG_MAX = 1024 * 1024;
 const run = promisify(execFile);
 
 /** What this machine/VM actually has (on WSL: the VM caps from .wslconfig). */
@@ -145,6 +147,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const leaseTtlMs = (cfg.lease_ttl_s ?? 600) * 1000;
   const maxLifeMs = (cfg.max_lifetime_s ?? 6 * 3600) * 1000;
   const keepExitedMs = (cfg.keep_exited_s ?? 2 * 3600) * 1000;
+  const keepLogMs = (cfg.keep_log_s ?? 600) * 1000; // #6117: a destroyed sandbox's last log, run log and result stay readable this long, so a late fetch still works
+  const graveyard = new Map(); // sandbox id -> {until, log: {from, size, text}, tail, runLog, result}
   const keepPressureMs = (cfg.keep_disk_pressure_s ?? 24 * 3600) * 1000; // #5891: a disk-pressure stop keeps its worktree long enough for the requeue
   const running = versionOf(cfg.code_root ?? repoRoot);
   // The lane image tracks the installed ForgeDock version; only an explicit non-legacy cfg.image overrides it.
@@ -683,9 +687,51 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     try { return JSON.parse(readFileSync(join(r.dir, "result", basename(r.result_file)), "utf8")); } catch { return null; }
   }
 
+  /** #6117: the lane's own run log (jsonl text, newest RUNLOG_MAX bytes), copied out of the container (running or exited); "" when unavailable. */
+  async function readRunLog(r) {
+    if (typeof docker.copyOut !== "function") return "";
+    let tmp = null;
+    try {
+      tmp = mkdtempSync(join(stateDir, "runlog-"));
+      await docker.copyOut(r.name, RUNS_IN_SANDBOX, tmp);
+      const want = new RegExp(`(^|__)${String(r.issue ?? "").replace(/[^\w.-]/g, "")}\\.jsonl$`);
+      const files = readdirSync(tmp).filter((f) => want.test(f));
+      if (!files.length) return "";
+      const text = readFileSync(join(tmp, files.sort((a, b) => statSync(join(tmp, b)).size - statSync(join(tmp, a)).size)[0]), "utf8");
+      if (text.length <= RUNLOG_MAX) return text;
+      const cut = text.slice(-RUNLOG_MAX); return cut.slice(cut.indexOf("\n") + 1); // whole lines only
+    } catch { return ""; } finally { if (tmp) rmSync(tmp, { recursive: true, force: true }); }
+  }
+  /** The last TAIL_LINES lines of the sandbox's lane log (its engine stderr/stdout). */
+  function logTail(r) {
+    try { const t = readFileSync(join(r.dir, "out", "lane.log"), "utf8"); return t.split("\n").slice(-(TAIL_LINES + 1)).join("\n"); } catch { return ""; }
+  }
+  /** #6117: `{run_log, tail}` of a live sandbox, or of a destroyed one inside its grace period; null when unknown. */
+  async function evidence(id) {
+    const r = own(id);
+    if (r) return { run_log: await readRunLog(r), tail: logTail(r) };
+    const g = grave(id);
+    return g ? { run_log: g.runLog, tail: g.tail } : null;
+  }
+  const grave = (id) => { const g = typeof id === "string" ? graveyard.get(id) : null; if (g && g.until <= now()) { graveyard.delete(id); return null; } return g ?? null; };
+  /** Keeps what a late fetch needs once the container and its dir are gone. */
+  async function bury(r) {
+    try {
+      let text = "", size = 0;
+      try { size = statSync(join(r.dir, "out", "lane.log")).size; const fd = openSync(join(r.dir, "out", "lane.log"), "r"); try { const len = Math.min(size, GRAVE_LOG_MAX); const buf = Buffer.alloc(len); readSync(fd, buf, 0, len, size - len); text = buf.toString("utf8"); } finally { closeSync(fd); } } catch { /* no log */ }
+      graveyard.set(r.id, { until: now() + keepLogMs, log: { from: size - Buffer.byteLength(text), size, text }, tail: logTail(r), runLog: await readRunLog(r), result: readResult(r) });
+    } catch { /* best effort: the destroy goes on */ }
+  }
+  function graveLog(g, cursor) {
+    const c = Math.max(Number(cursor) || 0, g.log.from);
+    if (c >= g.log.size) return { text: "", cursor: g.log.size };
+    return { text: Buffer.from(g.log.text).subarray(c - g.log.from).toString("utf8"), cursor: g.log.size };
+  }
+
   async function destroy(id, why, { keepWork = false } = {}) {
     const r = own(id);
     if (!r) return false;
+    if (keepLogMs > 0) await bury(r); // #6117: before the container and its dir go
     if (r.slug && r.diskPeakMb) { const h = (hist()[r.slug] ??= []); h.push(r.diskPeakMb); if (h.length > 50) h.shift(); }
     const history = r.usage?.samples ? JSON.stringify({ at: new Date(now()).toISOString(), id: r.id, issue: r.issue, repo: r.repo ?? null, docker: Boolean(r.docker), minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10, ...usageView(r) }) : null;
     await docker.remove(r.name);
@@ -896,6 +942,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
 
   async function reap() {
     const t = now();
+    for (const id of [...graveyard.keys()]) grave(id); // #6117: expired grace entries go
     for (const r of Object.values(sb())) {
       try { await refresh(r); } catch { /* docker hiccup: judge by lease only */ }
       const why = t - r.lease > leaseTtlMs && !r.diskPaused && !r.memPaused ? "lease expired" : t - r.startedAt > maxLifeMs ? "max lifetime" : r.state === "exited" && r.finishedAt && t - r.finishedAt > (r.diskPressure ? keepPressureMs : keepExitedMs) ? "exited retention" : null;
@@ -1104,8 +1151,9 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     [route("POST", "/warm"), async (_p, body) => { const r = warm.configure({ ...(body ?? {}), n: body?.n }); await warm.replenish(); return { status: 200, body: { ...r, warm: warm.list() } }; }],
     [route("POST", "/warm/claim"), async (_p, body) => warm.claim(body ?? {})],
     [route("GET", "/sandboxes/:id"), async ({ id }) => { const r = own(id); if (!r) return { status: 404, body: { state: "gone" } }; await refresh(r); store.save(); return { status: 200, body: view(r) }; }],
-    [route("GET", "/sandboxes/:id/logs"), async ({ id }, _b, url) => { const r = own(id); return r ? { status: 200, body: readLog(r, url.searchParams.get("cursor")) } : { status: 404, body: { text: "", cursor: 0 } }; }],
-    [route("GET", "/sandboxes/:id/result"), async ({ id }) => { const r = own(id); const x = r && readResult(r); if (!x && r?.drained) return { status: 200, body: { drained: true, reason: r.drained } }; if (!x && r?.diskPressure) return { status: 200, body: { disk_pressure: true, code: "sandbox.disk_pressure", reason: "host drive below the hard floor" } }; /* #5891 */ return x ? { status: 200, body: x } : { status: 404, body: { error: "no result" } }; }], // #5856: a drained lane without its own result is reported so the dispatcher reschedules it
+    [route("GET", "/sandboxes/:id/logs"), async ({ id }, _b, url) => { const r = own(id), g = !r && grave(id); return r ? { status: 200, body: readLog(r, url.searchParams.get("cursor")) } : g ? { status: 200, body: graveLog(g, url.searchParams.get("cursor")) } : { status: 404, body: { text: "", cursor: 0 } }; }],
+    [route("GET", "/sandboxes/:id/runlog"), async ({ id }) => { const e = await evidence(id); return e ? { status: 200, body: e } : { status: 404, body: { error: "no run log" } }; }], // #6117
+    [route("GET", "/sandboxes/:id/result"), async ({ id }) => { const r = own(id); const x = r ? readResult(r) : grave(id)?.result; if (!x && r?.drained) return { status: 200, body: { drained: true, reason: r.drained } }; if (!x && r?.diskPressure) return { status: 200, body: { disk_pressure: true, code: "sandbox.disk_pressure", reason: "host drive below the hard floor" } }; /* #5891 */ return x ? { status: 200, body: x } : { status: 404, body: { error: "no result" } }; }], // #5856: a drained lane without its own result is reported so the dispatcher reschedules it
     [route("GET", "/sandboxes/:id/usage"), async ({ id }) => { const r = own(id); return r ? { status: 200, body: { minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10 } } : { status: 404, body: {} }; }],
     [route("POST", "/sandboxes/:id/lease"), async ({ id }) => { const r = own(id); if (!r) return { status: 404, body: { state: "gone" } }; r.lease = now(); store.save(); return { status: 200, body: { ok: true } }; }],
     // #5274: SIGTERM the lane (PID 1) so its teardown checkpoints and reports deferred run.interrupted; the sandbox is kept, never destroyed.
@@ -1169,7 +1217,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     await pruneLaneImages();
   }
 
-  return { handle, launch, warm, reap, destroy, capacity, refresh, store, prepullImages, ensureImage };
+  return { handle, launch, warm, reap, destroy, capacity, refresh, store, prepullImages, ensureImage, evidence, graveLog: (id, cursor) => { const g = grave(id); return g ? graveLog(g, cursor) : null; } };
 }
 
 /**

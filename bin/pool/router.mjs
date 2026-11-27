@@ -460,6 +460,17 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     return { status: 404, body: { error: "no warm sandbox ready" } };
   }
 
+  // #6117: a destroyed sandbox's placing agent, for the agent's log grace period: a late log/result/runlog read still reaches it.
+  const graced = new Map(); // id -> {agent, until}
+  const GRACE_MS = Number(cfg.keep_log_s ?? 600) * 1000;
+  async function forwardRead(id, path) {
+    if (own(sbx(), id)) return forward(id, "GET", path);
+    const g = graced.get(id);
+    if (!g || g.until <= now()) { graced.delete(id); return { status: 404, body: { state: "gone" } }; }
+    const a = own(agents(), g.agent);
+    if (!a) return { status: 404, body: { state: "gone" } };
+    try { const r = await agentCall(a, "GET", path); return { status: r.status, body: agentBody(r, g.agent) }; } catch (e) { return { status: 502, body: { error: `agent ${g.agent} unreachable: ${e.message}` } }; }
+  }
   async function forward(id, method, path, timeoutMs) {
     const s = own(sbx(), id);
     const a = s && own(agents(), s.agent);
@@ -467,7 +478,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     s.touched = now(); store.save();
     try {
       const r = await agentCall(a, method, path, undefined, timeoutMs);
-      if (method === "DELETE" && (r.ok || r.status === 404)) { delete sbx()[id]; relayQ.delete(id); store.save(); }
+      if (method === "DELETE" && (r.ok || r.status === 404)) { if (r.ok && GRACE_MS > 0) graced.set(id, { agent: s.agent, until: now() + GRACE_MS }); delete sbx()[id]; relayQ.delete(id); store.save(); }
       return { status: r.status, body: agentBody(r, s.agent) };
     } catch (e) { return { status: 502, body: { error: `agent ${s.agent} unreachable: ${e.message}` } }; }
   }
@@ -483,7 +494,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       try {
         if (now() - s.touched > abandonMs) {
           const r = await agentCall(a, "DELETE", `/sandboxes/${encodeURIComponent(id)}`, undefined, DESTROY_TIMEOUT_MS);
-          if (r.ok || r.status === 404) { delete sbx()[id]; relayQ.delete(id); log.info?.(`abandoned ${id} destroyed on ${s.agent}`); }
+          if (r.ok || r.status === 404) { if (r.ok && GRACE_MS > 0) graced.set(id, { agent: s.agent, until: now() + GRACE_MS }); delete sbx()[id]; relayQ.delete(id); log.info?.(`abandoned ${id} destroyed on ${s.agent}`); }
         } else {
           const r = await agentCall(a, "POST", `/sandboxes/${encodeURIComponent(id)}/lease`);
           if (r.status === 404) { delete sbx()[id]; relayQ.delete(id); log.info?.(`${id} gone on ${s.agent}`); }
@@ -657,8 +668,9 @@ bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TM
     [route("GET", "/sandboxes/:id/mirrors"), fd(async ({ id }, _b, url) => seedForward(id, "GET", `/mirrors?${new URLSearchParams([...[...url.searchParams].filter(([k]) => ["slug", "cache_key", "upload"].includes(k)), ["uploader", id]])}`, undefined, url.searchParams.get("slug")))], // #5949; uploader: per-sandbox part file (concurrent identical bundles)
     [route("POST", "/sandboxes/:id/seed"), fd(async ({ id }, body) => seedForward(id, "POST", "/mirrors/seed", { ...(body ?? {}), uploader: id }, body?.slug))],
     [route("GET", "/sandboxes/:id"), fd(async ({ id }) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}`))],
-    [route("GET", "/sandboxes/:id/logs"), fd(async ({ id }, _b, url) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/logs?cursor=${encodeURIComponent(url.searchParams.get("cursor") ?? "0")}`))],
-    [route("GET", "/sandboxes/:id/result"), fd(async ({ id }) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/result`))],
+    [route("GET", "/sandboxes/:id/logs"), fd(async ({ id }, _b, url) => forwardRead(id, `/sandboxes/${encodeURIComponent(id)}/logs?cursor=${encodeURIComponent(url.searchParams.get("cursor") ?? "0")}`))],
+    [route("GET", "/sandboxes/:id/result"), fd(async ({ id }) => forwardRead(id, `/sandboxes/${encodeURIComponent(id)}/result`))],
+    [route("GET", "/sandboxes/:id/runlog"), fd(async ({ id }) => forwardRead(id, `/sandboxes/${encodeURIComponent(id)}/runlog`))], // #6117
     [route("GET", "/sandboxes/:id/usage"), fd(async ({ id }) => { // #4549: the placing agent rides along for per-agent minutes
       const agent = own(sbx(), id)?.agent, r = await forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/usage`);
       return agent && r.status === 200 && r.body && typeof r.body === "object" ? { ...r, body: { ...r.body, agent } } : r;
@@ -768,7 +780,7 @@ bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TM
     }
   }
 
-  return { handle, launch, claim, tick, autoscale, enroll, issueCode, capacities, status, store };
+  return { handle, launch, claim, tick, autoscale, enroll, issueCode, capacities, status, store, forward, forwardRead };
 }
 
 /** tokenbaton's usage dir (#5165): router.json `usage_source`, else `$TOKENBATON_HOME`, else `~/.tokenbaton`. */

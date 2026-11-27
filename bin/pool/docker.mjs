@@ -32,6 +32,8 @@ export const dockerCli = {
       throw e;
     }
   },
+  /** #6117: copies `src` (a path inside container `name`, running or exited) into the host dir `dest`. */
+  async copyOut(name, src, dest) { await docker(["cp", `${name}:${src}`, dest], { timeoutMs: 60000 }); },
   async remove(name) { try { await docker(["rm", "-f", "-v", name], { timeoutMs: 60000 }); } catch (e) { if (!/No such container/i.test(e.stderr ?? "")) throw e; } },
   /** Signal the container's main process (the lane). False when the container is gone or already stopped. */
   async kill(name, signal = "TERM") {

@@ -18,7 +18,7 @@ function laneLog() {
 function hostProvider(result) {
   const hostDir = tmpDir("rl-host-");
   const transport = { launch: async () => ({}), status: async () => "exited", logs: async () => ({ text: "", cursor: 0 }), result: async () => result, usage: async () => null, destroy: async () => true };
-  const provider = remoteProvider({ batch: { id: "b1", logFile: () => join(hostDir, "x.log") }, repo: REPO, settings: {}, transport, env: { FORGE_RUNS_DIR: hostDir }, credentials: () => null, gitIdentity: () => ({}) });
+  const provider = remoteProvider({ batch: { id: "b1", logFile: () => join(tmpDir("rl-lanes-"), "x.log") }, repo: REPO, settings: {}, transport, env: { FORGE_RUNS_DIR: hostDir }, credentials: () => null, gitIdentity: () => ({}) });
   return { provider, hostDir };
 }
 
