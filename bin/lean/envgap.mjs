@@ -79,7 +79,23 @@ export function packageDirsMissingDeps(commands = [], exists = () => false) {
   return [...dirs].filter((d) => exists(`${d}/package.json`) && !exists(`${d}/node_modules`));
 }
 
-const SOURCE_PATH_RE = /(?:[\w@.-]+\/)*[\w@.-]+\.(?:test|spec)\.[cm]?[jt]sx?\b|(?:[\w@.-]+\/)*(?:test_[\w-]+|[\w-]+_test)\.(?:py|go|rb|rs)\b|(?:[\w@.-]+\/)*[\w-]+Tests?\.(?:java|kt|cs)\b/g;
+// #6094: test-file names in check output. A linear token scan (split on non-path characters, then an anchored test of each
+// basename): the earlier single regex nested quantifiers over overlapping classes and backtracked exponentially on long
+// path-like output, which froze the lane (and the test suite) in a microtask-free spin.
+const TEST_BASENAME_RES = [/^[\w@.-]+\.(?:test|spec)\.[cm]?[jt]sx?$/, /^(?:test_[\w-]+|[\w-]+_test)\.(?:py|go|rb|rs)$/, /^[\w-]+Tests?\.(?:java|kt|cs)$/];
+const MAX_SCAN_CHARS = 512 * 1024, MAX_TOKEN_CHARS = 400;
+function testFilesNamed(output) {
+  const text = String(output ?? "");
+  const out = new Set();
+  for (const raw of (text.length > MAX_SCAN_CHARS ? text.slice(-MAX_SCAN_CHARS) : text).split(/[^\w@./-]+/)) {
+    if (!raw || raw.length > MAX_TOKEN_CHARS) continue;
+    const tok = raw.replace(/^[./]+(?=[\w@])/, "").replace(/[.]+$/, "");
+    const slash = tok.lastIndexOf("/");
+    const base = slash < 0 ? tok : tok.slice(slash + 1);
+    if (base && TEST_BASENAME_RES.some((re) => re.test(base))) out.add(tok);
+  }
+  return [...out];
+}
 
 /**
  * #6094: a failing check whose output names test files and none of them is in the diff is not caused by the change: the lane
@@ -88,7 +104,7 @@ const SOURCE_PATH_RE = /(?:[\w@.-]+\/)*[\w@.-]+\.(?:test|spec)\.[cm]?[jt]sx?\b|(
  * @param {string[]} changed  files the lane's diff touches
  */
 export function failureOutsideDiff(output, changed = []) {
-  const named = [...new Set(String(output ?? "").match(SOURCE_PATH_RE) ?? [])];
+  const named = testFilesNamed(output);
   if (!named.length) return false;
   const touched = (p) => changed.some((c) => c === p || c.endsWith(`/${p}`) || p.endsWith(`/${c}`) || c.split("/").pop() === p.split("/").pop());
   return !named.some(touched);
