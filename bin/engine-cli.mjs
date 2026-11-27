@@ -2203,17 +2203,12 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         : execMod.placeLane({ exec: e, verifyMode, labels: labelsOf.get(n) ?? [], weight: weight.get(), headroom: hostHeadroom(), needs: needsOf.get(n) ?? [], relays }));
       if (batch.readExecution()?.provider !== true) batch.setExecution({ provider: true });
       // #4540: provider free slots, refreshed in the background (admission is sync); unknown (null) never blocks.
-      let capSample = null, onlineSample = null, capAt = 0, capLast = -Infinity, capFailed = false; // #5048: capFailed = last probe rejected // #4547: online = agents alive, null unknown
-      let liveSample = {}, usageLast = -Infinity; // #5985: the pool's live load/memory ride the capacity sample
+      let usageLast = -Infinity; // #5985: the pool's live load/memory ride the capacity sample
+      const { makeCapacitySampler } = await import("./lean/capsample.mjs");
+      const sampleCapacity = makeCapacitySampler({ provider, ...(deps.now ? { now: deps.now } : {}), pollMs: deps.pollMs ?? 5000 }); // #4547: online = agents alive, null unknown
       const capacity = () => {
         if (typeof provider.usageHistory === "function" && (deps.now ? deps.now() : Date.now()) - usageLast >= 600000) { usageLast = deps.now ? deps.now() : Date.now(); Promise.resolve().then(() => provider.usageHistory()).then((rows) => { if (Array.isArray(rows)) poolUsage = rows; }, () => {}); }
-        if (capFailed) throw new Error("capacity probe failed"); // #5048: until the next successful sample, so every caller sees it (release review CONC-1)
-        const t = deps.now ? deps.now() : Date.now();
-        if (typeof provider.capacity === "function" && t - capLast >= (deps.pollMs ?? 5000)) {
-          capLast = t;
-          Promise.resolve().then(() => provider.capacity()).then((c) => { capFailed = false; capSample = c && Number.isInteger(c.free) ? c.free : null; onlineSample = c && Number.isInteger(c.online) ? c.online : null; liveSample = { ...(Number.isFinite(c?.load_per_core) ? { load_per_core: c.load_per_core } : {}), ...(Number.isFinite(c?.mem_available_gb) ? { mem_available_gb: c.mem_available_gb } : {}) }; capAt++; }, () => { capSample = null; onlineSample = null; capFailed = true; capAt++; });
-        }
-        return capSample === null && onlineSample === null ? null : { free: capSample, online: onlineSample, ...liveSample, at: capAt };
+        return sampleCapacity();
       };
       remote = liveExec.liveRemote({
         hostFallback: readHostFallback(), capacity, isRemote: () => true, identity: () => holdId, ...(exec.fallbackLocal ? { offlineFallback: true, headroom: hostHeadroom, ...(exec.capacityFallbackAfter ? { capacityFallbackAfter: exec.capacityFallbackAfter } : {}) } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,

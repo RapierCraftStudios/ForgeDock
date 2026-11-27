@@ -154,3 +154,26 @@ describe("#5933 drain semantics", () => {
     assert.equal(mk({ mode: "hybrid", maxRemote: 0 }).place(1).where, "local");
   });
 });
+
+describe("#5746 remote mode never places on the host unless host_fallback is true", () => {
+  const exec = { mode: "remote", maxRemote: 4 };
+  const needsHost = () => ({ where: "local", reason: "host capability: prod-monitor" }); // placeLane: a `needs` entry the provider does not relay
+  it("a host-only capability stays remote when the host is not allowed", () => {
+    const r = liveRemote({ hostFallback: false }, { exec, readOverride: () => null, place: needsHost });
+    assert.deepEqual(r.place(1), { where: "remote", reason: "host fallback off, not on the host: host capability: prod-monitor" });
+    assert.equal(r.mode, "remote");
+  });
+  it("host_fallback true keeps the host placement", () => {
+    const r = liveRemote({ hostFallback: true }, { exec, readOverride: () => null, place: needsHost });
+    assert.equal(r.place(1).where, "local");
+  });
+  it("an operator's live --set-placement local is not a fallback", () => {
+    const r = liveRemote({ hostFallback: false }, { exec, readOverride: () => ({ mode: "local" }), place: needsHost });
+    assert.deepEqual(r.place(1), { where: "local", reason: "live placement: local" });
+    assert.equal(r.mode, "local");
+  });
+  it("hybrid placement is untouched by host_fallback false", () => {
+    const r = liveRemote({ hostFallback: false }, { exec: { mode: "hybrid", maxRemote: 2 }, readOverride: () => null, place: () => ({ where: "local", reason: "light lane, host has headroom" }) });
+    assert.equal(r.place(1).where, "local");
+  });
+});

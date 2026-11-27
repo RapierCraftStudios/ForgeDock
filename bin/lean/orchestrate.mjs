@@ -457,7 +457,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   let budgetLocal = false; // the execution budget refused a remote lane under on_budget local: the rest run on the host
   // #4256: where a lane goes before capacity: `remote.place` (hybrid) or `remote.isRemote` (remote mode).
   const hostFallbackOn = () => remote?.hostFallback !== false; // #5652: unset keeps the host re-placement
+  // #5746: in remote mode the host is orchestrator-only unless host_fallback is true: whatever branch below picks the host (a `needs`
+  // capability, a host pin, a failed placement), the lane is placed remotely instead. An operator's live `--set-placement local` is not a fallback.
   const placeOf = (n) => {
+    const p = placeRaw(n);
+    if (p?.where === "local" && remote?.mode === "remote" && !hostFallbackOn() && p.reason !== "live placement: local") return { where: "remote", reason: `host fallback off, not on the host: ${p.reason}` };
+    return p;
+  };
+  const placeRaw = (n) => {
     if (!remote) return null;
     // #4542: a lane recovering from a remote capability block runs on the host, which has the capability.
     // #4785: a tool-missing recovery too: the sandbox that lacked the tool is not chosen again.
@@ -1462,7 +1469,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     const lane = ln?.lane;
     if (relabelled.delete(n)) save(); // #4315: the recovery lane launches after all; it removes needs-human itself
-    const pl = placed.get(n);
+    // #5746: every running entry records where it runs; a lane admitted without a recorded placement (a requeue path) is derived, never left blank
+    const pl = placed.get(n) ?? (remote ? (remoteRun.has(n) ? { where: "remote", reason: "mode remote" } : (placeOf(n) ?? undefined)) : undefined);
     placed.delete(n);
     const queueMs = Number.isFinite(enqueued.get(n)) ? Math.max(0, now() - enqueued.get(n)) : null; // #4908: queue_wait in the phase ledger
     heads.delete(n); enqueued.delete(n); busyNoted.delete(n);
