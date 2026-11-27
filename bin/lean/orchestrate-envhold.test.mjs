@@ -20,7 +20,7 @@ const harness = ({ script, issues = Object.keys(script).map(Number), parallel = 
     recovery: { maxAttempts: 1, mechanicalMaxAttempts: 3 },
     envHold: { maxMs: 120_000, watchMs: 30_000, ...envHold },
     runOne: async (n, _l, ctx = {}) => {
-      calls.push({ n, recover: ctx.recover?.attempt ?? 0 });
+      calls.push({ n, recover: ctx.recover?.attempt ?? 0, at: t });
       t += 1000;
       const list = script[n] ?? [{ terminalReason: "merged", pr: 1 }];
       const k = calls.filter((c) => c.n === n).length - 1;
@@ -208,6 +208,20 @@ describe("#5755 one env issue per signature", () => {
     const { byIssue } = await harness({ script: { 1: [miss("html2text"), MERGED] }, envHold: null,
       onRow: (r) => { if (r.issue === 1 && r.outcome === "held") closed = true; }, extra: { envIssue: e } });
     assert.equal(byIssue[1].outcome, "merged");
+  });
+
+  it("#6123 an env issue that is closed but the gap persists re-admits with exponential backoff (15m, 1h, 4h), not every watch", async () => {
+    const e = seam(() => true); // closed from the start, the tool is still missing: every re-admit re-parks on the same signature
+    const { calls, byIssue } = await harness({ script: { 1: [miss("html2text"), miss("html2text"), miss("html2text"), miss("html2text"), miss("html2text"), MERGED] },
+      envHold: { maxMs: 5 * 3600_000, watchMs: 300_000 }, extra: { envIssue: e } });
+    const gaps = calls.slice(1).map((c, i) => c.at - calls[i].at);
+    assert.equal(calls.length, 6);
+    assert.equal(byIssue[1].outcome, "merged");
+    // gap 0 is the first re-admit (a fresh env issue closure); each later one waits 15m, 1h, 4h, 4h
+    assert.ok(gaps[0] < 15 * 60_000);
+    assert.ok(gaps[1] >= 15 * 60_000 && gaps[1] < 3600_000, String(gaps));
+    assert.ok(gaps[2] >= 3600_000 && gaps[2] < 4 * 3600_000, String(gaps));
+    assert.ok(gaps[3] >= 4 * 3600_000 && gaps[4] >= 4 * 3600_000, String(gaps));
   });
 
   it("without the seam the env.validate_timeout flow is unchanged (needs-human)", async () => {

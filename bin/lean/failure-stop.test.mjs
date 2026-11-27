@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { repeatSignature, countIdentical, shouldPark, summaryComment } from "./failure-stop.mjs";
+import { repeatSignature, countIdentical, isResetDecision, shouldPark, summaryComment } from "./failure-stop.mjs";
 import { OUTCOME_CODES, RECOVERABLE_CODES, classifyNeedsHuman, parkedLabel } from "../engine/outcome-codes.mjs";
 
 const D1 = "R3 unimplemented at 1e0c3e45 (cost $1.2345, 12 turns) 2026-11-25T10:00:00Z";
@@ -26,6 +26,19 @@ describe("identical-failure stop (#5979)", () => {
     assert.equal(countIdentical([nh(sig)], sig, () => false), 0);
     assert.equal(countIdentical([{ body: `sig=${sig}` }], sig), 0);
     assert.equal(countIdentical([{ body: `<!-- FORGE:PARKED -->\nsig=${sig}` }], sig), 1);
+  });
+  it("#6122 a FORGE:DECISION newer than the last park resets the repeat count; one before it does not; the engine's own premise note never does", () => {
+    const sig = repeatSignature("builder.blocked", "R4 manual");
+    const dec = { body: `<!-- FORGE:DECISION {"requirement":"R4","disposition":"post-deploy","quote":"x"} -->` };
+    const premise = { body: "<!-- FORGE:DECISION -->\n## Decision: no needs-human\nx" };
+    assert.equal(isResetDecision(dec.body), true);
+    assert.equal(isResetDecision(premise.body), false);
+    assert.equal(shouldPark(countIdentical([nh(sig), dec], sig) + 1), false, "decision after the park: the next failure is a first");
+    assert.equal(shouldPark(countIdentical([dec, nh(sig)], sig) + 1), true, "decision before the park does not clear it");
+    assert.equal(shouldPark(countIdentical([nh(sig), premise], sig) + 1), true);
+    assert.equal(shouldPark(countIdentical([nh(sig), dec, nh(sig)], sig) + 1), true, "an identical failure after the decision still parks");
+    assert.equal(countIdentical([nh(sig), dec], sig, () => false), 0);
+    assert.equal(shouldPark(countIdentical([nh(sig), dec], sig, (c) => c !== dec) + 1), true, "an untrusted decision does not reset");
   });
   it("the summary names the attempts, the failure and what would unblock it", () => {
     const s = summaryComment({ attempts: 2, code: "ci.red", detail: "boom", unblock: "decide X", sig: "abcabcabcabc" });
