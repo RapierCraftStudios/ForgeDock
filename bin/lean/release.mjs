@@ -445,7 +445,6 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
       const result = await steps[step](ctx);
       if (result?.refused) { out = { id, status: "refused", step, reason: result.refused }; break; }
       if (result?.blocked) { out = { id, status: "blocked", step, reason: result.reason }; break; }
-      if (result?.aborted) { state.steps[step] = { done: false, at: new Date(io.now()).toISOString(), result }; state.abortedReason = result.aborted; out = { id, status: "aborted", step, reason: `aborted: ${result.aborted}` }; break; } // one fix round max; the fixes stay on staging
       if (result?.skipped && OPTIONAL_STEPS.includes(step)) continue; // unconfigured: leaves no trace in the state
       if (result?.stopped) { state.steps[step] = { done: false, at: new Date(io.now()).toISOString(), result }; out = { id, status: "stopped", step, reason: result.why }; break; }
       state.steps[step] = { done: true, at: new Date(io.now()).toISOString(), result };
@@ -712,7 +711,7 @@ export async function releaseFromCli(argv, deps = {}) {
   const line = r.status === "done" ? `release ${id}: done` : `release ${id}: ${r.status} at ${r.step}: ${r.reason} (resume: forgedock release --resume ${id})`;
   io.print(line);
   try { await budget(Date.parse(openRelease(root, id).load()?.startedAt) || null); } catch { /* best effort */ }
-  const code = r.status === "refused" ? 1 : (r.status === "blocked" || r.status === "aborted") ? BLOCKED_EXIT : 0;
+  const code = r.status === "refused" ? 1 : r.status === "blocked" ? BLOCKED_EXIT : 0;
   if (argv.includes("--watch") && code === 0 && r.status !== "done") return statusCli(["status", id, "--watch", "--repo", repo, ...(flag(argv, "--interval") ? ["--interval", flag(argv, "--interval")] : [])], { io, cwd, env, deps }); // #5848: watch the record this start created
   return code;
 }

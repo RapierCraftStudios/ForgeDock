@@ -850,20 +850,24 @@ release:
 
 `forgedock release verify <release id>` (#5562) re-runs the deploy verification of a release that passed LIVE_CHECK; a release id (`rYYYYMMDD-HHMMSS-N`) is never mistaken for a sha. Policy `verify` block (default branch, `.forge/release.yaml`): `results` (list of `{workflow, kind: smoke|edge|convergence}`, layer 1), `workflow` (verification workflow dispatched through the epoch fence, layer 2), `slis` (layer 3, entries `{name, tolerance, worse: higher|lower, abs}` read through an injected read-only metric source; without one the layer reports `sli: skipped (no host)`), `post_deploy_checks_file` (layer 4, each issue's `[check:id]` runs once; entries with `for` are windowed and become rollup follow-ups), `flags` (layer 5, `{flag, off_command}` verified in the off state, never activated) and `close_requires: verified|deployed`. With `verified` (default once the block is set) an issue is closed only after a `FORGE:VERIFIED <deploy sha>` comment; `deployed` closes without it. Soak minutes by risk class: low 10, medium 20, full 30, p0 15, overridden by `lanes.<lane>.soak_min` (a number or a map by class). An empty `verify` block leaves VERIFYING a bare transition to LIVE.
 
-### Default release flow: CI green first, one review pass, one fix round (#6164)
+### Default release flow: the v1.0 contract (#6164)
 
-This is how `forgedock release` and `forgedock review-staging` work for every repo. There is no switch to turn it off; the keys below only tighten or loosen it.
+`forgedock release` and `forgedock review-staging` follow the original release contract of `commands/review-pr-staging.md` (commit dcfb86bf, 2026-06-05), restored as the default for every repo. There is no switch to turn it off.
 
-- `ci-green` step between `release-pr` and `review`: waits for every required check on the release PR head (branch protection and rulesets of the default branch plus `gate.required_checks`; `forgedock/verify`, `forge/deploy-gate` and the gate-marker check excluded). A failed check is rerun once (same attempt cap as the gate summary). A pass on the rerun counts as green and files a `flaky-test` issue naming the test when the log shows it. A check still red after its rerun runs the existing fix path once, then CI is awaited again. A draft release PR (host preflight mode) has no Actions CI yet, so the step is recorded as skipped there.
-- `forgedock review-staging <PR>` (and `--delta`) refuses while a required check is pending or failing; `--allow-ci-pending` overrides and is recorded in the route marker. A head move during review goes back through `ci-green` before the delta review.
-- One review pass. Only CONFIRMED findings at or above the blocking severity (default HIGH, so CRITICAL and HIGH) block. All other findings are filed for the next release and never trigger a fix or a head move.
-- One fix round per release: batch every fix into one head move, `ci-green` once, then one delta review of the domains the fix touched. A new blocker there ends the release with status `aborted: second blocking round`; the fixes stay on the staging branch and nothing more is pushed.
-- `release status` prints `timing`: `ci_green_min`, `review_min`, `fix_rounds`, `review_passes`; the release ledger mirrors them.
+1. **Open-finding gate first**: an open `review-finding` issue blocks the release before CI or any reviewer.
+2. **`ci-green` step** before `review`: waits for every required check on the release PR head (protection, rulesets and `gate.required_checks`; `forgedock/verify`, `forge/deploy-gate` and the gate-marker check excluded). A failed check is rerun once; a pass on the rerun counts as green and files a `flaky-test` issue naming the test when the log shows it. A check still red after its rerun gets one CI fix round in the release PR, then CI is awaited again. A draft release PR (host preflight mode) has no Actions CI yet, so the step skips it.
+3. **One review pass** on the green head. Every finding is filed as an issue (Phase 7). Nothing the review finds is fixed inside the release PR: no review fix lanes and no review-driven delta passes. A head that moves during review stops the job; re-run it.
+4. **Verdict**: a CONFIRMED CRITICAL/HIGH finding (or a failed guard) means BLOCK. The job stops with `blocked: review blockers #A #B`, the release PR is closed, the blocker issues are added to the repo's open orchestrate batch (`orchestrate --add`) when one exists, and the next release starts fresh after they merge (the open-finding gate enforces it). Without blockers the release merges on GATE_PASS and everything else stays filed for later.
+5. `forgedock review-staging <PR>` pre-dispatch (also `--delta`) runs the gate, then refuses while a required check is pending or failing (`CI not green on <sha> (pending: ..., failing: ...)`); `--allow-ci-pending` overrides and is recorded in the route marker. `--gate-only` runs just the open-finding gate.
+6. `release status` prints `timing`: `ci_green_min`, `review_min`, `fix_rounds`, `review_passes`; the release ledger mirrors them.
+
+Drift this removes: #4358 and #4360 (pre-dispatch and delta passes in the review loop), #5212 (review step fix lanes and delta passes), #5567 (CI and panel started on the same head, `ci.fix.co_start`, now ignored).
 
 ```yaml
 release:
-  block_severity: high       # lowest blocking severity: critical | high | medium
-  ci_green_max_wait_min: 40  # how long ci-green waits for pending checks before it blocks (max 240)
+  block_severity: high        # lowest blocking severity: critical | high | medium (default high)
+  ci_green_max_wait_min: 40   # how long ci-green waits for pending checks before it blocks (max 240)
+  review_fixes: false         # compatibility only: true restores the #5212 review fix lanes and delta passes
 ```
 
 ### `.forge/release.yaml` (#5551)

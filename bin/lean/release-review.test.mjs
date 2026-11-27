@@ -29,6 +29,8 @@ function fakeSeam({ heads = [H1], fins = [fin()], summary, lanes = [], jobs = []
     runAgent: async (a) => { agentCalls.push(a); agents.push(a.role + (a.prompt.includes("findings block required") ? ":reask" : "")); return { text: "ok" }; },
     fileIssue: async ({ item }) => { log.push(["file", item.title]); return n++; },
     failedJobs: async () => jobs,
+    queueBlockers: async () => ({ batch: null }),
+    holdReleasePr: async () => ({ closed: true }),
     fileDeferred: async ({ items }) => { log.push(["deferred", items.map((i) => i.title)]); return []; },
     fileFixIssue: async () => { log.push(["fix-issue"]); return n++; },
     issueMerged: async () => false,
@@ -38,7 +40,8 @@ function fakeSeam({ heads = [H1], fins = [fin()], summary, lanes = [], jobs = []
 }
 /** ci-green seam fake: every required check green at once (no CI to wait for). */
 export const greenCi = (over = {}) => ({ now: () => 0, sleep: async () => {}, isDraft: async () => false, headOf: async () => H1, checks: async () => [], required: async () => [], ...over });
-const ctx = (seam, steps = {}, extra = {}) => ({ io: { review: seam, ciGreen: greenCi() }, repo: "o/r", def: "main", staging: "staging", state: { steps: { "release-pr": { result: { pr: 7 } }, ...steps } }, save() {} });
+/** Legacy suite: `config.reviewFixes` (the #5212 fix lanes and delta passes) is on; the default flow is tested under "default flow (v1.0 contract)". */
+const ctx = (seam, steps = {}, extra = {}) => ({ config: { reviewFixes: true }, io: { review: seam, ciGreen: greenCi() }, ...extra, repo: "o/r", def: "main", staging: "staging", state: { steps: { "release-pr": { result: { pr: 7 } }, ...steps } }, save() {} });
 
 describe("#6098 reviewer fan-out is capped and niced", () => {
   it("mapLimit never has more than the cap in flight and keeps order", async () => {
@@ -209,18 +212,6 @@ describe("fixStep", () => {
     assert.equal((brief.match(/ci:lint/g) ?? []).length, 1);
   });
 
-  it("one fix round, then a new blocker in the delta aborts the release (second blocking round); no third round (#6164)", async () => {
-    const bad = { code: 0, data: { verdict: "BLOCK DEPLOY", marker: "FORGE:GATE_FAILURE", ciFailing: 0 }, lines: [] };
-    const s = fakeSeam({ heads: [H2], summary: bad, fins: [fin({ toFile: [{ id: "A", title: "x", severity: "CRITICAL" }], confirmedIds: ["A"] })] });
-    const c = ctx(s, { review: { result: failed } });
-    const r = await fixStep(c);
-    assert.equal(r.aborted, "second blocking round");
-    assert.equal(s.log.filter((e) => e[0] === "lane").length, 1);
-    assert.equal(c.state.abortedReason, "second blocking round");
-    assert.equal((await fixStep(c)).aborted, "second blocking round", "a resume never opens a third round");
-    assert.equal(s.log.filter((e) => e[0] === "lane").length, 1);
-  });
-
   it("only CONFIRMED CRITICAL/HIGH blocks; MEDIUM, LOW and unconfirmed findings are filed and never trigger a fix or head move (#6164)", async () => {
     const s = fakeSeam({ fins: [fin({ toFile: [{ id: "m", title: "med", severity: "MEDIUM" }, { id: "l", title: "unconfirmed", severity: "HIGH" }, { id: "c", title: "real", severity: "HIGH" }], confirmedIds: ["m", "c"] })] });
     const r = await reviewStep(ctx(s));
@@ -233,14 +224,14 @@ describe("fixStep", () => {
     assert.equal(s2.log.filter((e) => e[0] === "lane").length, 0, "no fix lane");
   });
 
-  it("a head move during review goes back through ci-green before the delta review (#6164)", async () => {
+  it("legacy review_fixes: a head move during review goes back through ci-green before the delta review (#6164)", async () => {
     const order = [];
     const s = fakeSeam({ heads: [H2, H2, H2], fins: [fin({ head: H2 })] });
     const pre = s.pre; s.pre = async (a) => { order.push(a.delta ? "delta-review" : "review"); return pre(a); };
     const c = ctx(s);
     c.io.ciGreen = greenCi({ checks: async () => { order.push("ci-green"); return []; } });
     await reviewStep(c);
-    assert.deepEqual(order, ["review", "ci-green", "delta-review"]);
+    assert.deepEqual(order, ["ci-green", "review", "ci-green", "delta-review"], "legacy knob: ci-green before the review and again before the delta");
   });
 
   it("the delta review after the fix round is preceded by ci-green on the new head and records timing", async () => {
@@ -432,7 +423,7 @@ describe("fixStep one-round loop (#5567)", () => {
   it("ci.fix.max_rounds raises the round budget", async () => {
     const s = fakeSeam({ heads: [H2], summary: bad, jobs: [{ name: "unit", conclusion: "failure", log: "AssertionError" }] });
     const c = ctx(s, { review: { result: failed } });
-    c.config = { fix: { maxRounds: 2 } };
+    c.config = { reviewFixes: true, fix: { maxRounds: 2 } };
     await fixStep(c);
     assert.equal(s.log.filter((e) => e[0] === "lane").length, 2);
   });
@@ -464,7 +455,7 @@ describe("fixStep one-round loop (#5567)", () => {
     let call = 0;
     s.failedJobs = async () => (call++ === 0 ? [{ name: "unit", conclusion: "failure", log: "x" }] : [{ name: "unit", conclusion: "failure", log: "x" }, { name: "e2e", conclusion: "failure", log: "y" }]);
     const c = ctx(s, { review: { result: failed } });
-    c.config = { mode: "snapshot" };
+    c.config = { reviewFixes: true, mode: "snapshot" };
     c.git = (a) => { git.push(a); if (a[0] === "commit-tree") return `${RV}\n`; return `${"6".repeat(40)}\n`; };
     c.io = { ...c.io, git: c.git, gh: async (a) => (a[1] === "list" ? "[]" : JSON.stringify({ body: "" })) };
     c.state.release = { branch: "release/x", snapshot: SNAP, range: {}, picks: [{ sha: PK, orig: "3".repeat(40), kind: "fix" }] };
@@ -531,7 +522,7 @@ describe("fixStep in snapshot mode (#5276)", () => {
     const c = ctx(seam, { review: { result: failed } });
     c.io = { ...c.io, ...w.io };
     c.git = w.io.git;
-    c.config = { mode: "snapshot", ...(fixMode ? { fixMode } : {}) };
+    c.config = { reviewFixes: true, mode: "snapshot", ...(fixMode ? { fixMode } : {}) };
     c.state.release = { branch: "release/x", snapshot: SNAP, range: {}, picks: [] };
     return c;
   };
@@ -646,5 +637,60 @@ describe("#5516 makeLeanRunner fullSession", () => {
     const [lean, full] = seen;
     assert.deepEqual(full, [], "no --disable-slash-commands / tool restriction for the gate session");
     if (lean.length) assert.ok(lean.some((f) => /slash|tools|mcp/i.test(f)), `lean flags restrict the session: ${lean.join(" ")}`);
+  });
+});
+
+describe("default flow (v1.0 contract, dcfb86bf): one review pass, nothing found by review is fixed in the release PR (#6164)", () => {
+  const def = (seam, steps = {}) => ctx(seam, steps, { config: {} });
+  const blockFin = fin({ toFile: [{ id: "A", title: "leak", severity: "HIGH" }, { id: "B", title: "nit", severity: "MEDIUM" }], confirmedIds: ["A", "B"] });
+  const bad = { code: 0, data: { verdict: "BLOCK DEPLOY", marker: "FORGE:GATE_FAILURE", ciFailing: 0 }, lines: [] };
+  it("reviews once, files every finding, and a confirmed HIGH is the only blocker", async () => {
+    const s = fakeSeam({ fins: [blockFin] });
+    const r = await reviewStep(def(s));
+    assert.equal(s.log.filter((e) => e[0] === "file").length, 2, "Phase 7: every finding is filed");
+    assert.deepEqual(r.blocking, [100]);
+    assert.equal(s.log.filter((e) => e[0] === "pre").length, 1);
+  });
+  it("a head that moves during the review is never delta-reviewed in place: the job stops and the release is re-run", async () => {
+    const s = fakeSeam({ heads: [H2, H2, H2] });
+    const r = await reviewStep(def(s));
+    assert.equal(r.blocked, true); assert.match(r.reason, /moved during the review/);
+    assert.deepEqual(s.log.filter((e) => e[0] === "pre"), [["pre", null]], "no --delta pass");
+  });
+  it("GATE_PASS passes with no lane", async () => {
+    const s = fakeSeam();
+    const c = def(s); const r = await reviewStep(c); c.state.steps.review = { done: true, result: r };
+    assert.equal((await fixStep(c)).verdict, "APPROVE FOR DEPLOY");
+    assert.equal(s.log.filter((e) => e[0] === "lane" || e[0] === "fix-issue").length, 0);
+  });
+  it("a confirmed blocker stops the release: no fix lane, blockers queued into the open batch, release PR closed, status names the blockers", async () => {
+    const s = fakeSeam({ fins: [blockFin], summary: bad });
+    const calls = [];
+    s.queueBlockers = async (a) => { calls.push(["queue", a.blockers]); return { batch: "b-1" }; };
+    s.holdReleasePr = async (a) => { calls.push(["hold", a.pr]); return { closed: true }; };
+    const c = def(s); c.state.steps.review = { done: true, result: await reviewStep(c) };
+    const r = await fixStep(c);
+    assert.equal(r.blocked, true); assert.match(r.reason, /^review blockers #100 \(queued in batch b-1\); release PR #7 closed/);
+    assert.deepEqual(calls, [["queue", [100]], ["hold", 7]]);
+    assert.equal(s.log.filter((e) => e[0] === "lane" || e[0] === "fix-issue").length, 0, "nothing is fixed inside the release PR");
+    assert.equal(s.log.filter((e) => e[0] === "pre").length, 1, "no delta pass");
+    assert.equal((await fixStep(c)).reason, r.reason); assert.equal(calls.length, 2, "a resume queues nothing twice");
+  });
+  it("no open batch: the blockers are still named and the PR held", async () => {
+    const s = fakeSeam({ fins: [blockFin], summary: bad });
+    s.queueBlockers = async () => ({ batch: null }); s.holdReleasePr = async () => ({ closed: false });
+    const c = def(s); c.state.steps.review = { done: true, result: await reviewStep(c) };
+    assert.match((await fixStep(c)).reason, /^review blockers #100; release PR #7 held/);
+  });
+  it("MEDIUM, LOW and unconfirmed findings never block: GATE_PASS stays a pass", async () => {
+    const s = fakeSeam({ fins: [fin({ toFile: [{ id: "u", title: "maybe", severity: "HIGH" }, { id: "m", title: "med", severity: "MEDIUM" }], confirmedIds: ["m"] })] });
+    const r = await reviewStep(def(s));
+    assert.deepEqual(r.blocking, []);
+  });
+  it("coStartCi is not run in the default flow", async () => {
+    const s = fakeSeam(); const c = def(s); c.config.fix = { coStart: true };
+    const gh = []; c.io.gh = async (a) => { gh.push(a); return "{}"; };
+    await reviewStep(c);
+    assert.ok(!gh.some((a) => a[0] === "workflow" || a[1] === "ready"));
   });
 });

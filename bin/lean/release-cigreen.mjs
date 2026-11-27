@@ -1,18 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /**
- * `ci-green` step of `forgedock release`: the default, ForgeDock-owned order is release PR -> CI green -> ONE review pass. Review never
- * starts on a head whose required checks are pending or red, because a CI failure then moves the head and voids the review.
+ * `ci-green` step of `forgedock release`. The default, ForgeDock-owned release flow is the v1.0 contract restored (commands/review-pr-staging.md
+ * at dcfb86bf): open-finding gate -> CI green -> ONE review pass on the green head -> verdict. CI comes first because a CI failure after the
+ * review moves the head and voids it (drift: #4358, #4360, #5212, #5567).
  *
- * The step waits for every required check of the release PR head (branch protection and rulesets of the default branch plus forge.yaml
- * gate.required_checks; forgedock/verify, forge/deploy-gate and the gate-marker check are excluded). A check that fails is rerun ONCE
- * (reusing the #5502/#6014 attempt cap); if the rerun passes it is a flake: it counts as green and a `flaky-test` issue is filed, naming
- * the test when the log shows it. A check still red after its rerun is real: the existing fix path runs once (`fixRound`), the new head
- * is waited on again, and a second red ends in a block. There is no switch to turn the step off; forge.yaml `release.ci_green.max_wait_min`
- * and `release.block_severity` only tighten or loosen it. Timings (`ci_green_min`, `review_min`, `fix_rounds`, `review_passes`) are
- * recorded in `state.timing`, which release status prints and the ledger mirrors.
+ * The step runs the open-finding gate (an open review-finding issue blocks the release first), then waits for every required check of the
+ * release PR head (branch protection and rulesets of the default branch plus forge.yaml gate.required_checks; forgedock/verify, forge/deploy-gate
+ * and the gate-marker check are excluded). A failed check is rerun ONCE (reusing the #5502/#6014 attempt cap); if the rerun passes it is a flake:
+ * green, and a `flaky-test` issue is filed naming the test when the log shows it. A check still red after its rerun gets ONE fix round (`fixRound`:
+ * a CI fix in the release PR), then CI is awaited again. Timings (`ci_green_min`, `review_min`, `fix_rounds`, `review_passes`) go to `state.timing`,
+ * which release status prints and the ledger mirrors. There is no switch to turn the step off.
  */
-import { ciState, requiredSet } from "../review-staging.mjs";
+import { ciState, requiredSet, reviewStagingJson, reviewStagingIo } from "../review-staging.mjs";
 import { requiredChecksRead } from "./effects.mjs";
 import { attemptGuard, classifyFailure } from "./release-flakes.mjs";
 
@@ -28,6 +28,7 @@ export function ciGreenKeys(r) {
   if (Number.isFinite(wait) && wait > 0) out.ciGreen = { maxWaitMin: Math.min(wait, 240) };
   const sev = String(r?.block_severity ?? "").trim().toUpperCase();
   if (SEVERITY_ORDER.includes(sev)) out.blockSeverity = sev;
+  if (/^(true|on|yes|1)$/i.test(String(r?.review_fixes ?? ""))) out.reviewFixes = true; // compatibility knob, default off: the #5212 review fix lanes and delta passes
   return out;
 }
 
@@ -67,6 +68,11 @@ export function realCiSeam(ctx) {
   return {
     sleep: (ms) => io.sleep(ms),
     now: () => io.now?.() ?? Date.now(),
+    // The open-finding gate first (review-staging --gate-only: bundle PR set + open review-finding issues). @returns null when it passes, else the reason.
+    openGate: async (pr) => {
+      const r = await reviewStagingJson([String(pr), "--gate-only"], { ...reviewStagingIo(), cwd: ctx.cwd ?? process.cwd(), env: process.env });
+      return r.code === 0 ? null : String((r.lines ?? []).filter(Boolean).slice(-3).join(" | ")).slice(0, 400) || `exit ${r.code}`;
+    },
     isDraft: async (pr) => Boolean(json(await gh(["pr", "view", String(pr), "--repo", repo, "--json", "isDraft"]))?.isDraft),
     headOf: async (pr) => String(await gh(["pr", "view", String(pr), "--repo", repo, "--json", "headRefOid", "--jq", ".headRefOid"])).trim(),
     checks: async ({ head }) => {
@@ -171,6 +177,7 @@ export async function ciGreenWait(ctx, pr, { noFix = false } = {}) {
   const seam = ciSeamOf(ctx);
   const t0 = Date.now();
   try {
+    if (await seam.isDraft?.(pr)) return { ok: true, skipped: "draft" }; // host preflight mode: no Actions CI until mark-ready
     for (;;) {
       const w = await waitGreen(ctx, pr, seam);
       if (!w.red || noFix) return w;
@@ -187,6 +194,8 @@ export async function ciGreenStep(ctx) {
   const pr = ctx.state?.steps?.["release-pr"]?.result?.pr;
   if (!pr) return { blocked: true, reason: "no release PR recorded by the release-pr step" };
   const seam = ciSeamOf(ctx);
+  const gate = await seam.openGate?.(pr); // 1. the open-finding gate: an open review-finding issue blocks the release before CI or any reviewer
+  if (gate) return { blocked: true, reason: `open-finding gate: ${gate}; merge or close the open review-finding issues, then re-run the release` };
   if (await seam.isDraft?.(pr)) return { green: false, skipped: "draft PR: CI starts at mark-ready, host preflight runs first" };
   const w = await ciGreenWait(ctx, pr);
   if (w.blocked) return w;

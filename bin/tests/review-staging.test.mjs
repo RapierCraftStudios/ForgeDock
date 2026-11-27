@@ -72,7 +72,7 @@ const comments = (w) => w.gh.filter((a) => a[0] === "pr" && a[1] === "comment").
 
 describe("review-staging args", () => {
   it("accepts a number, a PR URL, --thorough and --json", () => {
-    assert.deepEqual(parseArgs(["42"]), { pr: 42, thorough: false, json: false, mode: "pre", testGateOutput: null, notesDropped: 0, filed: [], delta: null, domain: null, bodyFile: null, allowCiPending: false });
+    assert.deepEqual(parseArgs(["42"]), { pr: 42, thorough: false, json: false, mode: "pre", testGateOutput: null, notesDropped: 0, filed: [], delta: null, domain: null, bodyFile: null, allowCiPending: false, gateOnly: false });
     assert.equal(parseArgs(["https://github.com/o/r/pull/77", "--json"]).pr, 77);
     assert.equal(parseArgs([]).pr, null);
     assert.equal(parseArgs(["--thorough"]).thorough, true);
@@ -336,7 +336,7 @@ const flagOf = (args, f) => args[args.indexOf(f) + 1];
 
 describe("review-staging post-dispatch args", () => {
   it("parses --finalize/--summary and their options", () => {
-    assert.deepEqual(parseArgs(["42", ...FIN, "--notes-dropped", "2"]), { pr: 42, thorough: false, json: false, mode: "finalize", testGateOutput: "tg.txt", notesDropped: 2, filed: [], delta: null, domain: null, bodyFile: null, allowCiPending: false });
+    assert.deepEqual(parseArgs(["42", ...FIN, "--notes-dropped", "2"]), { pr: 42, thorough: false, json: false, mode: "finalize", testGateOutput: "tg.txt", notesDropped: 2, filed: [], delta: null, domain: null, bodyFile: null, allowCiPending: false, gateOnly: false });
     assert.deepEqual(parseArgs(["--summary", "--filed", "101", "--filed", "#102,103"]).filed, [101, 102, 103]);
   });
   it("rejects bad combinations with exit 2 and touches nothing", async () => {
@@ -825,17 +825,28 @@ describe("pre-dispatch refuses until CI is green (#6164)", () => {
     assert.equal(ciState([{ name: "build", bucket: "pass" }], ["build"]).green, true);
     assert.equal(ciState([{ name: "build", bucket: "pass" }, { name: "build", bucket: "cancel" }], []).green, true, "a pass beats a cancelled duplicate (#5502)");
   });
-  it("a pending required check refuses, naming the sha, and posts no route marker", async () => {
+  it("a pending required check refuses after the open-finding gate, naming the sha", async () => {
     const w = world({ ci: ck([["build", "pending"], ["lint", "fail"]]), required: ["build", "lint"] });
     assert.equal(await reviewStagingFromCli(["42"], w.io), 1);
     assert.match(blockerOf(w), new RegExp(`REVIEW_RESULT: status: BLOCKED, blocker: CI not green on ${HEAD.slice(0, 7)} \\(pending: build, failing: lint\\); review starts after CI is green`));
-    assert.deepEqual(comments(w), []);
-    assert.deepEqual(w.scripts, [], "nothing dispatched");
+    assert.deepEqual(w.scripts.map((x) => x.sub), ["bundle", "gate"], "the open-finding gate runs first; no scope, prepare or briefs after the CI refusal");
   });
   it("applies to --delta too", async () => {
     const w = world({ ci: ck([["build", "fail"]]), required: ["build"] });
     assert.equal(await reviewStagingFromCli(["42", "--delta", "f".repeat(40)], w.io), 1);
     assert.match(blockerOf(w), /CI not green on/);
+  });
+  it("an open-finding block wins over CI: the gate runs first and CI is never read", async () => {
+    const w = world({ gate: { code: 1, stdout: "RESULT: BLOCK DEPLOY", stderr: "" }, ci: ck([["build", "pending"]]), required: ["build"] });
+    assert.equal(await reviewStagingFromCli(["42"], w.io), 1);
+    assert.ok(!w.gh.some((a) => a[0] === "pr" && a[1] === "checks"));
+  });
+  it("--gate-only runs bundle and gate only (no route marker, no CI read, no briefs)", async () => {
+    const w = world();
+    assert.equal(await reviewStagingFromCli(["42", "--gate-only"], w.io), 0, w.err.join("\n"));
+    assert.deepEqual(w.scripts.map((x) => x.sub), ["bundle", "gate"]);
+    assert.deepEqual(comments(w), []);
+    assert.match(w.out.join("\n"), /OPEN_FINDING_GATE: PASS on PR #42/);
   });
   it("green CI proceeds; --allow-ci-pending overrides and is recorded in the route marker", async () => {
     const ok = world({ ci: ck([["build", "pass"]]), required: ["build"] });

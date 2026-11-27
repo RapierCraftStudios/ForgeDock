@@ -79,6 +79,14 @@ describe("ci-green step (#6164)", () => {
     const r = await ciGreenStep(ctx(seam([[row("fail")]], { draft: true })));
     assert.match(r.skipped, /draft/);
   });
+  it("the open-finding gate runs first: an open review-finding issue blocks before any CI is read", async () => {
+    const s = seam([[row("pass")]]); let read = 0; const checks = s.checks; s.checks = async (a) => { read++; return checks(a); };
+    s.openGate = async () => "RESULT: BLOCK DEPLOY (open finding #12)";
+    const r = await ciGreenStep(ctx(s));
+    assert.equal(r.blocked, true); assert.match(r.reason, /^open-finding gate: .*#12/); assert.equal(read, 0);
+    s.openGate = async () => null;
+    assert.equal((await ciGreenStep(ctx(s))).green, true);
+  });
   it("records ci_green_min in state.timing", async () => {
     const c = ctx(seam([[row("pass")]]));
     await ciGreenStep(c);

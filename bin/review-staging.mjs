@@ -33,7 +33,7 @@ import { attemptGuard } from "./lean/release-flakes.mjs";
 import { requiredChecksRead } from "./lean/effects.mjs";
 
 const INSTALL_ROOT = fileURLToPath(new URL("..", import.meta.url));
-const USAGE = "usage: forgedock review-staging [<PR number|PR URL>] [--thorough | --delta <from-sha>] [--allow-ci-pending] [--json]\n" +
+const USAGE = "usage: forgedock review-staging [<PR number|PR URL>] [--thorough | --delta <from-sha>] [--allow-ci-pending | --gate-only] [--json]\n" +
   "       forgedock review-staging [<PR>] --finalize --test-gate-output <file> [--notes-dropped <n>] [--json]\n" +
   "       forgedock review-staging [<PR>] --summary [--filed <issue>]... [--json]\n" +
   "       forgedock review-staging [<PR>] --post-reviewer <domain> --body-file <file>";
@@ -53,7 +53,7 @@ class Stop extends Error {
 
 /** argv -> {pr, thorough, json, mode, testGateOutput, notesDropped, filed, delta}. Throws Stop(2) on anything else. */
 export function parseArgs(argv) {
-  const o = { pr: null, thorough: false, json: false, mode: "pre", testGateOutput: null, notesDropped: 0, filed: [], delta: null, domain: null, bodyFile: null, allowCiPending: false };
+  const o = { pr: null, thorough: false, json: false, mode: "pre", testGateOutput: null, notesDropped: 0, filed: [], delta: null, domain: null, bodyFile: null, allowCiPending: false, gateOnly: false };
   const setMode = (m, a) => { if (o.mode !== "pre") throw new Stop(2, [`review-staging: ${a} cannot be combined with --${o.mode}`, USAGE]); o.mode = m; };
   const value = (i, a) => { const v = argv[i + 1]; if (v == null || v.startsWith("--")) throw new Stop(2, [`review-staging: ${a} requires a value`, USAGE]); return v; };
   for (let i = 0; i < argv.length; i++) {
@@ -61,6 +61,7 @@ export function parseArgs(argv) {
     if (a === "--thorough") o.thorough = true;
     else if (a === "--json") o.json = true;
     else if (a === "--allow-ci-pending") o.allowCiPending = true;
+    else if (a === "--gate-only") o.gateOnly = true;
     else if (a === "--finalize") setMode("finalize", a);
     else if (a === "--summary") setMode("summary", a);
     else if (a === "--post-reviewer") { setMode("post-reviewer", a); o.domain = value(i++, a); }
@@ -91,7 +92,7 @@ export function parseArgs(argv) {
   if (o.mode !== "post-reviewer" && o.bodyFile) throw new Stop(2, ["review-staging: --body-file belongs to --post-reviewer", USAGE]);
   if (o.mode !== "finalize" && (o.testGateOutput != null || o.notesDropped)) throw new Stop(2, ["review-staging: --test-gate-output/--notes-dropped belong to --finalize", USAGE]);
   if (o.mode !== "summary" && o.filed.length) throw new Stop(2, ["review-staging: --filed belongs to --summary", USAGE]);
-  if (o.mode !== "pre" && o.allowCiPending) throw new Stop(2, ["review-staging: --allow-ci-pending belongs to the pre-dispatch", USAGE]);
+  if (o.mode !== "pre" && (o.gateOnly || o.allowCiPending)) throw new Stop(2, ["review-staging: --allow-ci-pending belongs to the pre-dispatch", USAGE]);
   if (o.mode !== "pre" && o.thorough) throw new Stop(2, ["review-staging: --thorough belongs to the pre-dispatch", USAGE]);
   if (o.mode !== "pre" && o.delta) throw new Stop(2, ["review-staging: --delta belongs to the pre-dispatch (--finalize reads it from the review context)", USAGE]);
   if (o.thorough && o.delta) throw new Stop(2, ["review-staging: --delta cannot be combined with --thorough", USAGE]);
@@ -235,6 +236,28 @@ async function retryGh(io, args) {
   }
 }
 
+/** Phase 0A: the bundle PR set, then the open review-finding gate. Throws Stop(1) on a block. @returns {{common, branches, prsFile, gate}} */
+async function bundleAndGate(io, c, pr, sd, env) {
+  const common = ["--repo", c.ghRepo, "--pr", String(pr)];
+  const branches = ["--default", c.defaultBranch, "--staging", c.stagingBranch];
+  const prsFile = join(sd, `${pr}_bundle-prs.txt`);
+  const b = await bash(io, "review-staging-pre.sh", ["bundle", ...common, ...branches, "--sd", sd], env);
+  if (b.stdout.trim()) io.err(b.stdout.trim());
+  if (b.code !== 0) throw new Stop(1, [b.stderr.trim(), `REVIEW_RESULT: status: BLOCKED, blocker: bundle PR set failed (exit ${b.code})`].filter(Boolean));
+  let bundlePrs = "";
+  try { bundlePrs = io.readFile(prsFile); } catch { /* unreadable: fail closed below */ }
+  // An empty bundle would let the gate pass vacuously (forge#4470): nothing gated is never a pass.
+  if (!bundlePrs.split("\n").some((l) => /^\d+$/.test(l.trim()))) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: bundle PR set is empty or unreadable (${prsFile}); nothing gated (fail closed)`]);
+  const g = await bash(io, "review-staging-pre.sh", ["gate", ...common, "--prs-file", prsFile], env);
+  if (g.code !== 0) {
+    const out = g.stdout.trim();
+    throw new Stop(1, [out, g.stderr.trim(), /RESULT: BLOCK DEPLOY/.test(out) ? "" : "RESULT: BLOCK DEPLOY"].filter(Boolean));
+  }
+  const gate = /human override/.test(g.stdout) ? "PASS (override)" : "PASS";
+
+  return { common, branches, prsFile, gate };
+}
+
 async function main(argv, io) {
   const a = parseArgs(argv);
   if (a.mode === "finalize") return finalize(a, io);
@@ -251,9 +274,11 @@ async function main(argv, io) {
   const head = await headSha(io, c, pr);
   if (a.delta && a.delta === head) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: --delta ${head} is the current head of PR #${pr}: nothing changed since that pass, nothing to review`]);
   const sha7 = head.slice(0, 7);
-  // CI first (default, no off switch): a review of a head whose required checks are pending or red is wasted when CI then moves the head.
-  const ciBlock = a.allowCiPending ? null : await ciNotGreen(io, c, pr, env);
-  if (ciBlock) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: CI not green on ${sha7} (pending: ${ciBlock.pending.join(", ") || "none"}, failing: ${ciBlock.failing.join(", ") || "none"}); review starts after CI is green`]);
+  if (a.gateOnly) { // the release job's first check: an open review-finding issue blocks before CI or any reviewer; posts only the gate marker
+    const { gate } = await bundleAndGate(io, c, pr, sd, env);
+    io.out(a.json ? JSON.stringify({ pr, headSha: head, gate }) : `OPEN_FINDING_GATE: ${gate} on PR #${pr}`);
+    return 0;
+  }
   // #4865: with selftest.sandbox_repo set, the release needs a passing live selftest for exactly this head (fail closed).
   // Without a sandbox repo there is nothing the harness can run against, so the gate is skipped and says so.
   if (c.sandboxRepo) {
@@ -272,23 +297,11 @@ async function main(argv, io) {
   await retryGh(io, ["pr", "comment", String(pr), "-R", c.ghRepo, "--body", `<!-- FORGE:REVIEW_ROUTE mode=staging-deploy spec=review-pr-staging.md sha=${sha7}${a.allowCiPending ? " allow_ci_pending=true" : ""} -->`]);
   io.writeFile(join(sd, `staging_pr_number.${runKey(io.env)}`), `${pr}\n`);
 
-  // 0A: bundle PR set, then the open review-finding gate
-  const common = ["--repo", c.ghRepo, "--pr", String(pr)];
-  const branches = ["--default", c.defaultBranch, "--staging", c.stagingBranch];
-  const prsFile = join(sd, `${pr}_bundle-prs.txt`);
-  const b = await bash(io, "review-staging-pre.sh", ["bundle", ...common, ...branches, "--sd", sd], env);
-  if (b.stdout.trim()) io.err(b.stdout.trim());
-  if (b.code !== 0) throw new Stop(1, [b.stderr.trim(), `REVIEW_RESULT: status: BLOCKED, blocker: bundle PR set failed (exit ${b.code})`].filter(Boolean));
-  let bundlePrs = "";
-  try { bundlePrs = io.readFile(prsFile); } catch { /* unreadable: fail closed below */ }
-  // An empty bundle would let the gate pass vacuously (forge#4470): nothing gated is never a pass.
-  if (!bundlePrs.split("\n").some((l) => /^\d+$/.test(l.trim()))) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: bundle PR set is empty or unreadable (${prsFile}); nothing gated (fail closed)`]);
-  const g = await bash(io, "review-staging-pre.sh", ["gate", ...common, "--prs-file", prsFile], env);
-  if (g.code !== 0) {
-    const out = g.stdout.trim();
-    throw new Stop(1, [out, g.stderr.trim(), /RESULT: BLOCK DEPLOY/.test(out) ? "" : "RESULT: BLOCK DEPLOY"].filter(Boolean));
-  }
-  const gate = /human override/.test(g.stdout) ? "PASS (override)" : "PASS";
+  // 0A: bundle PR set, then the open review-finding gate (it runs first: an open finding blocks before CI or any reviewer)
+  const { common, branches, prsFile, gate } = await bundleAndGate(io, c, pr, sd, env);
+  // CI green next (default, no off switch): a review of a head whose required checks are pending or red is wasted when CI then moves the head.
+  const ciBlock = a.allowCiPending ? null : await ciNotGreen(io, c, pr, env);
+  if (ciBlock) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: CI not green on ${sha7} (pending: ${ciBlock.pending.join(", ") || "none"}, failing: ${ciBlock.failing.join(", ") || "none"}); review starts after CI is green`]);
 
   // 0B.1: scope
   const s = await bash(io, "review-staging-pre.sh", ["scope", ...common, ...branches, "--prs-file", prsFile, "--sd", sd], env);

@@ -243,7 +243,7 @@ describe("release job (#5211)", () => {
       pre: async () => ({ code: 1, data: null, lines: ["stopped"] }), // ends the delta review right after the fix lane
     };
     const timer = new Promise((_, rej) => setTimeout(() => rej(new Error("still waiting after 5000ms")), 5000).unref());
-    const out = await Promise.race([mod.runRelease({ io, repo: REPO, root, mounts: DISK, id, opts: { merge: true }, config: {}, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ "post-merge": ok }) }), timer]);
+    const out = await Promise.race([mod.runRelease({ io, repo: REPO, root, mounts: DISK, id, opts: { merge: true }, config: { reviewFixes: true }, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ "post-merge": ok }) }), timer]);
     assert.deepEqual(log, ["fix-issue", "lane"]);
     assert.deepEqual(waits, []);
     assert.equal(out.step, "fixes"); // reached the fix step and ran it, not stopped at review
@@ -630,18 +630,20 @@ describe("preflight staging-health gate (#6013)", () => {
 });
 
 describe("default ci-green flow in the conductor (#6164)", () => {
-  it("runs ci-green after release-pr and before review, and a second blocking round ends the job as aborted (exit 3), leaving fixes on staging", async () => {
+  it("runs ci-green after release-pr and before review; a review blocker stops the job as blocked (exit 3) with the blockers named", async () => {
     const mod = await import("./release.mjs");
     const order = [], io = fakeIo();
     const rec = (n, r = {}) => async () => { order.push(n); return r; };
-    const steps = mod.withStubs({ "ci-green": rec("ci-green"), review: rec("review"), fixes: rec("fixes", { aborted: "second blocking round", head: HEAD }), "post-merge": ok });
+    const steps = mod.withStubs({ "ci-green": rec("ci-green"), review: rec("review"), fixes: async () => ({ blocked: true, held: true, reason: "review blockers #101 #102; release PR #7 closed; the next release starts fresh after they merge" }), "post-merge": ok });
     const out = await mod.runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts: { merge: true }, config: {}, branches: { staging: "staging", default: "main" }, steps: { ...steps, preflight: ok, "release-pr": rec("release-pr", { pr: 7, head: HEAD }) } });
-    assert.deepEqual(order, ["release-pr", "ci-green", "review", "fixes"]);
-    assert.equal(out.status, "aborted"); assert.equal(out.reason, "aborted: second blocking round"); assert.equal(out.step, "fixes");
+    assert.deepEqual(order, ["release-pr", "ci-green", "review"]);
+    assert.equal(out.status, "blocked"); assert.equal(out.step, "fixes"); assert.match(out.reason, /^review blockers #101 #102/);
   });
   it("release.block_severity and release.ci_green_max_wait_min only tune the default; absent keys leave it on", () => {
     const c = readReleaseConfig("release:\n  block_severity: medium\n  ci_green_max_wait_min: 15\n");
     assert.equal(c.blockSeverity, "MEDIUM"); assert.deepEqual(c.ciGreen, { maxWaitMin: 15 });
     assert.equal(readReleaseConfig("release:\n  auto_merge: true\n").ciGreen, undefined);
+    assert.equal(readReleaseConfig("release:\n  auto_merge: true\n").reviewFixes, undefined, "review fix lanes are off unless release.review_fixes: true (compatibility)");
+    assert.equal(readReleaseConfig("release:\n  review_fixes: true\n").reviewFixes, true);
   });
 });

@@ -15,7 +15,7 @@ import { priorityOf, classifyTheme, closure } from "./issuewatch-release.mjs";
 
 export const STATUS_SCHEMA = "forgedock.release.status/v1";
 export const EXPLAIN_SCHEMA = "forgedock.release.explain/v1";
-export const TERMINAL = ["done", "refused", "blocked", "cancelled", "aborted"];
+export const TERMINAL = ["done", "refused", "blocked", "cancelled"];
 export const SKIP_LABELS = ["epic", "needs-human", "post-deploy", "workflow:merged", "awaiting-promotion", "host-task"];
 const STEPS = ["preflight", "host-preflight", "release-pr", "ci-green", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge"];
 /** The verbs `release <verb>` runs (#5556, `release-control.mjs`): the one source for what `next_actions[]` may name. */
@@ -77,7 +77,6 @@ export async function collectStatus({ io, repo, id, config = {}, local, gateStat
     intake: active?.intake ? (active.intake.paused ? "paused" : "open") : "unknown",
     cut_sha: unk(state.release?.snapshot),
     timing: state.timing ?? "unknown", // ci_green_min, review_min, fix_rounds, review_passes
-    ...(state.abortedReason ? { aborted: `aborted: ${state.abortedReason}` } : {}),
     review: verdict ? { verdict, head: pr?.head ?? "unknown" } : "unknown",
     merge_sha: unk(state.steps?.promotion?.result?.sha ?? state.merge_sha),
     deploy: state.deploy ? { run: unk(state.deploy.run), stage: unk(state.deploy.stage), attempt: unk(state.deploy.attempt) } : "unknown",
@@ -131,7 +130,6 @@ export function renderReleaseStatus(s) {
     lines.push(`  wave: ${s.wave}  lane: ${s.lane}`, `  lease: ${show(s.lease)}`, `  cut: ${s.cut_sha}`);
     for (const st of s.steps) lines.push(`  ${st.done ? "[x]" : "[ ]"} ${st.step}${st.at ? `  ${st.at}` : ""}`);
     lines.push(s.pr ? `  PR #${s.pr.number}  head ${s.pr.head ?? "unknown"}  gate marker=${s.pr.gate?.marker ?? "none"} deploy-gate=${s.pr.gate?.deployGate ?? "none"}  ci: ${s.pr.ci ? show(s.pr.ci) : "unknown"}` : "  PR: unknown");
-    if (s.aborted) lines.push(`  ${s.aborted}`);
     lines.push(`  timing: ${show(s.timing)}`, `  review: ${show(s.review)}`, `  merge: ${s.merge_sha}`, `  deploy: ${show(s.deploy)}`, `  rollback: target=${s.rollback_target} auto=${s.auto_rollback}`);
     if (s.release) lines.push(`  release set: ${s.release.issues.map((n) => `#${n}`).join(" ") || "(none recorded)"}  picks=${s.release.picks}`);
   }
