@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpDir } from "./_tmp.mjs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { routerFresh, upgradeAgentsAfterUpdate } from "../pool/version.mjs";
 
@@ -26,8 +26,20 @@ test("a router that stays stale or cannot restart is not fresh, and the agents a
   const stale = await routerFresh("x", { installed, probe: async () => ({ version: "1.68.0", code: "old" }), restart: async () => true, sleep, waitMs: 3000 });
   assert.equal(stale.ok, false); assert.match(stale.why, /did not come back/);
   assert.equal((await routerFresh("x", { installed, probe: async () => ({ version: "1.68.0", code: "old" }), restart: async () => false, sleep })).ok, false);
-  const dir = mkdtempSync(join(tmpdir(), "fresh-")); const configPath = join(dir, "router.json"); writeFileSync(configPath, "{}");
+  const dir = tmpDir("fresh-"); const configPath = join(dir, "router.json"); writeFileSync(configPath, "{}");
   const calls = [], warns = [];
   const out = await upgradeAgentsAfterUpdate({ configPath, runPoolCli: async (a) => { calls.push(a); }, warn: (m) => warns.push(m), ensureRouterFresh: async () => ({ ok: false, running: "1.68.0", installed: "1.69.0", why: "could not restart the router" }) });
   assert.equal(out, "skipped"); assert.deepEqual(calls, []); assert.match(warns[0], /pool upgrade skipped/);
+});
+
+test("readRouterConfig takes the forgedock token inline, from forgedock_token_file, or from forgedock.token beside router.json", async () => {
+  const { readRouterConfig } = await import("../pool/version.mjs");
+  const dir = tmpDir("rcfg-");
+  const p = join(dir, "router.json");
+  writeFileSync(p, JSON.stringify({ listen: { host: "h", port: 1 }, forgedock_token: "inline" }));
+  assert.equal(readRouterConfig(p).forgedock_token, "inline");
+  writeFileSync(join(dir, "tok"), "fromfile\n"); writeFileSync(p, JSON.stringify({ listen: { host: "h", port: 1 }, forgedock_token_file: join(dir, "tok") }));
+  assert.equal(readRouterConfig(p).forgedock_token, "fromfile");
+  writeFileSync(join(dir, "forgedock.token"), "beside\n"); writeFileSync(p, JSON.stringify({ listen: { host: "h", port: 1 } }));
+  assert.equal(readRouterConfig(p).forgedock_token, "beside");
 });

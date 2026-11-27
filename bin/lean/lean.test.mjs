@@ -6696,9 +6696,17 @@ describe("two repos with the same issue number on one host (#4432)", () => {
 });
 
 describe("host-aware verification concurrency (#4182)", () => {
-  const host = (o = {}) => ({ memAvailableMb: () => 8192, freeMb: async () => 8192, loadAvg1: () => o.load ?? 1, cores: () => o.cores ?? 4, activeLanes: o.activeLanes ?? (() => o.lanes ?? 2), tmpPaths: () => ["/tmp"] });
-  const withEnv = async (v, fn) => { const prev = process.env.FORGE_HOST_PARALLELISM; if (v === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = v;
-    try { return await fn(); } finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; } };
+  const host = (o = {}) => ({ memAvailableMb: () => 8192, freeMb: async () => 8192, loadAvg1: () => o.load ?? 1, cores: () => o.cores ?? 4, activeLanes: o.activeLanes ?? (() => o.lanes ?? 2), tmpPaths: () => ["/tmp"], readFile: o.readFile ?? (() => { throw new Error("ENOENT"); }) });
+  const withEnv = async (v, fn) => { const prev = process.env.FORGE_HOST_PARALLELISM, prevQ = process.env.CS_CPU_QUOTA; delete process.env.CS_CPU_QUOTA; if (v === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = v;
+    try { return await fn(); } finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; if (prevQ !== undefined) process.env.CS_CPU_QUOTA = prevQ; } };
+
+  it("#4182 a cgroup cpu quota below the VM cores caps the workers (read through io.host.readFile)", async () => {
+    await withEnv(undefined, async () => {
+      const w = world(); w.io.host = host({ cores: 8, lanes: 1, readFile: (f) => { if (f === "/sys/fs/cgroup/cpu.max") return "200000 100000"; throw new Error("ENOENT"); } });
+      await run(w, { governor: false });
+      for (const e of w.envs) assert.equal(e?.FORGE_HOST_PARALLELISM, "2");
+    });
+  });
 
   it("#4182 hostParallelism = max(1, floor(cores / lanes)); bad inputs count as 1", () => {
     assert.equal(hostParallelism({ cores: 4, lanes: 2 }), 2);
@@ -8130,7 +8138,7 @@ describe("#4363 fresh fix sessions", () => {
   const FRESH = /no earlier session/;
   const prechecked = (o = {}) => {
     const w = world(o); let rc = 1;
-    w.io.runCommand = async () => ({ rc, output: rc ? `${"x".repeat(300000)}\nlint: src/foo.js:3 unused var` : "" });
+    w.io.runCommand = async () => ({ rc, output: rc ? `${"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n".repeat(4700)}lint: src/foo.js:3 unused var` /* many lines: one unbroken 300K line makes the output redaction quadratic and stalls the file */ : "" });
     const inner = w.io.runner;
     w.io.runner = async (c) => { const res = await inner(c); if (/declared check commands failed/.test(c.prompt) && !o.freshNoCommit) rc = 0; return res; };
     return w;
@@ -10303,6 +10311,49 @@ describe("#6107 precheck parks carry the failing check; a ci.red recovery runs t
     w.io.runCommand = async () => ({ rc: 0, output: "" });
     await atIdleLoad(() => run(w, { precheck: { commands: ["make lanecheck"] } }));
     assert.equal(w.calls.filter((c) => c[0] === "git" && c[1] === "merge" && c[2] === "--no-edit").length, 0);
+  });
+});
+
+describe("#6153 a failing precheck on a lane behind its base is rerun once on the merged tree", () => {
+  const block = { precheck: { commands: ["make lanecheck"] }, verify: { ...parseVerify({}), precheckBlock: true } };
+  const track = (w, rcFor) => { const st = { merged: 0, checks: 0 }; const orig = w.io.git; w.io.git = async (a, ...rest) => { if (a[0] === "merge" && a[1] === "--no-edit") st.merged++; return orig(a, ...rest); }; w.io.runCommand = async () => { st.checks++; return rcFor(st); }; return st; };
+  it("a check the base fixed passes after the base-sync: no ci.red, no builder round", async () => {
+    const w = world({ behind: 2 });
+    const st = track(w, (s) => (s.merged ? { rc: 0, output: "" } : { rc: 1, output: "lane-checks exit 1 (old guard script)" }));
+    const r = await atIdleLoad(() => run(w, block));
+    assert.equal(r.terminalReason, "merged"); assert.equal(st.merged, 1); assert.equal(st.checks, 2);
+  });
+  it("a tool_missing-shaped failure is also rerun on the merged tree before env.tool_missing", async () => {
+    const w = world({ behind: 1 });
+    const st = track(w, (s) => (s.merged ? { rc: 0, output: "" } : { rc: 127, output: "bash: shellcheck: command not found" }));
+    const r = await atIdleLoad(() => run(w, block));
+    assert.equal(r.terminalReason, "merged"); assert.equal(st.merged, 1);
+  });
+  it("still failing after the sync is classified as before, with exactly one sync", async () => {
+    const w = world({ behind: 2 });
+    const st = track(w, () => ({ rc: 1, output: "FAILED real failure" }));
+    const r = await atIdleLoad(() => run(w, block));
+    assert.equal(r.code, "ci.red"); assert.equal(st.merged, 1);
+  });
+  it("a lane not behind its base is not synced and fails as before", async () => {
+    const w = world({ behind: 0 });
+    const st = track(w, () => ({ rc: 1, output: "FAILED real failure" }));
+    const r = await atIdleLoad(() => run(w, block));
+    assert.equal(r.code, "ci.red"); assert.equal(st.merged, 0);
+  });
+  it("a conflicting base ends base.conflict, not ci.red", async () => {
+    const w = world({ behind: 2, mergeResults: ["conflict"], conflictFiles: ["scripts/lane-checks.sh"] });
+    track(w, () => ({ rc: 1, output: "old guard" }));
+    const r = await atIdleLoad(() => run(w, block));
+    assert.equal(r.code, "base.conflict");
+  });
+  it("an env.tool_missing recovery base-syncs before its first check", async () => {
+    const w = world({ behind: 2 }); const order = [];
+    w.io.runCommand = async () => { order.push("check"); return { rc: 0, output: "" }; };
+    const orig = w.io.git; w.io.git = async (a, ...rest) => { if (a[0] === "merge" && a[1] === "--no-edit") order.push("merge"); return orig(a, ...rest); };
+    const r = await atIdleLoad(() => run(w, { recover: { code: "env.tool_missing", attempt: 1 }, precheck: { commands: ["make lanecheck"] } }));
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(order.indexOf("merge") >= 0 && order.indexOf("merge") < order.indexOf("check"), `merge before check: ${order}`);
   });
 });
 

@@ -462,8 +462,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
 
   // #6117: a destroyed sandbox's placing agent, for the agent's log grace period: a late log/result/runlog read still reaches it.
   const graced = new Map(); // id -> {agent, until}
-  const grace = (id, agent) => { const t = now(); for (const [k, v] of graced) if (v.until <= t) graced.delete(k); graced.set(id, { agent, until: t + GRACE_MS }); }; // expired entries go on every insert
   const GRACE_MS = Number(cfg.keep_log_s ?? 600) * 1000;
+  const grace = (id, agent) => { const t = now(); for (const [k, v] of graced) if (v.until <= t) graced.delete(k); graced.set(id, { agent, until: t + GRACE_MS }); }; // expired entries go on every insert
   async function forwardRead(id, path) {
     if (own(sbx(), id)) return forward(id, "GET", path);
     const g = graced.get(id);

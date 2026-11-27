@@ -518,7 +518,8 @@ echo '{"a":1}' > "$r/lib/data.json"; P=$(plan "$r")
 has "jest: a changed data file widens (not reachable through imports)" "$(step_field "$P" task:npm:test 1 '.scope.widen_reason')" "unknown-language"
 
 # ------------------------------------------------------------------------------------------------ ForgeDock's own workflows
-P=$(bash "$S" plan --repo "$ROOT" --base HEAD --base-branch staging --head-branch feat/spec-change --files "commands/work-on/build.md" --json --no-cache 2>/dev/null)
+# PR CI runs only on release PRs to main (owner decision 2026-11-27); staging is checked on push.
+P=$(bash "$S" plan --repo "$ROOT" --base HEAD --base-branch main --head-branch release/spec-change --files "commands/work-on/build.md" --json --no-cache 2>/dev/null)
 if [ -z "$P" ]; then bad "plan on ForgeDock's own workflows produced no output"; else
   eq "ForgeDock: a spec change selects a check-commands job" runnable "$(state "$P" gha:check-commands:check-native-conflicts)"
   eq "ForgeDock: a spec change selects the ci unit-tests job" runnable "$(state "$P" gha:ci:unit-tests)"
@@ -529,7 +530,7 @@ if [ -z "$P" ]; then bad "plan on ForgeDock's own workflows produced no output";
   eq "ForgeDock: portability checks run" runnable "$(state "$P" portability:builtin)"
   # Narrowing is asserted on a spec with a small reference reach (design-bench.md: ~10 referrers). Specs that name the release engine
   # (build.md, review-pr-staging.md) sit near the 600-file fan-out cap, so any growth in bin/lean widens them to the full suite; that is the cap working.
-  PN=$(bash "$S" plan --repo "$ROOT" --base HEAD --base-branch staging --head-branch feat/spec-change --files "commands/design-bench.md" --json --no-cache 2>/dev/null)
+  PN=$(bash "$S" plan --repo "$ROOT" --base HEAD --base-branch main --head-branch release/spec-change --files "commands/design-bench.md" --json --no-cache 2>/dev/null)
   eq "ForgeDock: the unit-test step is narrowed by the reference graph" scoped "$(printf '%s' "$PN" | jq -r '[.jobs[] | select(.id == "gha:ci:unit-tests") | .steps[] | select(.scope.selector == "refgraph-nodetest") | .scope.mode][0]')"
 fi
 
