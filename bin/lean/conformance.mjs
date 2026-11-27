@@ -1027,6 +1027,9 @@ export function missingTool({ rc, output } = {}, { repoHas = () => false, comman
   const first = String(command).trim().split(/\s+/)[0] ?? "";
   const fallback = INTERPRETER_RE.test(first.split("/").pop()) ? null : first;
   const cmd = CMD_NOT_FOUND_RE.exec(out)?.[1] ?? (rc === 127 ? SH_NOT_FOUND_RE.exec(out)?.[1] ?? fallback : null);
+  // an exit 127 inside an interpreter's script with no line naming the command is still the environment (a command the
+  // script runs is missing), never an unimplemented requirement
+  if (!cmd && rc === 127 && fallback === null) return envSignature(out) ?? { tool: "a command the script runs (exit 127)", kind: "environment" };
   if (!cmd || cmd.includes("/") || local(cmd)) return envSignature(out); // #5371
   return { tool: cmd, kind: "command" };
 }

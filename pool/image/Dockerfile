@@ -22,7 +22,7 @@ RUN test -n "$FORGEDOCK_VERSION" || { echo "FORGEDOCK_VERSION build arg is requi
 ENV IS_SANDBOX=1 DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 PLAYWRIGHT_BROWSERS_PATH=/opt/playwright UV_PYTHON_INSTALL_DIR=/opt/uv-python PATH=/opt/cs/bin:/opt/node/bin:/root/.local/bin:$PATH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git jq xz-utils build-essential python3 python3-venv python3-dev python3-yaml pkg-config libpq-dev \
+      ca-certificates curl git jq xz-utils build-essential python3 python3-venv python3-dev python3-yaml gnupg pkg-config libpq-dev \
       shellcheck xvfb xauth postgresql-client redis-tools \
     && install -d -m 0755 /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli.gpg \

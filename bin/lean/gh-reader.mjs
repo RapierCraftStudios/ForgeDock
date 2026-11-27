@@ -56,7 +56,11 @@ export function makeGhReader({ gh, repo, ttlMs = READER_TTL_MS, chunk = READER_C
       if (!cache.has(n)) await refresh([n]); // a refresh begun before `n` was tracked
     } catch (e) {
       if (cache.has(n)) return cache.get(n);
-      throw e;
+      // no cached value: one per-issue read (the fallback the batch refresh promises), so a GraphQL outage never stalls the reads
+      try {
+        const v = JSON.parse(String(await spawn(["issue", "view", String(n), "-R", repo, "--json", "state,stateReason,labels,milestone,comments,updatedAt"])));
+        store(n, { state: v.state, stateReason: v.stateReason, labels: (v.labels ?? []).map((l) => l?.name ?? l), milestone: v.milestone?.title ?? null, comments: Array.isArray(v.comments) ? v.comments.length : (v.comments ?? 0), updatedAt: v.updatedAt });
+      } catch { throw e; }
     }
     const e = cache.get(n);
     if (!e) throw new Error(`issue #${n} not found in ${repo}`);
