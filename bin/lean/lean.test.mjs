@@ -3883,6 +3883,7 @@ describe("orchestrate", () => {
     const leanIo = {
       gh: async (a) => {
         if (a[0] === "repo" && a[1] === "view") return "main\n";
+        if (a[0] === "api" && a[1] === "graphql") return JSON.stringify({ data: { repository: Object.fromEntries(Object.entries(milestones).map(([n, m]) => [`i${n}`, { state: "OPEN", stateReason: null, labels: { nodes: [] }, milestone: m ? { title: m } : null, comments: { totalCount: 0 }, updatedAt: "2026-11-27T00:00:00Z" }])) } }); // #5990 gh-reader
         if (a[0] === "api") return "OWNER\n"; // #4859: the author association is a REST read
         if (a.includes("milestone")) return JSON.stringify({ milestone: milestones[a[2]] ? { title: milestones[a[2]] } : null });
         return JSON.stringify({ body: a[2] === "1" ? "**Depends on**: #2" : "", authorAssociation: "OWNER" });

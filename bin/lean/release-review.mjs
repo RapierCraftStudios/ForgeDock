@@ -209,6 +209,7 @@ async function runReview({ seam, pr, def, delta = null, green = null, blockSet =
  * Every finding is filed (Phase 7) and nothing the review finds is fixed in the release PR. The `release.review_fixes` knob (default
  * off) restores the #5212 delta passes. @returns {{pr, head, verdict, marker, filed, blocking}|{blocked: true, reason: string}}
  */
+export const seamOf = (ctx) => ctx.io.review ?? (ctx.seam ??= realSeam(ctx));
 export async function reviewStep(ctx) {
   const pr = ctx.state?.steps?.["release-pr"]?.result?.pr;
   if (!pr) return blocked("no release PR recorded by the release-pr step");
@@ -401,7 +402,6 @@ async function legacyFixStep(ctx) {
   return { verdict: r.verdict, head: r.head };
 }
 
-export const seamOf = (ctx) => ctx.io.review ?? (ctx.seam ??= realSeam(ctx));
 
 /** Real effects of the review steps: the review-staging library, the engine runner, the filing scripts, gh and a lane process. */
 /** #6098: CPU niceness of reviewer processes (ionice idle class is applied alongside). */
