@@ -2099,12 +2099,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const prefilter = argv.includes("--no-prefilter") ? null
     : makePrefilter({ repo, cwd, io: leanIo, ...prefilterModel(argv), defaultBranch: lazyDefaultBranch({ io: leanIo, repo, cwd, configured: branches.default }), preconditionCmd: readPreconditionCmd(cwd), minAge: await readPostDeployMinAge(cwd) });
   const fetched = new Set();
-  const { makeGhReader } = await import("./lean/gh-reader.mjs");
-  const reader = makeGhReader({ gh: leanIo.readGh ?? leanIo.gh, repo, log: (m) => process.stderr.write(`${m}\n`) }); // #5990: one read client per schedd
   const laneCache = makeLaneCache(), milestoneOf = new Map(); // #4963: shared default-branch / ls-remote reads; the milestone readBody already fetched
   const laneOf = async (n) => {
     const known = milestoneOf.get(n); milestoneOf.delete(n); // used once: a later retry re-reads the live milestone
-    const r = await resolveLane({ issue: n, repo, io: leanIo, cwd, branches, requested: lane, override: laneOverride, cache: laneCache, milestone: known, reader });
+    const r = await resolveLane({ issue: n, repo, io: leanIo, cwd, branches, requested: lane, override: laneOverride, cache: laneCache, milestone: known });
     if (r.ok && prefilter && !fetched.has(r.lane)) { fetched.add(r.lane); try { await leanIo.git(["fetch", "origin", r.lane], { cwd }); } catch { /* offline: use the local ref */ } }
     return r;
   };
@@ -2261,14 +2259,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const registry = deps.sched !== undefined ? deps.sched : schedMod.openSched(schedMod.schedDir());
   const overload = deps.overload !== undefined ? deps.overload : registry ? liveOverload(readAdmission(cwd)) : null; // #5174
   const labelNames = async (n, { fresh = false } = {}) => { // #5893: `fresh` re-reads (the readmit decision); the cache serves placement
-    if (fresh) { try { await reader.refresh([n]); labelsOf.delete(n); } catch { /* offline: the cached labels */ } } // #5990: one GraphQL call, not a gh spawn per issue
-    if (!labelsOf.has(n)) labelsOf.set(n, await reader.labels(n));
+    if (fresh || !labelsOf.has(n)) labelsOf.set(n, (JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "labels"])).labels ?? []).map((x) => x.name));
     return labelsOf.get(n);
   };
-  // #5990: one batched GraphQL refresh for the pass's issues; a failure leaves reads to the TTL cache / per-issue fallback
-  reader.beginPass();
-  try { await reader.refresh(issues); } catch (e) { process.stderr.write(`gh-reader: refresh failed (${String(e?.message ?? e).slice(0, 120)}); serving cache\n`); }
-  reader.endPass("refresh"); // the pass's spawn count against the budget, in schedd.log (R7 evidence)
   let budget = {};
   if (maint) {
     const mLabels = maint.labels ?? DEFAULT_MAINTENANCE_LABELS;
@@ -2399,7 +2392,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   // used once by the runner's first read (no second gh call), later reads (requeue, --add) see the live body.
   const planViews = new Map();
   const viewOf = async (n) => {
-    const v = await viewIssue(reader.spawn, repo, n, maint || registry || hybrid ? "title,body,labels,comments,author,milestone" : "title,body,comments,author,milestone");
+    const v = await viewIssue(leanIo.gh, repo, n, maint || registry || hybrid ? "title,body,labels,comments,author,milestone" : "title,body,comments,author,milestone");
     if ("milestone" in v) milestoneOf.set(n, v.milestone?.title ?? null);
     trustedOf.set(n, bodyTrusted(v));
     if (maint || registry || hybrid) labelsOf.set(n, (v.labels ?? []).map((x) => x.name));
@@ -2480,7 +2473,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       relabelNeedsHuman: deps.relabelNeedsHuman ?? makeRelabelNeedsHuman({ gh: (a) => leanIo.gh(a), repo }),
       markRecovering: deps.markRecovering ?? makeMarkRecovering({ gh: (a) => leanIo.gh(a), repo }), // #5647
       // #4481: a requeued or resumed issue that was closed or whose lane PR merged meanwhile is not run again
-      dispatchCheck: deps.dispatchCheck !== undefined ? deps.dispatchCheck : makeDispatchCheck({ gh: (a) => leanIo.gh(a), reader, repo, batchId: batch.id, owner: plan?.forced ? null : (n) => batchMod.dispatchOwner(root, repo, n, batch.id) }),
+      dispatchCheck: deps.dispatchCheck !== undefined ? deps.dispatchCheck : makeDispatchCheck({ gh: (a) => leanIo.gh(a), repo, batchId: batch.id, owner: plan?.forced ? null : (n) => batchMod.dispatchOwner(root, repo, n, batch.id) }),
       // #5204: the engine version is saved with the batch state, so a resume after an upgrade names it on each interrupted lane
       version: ENGINE_VERSION,
       // #5805: engine/env-caused failures that would repeat are held and re-admitted on an install version change, a --set-env, or the
@@ -2629,7 +2622,7 @@ export async function closedScope({ gh, repo, issue, labels }) {
  * Release review #4500: an OPEN issue reopened after that PR merged (a failed acceptance probe, #4399, or an operator
  * reopening it for rework) is new work, so the lane runs; an unreadable reopen history also runs the lane.
  */
-export function makeDispatchCheck({ gh, reader = null, repo, owner: batchOwner = null, batchId = null }) {
+export function makeDispatchCheck({ gh, repo, owner: batchOwner = null, batchId = null }) {
   const json = async (args) => { try { return JSON.parse(String(await gh(args))); } catch { return null; } };
   /** Latest `reopened` event time (ms) on the issue, 0 when never reopened, null when unreadable. */
   const lastReopen = async (n) => {
@@ -2639,9 +2632,7 @@ export function makeDispatchCheck({ gh, reader = null, repo, owner: batchOwner =
     } catch { return null; }
   };
   return async (n) => {
-    // #5990: the cached batch read (last good value when GitHub is unreachable); the per-issue spawn only without a reader
-    const iss = reader ? await reader.get(n).then((e) => ({ state: e.state, stateReason: e.stateReason, labels: (e.labels ?? []).map((name) => ({ name })) }), () => null)
-      : await json(["issue", "view", String(n), "-R", repo, "--json", "state,stateReason,labels"]);
+    const iss = await json(["issue", "view", String(n), "-R", repo, "--json", "state,stateReason,labels"]);
     const state = typeof iss?.state === "string" ? iss.state.toUpperCase() : null;
     const notPlanned = String(iss?.stateReason ?? "").toUpperCase().replace(/\s/g, "_") === "NOT_PLANNED";
     const prs = await json(["pr", "list", "-R", repo, "--head", `feat/issue-${n}-lean`, "--state", "merged", "--json", "number,mergedAt", "--limit", "1"]);
