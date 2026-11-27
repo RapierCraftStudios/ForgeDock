@@ -560,6 +560,21 @@ describe("core work-on", () => {
     assert.equal(real.code, "builder.blocked");
   });
 
+  it("#6122 a FORGE:DECISION posted after the park resets the repeat: the next identical failure is a first (NEEDS_HUMAN), not failure.repeated", async () => {
+    const block = { status: "blocked", summary: "need creds", block: { kind: "human", why: "credentials" } };
+    const first = world({ changed: [] });
+    await run(first);
+    const nh = first.comments.find((c) => c.includes("<!-- FORGE:NEEDS_HUMAN -->"));
+    const bot = (body) => ({ author: { login: "rapiercraft-forgedock" }, body });
+    const decision = bot('<!-- FORGE:DECISION {"requirement":"R4","disposition":"post-deploy","quote":"x"} -->');
+    const after = world({ changed: [], viewComments: [bot(nh), decision] });
+    const r = await run(after);
+    assert.notEqual(r.code, "failure.repeated");
+    assert.ok(after.comments.some((c) => c.includes("<!-- FORGE:NEEDS_HUMAN -->")));
+    const before = world({ changed: [], viewComments: [decision, bot(nh)] });
+    assert.equal((await run(before)).code, "failure.repeated", "a decision older than the park does not clear it");
+  });
+
   it("#6076 an unhappy terminal posts one FORGE:LANE_AUDIT; a failing audit post leaves the terminal reason unchanged", async () => {
     const block = { status: "blocked", summary: "need creds", block: { kind: "human", why: "credentials" } };
     const w = world({ changed: [], result: block });
@@ -2770,7 +2785,8 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     const prev = process.env.FORGE_HOST_PARALLELISM; process.env.FORGE_HOST_PARALLELISM = "3";
     try { assert.equal((await run(w, { envSetup: "make setup", precheck: { commands: ["npm run lint"] } })).terminalReason, "merged"); }
     finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; }
-    const lane = { UV_CACHE_DIR: "/c/uv", TMPDIR: w.envs[0].TMPDIR, FORGE_HOST_PARALLELISM: "3", FORGE_LANE_WORKTREE: "1", GIT_CEILING_DIRECTORIES: w.envs[0].GIT_CEILING_DIRECTORIES, FORGEDOCK_CHECKS_CLI: CHECKS_CLI, FORGEDOCK_ENTRY_CLI: FORGEDOCK_CLI, PATH: "/rt/toolchain/bin:/usr/bin" };
+    const cfg = (d) => ({ POETRY_CONFIG_DIR: `${d}/hostconfig/poetry`, npm_config_userconfig: `${d}/hostconfig/npmrc`, PIP_CONFIG_FILE: `${d}/hostconfig/pip.conf`, UV_CONFIG_FILE: `${d}/hostconfig/uv.toml`, GIT_CONFIG_GLOBAL: `${d}/hostconfig/gitconfig` }); // #5917
+    const lane = { ...cfg(w.envs[0].TMPDIR), UV_CACHE_DIR: "/c/uv", TMPDIR: w.envs[0].TMPDIR, FORGE_HOST_PARALLELISM: "3", FORGE_LANE_WORKTREE: "1", GIT_CEILING_DIRECTORIES: w.envs[0].GIT_CEILING_DIRECTORIES, FORGEDOCK_CHECKS_CLI: CHECKS_CLI, FORGEDOCK_ENTRY_CLI: FORGEDOCK_CLI, PATH: "/rt/toolchain/bin:/usr/bin" };
     assert.equal(lane.GIT_CEILING_DIRECTORIES.split(":")[0], "/wt", "#5825: lane children are ceiled at the worktree parent");
     assert.match(lane.TMPDIR, /\/runs\/7-/, "the builder ran with the run TMPDIR");
     assert.deepEqual(w.rgCalls.map((x) => x.env), [lane], "red-green gets the lane env, not the daemon's");

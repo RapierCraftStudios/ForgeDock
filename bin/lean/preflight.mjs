@@ -13,6 +13,7 @@ import { builtinModules } from "node:module";
 import { existsSync } from "node:fs";
 import { join, dirname, delimiter, posix } from "node:path";
 import { missingTool } from "./conformance.mjs";
+import { hostPoetryConfigProblem } from "./hostconfig.mjs";
 
 export const PREFLIGHT_CAP = 20;
 const KIND_NAME = { command: "command", "python-module": "Python module", "node-module": "Node package", path: "path", "env-var": "env var" };
@@ -516,4 +517,10 @@ export function venvPythonRewrite(command, files = [], exists = () => false) {
     return `${m[1]}${rel} -m pytest${rest}`;
   });
   return changed ? out.join("") : String(command ?? "");
+}
+
+/** #5917: host config defects (not contract misses): a poisoned poetry config fails every host validate as if the change were wrong. */
+export function hostEnvDefects(opts = {}) {
+  const p = hostPoetryConfigProblem(opts);
+  return p ? [p] : [];
 }

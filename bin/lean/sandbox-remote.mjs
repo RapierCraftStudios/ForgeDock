@@ -16,7 +16,7 @@
  * or a session gateway fronts. Tests use an in-memory transport.
  */
 import { execFileSync } from "node:child_process";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { mergeRemoteLog } from "../engine/runlog.mjs";
@@ -105,6 +105,8 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
     },
     async logs(id, cursor = 0) { const r = await call("GET", `${p(id)}/logs?cursor=${encodeURIComponent(cursor)}`); return r.ok ? { text: String(r.data?.text ?? ""), cursor: r.data?.cursor ?? cursor } : { text: "", cursor }; },
     async result(id) { const r = await call("GET", `${p(id)}/result`); if (r.status === 401) throw Object.assign(fail("result", r), { transient: true }); if (r.ok && r.data?.disk_pressure === true) return { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_DISK_PRESSURE, retryInSeconds: 120, cost_usd: 0, detail: `sandbox ${id} was stopped to save the host drive (disk pressure); worktree and volume kept, requeued to resume` }; /* #5891 */ if (r.ok && r.data?.drained === true) return { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, retryInSeconds: 60, cost_usd: 0, detail: `sandbox ${id} was drained to free capacity for reserved work (${String(r.data.reason ?? "").slice(0, 120)}); rescheduled` }; /* #5856 */ if (r.ok && r.data && typeof r.data === "object") { const v = r.data.engineVersion ?? r.data.engine_version ?? r.data.forge_version ?? /ForgeDock\s*[·-]\s*v?(\d+\.\d+(?:\.\d+)?)/.exec(String(r.data.banner ?? r.data.log ?? ""))?.[1]; const pv = v ?? placedEngine.get(id); return pv && !r.data.engineVersion ? { ...r.data, engineVersion: String(pv) } : r.data; } return null; }, /* #5931 */
+    /** #6117: the lane's run log (jsonl text, capped) and the last ~200 lines of its stderr/stdout; null from a pool without the endpoint (404/405) or any error. Kept by the agent for a grace period after destroy. */
+    async runlog(id) { const r = await call("GET", `${p(id)}/runlog`); return r.ok && r.data && typeof r.data === "object" ? { runLog: String(r.data.run_log ?? ""), tail: String(r.data.tail ?? "") } : null; },
     async usage(id) { const r = await call("GET", `${p(id)}/usage`); return r.ok && Number.isFinite(Number(r.data?.minutes)) ? { minutes: Number(r.data.minutes), ...(typeof r.data.agent === "string" && r.data.agent ? { agent: r.data.agent } : {}) } : null; }, // agent: #4549, optional
     async stop(id) { const r = await call("POST", `${p(id)}/stop`); if (r.ok) return true; if (r.status === 404 || r.status === 405) return false; throw fail("stop", r); },
     async destroy(id) { const r = await call("DELETE", p(id)); if (r.ok || r.status === 404) return true; throw fail("destroy", r); },
@@ -259,13 +261,41 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
     }
     return b64 ? { CS_RELAY_PREFETCH_B64: b64 } : {};
   };
+  /** Appends the sandbox log chunk past the handle's cursor to the lane log. {ok, bytes}: ok=false when the pool could not answer. */
   const pullLogs = async (h) => {
-    if (!transport.logs) return;
+    if (!transport.logs) return { ok: false, bytes: 0 };
     try {
       const { text, cursor } = (await transport.logs(h.id, h.logCursor ?? 0)) ?? {};
       if (text) { const f = batch.logFile(h.issue); mkdirSync(dirname(f), { recursive: true }); appendFileSync(f, redact(text, [...known])); }
       if (cursor !== undefined) h.logCursor = cursor;
-    } catch { /* the next poll retries */ }
+      return { ok: true, bytes: text ? String(text).length : 0 };
+    } catch { return { ok: false, bytes: 0 }; /* the next poll retries */ }
+  };
+  /** #6117: `<n>.runlog.jsonl` beside the lane log (`<n>.log`): the sandbox's own run log, so an env park stays triageable after teardown. */
+  const runLogFile = (issue) => { const f = batch.logFile(issue); return /\.log$/.test(f) ? f.replace(/\.log$/, ".runlog.jsonl") : `${f}.runlog.jsonl`; };
+  const keepRunLog = (h, runLog) => {
+    if (!runLog) return;
+    try { const f = runLogFile(h.issue); mkdirSync(dirname(f), { recursive: true }); writeFileSync(f, redact(String(runLog), [...known])); } catch { /* evidence only */ }
+    mergeRemoteLog(env.FORGE_RUNS_DIR || join(homedir(), ".forge", "runs"), h.issue, runLog, { repo });
+  };
+  /**
+   * #6117: everything the sandbox still holds, copied to the dispatcher BEFORE it is destroyed: the rest of the lane log
+   * (chunks past the cursor, until drained), the run log, and (when the log could not be drained) the stderr tail.
+   * Runs on every terminal path (teardown is their one choke point) and never throws.
+   */
+  const collectEvidence = async (h) => {
+    try {
+      let drained = false;
+      for (let i = 0; i < 64; i++) { const r = await pullLogs(h); drained = r.ok; if (!r.ok || r.bytes === 0) break; }
+      if (typeof transport.runlog !== "function") return;
+      const e = await transport.runlog(h.id).catch(() => null);
+      if (!e) return;
+      keepRunLog(h, e.runLog);
+      if (!drained && e.tail) {
+        const f = batch.logFile(h.issue); mkdirSync(dirname(f), { recursive: true });
+        appendFileSync(f, redact(`\n[sandbox ${h.id}] last lines of its log (the live stream could not be drained before teardown):\n${e.tail}${e.tail.endsWith("\n") ? "" : "\n"}`, [...known]));
+      }
+    } catch { /* teardown goes on */ }
   };
   return {
     name,
@@ -330,7 +360,7 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
       if (r) { await pullLogs(h); await minutesOf(h); }
       if (!r) return null;
       const { runLog, ...rest } = r; // #5697: the lane's run log goes to the host run log, not into the result
-      if (runLog) mergeRemoteLog(env.FORGE_RUNS_DIR || join(homedir(), ".forge", "runs"), h.issue, runLog, { repo });
+      keepRunLog(h, runLog); // #6117: the host run log and `<n>.runlog.jsonl` beside the lane log
       return rest;
     },
     /** #5991: is the pool agent of this handle answering? Unknown (null) without transport support; transport errors propagate. */
@@ -357,6 +387,7 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
     /** #5241: why the last `stop(h)` returned false (null when it succeeded or never ran), so a cancel can report it. */
     stopReason: (h) => stopWhy.get(h?.id) ?? null,
     async teardown(h) {
+      await collectEvidence(h); // #6117: the run log and the log tail leave the sandbox before it is destroyed
       await minutesOf(h);
       try { return (await transport.destroy(h.id)) !== false; } catch { return false; }
     },

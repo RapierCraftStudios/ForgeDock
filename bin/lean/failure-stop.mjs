@@ -26,11 +26,22 @@ export function repeatSignature(code, detail) {
   return createHash("sha256").update(`${code ?? ""}\n${normalizeDetail(detail)}`).digest("hex").slice(0, 12);
 }
 
-/** Earlier trusted NEEDS_HUMAN/PARKED comments carrying `sig=<hash>`. A PARKED summary counts as the failure it parked on. */
+const DECISION_RE = /<!--\s*FORGE:DECISION(?![A-Za-z0-9_])/;
+const PREMISE_DECISION_RE = /^\s*(?:<!--[^>]*-->\s*)?##\s*Decision:\s*no needs-human/i;
+
+/** #6122: a trusted operator/builder FORGE:DECISION (not the engine's own "no needs-human" premise note) is new input for the lane. */
+export const isResetDecision = (body) => DECISION_RE.test(String(body ?? "")) && !PREMISE_DECISION_RE.test(String(body ?? "").replace(DECISION_RE, "").replace(/^\s*(?:-->)?/, ""));
+
+/**
+ * Earlier trusted NEEDS_HUMAN/PARKED comments carrying `sig=<hash>`. A PARKED summary counts as the failure it parked on.
+ * #6122: comments are chronological; a trusted FORGE:DECISION newer than a park resets the count (the decision is applied on the
+ * next run, so the repeat is no longer "the same input"), only failures after the last decision count.
+ */
 export function countIdentical(comments, sig, trusted = () => true) {
   let n = 0;
   for (const c of Array.isArray(comments) ? comments : []) {
     const body = String(c?.body ?? "");
+    if (isResetDecision(body) && trusted(c)) { n = 0; continue; }
     if (MARKER_RE.test(body) && SIG_RE.exec(body)?.[1] === sig && trusted(c)) n++;
   }
   return n;
