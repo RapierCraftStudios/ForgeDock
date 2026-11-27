@@ -36,8 +36,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" | tar -xJ -C /opt \
     && mv "/opt/node-v${NODE_VERSION}-linux-x64" /opt/node \
-    && npm install -g "corepack@${COREPACK_VERSION}" "forgedock@${FORGEDOCK_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-    && npm cache clean --force
+    && NODE_OPTIONS=--dns-result-order=ipv4first npm install -g --include=optional "corepack@${COREPACK_VERSION}" "forgedock@${FORGEDOCK_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && npm cache clean --force \
+    && claude --version && forgedock --version   # smoke: a missing native binary (failed optional download) fails the build, never a lane
 
 RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | env UV_INSTALL_DIR=/usr/local/bin sh \
     && uv tool install "poetry==${POETRY_VERSION}" \
