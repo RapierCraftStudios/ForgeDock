@@ -10341,11 +10341,12 @@ describe("#6153 a failing precheck on a lane behind its base is rerun once on th
     const r = await atIdleLoad(() => run(w, block));
     assert.equal(r.code, "ci.red"); assert.equal(st.merged, 0);
   });
-  it("a conflicting base ends base.conflict, not ci.red", async () => {
+  it("a base the resolvers cannot merge does not park the lane: the merge is aborted and the checks are judged as before", async () => {
     const w = world({ behind: 2, mergeResults: ["conflict"], conflictFiles: ["scripts/lane-checks.sh"] });
     track(w, () => ({ rc: 1, output: "old guard" }));
     const r = await atIdleLoad(() => run(w, block));
-    assert.equal(r.code, "base.conflict");
+    assert.notEqual(r.code, "base.conflict", "the early sync never parks on a conflict; the PR-time base-sync lets the builder resolve it");
+    assert.equal(r.code, "ci.red");
   });
   it("an env.tool_missing recovery base-syncs before its first check", async () => {
     const w = world({ behind: 2 }); const order = [];

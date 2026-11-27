@@ -2962,10 +2962,11 @@ export async function runCore(o) {
       if (!merged && conflicted.length) {
         const bm = o.baseMerge, cr = io.conflictResolve && bm && Object.values(bm).some((v) => v?.length) ? await io.conflictResolve({ cwd: wt, files: conflicted, cfg: bm }).catch(() => null) : null;
         if (cr?.resolved?.length && !(cr.remaining ?? []).length) { try { await git(["commit", "--no-edit"]); merged = true; } catch { /* abort below */ } }
-        if (!merged) {
+        if (!merged) { // a conflict the deterministic resolvers cannot settle is not a check failure: fall back to the old path (builder fix round, PR-time base-sync where the builder resolves it)
           await git(["merge", "--abort"]).catch(() => {});
           ev({ event: "RECOVERY_BASE_SYNC", base, behind, result: "conflict", why, files: conflicted.slice(0, 20) });
-          return { ended: await needsHuman(`The branch conflicts with ${base} in ${conflicted.slice(0, 20).join(", ")}; the checks were not judged on the stale tree (a conflicting base is not a check failure); nothing merged.`, OUTCOME_CODES.BASE_CONFLICT) };
+          T.anomalies.push(`Base-sync before the checks hit a conflict with ${base} in ${conflicted.slice(0, 20).join(", ")}; checks judged on the branch as it is, the PR-time base-sync resolves it`);
+          return { merged: false };
         }
       } else if (!merged) { await git(["merge", "--abort"]).catch(() => {}); T.anomalies.push(`Base-sync before the checks could not merge ${base} (${behind} commit(s) behind, no conflict files); checks judged on the branch as it is`); return { merged: false }; }
       ev({ event: "RECOVERY_BASE_SYNC", base, behind, result: "merged", why });
