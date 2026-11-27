@@ -114,11 +114,6 @@
       "count": 2
     }
   },
-  "bin/lean/release-review.mjs": {
-    "no-use-before-define": {
-      "count": 2
-    }
-  },
   "bin/lean/release-status.mjs": {
     "no-use-before-define": {
       "count": 1
