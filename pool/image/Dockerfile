@@ -23,6 +23,9 @@ RUN test -n "$FORGEDOCK_VERSION" || { echo "FORGEDOCK_VERSION build arg is requi
 
 ENV IS_SANDBOX=1 DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 PLAYWRIGHT_BROWSERS_PATH=/opt/playwright UV_PYTHON_INSTALL_DIR=/opt/uv-python PATH=/opt/cs/bin:/opt/node/bin:/root/.local/bin:$PATH
 
+# IPv4 for apt: hosts whose Docker networking dials IPv6 first with no IPv6 route (WSL mirrored) fail apt fetches in
+# lane_tools variant builds FROM this image (#6187).
+RUN echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git jq xz-utils build-essential python3 python3-venv python3-dev python3-yaml gnupg pkg-config libpq-dev \
       shellcheck xvfb xauth postgresql-client redis-tools \
