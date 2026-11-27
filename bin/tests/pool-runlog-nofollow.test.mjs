@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, symlinkSync } from "node:fs";
+import { mkdtempSync, writeFileSync, symlinkSync, closeSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readLaneFile } from "../pool/agent.mjs";
+import { readLaneFile, openLaneFile } from "../pool/agent.mjs";
 
 test("readLaneFile reads a regular lane file but never follows a symlink a lane planted to a host file", () => {
   const dir = mkdtempSync(join(tmpdir(), "nofollow-"));
@@ -16,4 +17,13 @@ test("readLaneFile reads a regular lane file but never follows a symlink a lane 
   assert.equal(readLaneFile(link), "");
   assert.equal(readLaneFile(join(dir, "missing")), "");
   assert.equal(readLaneFile(dir), "", "a directory is not a regular file");
+});
+
+test("openLaneFile refuses a FIFO without blocking and a symlink, and opens a regular file", { skip: process.platform === "win32" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "nofollow-fifo-"));
+  const fifo = join(dir, "lane.log"); execFileSync("mkfifo", [fifo]);
+  assert.equal(openLaneFile(fifo), null);
+  const secret = join(dir, "s"); writeFileSync(secret, "x"); const link = join(dir, "l"); symlinkSync(secret, link);
+  assert.equal(openLaneFile(link), null);
+  const fd = openLaneFile(secret); assert.notEqual(fd, null); closeSync(fd);
 });
