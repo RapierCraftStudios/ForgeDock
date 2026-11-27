@@ -6695,8 +6695,8 @@ describe("two repos with the same issue number on one host (#4432)", () => {
 
 describe("host-aware verification concurrency (#4182)", () => {
   const host = (o = {}) => ({ memAvailableMb: () => 8192, freeMb: async () => 8192, loadAvg1: () => o.load ?? 1, cores: () => o.cores ?? 4, readQuota: () => { throw new Error("no cgroup"); }, activeLanes: o.activeLanes ?? (() => o.lanes ?? 2), tmpPaths: () => ["/tmp"] });
-  const withEnv = async (v, fn) => { const prev = process.env.FORGE_HOST_PARALLELISM; if (v === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = v;
-    try { return await fn(); } finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; } };
+  const withEnv = async (v, fn) => { const prev = process.env.FORGE_HOST_PARALLELISM, prevQ = process.env.CS_CPU_QUOTA; delete process.env.CS_CPU_QUOTA; if (v === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = v;
+    try { return await fn(); } finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; if (prevQ !== undefined) process.env.CS_CPU_QUOTA = prevQ; } };
 
   it("#4182 hostParallelism = max(1, floor(cores / lanes)); bad inputs count as 1", () => {
     assert.equal(hostParallelism({ cores: 4, lanes: 2 }), 2);
