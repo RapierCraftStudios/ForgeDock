@@ -984,7 +984,7 @@ export async function runCore(o) {
     const set = String(process.env.FORGE_HOST_PARALLELISM ?? "").trim();
     if (/^\d+$/.test(set) && Number(set) > 0) return set;
     if (!io.host?.cores) return null;
-    try { return String(hostParallelism({ cores: quotaCores({ cores: io.host.cores(), read: (f) => readFileSync(f, "utf8"), env: process.env }), lanes: io.host.activeLanes?.() })); } catch { return null; }
+    try { return String(hostParallelism({ cores: quotaCores({ cores: io.host.cores(), read: (f) => (io.host.readFile ?? readFileSync)(f, "utf8"), env: process.env }), lanes: io.host.activeLanes?.() })); } catch { return null; }
   }
   /**
    * #4325: the lane env every engine-run command shares with the builder: shared package-manager stores (#4220), the run
