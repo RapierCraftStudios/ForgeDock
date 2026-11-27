@@ -2768,7 +2768,8 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     const prev = process.env.FORGE_HOST_PARALLELISM; process.env.FORGE_HOST_PARALLELISM = "3";
     try { assert.equal((await run(w, { envSetup: "make setup", precheck: { commands: ["npm run lint"] } })).terminalReason, "merged"); }
     finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; }
-    const lane = { UV_CACHE_DIR: "/c/uv", TMPDIR: w.envs[0].TMPDIR, FORGE_HOST_PARALLELISM: "3", FORGE_LANE_WORKTREE: "1", GIT_CEILING_DIRECTORIES: w.envs[0].GIT_CEILING_DIRECTORIES, FORGEDOCK_CHECKS_CLI: CHECKS_CLI, FORGEDOCK_ENTRY_CLI: FORGEDOCK_CLI, PATH: "/rt/toolchain/bin:/usr/bin" };
+    const cfg = (d) => ({ POETRY_CONFIG_DIR: `${d}/hostconfig/poetry`, npm_config_userconfig: `${d}/hostconfig/npmrc`, PIP_CONFIG_FILE: `${d}/hostconfig/pip.conf`, UV_CONFIG_FILE: `${d}/hostconfig/uv.toml`, GIT_CONFIG_GLOBAL: `${d}/hostconfig/gitconfig` }); // #5917
+    const lane = { ...cfg(w.envs[0].TMPDIR), UV_CACHE_DIR: "/c/uv", TMPDIR: w.envs[0].TMPDIR, FORGE_HOST_PARALLELISM: "3", FORGE_LANE_WORKTREE: "1", GIT_CEILING_DIRECTORIES: w.envs[0].GIT_CEILING_DIRECTORIES, FORGEDOCK_CHECKS_CLI: CHECKS_CLI, FORGEDOCK_ENTRY_CLI: FORGEDOCK_CLI, PATH: "/rt/toolchain/bin:/usr/bin" };
     assert.equal(lane.GIT_CEILING_DIRECTORIES.split(":")[0], "/wt", "#5825: lane children are ceiled at the worktree parent");
     assert.match(lane.TMPDIR, /\/runs\/7-/, "the builder ran with the run TMPDIR");
     assert.deepEqual(w.rgCalls.map((x) => x.env), [lane], "red-green gets the lane env, not the daemon's");

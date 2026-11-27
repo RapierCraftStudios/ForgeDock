@@ -37,7 +37,7 @@ import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from
 import { toolMisses } from "./toolplace.mjs";
 import { loadImageManifest, manifestProvides } from "../pool/image-manifest.mjs";
 import { hasRecipe, installLaneTools, genericInstallCommands, RECIPES } from "../pool/lane-tools.mjs";
-import { testRunnerProblems, hostOnlyProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, manifestDepOwner, collectOnlyCommand, collectImportMiss, contractCommands } from "./preflight.mjs";
+import { testRunnerProblems, hostOnlyProblems, preflightProbes, preflightProblems, hostEnvDefects, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, manifestDepOwner, collectOnlyCommand, collectImportMiss, contractCommands } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
 import { ceilingFor, modelInfo, restartDecision, DEFAULT_CEILING, WINDOW_SHARE, RESTART_COST_USD, CACHE_READ_USD, REAL_LIMIT_SHARE, predictRestart, handoffFacts, routeHandoff, buildReadsOf, NARROW_NOTE } from "./ceiling.mjs";
@@ -45,6 +45,7 @@ import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
 import { batchImageCache, envNamesOf, provisionSandboxes } from "./testsandbox.mjs";
 import { repoKey, estimateCostUsd } from "../runner.mjs";
 import { depcacheNamespace } from "./depcache.mjs";
+import { laneConfigEnv } from "./hostconfig.mjs"; // #5917
 import { prepareToolchain } from "./toolchain.mjs";
 import { toolStats } from "./toolstats.mjs";
 import { readTestMap, readTestMapAtRef, selectCommands, mergeChecks, factsPath, TEST_MAP_FILE } from "./testmap.mjs";
@@ -1006,11 +1007,14 @@ export async function runCore(o) {
       ev({ event: "SIGNOFF_HOOK", dir });
     } catch { signoffEnv = {}; }
   }
+  /** #5917: tool user-config redirected into the run dir (created once), beneath every engine key; {} without a run dir. */
+  let laneCfgEnv = null, laneCfgDir = null;
+  function laneCfg() { if (!runTmp) return {}; if (laneCfgDir !== runTmp) { laneCfgDir = runTmp; laneCfgEnv = laneConfigEnv({ dir: runTmp }); } return laneCfgEnv; }
   function laneEnv() {
     let deps = {};
     try { deps = io.deps?.env?.() ?? {}; } catch { deps = {}; }
     const par = verifyParallelism();
-    return { ...deps, ...(runTmp ? { TMPDIR: runTmp } : {}), ...(par ? { FORGE_HOST_PARALLELISM: par } : {}), FORGE_LANE_WORKTREE: "1", ...laneGitEnv, [FORGEDOCK_CHECKS_VAR]: CHECKS_CLI, [FORGEDOCK_ENTRY_VAR]: FORGEDOCK_CLI, ...sandboxEnv, ...(toolchain?.env ?? {}) }; // #5333: the hook denies git stash where this is set; #5825: git in a lane child never walks up out of the worktree
+    return { ...laneCfg(), ...deps, ...(runTmp ? { TMPDIR: runTmp } : {}), ...(par ? { FORGE_HOST_PARALLELISM: par } : {}), FORGE_LANE_WORKTREE: "1", ...laneGitEnv, [FORGEDOCK_CHECKS_VAR]: CHECKS_CLI, [FORGEDOCK_ENTRY_VAR]: FORGEDOCK_CLI, ...sandboxEnv, ...(toolchain?.env ?? {}) }; // #5333: the hook denies git stash where this is set; #5825: git in a lane child never walks up out of the worktree
   }
   /** #5168: a failed claude login ends the lane `deferred` `backend.auth`, held per account by the batch (never the relaunch or the breaker). */
   const authDeferral = (e, account = null) => Object.assign(e, { deferCode: OUTCOME_CODES.BACKEND_AUTH, retryInSeconds: AUTH_RETRY_SECONDS, backendId: laneBackendId(process.env, rotator), ...cliDeferFacts(e, account),
@@ -2241,6 +2245,7 @@ export async function runCore(o) {
     }
     const imageManifest = loadImageManifest();
     async function preflightValidates(contract) {
+      for (const d of hostEnvDefects()) { T.anomalies.push(`Host environment defect (${d.code}): ${d.detail}`); ev({ event: "HOST_ENV_DEFECT", code: d.code, detail: d.detail }); } // #5917: an env defect, never a miss that blames the contract
       if ((!io.probeCommand && !io.preflightRun) || !contract || typeof contract !== "object") return [];
       const files = String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean);
       const env = laneEnv(), missing = new Set(), misses = []; // #4325: the env the validate commands run with
