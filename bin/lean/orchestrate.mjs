@@ -384,6 +384,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // `deterministic`: `version|signature` seen twice (never relaunched again on that version); `toolReadmits`: `issue|signature`
   // already re-admitted because the probe found the tool (a lane that still misses it waits for an engine or env change instead).
   const ehOn = !!envHold || !!envIssue;
+  const envReadmits = new Map(); // #6123: issue -> {sig, count, at} of the last env-issue/tool-probe re-admit
   // #5755: env.* failures are one engine/env defect per signature: `envSigs` signature -> {issues, number} (the env issue the `envIssue` seam
   // filed or updated); affected product issues are held on it (never needs-human) and 2+ issues on a signature stop admitting lanes that need it.
   const envSigs = toMap(saved?.envSigs);
@@ -1959,7 +1960,6 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const envHeld = () => [...results.values()].filter((r) => r?.outcome === "held" && r.envHold);
   const envWaiting = () => ehOn && !cancelled && !tripped && !budgetStop && envHeld().some((r) => now() - (Number(r.envHold.since) || 0) < ehMaxMs);
   let envClosedAt = null;
-  const envReadmits = new Map(); // #6123: issue -> {sig, count, at} of the last env-issue/tool-probe re-admit
   const watchEnvHolds = async (force = false) => {
     if (!ehOn || cancelled) return;
     const rows = envHeld();
