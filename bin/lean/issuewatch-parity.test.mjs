@@ -91,7 +91,7 @@ test("#5313 a release in flight pauses the watch (no claims), the next pass resu
 
 test("#5560 releaseInFlight: an unconfigured (trace-less) deploy is not the pending step after post-merge", () => {
   const env = tmpDir("iwp-"), root = join(env, "releases"), done = { done: true };
-  relDir(env, "r20261110-120000-1", { repo: "o/r", steps: { preflight: done, "host-preflight": done, "release-pr": done, review: done, fixes: done, "mark-ready": done, rehearsal: done, promotion: done, "post-merge": done } }, 60000);
+  relDir(env, "r20261110-120000-1", { repo: "o/r", steps: { preflight: done, "host-preflight": done, "release-pr": done, "ci-green": done, review: done, fixes: done, "mark-ready": done, rehearsal: done, promotion: done, "post-merge": done } }, 60000);
   assert.equal(releaseInFlight({ root, repo: "o/r", now: NOW }).step, null);
 });
 
