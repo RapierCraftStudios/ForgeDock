@@ -131,6 +131,7 @@ export async function buildWithRetry(build, { sleep = (ms) => new Promise((r) =>
 }
 
 /** A regular file the lane may have written, read without following symlinks (a lane can plant a link to a host file); "" otherwise. */
+const BURY_TIMEOUT_MS = 30000; // evidence copy before a destroy (run logs out of the container) never holds the destroy longer
 export function readLaneFile(path) {
   let fd = null;
   try {
@@ -725,7 +726,9 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     return g ? { run_log: g.runLog, tail: g.tail } : null;
   }
   /** Keeps what a late fetch needs once the container and its dir are gone. */
+  const GRAVE_MAX = 64; // destroyed sandboxes whose evidence is kept at once; the oldest goes first
   async function bury(r) {
+    while (graveyard.size >= GRAVE_MAX) graveyard.delete(graveyard.keys().next().value);
     try {
       let text = "", size = 0;
       try { size = statSync(join(r.dir, "out", "lane.log")).size; const fd = openSync(join(r.dir, "out", "lane.log"), "r"); try { const len = Math.min(size, GRAVE_LOG_MAX); const buf = Buffer.alloc(len); readSync(fd, buf, 0, len, size - len); text = buf.toString("utf8"); } finally { closeSync(fd); } } catch { /* no log */ }
@@ -741,7 +744,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   async function destroy(id, why, { keepWork = false } = {}) {
     const r = own(id);
     if (!r) return false;
-    if (keepLogMs > 0) await bury(r); // #6117: before the container and its dir go
+    if (keepLogMs > 0) await Promise.race([bury(r), new Promise((res) => { const t = setTimeout(res, BURY_TIMEOUT_MS); t.unref?.(); })]); // #6117: before the container and its dir go; bounded so a hung copy never blocks the destroy
     if (r.slug && r.diskPeakMb) { const h = (hist()[r.slug] ??= []); h.push(r.diskPeakMb); if (h.length > 50) h.shift(); }
     const history = r.usage?.samples ? JSON.stringify({ at: new Date(now()).toISOString(), id: r.id, issue: r.issue, repo: r.repo ?? null, docker: Boolean(r.docker), minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10, ...usageView(r) }) : null;
     await docker.remove(r.name);

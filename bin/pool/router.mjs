@@ -462,6 +462,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
 
   // #6117: a destroyed sandbox's placing agent, for the agent's log grace period: a late log/result/runlog read still reaches it.
   const graced = new Map(); // id -> {agent, until}
+  const grace = (id, agent) => { const t = now(); for (const [k, v] of graced) if (v.until <= t) graced.delete(k); graced.set(id, { agent, until: t + GRACE_MS }); }; // expired entries go on every insert
   const GRACE_MS = Number(cfg.keep_log_s ?? 600) * 1000;
   async function forwardRead(id, path) {
     if (own(sbx(), id)) return forward(id, "GET", path);
@@ -478,7 +479,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     s.touched = now(); store.save();
     try {
       const r = await agentCall(a, method, path, undefined, timeoutMs);
-      if (method === "DELETE" && (r.ok || r.status === 404)) { if (r.ok && GRACE_MS > 0) graced.set(id, { agent: s.agent, until: now() + GRACE_MS }); delete sbx()[id]; relayQ.delete(id); store.save(); }
+      if (method === "DELETE" && (r.ok || r.status === 404)) { if (r.ok && GRACE_MS > 0) grace(id, s.agent); delete sbx()[id]; relayQ.delete(id); store.save(); }
       return { status: r.status, body: agentBody(r, s.agent) };
     } catch (e) { return { status: 502, body: { error: `agent ${s.agent} unreachable: ${e.message}` } }; }
   }
@@ -494,7 +495,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       try {
         if (now() - s.touched > abandonMs) {
           const r = await agentCall(a, "DELETE", `/sandboxes/${encodeURIComponent(id)}`, undefined, DESTROY_TIMEOUT_MS);
-          if (r.ok || r.status === 404) { if (r.ok && GRACE_MS > 0) graced.set(id, { agent: s.agent, until: now() + GRACE_MS }); delete sbx()[id]; relayQ.delete(id); log.info?.(`abandoned ${id} destroyed on ${s.agent}`); }
+          if (r.ok || r.status === 404) { if (r.ok && GRACE_MS > 0) grace(id, s.agent); delete sbx()[id]; relayQ.delete(id); log.info?.(`abandoned ${id} destroyed on ${s.agent}`); }
         } else {
           const r = await agentCall(a, "POST", `/sandboxes/${encodeURIComponent(id)}/lease`);
           if (r.status === 404) { delete sbx()[id]; relayQ.delete(id); log.info?.(`${id} gone on ${s.agent}`); }
