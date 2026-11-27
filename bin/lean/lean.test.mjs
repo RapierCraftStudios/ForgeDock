@@ -6696,9 +6696,17 @@ describe("two repos with the same issue number on one host (#4432)", () => {
 });
 
 describe("host-aware verification concurrency (#4182)", () => {
-  const host = (o = {}) => ({ memAvailableMb: () => 8192, freeMb: async () => 8192, loadAvg1: () => o.load ?? 1, cores: () => o.cores ?? 4, activeLanes: o.activeLanes ?? (() => o.lanes ?? 2), tmpPaths: () => ["/tmp"] });
-  const withEnv = async (v, fn) => { const prev = process.env.FORGE_HOST_PARALLELISM; if (v === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = v;
-    try { return await fn(); } finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; } };
+  const host = (o = {}) => ({ memAvailableMb: () => 8192, freeMb: async () => 8192, loadAvg1: () => o.load ?? 1, cores: () => o.cores ?? 4, activeLanes: o.activeLanes ?? (() => o.lanes ?? 2), tmpPaths: () => ["/tmp"], readFile: o.readFile ?? (() => { throw new Error("ENOENT"); }) });
+  const withEnv = async (v, fn) => { const prev = process.env.FORGE_HOST_PARALLELISM, prevQ = process.env.CS_CPU_QUOTA; delete process.env.CS_CPU_QUOTA; if (v === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = v;
+    try { return await fn(); } finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; if (prevQ !== undefined) process.env.CS_CPU_QUOTA = prevQ; } };
+
+  it("#4182 a cgroup cpu quota below the VM cores caps the workers (read through io.host.readFile)", async () => {
+    await withEnv(undefined, async () => {
+      const w = world(); w.io.host = host({ cores: 8, lanes: 1, readFile: (f) => { if (f === "/sys/fs/cgroup/cpu.max") return "200000 100000"; throw new Error("ENOENT"); } });
+      await run(w, { governor: false });
+      for (const e of w.envs) assert.equal(e?.FORGE_HOST_PARALLELISM, "2");
+    });
+  });
 
   it("#4182 hostParallelism = max(1, floor(cores / lanes)); bad inputs count as 1", () => {
     assert.equal(hostParallelism({ cores: 4, lanes: 2 }), 2);
@@ -8130,7 +8138,7 @@ describe("#4363 fresh fix sessions", () => {
   const FRESH = /no earlier session/;
   const prechecked = (o = {}) => {
     const w = world(o); let rc = 1;
-    w.io.runCommand = async () => ({ rc, output: rc ? `${"x".repeat(300000)}\nlint: src/foo.js:3 unused var` : "" });
+    w.io.runCommand = async () => ({ rc, output: rc ? `${"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n".repeat(4700)}lint: src/foo.js:3 unused var` /* many lines: one unbroken 300K line makes the output redaction quadratic and stalls the file */ : "" });
     const inner = w.io.runner;
     w.io.runner = async (c) => { const res = await inner(c); if (/declared check commands failed/.test(c.prompt) && !o.freshNoCommit) rc = 0; return res; };
     return w;
