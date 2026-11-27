@@ -11,6 +11,7 @@ import { basename, dirname, join } from "node:path";
 import { cpus, hostname } from "node:os";
 import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
 import { repoRoot, versionOf, laneImageTag, laneBuildArgs } from "./version.mjs";
+import { provideLaneImage } from "./lane-image.mjs";
 import { jsonStore } from "./store.mjs";
 import { makeWarm } from "./warm.mjs";
 import { resolveLaneImage, laneImageNow, laneToolsTag, isLaneToolsTagOf } from "./lane-tools.mjs";
@@ -1060,10 +1061,10 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       if (want.image !== running.image || want.version !== running.version) {
         const nextImage = cfg.image && cfg.image !== "computeshare-lane:1" ? cfg.image : laneImageTag(want.version);
         log.info?.(`rebuilding ${nextImage} (${running.version}/${running.image} -> ${want.version}/${want.image})`);
-        // 2026-11-26: a host pre-seeded with the image (docker load from another host) skips the build: on a slow or memory-tight
-        // host the build itself is the risk (an upgrade build coincided with a host crash)
-        if (await docker.hasImage?.(nextImage)) log.info?.(`${nextImage} already present; no build`);
-        else await buildWithRetry(() => docker.build(join(next, "pool", "image"), nextImage, laneBuildArgs(want.version)), { log }); // #5919
+        // #6166: present (pre-seeded) -> pull the published image -> local build only as the fallback
+        const how = await provideLaneImage({ docker, image: nextImage, version: want.version, recipe: want.image, publishable: nextImage === laneImageTag(want.version), log,
+          build: () => buildWithRetry(() => docker.build(join(next, "pool", "image"), nextImage, laneBuildArgs(want.version, want.image)), { log }) }); // #5919
+        log.info?.(`${nextImage}: ${how}`);
       }
       await pruneLaneImages([laneImageTag(want.version)]);
       await prepullImages();
@@ -1232,9 +1233,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
 
   /** Build the lane image for the running ForgeDock version when this host does not have it yet. */
   async function ensureImage() {
-    if (await docker.hasImage?.(image)) { await pruneLaneImages(); return; }
-    log.info?.(`building ${image}`);
-    await docker.build(join(cfg.code_root ?? repoRoot, "pool", "image"), image, laneBuildArgs(running.version));
+    await provideLaneImage({ docker, image, version: running.version, recipe: running.image, publishable: image === laneImageTag(running.version), log,
+      build: () => docker.build(join(cfg.code_root ?? repoRoot, "pool", "image"), image, laneBuildArgs(running.version, running.image)) });
     await pruneLaneImages();
   }
 

@@ -16,7 +16,9 @@ ARG POETRY_VERSION=2.4.3
 ARG YQ_VERSION=4.44.3
 ARG PLAYWRIGHT_VERSION=1.49.1
 
-LABEL org.opencontainers.image.version=$FORGEDOCK_VERSION
+# Image recipe hash (versionOf().image); pool agents check it after pulling the published image (#6166).
+ARG FORGEDOCK_RECIPE=
+LABEL org.opencontainers.image.version=$FORGEDOCK_VERSION forgedock.recipe=$FORGEDOCK_RECIPE
 RUN test -n "$FORGEDOCK_VERSION" || { echo "FORGEDOCK_VERSION build arg is required" >&2; exit 1; }
 
 ENV IS_SANDBOX=1 DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 PLAYWRIGHT_BROWSERS_PATH=/opt/playwright UV_PYTHON_INSTALL_DIR=/opt/uv-python PATH=/opt/cs/bin:/opt/node/bin:/root/.local/bin:$PATH

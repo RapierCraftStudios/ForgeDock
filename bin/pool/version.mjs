@@ -25,7 +25,7 @@ export function versionOf(root = repoRoot) {
 
 /** The lane image is tagged and built from the ForgeDock package version (no separate pin). */
 export const laneImageTag = (version) => `forgedock-lane:${version}`;
-export const laneBuildArgs = (version) => ({ FORGEDOCK_VERSION: version });
+export const laneBuildArgs = (version, recipe) => ({ FORGEDOCK_VERSION: version, ...(recipe ? { FORGEDOCK_RECIPE: recipe } : {}) });
 
 /** Numeric dotted-version compare (1.10 > 1.9): negative, 0 or positive; null when either side is not a version. */
 export function cmpVersion(a, b) {

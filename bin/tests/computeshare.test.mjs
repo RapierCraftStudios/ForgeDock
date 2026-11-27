@@ -450,7 +450,7 @@ test("lane image version equals the dispatcher version (#4545)", async () => {
   const docker = { ...fakeDocker(), builds: [], async hasImage() { return false; }, async build(d, tag, args) { this.builds.push({ tag, args }); } };
   const agent = createAgent({ state_dir: dir, allow_cpus: 2, allow_mem_gb: 4, router_url: "http://x" }, { docker, log: quiet, vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
   await agent.ensureImage();
-  assert.deepEqual(docker.builds, [{ tag: `forgedock-lane:${pkg.version}`, args: { FORGEDOCK_VERSION: pkg.version } }]);
+  assert.deepEqual(docker.builds, [{ tag: `forgedock-lane:${pkg.version}`, args: { FORGEDOCK_VERSION: pkg.version, FORGEDOCK_RECIPE: versionOf().image } }]);
 });
 
 test("forgedock update upgrades pool agents only when a router is configured (#4545)", async () => {
