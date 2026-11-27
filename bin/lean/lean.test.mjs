@@ -10314,6 +10314,49 @@ describe("#6107 precheck parks carry the failing check; a ci.red recovery runs t
   });
 });
 
+describe("#6153 a failing precheck on a lane behind its base is rerun once on the merged tree", () => {
+  const block = { precheck: { commands: ["make lanecheck"] }, verify: { ...parseVerify({}), precheckBlock: true } };
+  const track = (w, rcFor) => { const st = { merged: 0, checks: 0 }; const orig = w.io.git; w.io.git = async (a, ...rest) => { if (a[0] === "merge" && a[1] === "--no-edit") st.merged++; return orig(a, ...rest); }; w.io.runCommand = async () => { st.checks++; return rcFor(st); }; return st; };
+  it("a check the base fixed passes after the base-sync: no ci.red, no builder round", async () => {
+    const w = world({ behind: 2 });
+    const st = track(w, (s) => (s.merged ? { rc: 0, output: "" } : { rc: 1, output: "lane-checks exit 1 (old guard script)" }));
+    const r = await atIdleLoad(() => run(w, block));
+    assert.equal(r.terminalReason, "merged"); assert.equal(st.merged, 1); assert.equal(st.checks, 2);
+  });
+  it("a tool_missing-shaped failure is also rerun on the merged tree before env.tool_missing", async () => {
+    const w = world({ behind: 1 });
+    const st = track(w, (s) => (s.merged ? { rc: 0, output: "" } : { rc: 127, output: "bash: shellcheck: command not found" }));
+    const r = await atIdleLoad(() => run(w, block));
+    assert.equal(r.terminalReason, "merged"); assert.equal(st.merged, 1);
+  });
+  it("still failing after the sync is classified as before, with exactly one sync", async () => {
+    const w = world({ behind: 2 });
+    const st = track(w, () => ({ rc: 1, output: "FAILED real failure" }));
+    const r = await atIdleLoad(() => run(w, block));
+    assert.equal(r.code, "ci.red"); assert.equal(st.merged, 1);
+  });
+  it("a lane not behind its base is not synced and fails as before", async () => {
+    const w = world({ behind: 0 });
+    const st = track(w, () => ({ rc: 1, output: "FAILED real failure" }));
+    const r = await atIdleLoad(() => run(w, block));
+    assert.equal(r.code, "ci.red"); assert.equal(st.merged, 0);
+  });
+  it("a conflicting base ends base.conflict, not ci.red", async () => {
+    const w = world({ behind: 2, mergeResults: ["conflict"], conflictFiles: ["scripts/lane-checks.sh"] });
+    track(w, () => ({ rc: 1, output: "old guard" }));
+    const r = await atIdleLoad(() => run(w, block));
+    assert.equal(r.code, "base.conflict");
+  });
+  it("an env.tool_missing recovery base-syncs before its first check", async () => {
+    const w = world({ behind: 2 }); const order = [];
+    w.io.runCommand = async () => { order.push("check"); return { rc: 0, output: "" }; };
+    const orig = w.io.git; w.io.git = async (a, ...rest) => { if (a[0] === "merge" && a[1] === "--no-edit") order.push("merge"); return orig(a, ...rest); };
+    const r = await atIdleLoad(() => run(w, { recover: { code: "env.tool_missing", attempt: 1 }, precheck: { commands: ["make lanecheck"] } }));
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(order.indexOf("merge") >= 0 && order.indexOf("merge") < order.indexOf("check"), `merge before check: ${order}`);
+  });
+});
+
 describe("#5844 a busy host is not an absent CLI", () => {
   const base = { role: "builder", issue: 5844, cwd: "/tmp/x", model: "m", prompt: "p", system: "s" };
   it("probe timeout does not spawn a bare name", async () => {
