@@ -706,6 +706,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   function logTail(r) {
     try { const t = readFileSync(join(r.dir, "out", "lane.log"), "utf8"); return t.split("\n").slice(-(TAIL_LINES + 1)).join("\n"); } catch { return ""; }
   }
+  const grave = (id) => { const g = typeof id === "string" ? graveyard.get(id) : null; if (g && g.until <= now()) { graveyard.delete(id); return null; } return g ?? null; };
   /** #6117: `{run_log, tail}` of a live sandbox, or of a destroyed one inside its grace period; null when unknown. */
   async function evidence(id) {
     const r = own(id);
@@ -713,7 +714,6 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const g = grave(id);
     return g ? { run_log: g.runLog, tail: g.tail } : null;
   }
-  const grave = (id) => { const g = typeof id === "string" ? graveyard.get(id) : null; if (g && g.until <= now()) { graveyard.delete(id); return null; } return g ?? null; };
   /** Keeps what a late fetch needs once the container and its dir are gone. */
   async function bury(r) {
     try {
