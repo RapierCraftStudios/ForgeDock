@@ -1008,8 +1008,8 @@ export async function runCore(o) {
     } catch { signoffEnv = {}; }
   }
   /** #5917: tool user-config redirected into the run dir (created once), beneath every engine key; {} without a run dir. */
-  let laneCfgEnv = null;
-  function laneCfg() { if (!runTmp) return {}; return (laneCfgEnv ??= laneConfigEnv({ dir: runTmp })); }
+  let laneCfgEnv = null, laneCfgDir = null;
+  function laneCfg() { if (!runTmp) return {}; if (laneCfgDir !== runTmp) { laneCfgDir = runTmp; laneCfgEnv = laneConfigEnv({ dir: runTmp }); } return laneCfgEnv; }
   function laneEnv() {
     let deps = {};
     try { deps = io.deps?.env?.() ?? {}; } catch { deps = {}; }
