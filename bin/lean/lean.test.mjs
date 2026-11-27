@@ -8120,7 +8120,7 @@ describe("#4363 fresh fix sessions", () => {
   const FRESH = /no earlier session/;
   const prechecked = (o = {}) => {
     const w = world(o); let rc = 1;
-    w.io.runCommand = async () => ({ rc, output: rc ? `${"x".repeat(300000)}\nlint: src/foo.js:3 unused var` : "" });
+    w.io.runCommand = async () => ({ rc, output: rc ? `${"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n".repeat(4700)}lint: src/foo.js:3 unused var` /* many lines: one unbroken 300K line makes the output redaction quadratic and stalls the file */ : "" });
     const inner = w.io.runner;
     w.io.runner = async (c) => { const res = await inner(c); if (/declared check commands failed/.test(c.prompt) && !o.freshNoCommit) rc = 0; return res; };
     return w;
