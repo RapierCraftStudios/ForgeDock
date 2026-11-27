@@ -71,7 +71,9 @@ export function hasRecipe(name) { return recipeFor(name) !== null; }
  */
 export function installCommands(entry, { root = true } = {}) {
   const { name, version } = parseLaneTool(entry);
-  if (manifestProvides(IMAGE, name)) return [];
+  // the image covers the tool only when no version is pinned, or the manifest entry carries that same version (#6147)
+  const baked = (IMAGE?.tools ?? []).find((e) => e.name === name || e.binary === name);
+  if (manifestProvides(IMAGE, name) && (!version || String(baked?.version ?? "") === String(version))) return [];
   const recipe = recipeFor(name);
   if (!recipe) return [];
   const sh = (s) => s.replace(/^RUN\s+/, "");

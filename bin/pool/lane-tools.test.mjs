@@ -11,6 +11,10 @@ describe("#5652 in-sandbox lane tool install", () => {
     assert.match(installCommands("yaml", { root: false })[0], /^sudo sh -c /);
     assert.deepEqual(installCommands("nope"), []);
   });
+  it("a manifest-provided tool is skipped unpinned, but a pinned version still installs (#6147)", () => {
+    assert.deepEqual(installCommands("postgresql-client"), []);
+    assert.match(installCommands("postgresql-client@16").join("\n"), /postgresql-client-16/);
+  });
   it("installLaneTools runs every step, and returns the stderr tail of the first failure", async () => {
     const seen = [];
     assert.deepEqual(await installLaneTools(["yaml"], { run: async (a) => { seen.push(a.command); return { rc: 0 }; } }), { ok: true });
