@@ -462,10 +462,11 @@ test("forgedock update upgrades pool agents only when a router is configured (#4
   assert.equal(await upgradeAgentsAfterUpdate({ configPath, runPoolCli }), "skipped");
   assert.equal(calls.length, 0);
   writeFileSync(configPath, "{}");
-  assert.equal(await upgradeAgentsAfterUpdate({ configPath, runPoolCli }), "upgraded");
+  const ensureRouterFresh = async () => ({ ok: true });
+  assert.equal(await upgradeAgentsAfterUpdate({ configPath, runPoolCli, ensureRouterFresh }), "upgraded");
   assert.deepEqual(calls, [["upgrade", "--config", configPath]]);
   const warns = [];
-  assert.equal(await upgradeAgentsAfterUpdate({ configPath, runPoolCli: async () => { throw new Error("boom"); }, warn: (m) => warns.push(m) }), "failed");
+  assert.equal(await upgradeAgentsAfterUpdate({ configPath, runPoolCli: async () => { throw new Error("boom"); }, warn: (m) => warns.push(m), ensureRouterFresh }), "failed");
   assert.match(warns[0], /boom/);
 });
 

@@ -6,7 +6,7 @@ const LANE_BUILD_RETRY_AFTER_S = 300;
 import { randomBytes } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, statfsSync, lstatSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, constants as fsConstants, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, statfsSync, lstatSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { cpus, hostname } from "node:os";
 import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
@@ -130,6 +130,17 @@ export async function buildWithRetry(build, { sleep = (ms) => new Promise((r) =>
   }
 }
 
+/** A regular file the lane may have written, read without following symlinks (a lane can plant a link to a host file); "" otherwise. */
+const BURY_TIMEOUT_MS = 30000; // evidence copy before a destroy (run logs out of the container) never holds the destroy longer
+export function readLaneFile(path) {
+  let fd = null;
+  try {
+    if (!lstatSync(path).isFile()) return "";
+    fd = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    if (!fstatSync(fd).isFile()) return "";
+    return readFileSync(fd, "utf8");
+  } catch { return ""; } finally { if (fd !== null) { try { closeSync(fd); } catch { /* closed */ } } }
+}
 export function createAgent(cfg, { docker, now = () => Date.now(), log = console, live = liveHeadroom, hostDisk = null, hostMem = null, net = netState, vm = vmSize, trim = runFstrim, mirrorRunner = null } = {}) {
   const stateDir = cfg.state_dir;
   const store = jsonStore(join(stateDir, "state.json"), { sandboxes: {} });
@@ -695,16 +706,16 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       tmp = mkdtempSync(join(stateDir, "runlog-"));
       await docker.copyOut(r.name, RUNS_IN_SANDBOX, tmp);
       const want = new RegExp(`(^|__)${String(r.issue ?? "").replace(/[^\w.-]/g, "")}\\.jsonl$`);
-      const files = readdirSync(tmp).filter((f) => want.test(f));
+      const files = readdirSync(tmp).filter((f) => want.test(f) && (() => { try { return lstatSync(join(tmp, f)).isFile(); } catch { return false; } })());
       if (!files.length) return "";
-      const text = readFileSync(join(tmp, files.sort((a, b) => statSync(join(tmp, b)).size - statSync(join(tmp, a)).size)[0]), "utf8");
+      const text = readLaneFile(join(tmp, files.sort((a, b) => lstatSync(join(tmp, b)).size - lstatSync(join(tmp, a)).size)[0]));
       if (text.length <= RUNLOG_MAX) return text;
       const cut = text.slice(-RUNLOG_MAX); return cut.slice(cut.indexOf("\n") + 1); // whole lines only
     } catch { return ""; } finally { if (tmp) rmSync(tmp, { recursive: true, force: true }); }
   }
   /** The last TAIL_LINES lines of the sandbox's lane log (its engine stderr/stdout). */
   function logTail(r) {
-    try { const t = readFileSync(join(r.dir, "out", "lane.log"), "utf8"); return t.split("\n").slice(-(TAIL_LINES + 1)).join("\n"); } catch { return ""; }
+    const t = readLaneFile(join(r.dir, "out", "lane.log")); return t ? t.split("\n").slice(-(TAIL_LINES + 1)).join("\n") : "";
   }
   const grave = (id) => { const g = typeof id === "string" ? graveyard.get(id) : null; if (g && g.until <= now()) { graveyard.delete(id); return null; } return g ?? null; };
   /** #6117: `{run_log, tail}` of a live sandbox, or of a destroyed one inside its grace period; null when unknown. */
@@ -715,7 +726,9 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     return g ? { run_log: g.runLog, tail: g.tail } : null;
   }
   /** Keeps what a late fetch needs once the container and its dir are gone. */
+  const GRAVE_MAX = 64; // destroyed sandboxes whose evidence is kept at once; the oldest goes first
   async function bury(r) {
+    while (graveyard.size >= GRAVE_MAX) graveyard.delete(graveyard.keys().next().value);
     try {
       let text = "", size = 0;
       try { size = statSync(join(r.dir, "out", "lane.log")).size; const fd = openSync(join(r.dir, "out", "lane.log"), "r"); try { const len = Math.min(size, GRAVE_LOG_MAX); const buf = Buffer.alloc(len); readSync(fd, buf, 0, len, size - len); text = buf.toString("utf8"); } finally { closeSync(fd); } } catch { /* no log */ }
@@ -731,7 +744,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   async function destroy(id, why, { keepWork = false } = {}) {
     const r = own(id);
     if (!r) return false;
-    if (keepLogMs > 0) await bury(r); // #6117: before the container and its dir go
+    if (keepLogMs > 0) await Promise.race([bury(r), new Promise((res) => { const t = setTimeout(res, BURY_TIMEOUT_MS); t.unref?.(); })]); // #6117: before the container and its dir go; bounded so a hung copy never blocks the destroy
     if (r.slug && r.diskPeakMb) { const h = (hist()[r.slug] ??= []); h.push(r.diskPeakMb); if (h.length > 50) h.shift(); }
     const history = r.usage?.samples ? JSON.stringify({ at: new Date(now()).toISOString(), id: r.id, issue: r.issue, repo: r.repo ?? null, docker: Boolean(r.docker), minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10, ...usageView(r) }) : null;
     await docker.remove(r.name);

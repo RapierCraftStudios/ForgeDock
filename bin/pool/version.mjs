@@ -52,13 +52,43 @@ async function fetchLeftBehind(configPath) {
 }
 
 /**
+ * The local router runs the installed bin/pool code (its /version `code` hash equals versionOf().code). When it does not,
+ * restart it through `restart()` (systemd user unit by default) and poll `/version` for up to `waitMs`. Returns
+ * {ok, running, installed, why}. `probe(configPath)` returns the router's /version data or null.
+ */
+export async function routerFresh(configPath, { installed = versionOf(), probe = probeRouterVersion, restart = restartRouterUnit, waitMs = 30000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  const same = (v) => v && v.code === installed.code && v.version === installed.version;
+  let v = await probe(configPath);
+  if (same(v)) return { ok: true, running: v.version, installed: installed.version };
+  if (!v) return { ok: false, running: null, installed: installed.version, why: "router unreachable" };
+  if (!(await restart())) return { ok: false, running: v.version, installed: installed.version, why: "could not restart the router" };
+  for (let t = 0; t < waitMs; t += 1000) { await sleep(1000); v = await probe(configPath); if (same(v)) return { ok: true, running: v.version, installed: installed.version }; }
+  return { ok: false, running: v?.version ?? null, installed: installed.version, why: "router did not come back on the installed code" };
+}
+async function probeRouterVersion(configPath) {
+  try {
+    const cfg = JSON.parse(readFileSync(configPath, "utf8"));
+    const { call } = await import("./http.mjs");
+    const r = await call(`http://${cfg.listen.host}:${cfg.listen.port}`, "GET", "/version", { token: cfg.forgedock_token });
+    return r?.data ?? null;
+  } catch { return null; }
+}
+async function restartRouterUnit() {
+  try { const { execFileSync } = await import("node:child_process"); execFileSync("systemctl", ["--user", "restart", "computeshare-router.service"], { stdio: "ignore", timeout: 30000 }); return true; } catch { return false; }
+}
+
+/**
  * `forgedock update` hook: push the new code and lane image to every enrolled agent. A no-op on hosts without a
  * pool router config; never throws (a failed push must not fail the update). Returns "skipped" | "upgraded" | "failed";
  * agents still on an older engine afterwards are named through `warn` (and `onLeftBehind`).
  */
-export async function upgradeAgentsAfterUpdate({ configPath = process.env.COMPUTESHARE_CONFIG ?? join(homedir(), ".config/computeshare/router.json"), runPoolCli, warn = console.warn, leftBehind = fetchLeftBehind, onLeftBehind } = {}) {
+export async function upgradeAgentsAfterUpdate({ configPath = process.env.COMPUTESHARE_CONFIG ?? join(homedir(), ".config/computeshare/router.json"), runPoolCli, warn = console.warn, leftBehind = fetchLeftBehind, onLeftBehind, ensureRouterFresh } = {}) {
   if (!existsSync(configPath)) return "skipped";
   try {
+    // The router builds the agent bundle from the code it is RUNNING: a router still on the old version ships an incomplete
+    // bundle and the upgraded agent crash-loops at import. Restart it onto the installed code first, or do not push.
+    const fresh = await (ensureRouterFresh ?? routerFresh)(configPath);
+    if (!fresh.ok) { warn(`pool upgrade skipped: the router runs ${fresh.running ?? "unknown"} code but ${fresh.installed} is installed (${fresh.why}); restart computeshare-router, then run forgedock pool upgrade`); return "skipped"; }
     const run = runPoolCli ?? (await import("./cli.mjs")).runPoolCli;
     await run(["upgrade", "--config", configPath]);
     const { target, rows } = await leftBehind(configPath);
