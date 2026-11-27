@@ -29,6 +29,7 @@ function world() {
       throw new Error(`unexpected gh ${j}`);
     },
   };
+  io.ciGreen = { now: () => 0, sleep: async () => {}, isDraft: async () => false, headOf: async () => sha(w.head), checks: async () => [], required: async () => [] }; // CI is green at once
   io.review = {
     pre: async ({ delta }) => ({ code: 0, lines: [], data: { pr: 7, headSha: sha(w.head), bundle: [1, 2], scopeMode: "full", contextFile: "/sd/ctx.json", launchedFile: "/sd/l", briefs: [{ domain: "security", path: "/sd/b" }], delta: delta ? { from: delta, files: ["f"] } : null } }),
     headOf: async () => sha(w.head),

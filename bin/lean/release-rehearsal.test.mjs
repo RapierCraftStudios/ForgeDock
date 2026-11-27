@@ -35,7 +35,7 @@ function fakeIo({ run = { ok: true }, issues = [], body = "Bundle" } = {}) {
   return io;
 }
 const go = async (io, config, root = tmpDir("rehearsal-"), id = newReleaseId()) => ({
-  out: await runRelease({ io, repo: REPO, root, mounts: DISK, id, opts: { merge: true }, config, branches: { staging: "staging", default: "main" }, steps: withStubs({ review: ok, fixes: ok, "post-merge": ok }) }),
+  out: await runRelease({ io, repo: REPO, root, mounts: DISK, id, opts: { merge: true }, config, branches: { staging: "staging", default: "main" }, steps: withStubs({ "ci-green": ok, review: ok, fixes: ok, "post-merge": ok }) }),
   root, id,
 });
 const cfg = (o = {}) => ({ rehearsal: parseRehearsalConfig({ rehearsal_command: "./dry-run.sh", ...o }) });

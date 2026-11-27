@@ -18,6 +18,7 @@ import { readBranches, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { ghRunner } from "./issuewatch.mjs";
 import { parseForgeYaml } from "../forge-utils.mjs";
 import { reviewStep, fixStep } from "./release-review.mjs";
+import { ciGreenStep, ciGreenKeys } from "./release-cigreen.mjs";
 import { postMergeStep } from "./release-postmerge.mjs";
 import { deployStep } from "./release-deploy.mjs";
 import { riskClass } from "./release-verify.mjs";
@@ -37,7 +38,7 @@ import { hostPreflightStep, markReadyStep, stagingHealthStep, parsePreflightConf
 import { roleRefusal } from "./release-credentials.mjs";
 import { mergeGuard } from "./release-gate.mjs";
 
-export const RELEASE_STEPS = ["preflight", "host-preflight", "release-pr", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge", "deploy"];
+export const RELEASE_STEPS = ["preflight", "host-preflight", "release-pr", "ci-green", "review", "fixes", "mark-ready", "rehearsal", "promotion", "post-merge", "deploy"];
 const ID_RE = /^r\d{8}-\d{6}-\d+$/;
 const BLOCKED_EXIT = 3;
 
@@ -65,7 +66,7 @@ export function readReleaseConfig(raw) {
   let r = {};
   try { r = parseForgeYaml(String(raw ?? ""))?.release ?? {}; } catch { r = {}; }
   const off = (v) => ["false", "off", "no", "0", ""].includes(String(v ?? "").trim().toLowerCase());
-  return { autoMerge: !off(r.auto_merge), artifactCheck: r.artifact_check || null, versionSync: !off(r.version_sync), publishWorkflow: r.publish_workflow || null, ...(r.managed !== undefined && !off(r.managed) ? { managed: true } : {}), ...managedKeys(raw, r), ...freezeKeys(raw, r), ...optKeys(r), ...snapshotKeys(r) };
+  return { autoMerge: !off(r.auto_merge), artifactCheck: r.artifact_check || null, versionSync: !off(r.version_sync), publishWorkflow: r.publish_workflow || null, ...(r.managed !== undefined && !off(r.managed) ? { managed: true } : {}), ...managedKeys(raw, r), ...freezeKeys(raw, r), ...optKeys(r), ...snapshotKeys(r), ...ciGreenKeys(r) };
 }
 
 /** `{nightly, budget}` (#5569) only when `release.managed` is on: the forge.yaml `nightly:` and `budget:` blocks. */
@@ -377,6 +378,7 @@ const STEP_FNS = {
   preflight: preflightStep,
   "host-preflight": hostPreflightStep,
   "release-pr": releasePrStep,
+  "ci-green": (ctx) => ciGreenStep(ctx),
   review: (ctx) => reviewStep(ctx),
   fixes: (ctx) => fixStep(ctx),
   "mark-ready": markReadyStep,
@@ -443,6 +445,7 @@ export async function runRelease({ io, repo, opts = {}, config = {}, branches = 
       const result = await steps[step](ctx);
       if (result?.refused) { out = { id, status: "refused", step, reason: result.refused }; break; }
       if (result?.blocked) { out = { id, status: "blocked", step, reason: result.reason }; break; }
+      if (result?.aborted) { state.steps[step] = { done: false, at: new Date(io.now()).toISOString(), result }; state.abortedReason = result.aborted; out = { id, status: "aborted", step, reason: `aborted: ${result.aborted}` }; break; } // one fix round max; the fixes stay on staging
       if (result?.skipped && OPTIONAL_STEPS.includes(step)) continue; // unconfigured: leaves no trace in the state
       if (result?.stopped) { state.steps[step] = { done: false, at: new Date(io.now()).toISOString(), result }; out = { id, status: "stopped", step, reason: result.why }; break; }
       state.steps[step] = { done: true, at: new Date(io.now()).toISOString(), result };
@@ -709,7 +712,7 @@ export async function releaseFromCli(argv, deps = {}) {
   const line = r.status === "done" ? `release ${id}: done` : `release ${id}: ${r.status} at ${r.step}: ${r.reason} (resume: forgedock release --resume ${id})`;
   io.print(line);
   try { await budget(Date.parse(openRelease(root, id).load()?.startedAt) || null); } catch { /* best effort */ }
-  const code = r.status === "refused" ? 1 : r.status === "blocked" ? BLOCKED_EXIT : 0;
+  const code = r.status === "refused" ? 1 : (r.status === "blocked" || r.status === "aborted") ? BLOCKED_EXIT : 0;
   if (argv.includes("--watch") && code === 0 && r.status !== "done") return statusCli(["status", id, "--watch", "--repo", repo, ...(flag(argv, "--interval") ? ["--interval", flag(argv, "--interval")] : [])], { io, cwd, env, deps }); // #5848: watch the record this start created
   return code;
 }

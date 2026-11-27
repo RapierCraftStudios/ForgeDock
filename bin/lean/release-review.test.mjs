@@ -36,7 +36,9 @@ function fakeSeam({ heads = [H1], fins = [fin()], summary, lanes = [], jobs = []
     runLane: async (a) => { log.push(["lane", a.issue, a.lane]); return lanes[l++] ?? { terminalReason: "merged" }; },
   };
 }
-const ctx = (seam, steps = {}) => ({ io: { review: seam }, repo: "o/r", def: "main", staging: "staging", state: { steps: { "release-pr": { result: { pr: 7 } }, ...steps } }, save() {} });
+/** ci-green seam fake: every required check green at once (no CI to wait for). */
+export const greenCi = (over = {}) => ({ now: () => 0, sleep: async () => {}, isDraft: async () => false, headOf: async () => H1, checks: async () => [], required: async () => [], ...over });
+const ctx = (seam, steps = {}, extra = {}) => ({ io: { review: seam, ciGreen: greenCi() }, repo: "o/r", def: "main", staging: "staging", state: { steps: { "release-pr": { result: { pr: 7 } }, ...steps } }, save() {} });
 
 describe("#6098 reviewer fan-out is capped and niced", () => {
   it("mapLimit never has more than the cap in flight and keeps order", async () => {
@@ -207,14 +209,51 @@ describe("fixStep", () => {
     assert.equal((brief.match(/ci:lint/g) ?? []).length, 1);
   });
 
-  it("is bounded: one round (ci.fix.max_rounds default 1), then HELD with an owner ask for a non-flake, non-regression failure", async () => {
+  it("one fix round, then a new blocker in the delta aborts the release (second blocking round); no third round (#6164)", async () => {
     const bad = { code: 0, data: { verdict: "BLOCK DEPLOY", marker: "FORGE:GATE_FAILURE", ciFailing: 0 }, lines: [] };
-    const s = fakeSeam({ heads: [H2], summary: bad, fins: [fin({ toFile: [{ title: "x", severity: "CRITICAL" }] })] });
-    const r = await fixStep(ctx(s, { review: { result: failed } }));
-    assert.equal(r.blocked, true);
-    assert.equal(r.held, true);
-    assert.match(r.reason, /^Owner: .*ci\.fix\.max_rounds=1/);
+    const s = fakeSeam({ heads: [H2], summary: bad, fins: [fin({ toFile: [{ id: "A", title: "x", severity: "CRITICAL" }], confirmedIds: ["A"] })] });
+    const c = ctx(s, { review: { result: failed } });
+    const r = await fixStep(c);
+    assert.equal(r.aborted, "second blocking round");
     assert.equal(s.log.filter((e) => e[0] === "lane").length, 1);
+    assert.equal(c.state.abortedReason, "second blocking round");
+    assert.equal((await fixStep(c)).aborted, "second blocking round", "a resume never opens a third round");
+    assert.equal(s.log.filter((e) => e[0] === "lane").length, 1);
+  });
+
+  it("only CONFIRMED CRITICAL/HIGH blocks; MEDIUM, LOW and unconfirmed findings are filed and never trigger a fix or head move (#6164)", async () => {
+    const s = fakeSeam({ fins: [fin({ toFile: [{ id: "m", title: "med", severity: "MEDIUM" }, { id: "l", title: "unconfirmed", severity: "HIGH" }, { id: "c", title: "real", severity: "HIGH" }], confirmedIds: ["m", "c"] })] });
+    const r = await reviewStep(ctx(s));
+    assert.equal(s.log.filter((e) => e[0] === "file").length, 3, "all are filed for the next release");
+    assert.deepEqual(r.blocking, [102], "only the confirmed HIGH blocks");
+    const s2 = fakeSeam({ fins: [fin({ toFile: [{ id: "m", title: "med", severity: "MEDIUM" }], confirmedIds: ["m"] })], summary: { code: 0, data: { verdict: "APPROVE FOR DEPLOY", marker: "FORGE:GATE_PASS", ciFailing: 0 }, lines: [] } });
+    const r2 = await reviewStep(ctx(s2));
+    assert.deepEqual(r2.blocking, []);
+    assert.equal((await fixStep(ctx(s2, { review: { result: r2 } }))).verdict, "APPROVE FOR DEPLOY");
+    assert.equal(s2.log.filter((e) => e[0] === "lane").length, 0, "no fix lane");
+  });
+
+  it("a head move during review goes back through ci-green before the delta review (#6164)", async () => {
+    const order = [];
+    const s = fakeSeam({ heads: [H2, H2, H2], fins: [fin({ head: H2 })] });
+    const pre = s.pre; s.pre = async (a) => { order.push(a.delta ? "delta-review" : "review"); return pre(a); };
+    const c = ctx(s);
+    c.io.ciGreen = greenCi({ checks: async () => { order.push("ci-green"); return []; } });
+    await reviewStep(c);
+    assert.deepEqual(order, ["review", "ci-green", "delta-review"]);
+  });
+
+  it("the delta review after the fix round is preceded by ci-green on the new head and records timing", async () => {
+    const order = [];
+    const s = fakeSeam({ heads: [H2], fins: [fin({ head: H2 })] });
+    const pre = s.pre; s.pre = async (a) => { order.push(a.delta ? "delta" : "pre"); return pre(a); };
+    const c = ctx(s, { review: { result: { ...failed, blocking: [], ciFailing: 2 } } });
+    c.io.ciGreen = greenCi({ checks: async () => { order.push("ci-green"); return []; } });
+    await fixStep(c);
+    assert.deepEqual(order, ["ci-green", "delta"]);
+    assert.equal(c.state.timing.fix_rounds, 1);
+    assert.equal(c.state.timing.review_passes, 1);
+    assert.equal(typeof c.state.timing.review_min, "number");
   });
 
   it("blocks when a lane does not merge", async () => {

@@ -33,7 +33,7 @@ import { attemptGuard } from "./lean/release-flakes.mjs";
 import { requiredChecksRead } from "./lean/effects.mjs";
 
 const INSTALL_ROOT = fileURLToPath(new URL("..", import.meta.url));
-const USAGE = "usage: forgedock review-staging [<PR number|PR URL>] [--thorough | --delta <from-sha>] [--json]\n" +
+const USAGE = "usage: forgedock review-staging [<PR number|PR URL>] [--thorough | --delta <from-sha>] [--allow-ci-pending] [--json]\n" +
   "       forgedock review-staging [<PR>] --finalize --test-gate-output <file> [--notes-dropped <n>] [--json]\n" +
   "       forgedock review-staging [<PR>] --summary [--filed <issue>]... [--json]\n" +
   "       forgedock review-staging [<PR>] --post-reviewer <domain> --body-file <file>";
@@ -53,13 +53,14 @@ class Stop extends Error {
 
 /** argv -> {pr, thorough, json, mode, testGateOutput, notesDropped, filed, delta}. Throws Stop(2) on anything else. */
 export function parseArgs(argv) {
-  const o = { pr: null, thorough: false, json: false, mode: "pre", testGateOutput: null, notesDropped: 0, filed: [], delta: null, domain: null, bodyFile: null };
+  const o = { pr: null, thorough: false, json: false, mode: "pre", testGateOutput: null, notesDropped: 0, filed: [], delta: null, domain: null, bodyFile: null, allowCiPending: false };
   const setMode = (m, a) => { if (o.mode !== "pre") throw new Stop(2, [`review-staging: ${a} cannot be combined with --${o.mode}`, USAGE]); o.mode = m; };
   const value = (i, a) => { const v = argv[i + 1]; if (v == null || v.startsWith("--")) throw new Stop(2, [`review-staging: ${a} requires a value`, USAGE]); return v; };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--thorough") o.thorough = true;
     else if (a === "--json") o.json = true;
+    else if (a === "--allow-ci-pending") o.allowCiPending = true;
     else if (a === "--finalize") setMode("finalize", a);
     else if (a === "--summary") setMode("summary", a);
     else if (a === "--post-reviewer") { setMode("post-reviewer", a); o.domain = value(i++, a); }
@@ -90,6 +91,7 @@ export function parseArgs(argv) {
   if (o.mode !== "post-reviewer" && o.bodyFile) throw new Stop(2, ["review-staging: --body-file belongs to --post-reviewer", USAGE]);
   if (o.mode !== "finalize" && (o.testGateOutput != null || o.notesDropped)) throw new Stop(2, ["review-staging: --test-gate-output/--notes-dropped belong to --finalize", USAGE]);
   if (o.mode !== "summary" && o.filed.length) throw new Stop(2, ["review-staging: --filed belongs to --summary", USAGE]);
+  if (o.mode !== "pre" && o.allowCiPending) throw new Stop(2, ["review-staging: --allow-ci-pending belongs to the pre-dispatch", USAGE]);
   if (o.mode !== "pre" && o.thorough) throw new Stop(2, ["review-staging: --thorough belongs to the pre-dispatch", USAGE]);
   if (o.mode !== "pre" && o.delta) throw new Stop(2, ["review-staging: --delta belongs to the pre-dispatch (--finalize reads it from the review context)", USAGE]);
   if (o.thorough && o.delta) throw new Stop(2, ["review-staging: --delta cannot be combined with --thorough", USAGE]);
@@ -249,6 +251,9 @@ async function main(argv, io) {
   const head = await headSha(io, c, pr);
   if (a.delta && a.delta === head) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: --delta ${head} is the current head of PR #${pr}: nothing changed since that pass, nothing to review`]);
   const sha7 = head.slice(0, 7);
+  // CI first (default, no off switch): a review of a head whose required checks are pending or red is wasted when CI then moves the head.
+  const ciBlock = a.allowCiPending ? null : await ciNotGreen(io, c, pr, env);
+  if (ciBlock) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: CI not green on ${sha7} (pending: ${ciBlock.pending.join(", ") || "none"}, failing: ${ciBlock.failing.join(", ") || "none"}); review starts after CI is green`]);
   // #4865: with selftest.sandbox_repo set, the release needs a passing live selftest for exactly this head (fail closed).
   // Without a sandbox repo there is nothing the harness can run against, so the gate is skipped and says so.
   if (c.sandboxRepo) {
@@ -264,7 +269,7 @@ async function main(argv, io) {
   } catch { /* unreadable: treated as a first pass */ }
   const priorOpen = priorRoutes > 0 ? await priorFindings(io, c, pr, "open") : [];
   const priorResolved = priorRoutes > 0 ? await priorFindings(io, c, pr, "closed") : [];
-  await retryGh(io, ["pr", "comment", String(pr), "-R", c.ghRepo, "--body", `<!-- FORGE:REVIEW_ROUTE mode=staging-deploy spec=review-pr-staging.md sha=${sha7} -->`]);
+  await retryGh(io, ["pr", "comment", String(pr), "-R", c.ghRepo, "--body", `<!-- FORGE:REVIEW_ROUTE mode=staging-deploy spec=review-pr-staging.md sha=${sha7}${a.allowCiPending ? " allow_ci_pending=true" : ""} -->`]);
   io.writeFile(join(sd, `staging_pr_number.${runKey(io.env)}`), `${pr}\n`);
 
   // 0A: bundle PR set, then the open review-finding gate
@@ -492,7 +497,7 @@ async function finalize(a, io) {
   const items = worklist.items;
   const state = {
     pr, head, bundle, codeBranch, scopeMode, delta, testGate: { verdict: tg.verdict, reason: tg.reason }, counts, notes,
-    confirmedCritical: confirmed("CRITICAL"), confirmedHigh: confirmed("HIGH"), resolved,
+    confirmedCritical: confirmed("CRITICAL"), confirmedHigh: confirmed("HIGH"), confirmedMedium: confirmed("MEDIUM"), confirmedIds: findings.filter((f) => !resolvedBy.has(f.id) && upper(f.confidence) === "CONFIRMED").map((f) => f.id), resolved,
     toFile: items.filter((i) => i.action === "file"), skipped: items.filter((i) => String(i.action).startsWith("skip-")),
   };
   io.writeFile(join(sd, `${pr}_finalize.json`), JSON.stringify(state));
@@ -565,6 +570,30 @@ export function cancelOnlyChecks(checks, required = []) {
   const seen = new Map();
   for (const k of blockRows) if (k.bucket === "cancel" && !failed.has(k.name) && !seen.has(k.name)) seen.set(k.name, { name: k.name, link: k.link ?? "" });
   return [...seen.values()];
+}
+
+/** Required checks on the head, by state: `pending` (running, or required but not reported yet) and `failing` (fail/cancel and not pending). */
+export function ciState(checks, required = []) {
+  const rows = redChecks(checks, required).blockRows;
+  const names = (f) => [...new Set(rows.filter(f).map((k) => String(k.name)))];
+  const pend = names((k) => k.bucket === "pending");
+  const seen = new Set(checks.map((k) => k?.name));
+  const missing = [...new Set(required)].filter((n) => !CI_EXCLUDED_CHECKS.includes(n) && !seen.has(n));
+  const pending = [...new Set([...pend, ...missing])];
+  return { pending, failing: names((k) => k.bucket === "fail" || k.bucket === "cancel").filter((n) => !pending.includes(n)), green: !pending.length && !rows.length };
+}
+
+/** Pre-dispatch CI read: `null` when green (or the PR has no checks), else `{pending, failing}`. An unreadable read fails closed. */
+async function ciNotGreen(io, c, pr, env) {
+  const r = await io.run("gh", ["pr", "checks", String(pr), "-R", c.ghRepo, "--json", "name,bucket,link"], { env, cwd: io.cwd });
+  const checks = r.code === 0 || r.code === 8 ? parseChecks(r.stdout) : null;
+  if (!checks) {
+    if (/no checks reported/i.test(`${r.stderr ?? ""}${r.stdout ?? ""}`)) return null;
+    return { pending: [], failing: ["checks unreadable"] };
+  }
+  const read = await requiredChecksRead({ gh: io.gh, repo: c.ghRepo, lane: c.defaultBranch });
+  const st = ciState(checks, requiredSet(read, c.extraRequiredChecks));
+  return st.green ? null : st;
 }
 
 const CI_POLL_MS = 20_000, CI_POLL_MAX = 45;

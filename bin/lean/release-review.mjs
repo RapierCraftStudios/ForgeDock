@@ -20,13 +20,16 @@ import { pickFixes, recut, revertLast } from "./release-snapshot.mjs";
 import { parseFixConfig, collectFindings, blockingOf, compileBrief, roundsAt, recordRound, secondPush, secondPushOf, holdForOwner, jobsToRerun, inputHash, deferredOf } from "./release-fixloop.mjs";
 import { coStartCi } from "./release-preflight.mjs";
 import { laneEnv } from "./release-credentials.mjs";
+import { ciGreenWait, addTiming, blockSetOf } from "./release-cigreen.mjs";
 
 /** Delta passes after a head move: past it the job blocks for the manual path. Fix rounds are `ci.fix.max_rounds` (release-fixloop.mjs, default 1, #5567). */
 export const MAX_DELTA_PASSES = 2;
 const REVIEW_MS = 45 * 60_000, LANE_MS = 3 * 60 * 60_000;
 const CI_WAIT_MS = 10 * 60_000, CI_POLL_MS = 60_000; // #5779: bounded fail-late CI wait of the fix step
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
-const SEVERE = new Set(["CRITICAL", "HIGH"]);
+const DEFAULT_BLOCK = new Set(["CRITICAL", "HIGH"]);
+/** Default policy (no off switch): a finding blocks only when CONFIRMED and at or above the blocking severity (default HIGH; forge.yaml release.block_severity tightens or loosens it). Everything else is filed for the next release. */
+const isBlocking = (item, st, set) => set.has(String(item.severity ?? "").toUpperCase()) && (!Array.isArray(st.confirmedIds) || st.confirmedIds.includes(item.id));
 const MANUAL = "use the manual path: forgedock review-staging <PR> (commands/review-pr-staging.md)";
 const blocked = (why) => ({ blocked: true, reason: `${why}; ${MANUAL}` });
 
@@ -177,7 +180,7 @@ async function reviewRound({ seam, pr, def, delta }) {
 }
 
 /** The whole review of PR `pr`: rounds until one finalizes at its own head. @returns the step result or `{blocked}`. */
-async function runReview({ seam, pr, def, delta = null }) {
+async function runReview({ seam, pr, def, delta = null, green = null, blockSet = DEFAULT_BLOCK }) {
   let st = null;
   for (let pass = 0; ; pass++) {
     const r = await reviewRound({ seam, pr, def, delta });
@@ -185,18 +188,19 @@ async function runReview({ seam, pr, def, delta = null }) {
     if (r.ok) { st = r.ok; break; }
     if (pass >= MAX_DELTA_PASSES) return blocked(`head of #${pr} kept moving during the review (${MAX_DELTA_PASSES} delta passes)`);
     delta = r.moved;
+    if (green) { const g = await green(); if (g?.blocked) return g; } // a head move goes back through ci-green before the delta review
   }
   const filed = [], blocking = [];
   for (const item of st.toFile ?? []) {
     const n = await seam.fileIssue({ item, pr, head: st.head });
     if (!n) return blocked(`could not file the finding "${item.title ?? item.id}"`);
     filed.push(n);
-    if (SEVERE.has(String(item.severity ?? "").toUpperCase())) blocking.push(n);
+    if (isBlocking(item, st, blockSet)) blocking.push(n);
   }
   if ((st.notes ?? []).length) await seam.addNotes(pr, st.notes);
   const sum = await seam.summary({ pr, filed });
   if (!sum.data) return blocked(`the gate summary was not posted (exit ${sum.code}): ${(sum.lines ?? []).slice(-1).join("").slice(0, 200)}`);
-  return { pr, head: st.head, verdict: sum.data.verdict, marker: sum.data.marker, ciFailing: sum.data.ciFailing, ciCancelOnly: Boolean(sum.data.ciCancelOnly), ciPendingOnly: Boolean(sum.data.ciPendingOnly), filed, blocking, items: st.toFile ?? [], guards: st.guards ?? [], delta: st.delta?.from ?? null };
+  return { pr, head: st.head, verdict: sum.data.verdict, marker: sum.data.marker, ciFailing: sum.data.ciFailing, ciCancelOnly: Boolean(sum.data.ciCancelOnly), ciPendingOnly: Boolean(sum.data.ciPendingOnly), filed, blocking, items: (st.toFile ?? []).map((i) => ({ ...i, blocking: isBlocking(i, st, blockSet), filed: true })), guards: st.guards ?? [], delta: st.delta?.from ?? null };
 }
 
 /** Review step. @returns {{pr, head, verdict, marker, filed, blocking}|{blocked: true, reason: string}} */
@@ -205,7 +209,12 @@ export async function reviewStep(ctx) {
   if (!pr) return blocked("no release PR recorded by the release-pr step");
   const started = await coStartCi(ctx, { pr }); // #5567: CI and the panel start on the same head (off unless ci.fix is configured)
   if (started?.refused) return { refused: started.refused };
-  return runReview({ seam: seamOf(ctx), pr, def: ctx.def });
+  return timedReview(ctx, () => runReview({ seam: seamOf(ctx), pr, def: ctx.def, green: () => ciGreenWait(ctx, pr), blockSet: blockSetOf(ctx.config) }));
+}
+/** Review minutes and passes of this release go to `state.timing` (read by release status and the ledger). */
+async function timedReview(ctx, fn) {
+  const t0 = Date.now();
+  try { return await fn(); } finally { addTiming(ctx, "review_min", Date.now() - t0); addTiming(ctx, "review_passes", 1, { raw: true }); }
 }
 
 /** Re-read the gate summary into the review result (after a rerun or a re-summarise). */
@@ -251,6 +260,58 @@ async function secondRound(ctx, seam, r, cfg) {
 }
 
 /**
+ * One fix round on release PR `r.pr`: collect every failed CI job, blocking finding and guard on `r.head`, compile one brief, file one fix
+ * issue, run one lane, bring the fix onto the release branch and record the head move. No review here: the caller sends the new head back
+ * through ci-green and then ONE delta review. @returns {{head, rec}|{blocked: true, reason}}
+ */
+export async function fixRound(ctx, seam, r) {
+  const cfg = parseFixConfig(ctx.config?.fix);
+  // #5779: with blocking findings in hand the fix round starts now (completed runs go into the brief); else the wait is bounded
+  const seen = r.ciFailing > 0 ? await seam.failedJobs({ pr: r.pr, head: r.head, wait: !r.blocking?.length }) : [];
+  // #6013: failures the staging-health gate named earlier ride along in the same brief, so all fixes are dispatched together.
+  const known = (ctx.state.knownFailures ?? []).filter((k) => !seen.some((j) => j.name === k.name)).map((k) => ({ name: k.name, conclusion: "failure", log: `failed on staging (${k.cause})` }));
+  const jobs = Object.assign([...seen, ...known], { pending: seen.pending });
+  const rec = collectFindings({ head: r.head, jobs, findings: r.items ?? [], guards: r.guards ?? [] });
+  const b = blockingOf(rec);
+  if (!b.ci.length && !b.review.length && !b.guards.length && !r.blocking?.length && jobs.pending?.length) return blocked(`required checks of #${r.pr} still running (${jobs.pending.join(", ")}), with no failure to fix yet; re-run the release once CI finishes`);
+  if (!b.ci.length && !b.review.length && !b.guards.length && !r.blocking?.length && !(r.ciFailing > 0)) return blocked(`${r.verdict} (${r.marker}) on #${r.pr} at ${String(r.head).slice(0, 7)} with neither a blocking finding nor red CI to fix: nothing is pending or failing, so the gate summary names the actual blocker; read it and re-run the release`);
+  const hashesNow = Object.fromEntries(rec.ci.map((j) => [j.name, j.inputHash ?? inputHash(j.name, r.head)]));
+  const brief = compileBrief(rec, { commands: ctx.config?.preflight ? [ctx.config.preflight.command] : [], rerunChecks: jobsToRerun(hashesNow, ctx.state.fixloop?.hashes ?? {}) });
+  // Non-blocking and out-of-wave findings become next-plan issues, once per head; they are never part of the fix and never merged after READY (I16).
+  const fl = (ctx.state.fixloop ??= { heads: {} });
+  fl.hashes = hashesNow;
+  if (!fl.deferred?.includes(r.head)) {
+    const later = deferredOf(rec).filter((x) => !x.filed); // review findings are already filed for the next release by the review round
+    if (later.length) await seam.fileDeferred?.({ pr: r.pr, head: r.head, items: later });
+    fl.deferred = [...(fl.deferred ?? []), r.head];
+    ctx.save();
+  }
+  // One issue carries the whole brief (blocking findings stay filed as their own issues and are referenced); its lane is the one fix lane.
+  const issue = await seam.fileFixIssue({ pr: r.pr, head: r.head, brief, blocking: r.blocking ?? [] });
+  if (!issue) return blocked(`could not file the fix issue for #${r.pr}`);
+  // A resume after the fix already merged (by this job or by an intake lane): its lane would end invalid on a closed issue.
+  if (!(await seam.issueMerged?.(issue))) {
+    const lane = await seam.runLane({ issue, lane: ctx.staging });
+    if (lane?.terminalReason !== "merged") return blocked(`fix lane for #${issue} ended ${lane?.terminalReason ?? "without a result"}`);
+  }
+  // Snapshot mode (#5276): the fixes are merged on staging; bring exactly those onto release/<id> (or recut it) before the delta review.
+  if (ctx.config?.mode === "snapshot") {
+    const moved = ctx.config.fixMode === "recut" ? await recut(ctx) : await pickFixes(ctx, { issues: [issue, ...(r.blocking ?? [])] });
+    if (moved.err) return blocked(moved.err);
+  }
+  // The host preflight re-runs on the head the fixes produced, before the delta review (the draft PR has no Actions CI yet, #5277).
+  const head = await seam.headOf(r.pr);
+  if (ctx.config?.preflight) {
+    const pf = await runHostPreflight(ctx, { head, pr: r.pr });
+    if (!pf.ok && pf.blocking) return blocked(`host preflight failed at ${pf.head} after the fix round (release-blocker #${pf.issue})`);
+  }
+  recordRound(ctx.state, { from: r.head, to: head, failedBefore: rec.ci.map((j) => j.name) });
+  ctx.save();
+  addTiming(ctx, "fix_rounds", Object.values(ctx.state.fixloop?.heads ?? {}).filter((h) => !h.second).length, { set: true });
+  return { head, rec };
+}
+
+/**
  * Fix step: nothing to do on GATE_PASS; else ONE round (`ci.fix.max_rounds`, counted per head sha): collect every failed job, finding
  * and guard on the head, compile one invariant-grouped brief, file one fix issue, run one lane, push once, delta-review the fix commits.
  * A still-failing head after the budget gets only a mechanical revert or an infra-flake rerun, once; else HELD with an owner ask.
@@ -260,6 +321,7 @@ export async function fixStep(ctx) {
   if (!r?.pr) return blocked("no review result recorded by the review step");
   const seam = seamOf(ctx);
   const cfg = parseFixConfig(ctx.config?.fix);
+  if (ctx.state.aborted) return { aborted: ABORT_REASON, head: ctx.state.aborted.head }; // a resume never opens a third round
   // #5912: a resume reads the result saved while CI was still running. A CI-only failure at an unmoved head is re-summarised once, so CI
   // that finished green since posts GATE_PASS instead of the stale "still pending" block.
   if (r.marker !== "FORGE:GATE_PASS" && !r.blocking?.length && !r.guards?.length && (r.ciPendingOnly || !(r.ciFailing > 0)) && (await seam.headOf(r.pr)) === r.head) {
@@ -279,55 +341,23 @@ export async function fixStep(ctx) {
     }
     // Required checks that are only still pending (#5519) have not failed: no CI issue or lane, the release re-runs once CI finishes.
     if (!r.blocking?.length && r.ciFailing > 0 && r.ciPendingOnly) return blocked(`required checks of #${r.pr} still pending, with no failure to fix; re-run the release once CI finishes`);
+    // One fix round per release (a ci-green fix counts): blocking findings on a head the round already produced end the release.
+    if ((r.blocking?.length || r.guards?.length) && Object.values(ctx.state.fixloop?.heads ?? {}).some((h) => !h.second)) return abortSecondRound(ctx, r);
     if (roundsAt(ctx.state, r.head) >= cfg.maxRounds) {
       const s = await secondRound(ctx, seam, r, cfg);
       if (s.blocked) return s;
       r = s.r;
       continue;
     }
-    // #5779: with blocking findings in hand the fix round starts now (completed runs go into the brief); else the wait is bounded
-    const seen = r.ciFailing > 0 ? await seam.failedJobs({ pr: r.pr, head: r.head, wait: !r.blocking?.length }) : [];
-    // #6013: failures the staging-health gate named earlier ride along in the same brief, so all fixes are dispatched together.
-    const known = (ctx.state.knownFailures ?? []).filter((k) => !seen.some((j) => j.name === k.name)).map((k) => ({ name: k.name, conclusion: "failure", log: `failed on staging (${k.cause})` }));
-    const jobs = Object.assign([...seen, ...known], { pending: seen.pending });
-    const rec = collectFindings({ head: r.head, jobs, findings: r.items ?? [], guards: r.guards ?? [] });
-    const b = blockingOf(rec);
-    if (!b.ci.length && !b.review.length && !b.guards.length && !r.blocking?.length && jobs.pending?.length) return blocked(`required checks of #${r.pr} still running (${jobs.pending.join(", ")}), with no failure to fix yet; re-run the release once CI finishes`);
-    if (!b.ci.length && !b.review.length && !b.guards.length && !r.blocking?.length && !(r.ciFailing > 0)) return blocked(`${r.verdict} (${r.marker}) on #${r.pr} at ${String(r.head).slice(0, 7)} with neither a blocking finding nor red CI to fix: nothing is pending or failing, so the gate summary names the actual blocker; read it and re-run the release`);
-    const hashesNow = Object.fromEntries(rec.ci.map((j) => [j.name, j.inputHash ?? inputHash(j.name, r.head)]));
-    const brief = compileBrief(rec, { commands: ctx.config?.preflight ? [ctx.config.preflight.command] : [], rerunChecks: jobsToRerun(hashesNow, ctx.state.fixloop?.hashes ?? {}) });
-    // Non-blocking and out-of-wave findings become next-plan issues, once per head; they are never part of the fix and never merged after READY (I16).
-    const fl = (ctx.state.fixloop ??= { heads: {} });
-    fl.hashes = hashesNow;
-    if (!fl.deferred?.includes(r.head)) {
-      const later = deferredOf(rec);
-      if (later.length) await seam.fileDeferred?.({ pr: r.pr, head: r.head, items: later });
-      fl.deferred = [...(fl.deferred ?? []), r.head];
-      ctx.save();
-    }
-    // One issue carries the whole brief (blocking findings stay filed as their own issues and are referenced); its lane is the one fix lane.
-    const issue = await seam.fileFixIssue({ pr: r.pr, head: r.head, brief, blocking: r.blocking ?? [] });
-    if (!issue) return blocked(`could not file the fix issue for #${r.pr}`);
-    // A resume after the fix already merged (by this job or by an intake lane): its lane would end invalid on a closed issue.
-    if (!(await seam.issueMerged?.(issue))) {
-      const lane = await seam.runLane({ issue, lane: ctx.staging });
-      if (lane?.terminalReason !== "merged") return blocked(`fix lane for #${issue} ended ${lane?.terminalReason ?? "without a result"}`);
-    }
-    // Snapshot mode (#5276): the fixes are merged on staging; bring exactly those onto release/<id> (or recut it) before the delta review.
-    if (ctx.config?.mode === "snapshot") {
-      const moved = ctx.config.fixMode === "recut" ? await recut(ctx) : await pickFixes(ctx, { issues: [issue, ...(r.blocking ?? [])] });
-      if (moved.err) return blocked(moved.err);
-    }
-    // The host preflight re-runs on the head the fixes produced, before the delta review (the draft PR has no Actions CI yet, #5277).
-    const head = await seam.headOf(r.pr);
-    if (ctx.config?.preflight) {
-      const pf = await runHostPreflight(ctx, { head, pr: r.pr });
-      if (!pf.ok && pf.blocking) return blocked(`host preflight failed at ${pf.head} after the fix round (release-blocker #${pf.issue})`);
-    }
-    recordRound(ctx.state, { from: r.head, to: head, failedBefore: rec.ci.map((j) => j.name) });
-    ctx.save();
-    const next = await runReview({ seam, pr: r.pr, def: ctx.def, delta: r.head });
+    const f = await fixRound(ctx, seam, r);
+    if (f.blocked) return f;
+    const { head, rec } = f;
+    // The fix moved the head: ci-green first (it never starts a second fix), then ONE delta review limited to what the fix touched.
+    const g = await ciGreenWait(ctx, r.pr, { noFix: true });
+    if (g.blocked || g.red) return g.blocked ? g : blocked(`required checks of #${r.pr} are still red after the fix round (${g.failing.join(", ")})`);
+    const next = await timedReview(ctx, () => runReview({ seam, pr: r.pr, def: ctx.def, delta: r.head, green: () => ciGreenWait(ctx, r.pr, { noFix: true }), blockSet: blockSetOf(ctx.config) }));
     if (next.blocked) return next;
+    if (next.marker !== "FORGE:GATE_PASS" && (next.blocking?.length || next.guards?.length)) return abortSecondRound(ctx, next);
     if (next.head && next.head !== head) { recordRound(ctx.state, { from: r.head, to: next.head, failedBefore: rec.ci.map((j) => j.name) }); ctx.save(); } // the reviewed head is the one the budget is keyed on
     r = next;
     ctx.state.steps.review = { ...ctx.state.steps.review, result: r };
@@ -336,7 +366,15 @@ export async function fixStep(ctx) {
   return { verdict: r.verdict, head: r.head };
 }
 
-const seamOf = (ctx) => ctx.io.review ?? (ctx.seam ??= realSeam(ctx));
+/** One fix round max: a new blocker after it ends the release (`aborted: second blocking round`); the fixes stay on staging, nothing more is pushed. */
+function abortSecondRound(ctx, r) {
+  ctx.state.abortedReason = ABORT_REASON;
+  ctx.state.aborted = { head: r.head, blocking: r.blocking ?? [], guards: (r.guards ?? []).map((g) => g.name) };
+  ctx.save();
+  return { aborted: ABORT_REASON, head: r.head };
+}
+export const ABORT_REASON = "second blocking round";
+export const seamOf = (ctx) => ctx.io.review ?? (ctx.seam ??= realSeam(ctx));
 
 /** Real effects of the review steps: the review-staging library, the engine runner, the filing scripts, gh and a lane process. */
 /** #6098: CPU niceness of reviewer processes (ionice idle class is applied alongside). */

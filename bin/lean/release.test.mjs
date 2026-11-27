@@ -42,6 +42,7 @@ function fakeIo(world = {}) {
       throw new Error(`unexpected gh ${j}`);
     },
   };
+  io.ciGreen = { isDraft: async () => true }; // real ci-green steps skip like a draft PR: CI waiting is tested in release-cigreen.test.mjs
   if (w.scorecard) io.scorecard = w.scorecard;
   return io;
 }
@@ -52,7 +53,7 @@ describe("unmanaged release carries no epoch (#5553)", () => {
     const mod = await import("./release.mjs");
     const io = fakeIo();
     io.api = async () => { throw new Error("no ledger call expected"); };
-    const out = await mod.runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts: { merge: true }, config: {}, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ review: ok, fixes: ok, "post-merge": ok }) });
+    const out = await mod.runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts: { merge: true }, config: {}, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ "ci-green": ok, review: ok, fixes: ok, "post-merge": ok }) });
     assert.equal(out.status, "done");
     const merge = io.calls.find((a) => a[0] === "pr" && a[1] === "merge");
     assert.deepEqual(merge, ["pr", "merge", "7", "--repo", REPO, "--merge", "--match-head-commit", HEAD]);
@@ -65,7 +66,7 @@ describe("legacy managed promotion without a fence (#5561 regression)", () => {
     const io = fakeIo({ gate: "failure" });
     const shown = [];
     io.git = (a) => { if (a[0] === "show") shown.push(a[1]); throw new Error("no git"); };
-    await mod.runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts: { merge: true }, config: { managed: true }, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ review: ok, fixes: ok, "post-merge": ok }) });
+    await mod.runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts: { merge: true }, config: { managed: true }, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ "ci-green": ok, review: ok, fixes: ok, "post-merge": ok }) });
     assert.ok(shown.some((x) => x.startsWith("origin/main:")), "policy read for the flake rerun");
   });
 });
@@ -75,7 +76,7 @@ describe("release job (#5211)", () => {
     const io = fakeIo(world), root = tmp(), id = newReleaseId();
     // Real preflight/release-pr/promotion, with review/fixes/post-merge replaced by no-ops.
     const mod = await import("./release.mjs");
-    const out = await mod.runRelease({ io, repo: REPO, root, mounts: DISK, id, opts, config, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ review: ok, fixes: ok, "post-merge": ok }) });
+    const out = await mod.runRelease({ io, repo: REPO, root, mounts: DISK, id, opts, config, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ "ci-green": ok, review: ok, fixes: ok, "post-merge": ok }) });
     return { io, out, root, id };
   };
 
@@ -139,7 +140,7 @@ describe("release job (#5211)", () => {
     const io = fakeIo({ prState: "MERGED" }), root = tmp(), id = newReleaseId();
     const mod = await import("./release.mjs");
     let seen = null;
-    const out = await mod.runRelease({ io, repo: REPO, root, mounts: DISK, id, opts: {}, config: {}, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ review: ok, fixes: ok, "post-merge": async (c) => { seen = c.state.steps.promotion.result; return {}; } }) });
+    const out = await mod.runRelease({ io, repo: REPO, root, mounts: DISK, id, opts: {}, config: {}, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ "ci-green": ok, review: ok, fixes: ok, "post-merge": async (c) => { seen = c.state.steps.promotion.result; return {}; } }) });
     assert.equal(out.status, "done");
     assert.equal(seen.alreadyMerged, true);
     assert.equal(seen.mergeCommit, "m".repeat(40));
@@ -210,12 +211,12 @@ describe("release job (#5211)", () => {
     const mod = await import("./release.mjs");
     const ran = [];
     const rec = (n, fn) => async (ctx) => { ran.push(n); return fn(ctx); };
-    const base = mod.withStubs({ review: ok, fixes: ok, "post-merge": ok });
+    const base = mod.withStubs({ "ci-green": ok, review: ok, fixes: ok, "post-merge": ok });
     const kill = async () => { throw new Error("killed"); };
     const first = { ...base, preflight: rec("preflight", base.preflight), "release-pr": rec("release-pr", base["release-pr"]), review: kill };
     await assert.rejects(() => mod.runRelease({ io, repo: REPO, root, mounts: DISK, id, opts: { merge: true }, config: {}, branches: {}, steps: first }), /killed/);
     const st = openRelease(root, id).load();
-    assert.deepEqual(Object.keys(st.steps), ["preflight", "release-pr"]);
+    assert.deepEqual(Object.keys(st.steps), ["preflight", "release-pr", "ci-green"]);
     const second = { ...base, preflight: rec("preflight2", base.preflight), "release-pr": rec("release-pr2", base["release-pr"]) };
     const out = await mod.runRelease({ io, repo: REPO, root, mounts: DISK, id, opts: { merge: true }, config: {}, branches: {}, steps: second });
     assert.equal(out.status, "done");
@@ -226,7 +227,7 @@ describe("release job (#5211)", () => {
     const root = tmp(), id = newReleaseId(), io = fakeIo(), mod = await import("./release.mjs");
     const at = new Date(io.now()).toISOString();
     const review = { pr: 7, head: HEAD, verdict: "BLOCK DEPLOY", marker: "FORGE:GATE_FAILURE", blocking: [101], filed: [101], ciFailing: 1, items: [] };
-    openRelease(root, id, DISK).save({ v: 1, id, repo: REPO, startedAt: at, held: [], steps: { preflight: { done: true, at, result: {} }, "release-pr": { done: true, at, result: { pr: 7, head: HEAD } }, review: { done: true, at, result: review } } });
+    openRelease(root, id, DISK).save({ v: 1, id, repo: REPO, startedAt: at, held: [], steps: { preflight: { done: true, at, result: {} }, "release-pr": { done: true, at, result: { pr: 7, head: HEAD } }, "ci-green": { done: true, at, result: {} }, review: { done: true, at, result: review } } });
     const stuckGh = (a) => {
       if (a[0] === "run" && a[1] === "list") return JSON.stringify([{ databaseId: 1, name: "Shell Compatibility", status: "in_progress", conclusion: "" }, { databaseId: 2, name: "CI", status: "completed", conclusion: "failure" }]);
       if (a[0] === "run" && a[1] === "view") return "boom";
@@ -234,6 +235,7 @@ describe("release job (#5211)", () => {
     };
     const waits = [], log = [];
     const real = realSeam({ repo: REPO, def: "main", env: {}, cwd: "/tmp", gh: stuckGh, io: { now: () => 0, sleep: async (ms) => { waits.push(ms); }, print: () => {} } });
+    io.ciGreen = { now: () => 0, sleep: async () => {}, isDraft: async () => false, headOf: async () => HEAD, checks: async () => [], required: async () => [] };
     io.review = {
       failedJobs: real.failedJobs, headOf: async () => HEAD, issueMerged: async () => false,
       fileDeferred: async () => [], fileFixIssue: async () => { log.push("fix-issue"); return 200; },
@@ -276,7 +278,7 @@ describe("release job (#5211)", () => {
     assert.equal(readReleaseConfig("release:\n  managed: true\n").managed, true);
     const apiCalls = [], ghCalls = [], io = { print() {}, now: () => 1_700_000_000_000, runningLanes: async () => [], batches: async () => [], setParallel: async () => {}, gh: async (a) => { ghCalls.push(a); return ""; }, api: async (...a) => { apiCalls.push(a); return {}; } };
     const ok = async () => ({});
-    const out = await (await import("./release.mjs")).runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts: {}, config: {}, branches: {}, steps: { preflight: ok, "host-preflight": ok, "release-pr": ok, review: ok, fixes: ok, "mark-ready": ok, rehearsal: ok, promotion: ok, "post-merge": ok, deploy: async () => ({ skipped: true }) } });
+    const out = await (await import("./release.mjs")).runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts: {}, config: {}, branches: {}, steps: { preflight: ok, "host-preflight": ok, "release-pr": ok, "ci-green": ok, review: ok, fixes: ok, "mark-ready": ok, rehearsal: ok, promotion: ok, "post-merge": ok, deploy: async () => ({ skipped: true }) } });
     assert.equal(out.status, "done");
     assert.deepEqual(apiCalls, []);
     assert.deepEqual(ghCalls, []);
@@ -418,7 +420,7 @@ describe("release post-merge step (#5213)", () => {
     const go = async (runs) => {
       const io = fakeIo({ pm: world(runs).pm });
       const config = { postMerge: { publishPolls: 1, runPolls: 1 } };
-      return mod.runRelease({ io, repo: REPO, root, mounts: DISK, id, opts: { merge: true }, config, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ review: ok, fixes: ok }) });
+      return mod.runRelease({ io, repo: REPO, root, mounts: DISK, id, opts: { merge: true }, config, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ "ci-green": ok, review: ok, fixes: ok }) });
     };
     assert.equal((await go([[{ databaseId: 1, status: "completed", conclusion: "failure" }]])).status, "blocked");
     assert.equal((await go([[{ databaseId: 2, status: "completed", conclusion: "success" }]])).status, "done");
@@ -441,7 +443,7 @@ describe("snapshot releases (#5276)", () => {
     const io = fakeIo(world);
     if (world.git) io.git = world.git;
     const mod = await import("./release.mjs");
-    const out = await mod.runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts, config, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ review: ok, fixes: ok, "post-merge": ok }) });
+    const out = await mod.runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts, config, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ "ci-green": ok, review: ok, fixes: ok, "post-merge": ok }) });
     return { io, out };
   };
 
@@ -615,7 +617,7 @@ describe("preflight staging-health gate (#6013)", () => {
   it("refuses a snapshot cut on a red staging head and proceeds when green", async () => {
     const mod = await import("./release.mjs");
     const root = tmp(), id = newReleaseId();
-    const base = (io) => ({ io, repo: REPO, root, mounts: DISK, id, opts: {}, config: snap, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ "release-pr": ok, review: ok, fixes: ok, promotion: ok, "post-merge": ok }) });
+    const base = (io) => ({ io, repo: REPO, root, mounts: DISK, id, opts: {}, config: snap, branches: { staging: "staging", default: "main" }, steps: mod.withStubs({ "release-pr": ok, "ci-green": ok, review: ok, fixes: ok, promotion: ok, "post-merge": ok }) });
     const reds = await mod.runRelease(base(fakeIo(world([{ name: "black", status: "completed", conclusion: "failure", text: "" }]))));
     assert.equal(reds.status, "refused");
     assert.match(JSON.stringify(reds), /black/);
@@ -624,5 +626,22 @@ describe("preflight staging-health gate (#6013)", () => {
     assert.equal(saved.rounds[0].cause, "regression");
     const green = await mod.runRelease({ ...base(fakeIo(world([{ name: "black", status: "completed", conclusion: "success", text: "" }]))), id: newReleaseId() });
     assert.notEqual(green.status, "refused");
+  });
+});
+
+describe("default ci-green flow in the conductor (#6164)", () => {
+  it("runs ci-green after release-pr and before review, and a second blocking round ends the job as aborted (exit 3), leaving fixes on staging", async () => {
+    const mod = await import("./release.mjs");
+    const order = [], io = fakeIo();
+    const rec = (n, r = {}) => async () => { order.push(n); return r; };
+    const steps = mod.withStubs({ "ci-green": rec("ci-green"), review: rec("review"), fixes: rec("fixes", { aborted: "second blocking round", head: HEAD }), "post-merge": ok });
+    const out = await mod.runRelease({ io, repo: REPO, root: tmp(), mounts: DISK, id: newReleaseId(), opts: { merge: true }, config: {}, branches: { staging: "staging", default: "main" }, steps: { ...steps, preflight: ok, "release-pr": rec("release-pr", { pr: 7, head: HEAD }) } });
+    assert.deepEqual(order, ["release-pr", "ci-green", "review", "fixes"]);
+    assert.equal(out.status, "aborted"); assert.equal(out.reason, "aborted: second blocking round"); assert.equal(out.step, "fixes");
+  });
+  it("release.block_severity and release.ci_green_max_wait_min only tune the default; absent keys leave it on", () => {
+    const c = readReleaseConfig("release:\n  block_severity: medium\n  ci_green_max_wait_min: 15\n");
+    assert.equal(c.blockSeverity, "MEDIUM"); assert.deepEqual(c.ciGreen, { maxWaitMin: 15 });
+    assert.equal(readReleaseConfig("release:\n  auto_merge: true\n").ciGreen, undefined);
   });
 });

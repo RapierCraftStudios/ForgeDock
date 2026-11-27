@@ -33,7 +33,7 @@ function fakeIo({ preflightOk = () => true, draft = true } = {}) {
     },
   };
 }
-const run = (io, config, over = {}) => runRelease({ io, repo: REPO, root: tmpDir("rel-pf-"), mounts: DISK, id: newReleaseId(), opts: {}, config, branches: { staging: "staging", default: "main" }, steps: withStubs({ review: ok, fixes: ok, promotion: ok, "post-merge": ok, ...over }) });
+const run = (io, config, over = {}) => runRelease({ io, repo: REPO, root: tmpDir("rel-pf-"), mounts: DISK, id: newReleaseId(), opts: {}, config, branches: { staging: "staging", default: "main" }, steps: withStubs({ "ci-green": ok, review: ok, fixes: ok, promotion: ok, "post-merge": ok, ...over }) });
 const CFG = readReleaseConfig("release:\n  preflight_command: npm test\n");
 
 describe("release host preflight (#5277)", () => {
