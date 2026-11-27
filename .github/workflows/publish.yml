@@ -35,6 +35,7 @@ on:
       - 'docs/**'
       - 'scripts/**'
       - 'templates/**'
+      - 'pool/**'
       - 'package.json'
       - '.github/workflows/publish.yml'
   workflow_dispatch:  # Manual retrigger for bot-token merges
@@ -86,7 +87,7 @@ jobs:
             echo "SKIP_PUBLISH=false" >> $GITHUB_ENV
           else
             CHANGED=$(git diff --name-only "$LAST_TAG"..HEAD -- \
-              commands/ bin/ .claude-plugin/ docs/ scripts/ templates/ package.json 2>/dev/null || echo "")
+              commands/ bin/ .claude-plugin/ docs/ scripts/ templates/ pool/ package.json 2>/dev/null || echo "")
             if [ -z "$CHANGED" ]; then
               echo "No publish-relevant files changed since $LAST_TAG — skipping spurious dispatch"
               echo "SKIP_PUBLISH=true" >> $GITHUB_ENV
