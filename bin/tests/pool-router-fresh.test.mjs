@@ -31,3 +31,15 @@ test("a router that stays stale or cannot restart is not fresh, and the agents a
   const out = await upgradeAgentsAfterUpdate({ configPath, runPoolCli: async (a) => { calls.push(a); }, warn: (m) => warns.push(m), ensureRouterFresh: async () => ({ ok: false, running: "1.68.0", installed: "1.69.0", why: "could not restart the router" }) });
   assert.equal(out, "skipped"); assert.deepEqual(calls, []); assert.match(warns[0], /pool upgrade skipped/);
 });
+
+test("readRouterConfig takes the forgedock token inline, from forgedock_token_file, or from forgedock.token beside router.json", async () => {
+  const { readRouterConfig } = await import("../pool/version.mjs");
+  const dir = mkdtempSync(join(tmpdir(), "rcfg-"));
+  const p = join(dir, "router.json");
+  writeFileSync(p, JSON.stringify({ listen: { host: "h", port: 1 }, forgedock_token: "inline" }));
+  assert.equal(readRouterConfig(p).forgedock_token, "inline");
+  writeFileSync(join(dir, "tok"), "fromfile\n"); writeFileSync(p, JSON.stringify({ listen: { host: "h", port: 1 }, forgedock_token_file: join(dir, "tok") }));
+  assert.equal(readRouterConfig(p).forgedock_token, "fromfile");
+  writeFileSync(join(dir, "forgedock.token"), "beside\n"); writeFileSync(p, JSON.stringify({ listen: { host: "h", port: 1 } }));
+  assert.equal(readRouterConfig(p).forgedock_token, "beside");
+});
