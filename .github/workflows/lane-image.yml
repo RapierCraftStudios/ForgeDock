@@ -1,0 +1,68 @@
+# Build and push the pool lane image for a released version (#6166). publish.yml builds it after each release; run this by
+# hand to (re)build a version whose image is missing: gh workflow run lane-image.yml -f version=1.71.1
+name: Lane image
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: ForgeDock version already on npm (e.g. 1.71.1)
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  lane-image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::version must be X.Y.Z"; exit 1; }
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: v${{ env.VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Wait for npm to serve this version
+        run: |
+          for i in $(seq 1 60); do
+            if [ "$(npm view "forgedock@${VERSION}" version --prefer-online 2>/dev/null)" = "${VERSION}" ]; then exit 0; fi
+            sleep 30
+          done
+          echo "::error::npm does not serve forgedock@${VERSION}"; exit 1
+      - name: Compute lane image recipe hash
+        id: lane
+        run: echo "recipe=$(node -e "import('./bin/pool/version.mjs').then((m) => process.stdout.write(m.versionOf().image))")" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push lane image (linux/amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: pool/image
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            FORGEDOCK_VERSION=${{ env.VERSION }}
+            FORGEDOCK_RECIPE=${{ steps.lane.outputs.recipe }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          tags: |
+            ghcr.io/rapiercraftstudios/forgedock-lane:${{ env.VERSION }}
+            ghcr.io/rapiercraftstudios/forgedock-lane:r-${{ steps.lane.outputs.recipe }}
+          cache-from: type=gha,scope=lane-image
+          cache-to: type=gha,mode=max,scope=lane-image
+      - name: Check the lane image is publicly pullable
+        run: |
+          docker logout ghcr.io
+          docker pull "ghcr.io/rapiercraftstudios/forgedock-lane:${VERSION}" >/dev/null \
+            || echo "::warning::not anonymously pullable yet: set the ghcr package forgedock-lane public (org Packages > forgedock-lane > Package settings)"
