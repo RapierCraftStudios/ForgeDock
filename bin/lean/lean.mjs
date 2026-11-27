@@ -2951,7 +2951,7 @@ export async function runCore(o) {
     // #6153: the same sync runs for an env.tool_missing recovery, and once more when a precheck round fails on a branch that is behind
     // its base (the base may have fixed the failing guard script): the lane's own stale copy of a check never decides a verdict.
     let precheckBaseSynced = false;
-    const syncBaseForChecks = async (why) => { // -> {ended} (a terminal result), {merged: true} (rerun the checks) or {merged: false}
+    const syncBaseForChecks = async (why, { parkOnConflict = false } = {}) => { // -> {ended} (a terminal result), {merged: true} (rerun the checks) or {merged: false}
       if (precheckBaseSynced || isSplit || !io.runCommand) return { merged: false };
       try { await git(["fetch", "origin", lane]); } catch { /* offline: the local ref */ }
       const behind = Number(String(await git(["rev-list", "--count", `HEAD..${base}`]).catch(() => "0")).trim()) || 0;
@@ -2962,9 +2962,10 @@ export async function runCore(o) {
       if (!merged && conflicted.length) {
         const bm = o.baseMerge, cr = io.conflictResolve && bm && Object.values(bm).some((v) => v?.length) ? await io.conflictResolve({ cwd: wt, files: conflicted, cfg: bm }).catch(() => null) : null;
         if (cr?.resolved?.length && !(cr.remaining ?? []).length) { try { await git(["commit", "--no-edit"]); merged = true; } catch { /* abort below */ } }
-        if (!merged) { // a conflict the deterministic resolvers cannot settle is not a check failure: fall back to the old path (builder fix round, PR-time base-sync where the builder resolves it)
+        if (!merged) { // first-failure sync: a conflict falls back to the old path (builder fix round, PR-time base-sync resolves it); a recovery lane parks base.conflict (#6107)
           await git(["merge", "--abort"]).catch(() => {});
           ev({ event: "RECOVERY_BASE_SYNC", base, behind, result: "conflict", why, files: conflicted.slice(0, 20) });
+          if (parkOnConflict) return { ended: await needsHuman(`The branch conflicts with ${base} in ${conflicted.slice(0, 20).join(", ")}; the checks were not judged on the stale tree (a conflicting base is not a check failure); nothing merged.`, OUTCOME_CODES.BASE_CONFLICT) };
           T.anomalies.push(`Base-sync before the checks hit a conflict with ${base} in ${conflicted.slice(0, 20).join(", ")}; checks judged on the branch as it is, the PR-time base-sync resolves it`);
           return { merged: false };
         }
@@ -2975,7 +2976,7 @@ export async function runCore(o) {
       return { merged: true };
     };
     if ((recover?.code === OUTCOME_CODES.CI_RED || recover?.code === OUTCOME_CODES.ENV_TOOL_MISSING) && !isSplit && io.runCommand) {
-      const sy = await syncBaseForChecks("before the recovery's first check run"); if (sy.ended) return sy.ended;
+      const sy = await syncBaseForChecks("before the recovery's first check run", { parkOnConflict: true }); if (sy.ended) return sy.ended;
     }
     let ciCommands = await ciPrecheckPlan(0);
     const pickChecks = () => planPrecheck({ testMap, files, learned: [...learnedCommands, ...ciCommands], maxMinutes: o.precheck?.maxMinutes, verify: vcfg });
