@@ -225,6 +225,7 @@ describe("precheck (deterministic, no reviewer)", () => {
   });
   it("an exit 127 under an interpreter is never blamed on the interpreter (Remote sandbox lacks bash)", () => {
     assert.equal(missingTool({ rc: 127, output: "" }, { command: "bash scripts/tests/new-check.sh" })?.tool === "bash", false);
+    assert.equal(missingTool({ rc: 127, output: "PASS: first section" }, { command: "bash scripts/tests/x.sh" })?.kind, "environment", "127 inside the script is the environment, not unimplemented");
     assert.equal(missingTool({ rc: 127, output: "boom" }, { command: "/usr/bin/python3 tools/x.py" })?.tool === "python3", false);
     assert.deepEqual(missingTool({ rc: 127, output: "" }, { command: "jq . x.json" }), { tool: "jq", kind: "command" });
     assert.deepEqual(missingTool({ rc: 127, output: "scripts/x.sh: line 3: yq: command not found" }, { command: "bash scripts/x.sh" }), { tool: "yq", kind: "command" });

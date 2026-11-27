@@ -33,7 +33,7 @@ export function collectFindings({ head, jobs = [], findings = [], guards = [] })
     .map((j) => ({ name: j.name, ...classifyFailure(j.log), inputHash: j.inputHash ?? null, tail: String(j.log ?? "").slice(-LOG_TAIL) }))
     .sort((a, b) => byText(a.name, b.name));
   const review = findings
-    .map((f) => ({ id: f.id ?? null, title: String(f.title ?? f.id ?? "finding"), severity: String(f.severity ?? "").toUpperCase() || null, property: f.property ?? f.invariant ?? f.category ?? null, inWave: f.wave !== false, blocking: f.blocking !== false && /^(CRITICAL|HIGH)$/i.test(String(f.severity ?? "")) }))
+    .map((f) => ({ id: f.id ?? null, title: String(f.title ?? f.id ?? "finding"), severity: String(f.severity ?? "").toUpperCase() || null, property: f.property ?? f.invariant ?? f.category ?? null, inWave: f.wave !== false, filed: f.filed === true, blocking: f.blocking !== false && /^(CRITICAL|HIGH)$/i.test(String(f.severity ?? "")) }))
     .sort((a, b) => byText(a.title, b.title) || byText(String(a.id), String(b.id)));
   const gs = guards.map((g) => ({ name: g.name, why: String(g.why ?? "") })).sort((a, b) => byText(a.name, b.name));
   return { head, ci, review, guards: gs };

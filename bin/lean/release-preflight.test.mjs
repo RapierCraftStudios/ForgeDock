@@ -33,7 +33,7 @@ function fakeIo({ preflightOk = () => true, draft = true } = {}) {
     },
   };
 }
-const run = (io, config, over = {}) => runRelease({ io, repo: REPO, root: tmpDir("rel-pf-"), mounts: DISK, id: newReleaseId(), opts: {}, config, branches: { staging: "staging", default: "main" }, steps: withStubs({ review: ok, fixes: ok, promotion: ok, "post-merge": ok, ...over }) });
+const run = (io, config, over = {}) => runRelease({ io, repo: REPO, root: tmpDir("rel-pf-"), mounts: DISK, id: newReleaseId(), opts: {}, config, branches: { staging: "staging", default: "main" }, steps: withStubs({ "ci-green": ok, review: ok, fixes: ok, promotion: ok, "post-merge": ok, ...over }) });
 const CFG = readReleaseConfig("release:\n  preflight_command: npm test\n");
 
 describe("release host preflight (#5277)", () => {
@@ -103,7 +103,7 @@ describe("release host preflight (#5277)", () => {
         headOf: async () => HEAD, runLane: async () => ({ terminalReason: "merged" }), fileFixIssue: async () => 3, failedJobs: async () => [],
         calls: [],
       };
-      return { io, seam, ctx: { io: Object.assign(io, { review: seam }), repo: REPO, def: "main", staging: "staging", config: CFG, save() {}, state: { steps: { review: { result: { pr: 9, marker: "FORGE:GATE_FAILURE", verdict: "X", head: "b".repeat(40), blocking: [11], ciFailing: 0 } } } } } };
+      return { io, seam, ctx: { io: Object.assign(io, { review: seam }), repo: REPO, def: "main", staging: "staging", config: { ...CFG, reviewFixes: true }, save() {}, state: { steps: { review: { result: { pr: 9, marker: "FORGE:GATE_FAILURE", verdict: "X", head: "b".repeat(40), blocking: [11], ciFailing: 0 } } } } } };
     };
     const red = mk(false);
     const out = await fixStep(red.ctx);
