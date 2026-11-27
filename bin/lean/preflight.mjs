@@ -13,6 +13,7 @@ import { builtinModules } from "node:module";
 import { existsSync } from "node:fs";
 import { join, dirname, delimiter, posix } from "node:path";
 import { missingTool } from "./conformance.mjs";
+import { hostPoetryConfigProblem } from "./hostconfig.mjs";
 
 export const PREFLIGHT_CAP = 20;
 const KIND_NAME = { command: "command", "python-module": "Python module", "node-module": "Node package", path: "path", "env-var": "env var" };
@@ -101,7 +102,7 @@ function moduleNeeds(exe, args) {
 /**
  * The probes for `contract.validate[]`: {probes: [{ids, tool, kind, interp, needs, probe}], dropped}. `needs` is the command
  * probe (tool) a module probe depends on: skip the module probe when its interpreter is missing. A name `repoHas(name)` holds
- * or a deliverable's change text names (the change adds it) is not probed; paths and `$...` words are never probed.
+ * or a deliverable's change text names (the change adds it) is not probed; nor is a tool `provided(name)` (the image manifest, #6037); paths and `$...` words are never probed.
  */
 /** #5020: the contract's runnable commands: each validate entry plus the repro_test, which fails the same ways. */
 export function contractCommands(contract) {
@@ -109,10 +110,10 @@ export function contractCommands(contract) {
   const t = contract?.repro_test;
   return t && typeof t === "object" && typeof t.command === "string" && t.command.trim() ? [...out, { id: "repro_test", command: t.command }] : out;
 }
-export function preflightProbes(contract, { repoHas = () => false, cap = PREFLIGHT_CAP } = {}) {
+export function preflightProbes(contract, { repoHas = () => false, provided = () => false, cap = PREFLIGHT_CAP } = {}) {
   const changes = (Array.isArray(contract?.deliverables) ? contract.deliverables : []).map((d) => String(d?.change ?? "")).join("\n");
   const named = (name) => new RegExp(`(^|[^\\w@/.-])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w/-])`).test(changes);
-  const skip = (name) => !name || name.includes("/") && !name.startsWith("@") || name.startsWith("$") || repoHas(name) || named(name);
+  const skip = (name) => !name || provided(name) || name.includes("/") && !name.startsWith("@") || name.startsWith("$") || repoHas(name) || named(name);
   const byKey = new Map();
   const add = (id, kind, tool, interp = null) => {
     const key = `${kind}|${tool}|${interp ?? ""}`;
@@ -516,4 +517,10 @@ export function venvPythonRewrite(command, files = [], exists = () => false) {
     return `${m[1]}${rel} -m pytest${rest}`;
   });
   return changed ? out.join("") : String(command ?? "");
+}
+
+/** #5917: host config defects (not contract misses): a poisoned poetry config fails every host validate as if the change were wrong. */
+export function hostEnvDefects(opts = {}) {
+  const p = hostPoetryConfigProblem(opts);
+  return p ? [p] : [];
 }

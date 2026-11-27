@@ -198,6 +198,7 @@ function world(o = {}) {
       return "";
     },
     runner: async (c) => {
+      if (c.role === "lane-audit") return { text: "" }; // #6079: the post-terminal audit classification is not a lane session
       w.calls.push(["runner", c.role, c.resume ?? null, c.model ?? null, c.prompt, c.readOnly ?? false, c.system]);
       w.seq.push(c.role + (c.resume ? "-resume" : ""));
       w.envs.push(c.env ?? null);
@@ -557,6 +558,21 @@ describe("core work-on", () => {
     assert.equal(remote.code, "env.capability_remote"); assert.notEqual(remote.terminalReason, "host-task");
     const real = await run(world({ result: { status: "blocked", summary: "needs the production API key to read prod data", block: { kind: "human", why: "credentials" } } }));
     assert.equal(real.code, "builder.blocked");
+  });
+
+  it("#6122 a FORGE:DECISION posted after the park resets the repeat: the next identical failure is a first (NEEDS_HUMAN), not failure.repeated", async () => {
+    const block = { status: "blocked", summary: "need creds", block: { kind: "human", why: "credentials" } };
+    const first = world({ changed: [] });
+    await run(first);
+    const nh = first.comments.find((c) => c.includes("<!-- FORGE:NEEDS_HUMAN -->"));
+    const bot = (body) => ({ author: { login: "rapiercraft-forgedock" }, body });
+    const decision = bot('<!-- FORGE:DECISION {"requirement":"R4","disposition":"post-deploy","quote":"x"} -->');
+    const after = world({ changed: [], viewComments: [bot(nh), decision] });
+    const r = await run(after);
+    assert.notEqual(r.code, "failure.repeated");
+    assert.ok(after.comments.some((c) => c.includes("<!-- FORGE:NEEDS_HUMAN -->")));
+    const before = world({ changed: [], viewComments: [decision, bot(nh)] });
+    assert.equal((await run(before)).code, "failure.repeated", "a decision older than the park does not clear it");
   });
 
   it("#6076 an unhappy terminal posts one FORGE:LANE_AUDIT; a failing audit post leaves the terminal reason unchanged", async () => {
@@ -1024,11 +1040,11 @@ describe("core work-on", () => {
       assert.notEqual(r.code, "env.tool_missing");
       assert.notEqual(r.terminalReason, "needs-human");
     });
-    it("#5764 a python3 miss maps to the python recipe: installed in the sandbox and re-probed, no needs-human", async () => {
-      const w = world({ contract: withTool("python3") }); let ok = false; const cmds = [];
+    it("#5764 a pip3 miss maps to the python recipe: installed in the sandbox and re-probed, no needs-human", async () => {
+      const w = world({ contract: withTool("pip3") }); let ok = false; const cmds = [];
       const base = w.io.runCommand;
       w.io.runCommand = async (a) => { if (/apt-get install/.test(a.command) && /python3 python3-venv/.test(a.command)) { cmds.push(a.command); ok = true; return { rc: 0 }; } return base(a); };
-      probing(w, "python3", () => ok);
+      probing(w, "pip3", () => ok);
       const r = await run(w, { dir: tmpDir("lean-5764a-"), ...remote });
       assert.equal(cmds.length, 1);
       assert.notEqual(r.code, "env.tool_missing");
@@ -1093,6 +1109,8 @@ describe("core work-on", () => {
     const pd = (summary) => code(world({ result: { status: "blocked", summary, block: { kind: "human", why: "product-decision" } } }));
     assert.equal(await pd("the yaml lane-tools recipe lives in the engine, so the lane cannot install it"), "env.tool_missing");
     assert.equal(await rb("no Python 3.11 interpreter in the sandbox (only 3.12.3)"), "env.tool_missing");
+    assert.equal(await pd("needs a user-approved merge of staging (CLAUDE.md forbids agent git merge)"), "base.conflict"); // #6137
+    assert.equal(await pd("needs a user-approved merge of staging, plus owner approval of the Stripe pricing"), "builder.blocked");
     assert.equal(await pd("needs Stripe approval before the pricing change ships"), "builder.blocked");
     assert.equal(await rb("needs the production API key and credentials from the owner"), "builder.blocked");
     assert.equal(await rb("this lane has no sops/age key", { ...remote, hostCaps: undefined }), "builder.blocked");
@@ -2232,17 +2250,18 @@ describe("conformance shadow mode (the default)", () => {
     assert.ok(traj(s).some((t) => /Validate preflight: the host lacks yaml after the contract correction/.test(t)));
     // every tool present: no correction, no event
     const dir3 = tmpDir("preflight-");
-    const ok = world({ contract: uvC, validation: [{ id: "V1", command: uvC.validate[0].command, exit: 0 }] }); const ran3 = probe(ok);
+    const rgC = { ...CONTRACT, validate: [{ id: "V1", command: "ripgrep foo" }] };
+    const ok = world({ contract: rgC, validation: [{ id: "V1", command: rgC.validate[0].command, exit: 0 }] }); const ran3 = probe(ok);
     assert.equal((await run(ok, { dir: dir3 })).terminalReason, "merged"); assert.equal(builders(ok).length, 2);
-    assert.deepEqual(ran3.map((a) => a.command), ["command -v -- 'uv' >/dev/null 2>&1"]);
+    assert.deepEqual(ran3.map((a) => a.command), ["command -v -- 'ripgrep' >/dev/null 2>&1"]);
     assert.equal(readLog(dir3, 7).filter((e) => e.event === "VALIDATE_PREFLIGHT").length, 0);
   });
   it("#4328 an invalid contract and a preflight miss share one correction; still invalid is contract.invalid as before", async () => {
-    const bad = { ...CONTRACT, requirements: [{ id: "R1", quote: "make foo nicer", disposition: "deliver" }], validate: [{ id: "V1", command: "jq . a.json" }] };
+    const bad = { ...CONTRACT, requirements: [{ id: "R1", quote: "make foo nicer", disposition: "deliver" }], validate: [{ id: "V1", command: "ripgrep . a.json" }] };
     const w = world({ contract: bad, fixedContract: bad });
     w.io.probeCommand = async () => ({ rc: 1, output: "" });
     assert.equal((await run(w)).code, "contract.invalid"); assert.equal(builders(w).length, 2, "plan + one correction");
-    assert.match(builders(w)[1][4], /R1: quote is not verbatim[\s\S]*V1: needs command 'jq'/);
+    assert.match(builders(w)[1][4], /R1: quote is not verbatim[\s\S]*V1: needs command 'ripgrep'/);
   });
   it("#4393 replaying the AlterLab#36619 contract flags V4 at preflight, before the builder starts", async () => {
     const V4 = "uv run --no-project --python 3.12 python -m shared.detection.corpus.tools.check_manifest";
@@ -2684,7 +2703,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 2750: #5750 (outcome vs guidance rows). 2650: #5557 (classification record line) on top of the base's growth. 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule). 1675 (hotspot case): #5284 (rubric prod_parity clause). 2375/1825: #5345 (self-check and pitfall lines).
-    assert.ok(approxTokens(plan) <= 2750, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    assert.ok(approxTokens(plan) <= 2800, `plan prompt with hotspots is ${approxTokens(plan)} tokens`); // 2800: #6137 (base merge is base-sync)
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 2075, `implement prompt with the hotspot rule is ${approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([])))} of 2075 tokens`); // 2075: #5979 (substitute-validate and out-of-band from the shared amendment schema); 2025: #5752 (mechanism supersedes, negative examples, outcome evidence) // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule) // 1925: #5760 (CI budget rule)
   });
 
@@ -2766,7 +2785,8 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     const prev = process.env.FORGE_HOST_PARALLELISM; process.env.FORGE_HOST_PARALLELISM = "3";
     try { assert.equal((await run(w, { envSetup: "make setup", precheck: { commands: ["npm run lint"] } })).terminalReason, "merged"); }
     finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; }
-    const lane = { UV_CACHE_DIR: "/c/uv", TMPDIR: w.envs[0].TMPDIR, FORGE_HOST_PARALLELISM: "3", FORGE_LANE_WORKTREE: "1", GIT_CEILING_DIRECTORIES: w.envs[0].GIT_CEILING_DIRECTORIES, FORGEDOCK_CHECKS_CLI: CHECKS_CLI, FORGEDOCK_ENTRY_CLI: FORGEDOCK_CLI, PATH: "/rt/toolchain/bin:/usr/bin" };
+    const cfg = (d) => ({ POETRY_CONFIG_DIR: `${d}/hostconfig/poetry`, npm_config_userconfig: `${d}/hostconfig/npmrc`, PIP_CONFIG_FILE: `${d}/hostconfig/pip.conf`, UV_CONFIG_FILE: `${d}/hostconfig/uv.toml`, GIT_CONFIG_GLOBAL: `${d}/hostconfig/gitconfig` }); // #5917
+    const lane = { ...cfg(w.envs[0].TMPDIR), UV_CACHE_DIR: "/c/uv", TMPDIR: w.envs[0].TMPDIR, FORGE_HOST_PARALLELISM: "3", FORGE_LANE_WORKTREE: "1", GIT_CEILING_DIRECTORIES: w.envs[0].GIT_CEILING_DIRECTORIES, FORGEDOCK_CHECKS_CLI: CHECKS_CLI, FORGEDOCK_ENTRY_CLI: FORGEDOCK_CLI, PATH: "/rt/toolchain/bin:/usr/bin" };
     assert.equal(lane.GIT_CEILING_DIRECTORIES.split(":")[0], "/wt", "#5825: lane children are ceiled at the worktree parent");
     assert.match(lane.TMPDIR, /\/runs\/7-/, "the builder ran with the run TMPDIR");
     assert.deepEqual(w.rgCalls.map((x) => x.env), [lane], "red-green gets the lane env, not the daemon's");
@@ -5568,12 +5588,12 @@ describe("batch robustness (#4112-#4115)", () => {
 
   it("#5653 a validate command freeze preflight finds unrunnable is rewritten from the CI-derived catalogue before any builder correction", async () => {
     const d = tmpDir("lean-5653-"); const src = join(d, "ci.yml"); writeFileSync(src, "run: uv run --with-requirements r.txt pytest tests\n");
-    const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "poetry run pytest t.py" }] };
-    const w = world({ contract }); w.io.probeCommand = async (a) => ({ rc: /poetry/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
-    const r = await run(w, { dir: d, validateCatalogSources: [`../..${src.replace(/^[A-Za-z]:/, "").split("\\").join("/")}`] }); // #5753: drive-less posix path on Windows
+    const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "pipenv run pytest t.py" }] };
+    const w = world({ contract }); w.io.probeCommand = async (a) => ({ rc: /pipenv/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
+    const r = await run(w, { dir: d, validateRecipes: [{ match: "\\bpipenv run pytest\\b", replace: "uv run --with-requirements r.txt pytest" }], validateCatalogSources: [`../..${src.replace(/^[A-Za-z]:/, "").split("\\").join("/")}`] }); // #5753: drive-less posix path on Windows
     assert.notEqual(r.code, "env.tool_missing");
     assert.ok(w.comments.some((c) => c.includes("FORGE:CONTRACT") && c.includes("uv run --with-requirements r.txt pytest t.py")));
-    assert.ok(!w.comments.some((c) => c.includes("FORGE:CONTRACT") && c.includes("poetry run pytest")));
+    assert.ok(!w.comments.some((c) => c.includes("FORGE:CONTRACT") && c.includes("pipenv run pytest")));
   });
 
   // ---- #4112 ----
@@ -6676,9 +6696,17 @@ describe("two repos with the same issue number on one host (#4432)", () => {
 });
 
 describe("host-aware verification concurrency (#4182)", () => {
-  const host = (o = {}) => ({ memAvailableMb: () => 8192, freeMb: async () => 8192, loadAvg1: () => o.load ?? 1, cores: () => o.cores ?? 4, activeLanes: o.activeLanes ?? (() => o.lanes ?? 2), tmpPaths: () => ["/tmp"] });
-  const withEnv = async (v, fn) => { const prev = process.env.FORGE_HOST_PARALLELISM; if (v === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = v;
-    try { return await fn(); } finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; } };
+  const host = (o = {}) => ({ memAvailableMb: () => 8192, freeMb: async () => 8192, loadAvg1: () => o.load ?? 1, cores: () => o.cores ?? 4, activeLanes: o.activeLanes ?? (() => o.lanes ?? 2), tmpPaths: () => ["/tmp"], readFile: o.readFile ?? (() => { throw new Error("ENOENT"); }) });
+  const withEnv = async (v, fn) => { const prev = process.env.FORGE_HOST_PARALLELISM, prevQ = process.env.CS_CPU_QUOTA; delete process.env.CS_CPU_QUOTA; if (v === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = v;
+    try { return await fn(); } finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; if (prevQ !== undefined) process.env.CS_CPU_QUOTA = prevQ; } };
+
+  it("#4182 a cgroup cpu quota below the VM cores caps the workers (read through io.host.readFile)", async () => {
+    await withEnv(undefined, async () => {
+      const w = world(); w.io.host = host({ cores: 8, lanes: 1, readFile: (f) => { if (f === "/sys/fs/cgroup/cpu.max") return "200000 100000"; throw new Error("ENOENT"); } });
+      await run(w, { governor: false });
+      for (const e of w.envs) assert.equal(e?.FORGE_HOST_PARALLELISM, "2");
+    });
+  });
 
   it("#4182 hostParallelism = max(1, floor(cores / lanes)); bad inputs count as 1", () => {
     assert.equal(hostParallelism({ cores: 4, lanes: 2 }), 2);
@@ -8110,7 +8138,7 @@ describe("#4363 fresh fix sessions", () => {
   const FRESH = /no earlier session/;
   const prechecked = (o = {}) => {
     const w = world(o); let rc = 1;
-    w.io.runCommand = async () => ({ rc, output: rc ? `${"x".repeat(300000)}\nlint: src/foo.js:3 unused var` : "" });
+    w.io.runCommand = async () => ({ rc, output: rc ? `${"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n".repeat(4700)}lint: src/foo.js:3 unused var` /* many lines: one unbroken 300K line makes the output redaction quadratic and stalls the file */ : "" });
     const inner = w.io.runner;
     w.io.runner = async (c) => { const res = await inner(c); if (/declared check commands failed/.test(c.prompt) && !o.freshNoCommit) rc = 0; return res; };
     return w;
@@ -10191,9 +10219,9 @@ describe("#5749 freeze-time runnability: host-only commands, recipes, check tail
   });
   it("#5749 remote probe installs a recipe tool or re-places before the builder", async () => {
     const installed = []; let ok = false;
-    const w = world({ contract: V2("shellcheck scripts/x.sh") });
+    const w = world({ contract: V2("pg_dump x") });
     w.io.runCommand = async ({ command }) => { if (/apt-get/.test(command)) { installed.push(command); ok = true; } return { rc: 0, output: "" }; };
-    w.io.probeCommand = async (a) => ({ rc: /shellcheck/.test(JSON.stringify(a)) && !ok ? 127 : 0, output: "" });
+    w.io.probeCommand = async (a) => ({ rc: /pg_dump/.test(JSON.stringify(a)) && !ok ? 127 : 0, output: "" });
     assert.notEqual((await run(w, { dir: tmpDir("lean-5749b-"), ...remote })).code, "env.tool_missing");
     assert.equal(installed.length, 1);
     const n = world({ contract: V2("nopetool-5749 x") }); n.io.probeCommand = async (a) => ({ rc: /nopetool-5749/.test(JSON.stringify(a)) ? 127 : 0, output: "" });
@@ -10214,6 +10242,14 @@ describe("#5749 freeze-time runnability: host-only commands, recipes, check tail
     assert.equal(r.code, "env.tool_missing"); assert.equal(r.terminalReason, "needs-human");
     assert.ok(prepared.length >= 2, "deps prepared at setup and once more after the missing tool");
     assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 0, "no builder resume");
+  });
+  it("#6138 a module missing at run time (isolated interpreter) is installed system-wide once, then env.tool_missing, never ci.red", async () => {
+    const w = world(); const cmds = [];
+    w.io.runCommand = async ({ command }) => { cmds.push(command); return /pip install/.test(command) ? { rc: 0, output: "" } : { rc: 1, output: "Traceback\nModuleNotFoundError: No module named 'yaml'" }; };
+    const r = await atIdleLoad(() => run(w, { precheck: { commands: ["python3 -I check.py"] }, verify: { ...parseVerify({}), precheckBlock: true } }));
+    assert.equal(r.code, "env.tool_missing");
+    const installs = cmds.filter((c) => /pip install/.test(c));
+    assert.equal(installs.length, 1); assert.doesNotMatch(installs[0], /--user/);
   });
   it("#6094 a check that fails in a test file the diff does not touch is rerun once: green on rerun is no fix round; red twice stays ci.red", async () => {
     const out = "not ok 3 - ten concurrent\n  location: '/w/bin/tests/mirror-script.test.mjs:48:3'";
@@ -10275,6 +10311,50 @@ describe("#6107 precheck parks carry the failing check; a ci.red recovery runs t
     w.io.runCommand = async () => ({ rc: 0, output: "" });
     await atIdleLoad(() => run(w, { precheck: { commands: ["make lanecheck"] } }));
     assert.equal(w.calls.filter((c) => c[0] === "git" && c[1] === "merge" && c[2] === "--no-edit").length, 0);
+  });
+});
+
+describe("#6153 a failing precheck on a lane behind its base is rerun once on the merged tree", () => {
+  const block = { precheck: { commands: ["make lanecheck"] }, verify: { ...parseVerify({}), precheckBlock: true } };
+  const track = (w, rcFor) => { const st = { merged: 0, checks: 0 }; const orig = w.io.git; w.io.git = async (a, ...rest) => { if (a[0] === "merge" && a[1] === "--no-edit") st.merged++; return orig(a, ...rest); }; w.io.runCommand = async () => { st.checks++; return rcFor(st); }; return st; };
+  it("a check the base fixed passes after the base-sync: no ci.red, no builder round", async () => {
+    const w = world({ behind: 2 });
+    const st = track(w, (s) => (s.merged ? { rc: 0, output: "" } : { rc: 1, output: "lane-checks exit 1 (old guard script)" }));
+    const r = await atIdleLoad(() => run(w, block));
+    assert.equal(r.terminalReason, "merged"); assert.equal(st.merged, 1); assert.equal(st.checks, 2);
+  });
+  it("a tool_missing-shaped failure is also rerun on the merged tree before env.tool_missing", async () => {
+    const w = world({ behind: 1 });
+    const st = track(w, (s) => (s.merged ? { rc: 0, output: "" } : { rc: 127, output: "bash: shellcheck: command not found" }));
+    const r = await atIdleLoad(() => run(w, block));
+    assert.equal(r.terminalReason, "merged"); assert.equal(st.merged, 1);
+  });
+  it("still failing after the sync is classified as before, with exactly one sync", async () => {
+    const w = world({ behind: 2 });
+    const st = track(w, () => ({ rc: 1, output: "FAILED real failure" }));
+    const r = await atIdleLoad(() => run(w, block));
+    assert.equal(r.code, "ci.red"); assert.equal(st.merged, 1);
+  });
+  it("a lane not behind its base is not synced and fails as before", async () => {
+    const w = world({ behind: 0 });
+    const st = track(w, () => ({ rc: 1, output: "FAILED real failure" }));
+    const r = await atIdleLoad(() => run(w, block));
+    assert.equal(r.code, "ci.red"); assert.equal(st.merged, 0);
+  });
+  it("a base the resolvers cannot merge does not park the lane: the merge is aborted and the checks are judged as before", async () => {
+    const w = world({ behind: 2, mergeResults: ["conflict"], conflictFiles: ["scripts/lane-checks.sh"] });
+    track(w, () => ({ rc: 1, output: "old guard" }));
+    const r = await atIdleLoad(() => run(w, block));
+    assert.notEqual(r.code, "base.conflict", "the early sync never parks on a conflict; the PR-time base-sync lets the builder resolve it");
+    assert.equal(r.code, "ci.red");
+  });
+  it("an env.tool_missing recovery base-syncs before its first check", async () => {
+    const w = world({ behind: 2 }); const order = [];
+    w.io.runCommand = async () => { order.push("check"); return { rc: 0, output: "" }; };
+    const orig = w.io.git; w.io.git = async (a, ...rest) => { if (a[0] === "merge" && a[1] === "--no-edit") order.push("merge"); return orig(a, ...rest); };
+    const r = await atIdleLoad(() => run(w, { recover: { code: "env.tool_missing", attempt: 1 }, precheck: { commands: ["make lanecheck"] } }));
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(order.indexOf("merge") >= 0 && order.indexOf("merge") < order.indexOf("check"), `merge before check: ${order}`);
   });
 });
 

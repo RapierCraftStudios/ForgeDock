@@ -35,8 +35,9 @@ import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
-import { hasRecipe, installLaneTools, genericInstallCommands, RECIPES } from "../pool/lane-tools.mjs";
-import { testRunnerProblems, hostOnlyProblems, preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, manifestDepOwner, collectOnlyCommand, collectImportMiss, contractCommands } from "./preflight.mjs";
+import { loadImageManifest, manifestProvides } from "../pool/image-manifest.mjs";
+import { hasRecipe, installLaneTools, genericInstallCommands, missingPythonModules, RECIPES } from "../pool/lane-tools.mjs";
+import { testRunnerProblems, hostOnlyProblems, preflightProbes, preflightProblems, hostEnvDefects, unsetEnvVars, runPreflight, knownToContract, declaredEnv, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, manifestDepOwner, collectOnlyCommand, collectImportMiss, contractCommands } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
 import { ceilingFor, modelInfo, restartDecision, DEFAULT_CEILING, WINDOW_SHARE, RESTART_COST_USD, CACHE_READ_USD, REAL_LIMIT_SHARE, predictRestart, handoffFacts, routeHandoff, buildReadsOf, NARROW_NOTE } from "./ceiling.mjs";
@@ -44,6 +45,7 @@ import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
 import { batchImageCache, envNamesOf, provisionSandboxes } from "./testsandbox.mjs";
 import { repoKey, estimateCostUsd } from "../runner.mjs";
 import { depcacheNamespace } from "./depcache.mjs";
+import { laneConfigEnv } from "./hostconfig.mjs"; // #5917
 import { prepareToolchain } from "./toolchain.mjs";
 import { toolStats } from "./toolstats.mjs";
 import { readTestMap, readTestMapAtRef, selectCommands, mergeChecks, factsPath, TEST_MAP_FILE } from "./testmap.mjs";
@@ -54,7 +56,7 @@ import { renderInvestigation, renderImplementation, renderReview, renderPrBody, 
 import { parseVerifierConfig, pickVerifierModel, changedSymbols, callersOf, verifierBudget, verifierPrompt, parseVerifierFindings, findingsToFailures, renderVerifierNote, VERIFIER_SYSTEM } from "./verifier.mjs";
 import { computeTrigger, riskPathHits, TRIGGER_MODES, pathDomains, parseEnforceDomains } from "./review-trigger.mjs";
 import { hostCapabilityBlock, contractHostNeeds } from "./execution.mjs";
-import { envGapBlockCode, toolGapFailures, packageDirsMissingDeps, failureOutsideDiff } from "./envgap.mjs"; // #6106
+import { baseMergeOnlyBlock, envGapBlockCode, toolGapFailures, packageDirsMissingDeps, failureOutsideDiff } from "./envgap.mjs"; // #6106
 
 const MISSING_TOOL_RE = /command not found|not found in PATH|no such file or directory.*\b(?:docker|promtool)\b|\b(?:docker|promtool)\b[^\n]{0,80}(?:not (?:installed|found|available)|no such file|cannot connect|daemon)|cannot connect to the docker daemon|no docker daemon|no module named|ModuleNotFoundError|\bENOENT\b[^\n]{0,60}spawn/i;
 /** #4685: true when a builder's block summary names a missing tool or module (environment), not a credential. */
@@ -128,6 +130,7 @@ import { createLedger, flattenPhases, overheadStats } from "./phaseledger.mjs";
 import { DEFAULT_CATALOG_SOURCES, deriveCatalog, mergeRecipes, rewriteMissed, isDriftFailure, rewriteSubprojectVenv, deriveTestEnvMap, rewriteToCiEnv } from "./validate-catalog.mjs";
 import { holderGone } from "./liveness.mjs";
 import { runLaneAudit, buildStamp, forgeYamlHash } from "./lane-audit.mjs"; // #6076
+import { classifyWithLlm } from "./lane-audit-llm.mjs"; // #6079
 import { makeGapAuditor, parseGapConfig } from "./lane-audit-gap.mjs"; // #6078
 import { parseForgeYaml } from "../forge-utils.mjs";
 import { planStale, stackedBaseBlock, validStackedOn, cascadeDecision, invalidatedChecks } from "./stacking.mjs";
@@ -798,7 +801,7 @@ export async function runCore(o) {
     if (reason === "needs-human" || reason === "engine-error" || (recoverUnlabelled && recover.final && (reason === "ci-pending" || reason === "budget-exceeded"))) { // #6076: one version-stamped FORGE:LANE_AUDIT at the unhappy terminals; never changes how the lane ends
       try {
         let gapCfg; try { gapCfg = parseGapConfig(parseForgeYaml(readFileSync(join(o.cwd ?? wt, "forge.yaml"), "utf8"))); } catch { gapCfg = parseGapConfig({}); }
-        await runLaneAudit({ gap: makeGapAuditor({ gh: ghc, cfg: gapCfg, repo }), issue, reason, code, detail, comments: allComments(), trusted: (c) => c?.__mine === true || isTrustedIssueComment(c), phases: phaseLedger.snapshot(), post: (m, b) => post(m, b),
+        await runLaneAudit({ gap: makeGapAuditor({ gh: ghc, cfg: gapCfg, repo }), issue, reason, code, detail, comments: allComments(), trusted: (c) => c?.__mine === true || isTrustedIssueComment(c), phases: phaseLedger.snapshot(), post: (m, b) => post(m, b), llm: (ev) => classifyWithLlm(ev, { runner: io.runner, cwd: o.cwd ?? wt }),
           stamp: buildStamp({ engineVersion: ENGINE_VERSION, forgeYamlHash: forgeYamlHash(o.cwd ?? wt), batchId: o.batchId ?? null, attempt: recover?.attempt ?? o.attempt ?? 1 }) });
       } catch { /* the audit is best effort */ }
     }
@@ -982,7 +985,7 @@ export async function runCore(o) {
     const set = String(process.env.FORGE_HOST_PARALLELISM ?? "").trim();
     if (/^\d+$/.test(set) && Number(set) > 0) return set;
     if (!io.host?.cores) return null;
-    try { return String(hostParallelism({ cores: quotaCores({ cores: io.host.cores(), read: (f) => readFileSync(f, "utf8"), env: process.env }), lanes: io.host.activeLanes?.() })); } catch { return null; }
+    try { return String(hostParallelism({ cores: quotaCores({ cores: io.host.cores(), read: (f) => (io.host.readFile ?? readFileSync)(f, "utf8"), env: process.env }), lanes: io.host.activeLanes?.() })); } catch { return null; }
   }
   /**
    * #4325: the lane env every engine-run command shares with the builder: shared package-manager stores (#4220), the run
@@ -1004,11 +1007,14 @@ export async function runCore(o) {
       ev({ event: "SIGNOFF_HOOK", dir });
     } catch { signoffEnv = {}; }
   }
+  /** #5917: tool user-config redirected into the run dir (created once), beneath every engine key; {} without a run dir. */
+  let laneCfgEnv = null, laneCfgDir = null;
+  function laneCfg() { if (!runTmp) return {}; if (laneCfgDir !== runTmp) { laneCfgDir = runTmp; laneCfgEnv = laneConfigEnv({ dir: runTmp }); } return laneCfgEnv; }
   function laneEnv() {
     let deps = {};
     try { deps = io.deps?.env?.() ?? {}; } catch { deps = {}; }
     const par = verifyParallelism();
-    return { ...deps, ...(runTmp ? { TMPDIR: runTmp } : {}), ...(par ? { FORGE_HOST_PARALLELISM: par } : {}), FORGE_LANE_WORKTREE: "1", ...laneGitEnv, [FORGEDOCK_CHECKS_VAR]: CHECKS_CLI, [FORGEDOCK_ENTRY_VAR]: FORGEDOCK_CLI, ...sandboxEnv, ...(toolchain?.env ?? {}) }; // #5333: the hook denies git stash where this is set; #5825: git in a lane child never walks up out of the worktree
+    return { ...laneCfg(), ...deps, ...(runTmp ? { TMPDIR: runTmp } : {}), ...(par ? { FORGE_HOST_PARALLELISM: par } : {}), FORGE_LANE_WORKTREE: "1", ...laneGitEnv, [FORGEDOCK_CHECKS_VAR]: CHECKS_CLI, [FORGEDOCK_ENTRY_VAR]: FORGEDOCK_CLI, ...sandboxEnv, ...(toolchain?.env ?? {}) }; // #5333: the hook denies git stash where this is set; #5825: git in a lane child never walks up out of the worktree
   }
   /** #5168: a failed claude login ends the lane `deferred` `backend.auth`, held per account by the batch (never the relaunch or the breaker). */
   const authDeferral = (e, account = null) => Object.assign(e, { deferCode: OUTCOME_CODES.BACKEND_AUTH, retryInSeconds: AUTH_RETRY_SECONDS, backendId: laneBackendId(process.env, rotator), ...cliDeferFacts(e, account),
@@ -1510,6 +1516,10 @@ export async function runCore(o) {
     if (b.kind === "human" && b.why === "credentials" && o.placement?.where === "remote" && missingToolBlock(s)) {
       // #4685: a tool the sandbox lacks (docker, promtool, a Python module) is an environment gap the host recovers, never a credential.
       return await needsHuman(`Remote sandbox lacks a validate tool (Builder is blocked (credentials)): ${s}\n\nNot a credential: the lane is recovered where the tool exists.`, OUTCOME_CODES.ENV_TOOL_MISSING);
+    }
+    if (b.kind === "human" && baseMergeOnlyBlock(b.why, s)) { // #6137: merging the base into the lane's own branch is the engine's base-sync, never a human gate
+      T.decisions.push(`Builder block (${b.why}) reclassified to base-sync: it only asks for a merge of the base into the lane branch`);
+      return await needsHuman(`Base merge, not a human decision (Builder reported blocked (${b.why})): ${s}\n\nMerging ${base} into the lane's own branch is the engine's base-sync: the lane is recovered with the base merged.`, OUTCOME_CODES.BASE_CONFLICT);
     }
     if (b.kind === "human") { // #6106: a missing tool/interpreter/recipe/package/sandbox capability is an env gap that recovers, whatever reason the builder typed; genuine human reasons stay human
       const envCode = envGapBlockCode(b.why, s);
@@ -2237,7 +2247,9 @@ export async function runCore(o) {
       if (d.converted.length) T.decisions.push(`Post-deploy with no registered check deferred to the orchestrator: ${d.converted.join(", ")}`);
       return d.contract;
     }
+    const imageManifest = loadImageManifest();
     async function preflightValidates(contract) {
+      for (const d of hostEnvDefects()) { T.anomalies.push(`Host environment defect (${d.code}): ${d.detail}`); ev({ event: "HOST_ENV_DEFECT", code: d.code, detail: d.detail }); } // #5917: an env defect, never a miss that blames the contract
       if ((!io.probeCommand && !io.preflightRun) || !contract || typeof contract !== "object") return [];
       const files = String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean);
       const env = laneEnv(), missing = new Set(), misses = []; // #4325: the env the validate commands run with
@@ -2245,7 +2257,7 @@ export async function runCore(o) {
       const local = projectBinDirs(wt, files);
       if (local.length) env.PATH = withLocalBins(env.PATH ?? process.env.PATH ?? "", local);
       if (io.probeCommand) {
-        const { probes, dropped } = preflightProbes(contract, { repoHas: repoTracks(files) });
+        const { probes, dropped } = preflightProbes(contract, { repoHas: repoTracks(files), provided: (t) => manifestProvides(imageManifest, t) });
         if (dropped) T.anomalies.push(`Validate preflight probed ${probes.length} tool(s); ${dropped} more not probed`);
         for (const p of probes) {
           if (p.needs && missing.has(p.needs)) continue;
@@ -2782,7 +2794,10 @@ export async function runCore(o) {
           } catch { /* keep the original miss */ }
         }
         if (tm.tools.length) { // #5652: a recipe-backed tool is installed in this sandbox and re-probed before any host re-placement
-          const withRecipe = tm.tools.filter(hasRecipe), noRecipe = tm.tools.filter((t) => !hasRecipe(t));
+          const inImage = tm.tools.filter((t) => manifestProvides(imageManifest, t)); // #6037: the image ships it; a miss is an image defect, never a recipe or generic install
+          if (inImage.length) ev({ event: "REMOTE_TOOL_IMAGE_DEFECT", tools: inImage });
+          const installable = tm.tools.filter((t) => !inImage.includes(t));
+          const withRecipe = installable.filter(hasRecipe), noRecipe = installable.filter((t) => !hasRecipe(t));
           if (withRecipe.length && io.runCommand) {
             const ins = await installLaneTools(withRecipe, { run: (a) => io.runCommand({ command: a.command, cwd: wt, timeoutMs: a.timeoutMs, env: laneEnv() }), root: process.getuid?.() === 0 });
             ev({ event: "REMOTE_TOOLS_INSTALLED", tools: withRecipe, ok: ins.ok });
@@ -2933,27 +2948,35 @@ export async function runCore(o) {
     }
     // #6107: a ci.red recovery must not judge a stale tree: the base's current head is merged in before any check runs. A conflict
     // the engine cannot resolve deterministically ends base.conflict (recoverable), never ci.red for a branch that is only behind.
-    if (recover?.code === OUTCOME_CODES.CI_RED && !isSplit && io.runCommand) {
+    // #6153: the same sync runs for an env.tool_missing recovery, and once more when a precheck round fails on a branch that is behind
+    // its base (the base may have fixed the failing guard script): the lane's own stale copy of a check never decides a verdict.
+    let precheckBaseSynced = false;
+    const syncBaseForChecks = async (why, { parkOnConflict = false } = {}) => { // -> {ended} (a terminal result), {merged: true} (rerun the checks) or {merged: false}
+      if (precheckBaseSynced || isSplit || !io.runCommand) return { merged: false };
       try { await git(["fetch", "origin", lane]); } catch { /* offline: the local ref */ }
       const behind = Number(String(await git(["rev-list", "--count", `HEAD..${base}`]).catch(() => "0")).trim()) || 0;
-      if (behind > 0) {
-        let merged = true, conflicted = [];
-        try { await git(["merge", "--no-edit", base]); } catch { merged = false; conflicted = String(await git(["diff", "--name-only", "--diff-filter=U"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean); }
-        if (!merged && conflicted.length) {
-          const bm = o.baseMerge, cr = io.conflictResolve && bm && Object.values(bm).some((v) => v?.length) ? await io.conflictResolve({ cwd: wt, files: conflicted, cfg: bm }).catch(() => null) : null;
-          if (cr?.resolved?.length && !(cr.remaining ?? []).length) { try { await git(["commit", "--no-edit"]); merged = true; } catch { /* abort below */ } }
-          if (!merged) {
-            await git(["merge", "--abort"]).catch(() => {});
-            ev({ event: "RECOVERY_BASE_SYNC", base, behind, result: "conflict", files: conflicted.slice(0, 20) });
-            return await needsHuman(`The branch conflicts with ${base} in ${conflicted.slice(0, 20).join(", ")}; the recovery's checks were not run on the stale tree (a conflicting base is not a check failure); nothing merged.`, OUTCOME_CODES.BASE_CONFLICT);
-          }
-        } else if (!merged) { await git(["merge", "--abort"]).catch(() => {}); T.anomalies.push(`Recovery base-sync could not merge ${base} (${behind} commit(s) behind, no conflict files); checks run on the branch as it is`); }
-        if (merged) {
-          ev({ event: "RECOVERY_BASE_SYNC", base, behind, result: "merged" });
-          T.decisions.push(`Recovery: merged ${base} (${behind} commit(s) behind) before re-running the checks`);
-          files = await changedFiles();
+      if (behind <= 0) return { merged: false };
+      precheckBaseSynced = true;
+      let merged = true, conflicted = [];
+      try { await git(["merge", "--no-edit", base]); } catch { merged = false; conflicted = String(await git(["diff", "--name-only", "--diff-filter=U"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean); }
+      if (!merged && conflicted.length) {
+        const bm = o.baseMerge, cr = io.conflictResolve && bm && Object.values(bm).some((v) => v?.length) ? await io.conflictResolve({ cwd: wt, files: conflicted, cfg: bm }).catch(() => null) : null;
+        if (cr?.resolved?.length && !(cr.remaining ?? []).length) { try { await git(["commit", "--no-edit"]); merged = true; } catch { /* abort below */ } }
+        if (!merged) { // first-failure sync: a conflict falls back to the old path (builder fix round, PR-time base-sync resolves it); a recovery lane parks base.conflict (#6107)
+          await git(["merge", "--abort"]).catch(() => {});
+          ev({ event: "RECOVERY_BASE_SYNC", base, behind, result: "conflict", why, files: conflicted.slice(0, 20) });
+          if (parkOnConflict) return { ended: await needsHuman(`The branch conflicts with ${base} in ${conflicted.slice(0, 20).join(", ")}; the checks were not judged on the stale tree (a conflicting base is not a check failure); nothing merged.`, OUTCOME_CODES.BASE_CONFLICT) };
+          T.anomalies.push(`Base-sync before the checks hit a conflict with ${base} in ${conflicted.slice(0, 20).join(", ")}; checks judged on the branch as it is, the PR-time base-sync resolves it`);
+          return { merged: false };
         }
-      }
+      } else if (!merged) { await git(["merge", "--abort"]).catch(() => {}); T.anomalies.push(`Base-sync before the checks could not merge ${base} (${behind} commit(s) behind, no conflict files); checks judged on the branch as it is`); return { merged: false }; }
+      ev({ event: "RECOVERY_BASE_SYNC", base, behind, result: "merged", why });
+      T.decisions.push(`Merged ${base} (${behind} commit(s) behind) ${why}`);
+      files = await changedFiles();
+      return { merged: true };
+    };
+    if ((recover?.code === OUTCOME_CODES.CI_RED || recover?.code === OUTCOME_CODES.ENV_TOOL_MISSING) && !isSplit && io.runCommand) {
+      const sy = await syncBaseForChecks("before the recovery's first check run", { parkOnConflict: true }); if (sy.ended) return sy.ended;
     }
     let ciCommands = await ciPrecheckPlan(0);
     const pickChecks = () => planPrecheck({ testMap, files, learned: [...learnedCommands, ...ciCommands], maxMinutes: o.precheck?.maxMinutes, verify: vcfg });
@@ -2966,6 +2989,7 @@ export async function runCore(o) {
       // #6106: dependencies for every package the checks touch are prepared before the checks run; a missing tool afterwards is env, not ci.red
       let depsReprovisioned = false;
       const flakeReran = new Set();
+      const pyModTried = new Set(); // #6138
       const reprovisionDeps = async (why) => {
         if (depsReprovisioned || !io.deps?.prepare) return false;
         depsReprovisioned = true;
@@ -3012,10 +3036,23 @@ export async function runCore(o) {
         const names = failed.map((f) => `\`${f.command}\` (exit ${f.rc})`).join(", ");
         // #5749/#6107: the park names each failing check and carries the last ~40 lines of its output, secrets redacted (run log too)
         const failTail = (fs) => { const rows = fs.map((f) => ({ name: ciDerived.get(f.command)?.name ?? null, command: f.command, rc: f.rc, tail: checkFailureTail(f, { name: ciDerived.get(f.command)?.name }) })); ev({ event: "PRECHECK_FAILED", round, checks: rows.map(({ name, command, rc, tail }) => ({ name, command, rc, tail })) }); return rows.map((r) => r.tail).join(""); };
+        { // #6153: a failing check on a branch behind its base is rerun once on the merged tree before it is classified (the base may have fixed the guard script)
+          const sy = await syncBaseForChecks(`after a failing check, before classifying it (the base may have fixed the check's script)`); if (sy.ended) return sy.ended;
+          if (sy.merged) { picked = pickChecks(); round--; continue; }
+        }
         if (isSplit) return await needsHuman(`Declared check command(s) fail on the refactor:split move (no builder edits a split); nothing merged: ${names}${failTail(failed)}`, OUTCOME_CODES.CI_RED);
         { // #6106: every failed check died on a missing tool/binary (not on its own assertion): prepare dependencies once and rerun, then it is env.tool_missing
           const gap = toolGapFailures(failed);
           if (gap.length && gap.length === failed.length) {
+            { // #6138: the probe passed but the run still lacks a module (isolated interpreter ignores user site): install it system-wide once, rerun, then it is env
+              const mods = missingPythonModules(gap.map((f) => f.output).join("\n")).filter((m) => !pyModTried.has(m));
+              if (mods.length && io.runCommand) {
+                const root = process.getuid?.() === 0;
+                for (const m of mods) { pyModTried.add(m); for (const command of genericInstallCommands({ kind: "python-module", tool: m }, { root })) await io.runCommand({ command, cwd: wt, timeoutMs: 600000, env: laneEnv() }).catch(() => null); }
+                ev({ event: "PRECHECK_PYTHON_MODULE_INSTALL", modules: mods });
+                round--; continue;
+              }
+            }
             if (await reprovisionDeps("check failed on a missing tool")) { round--; continue; }
             ev({ event: "PRECHECK_TOOL_MISSING", commands: gap.map((f) => f.command) });
             return await needsHuman(`Environment error (not a check failure): declared check command(s) could not run because a tool or binary is missing, even after the dependencies were prepared; nothing merged: ${names}${failTail(gap)}`, OUTCOME_CODES.ENV_TOOL_MISSING);

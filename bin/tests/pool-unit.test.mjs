@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { runPoolCli } from "../pool/cli.mjs";
+import { runPoolCli, statusTable, queueWaitByWorker } from "../pool/cli.mjs";
+import { usageSummary } from "../pool/agent.mjs";
 import { restartCheck, lastExitReason } from "../pool/health.mjs";
 // Windows hosts: these tests exercise POSIX-only behaviour (file modes, tmpfs, systemd units, sh/bash scripts, file-URL paths); Linux CI runs them.
 const POSIX_ONLY = process.platform === "win32" && "POSIX-only behaviour";
@@ -72,5 +73,24 @@ describe("per-repo lane image (#5650)", () => {
     const src = read("bin/pool/agent.mjs");
     assert.match(src, /resolveLaneImage\(\{ tools: spec\.lane_tools, baseImage: spec\.image \?\? image, docker \}\)/);
     assert.match(src, /: \(spec\.image \?\? image\)/);
+  });
+});
+
+describe("#6062 per-worker usage rollup", () => {
+  const row = (c, m, cu, cp, mu, mp) => ({ reserved: { cpus: c, mem_gb: m }, cpu_avg: cu, cpu_peak: cp, mem_avg_gb: mu, mem_peak_gb: mp, samples: 3 });
+  it("empty rows give zeros and null ratios", () => {
+    assert.deepEqual(usageSummary([]), { lanes: 0, admitted: { cpus: 0, mem_gb: 0 }, used: { cpu_avg: 0, cpu_peak: 0, mem_avg_gb: 0, mem_peak_gb: 0 }, utilization: { cpu: null, mem: null } });
+    assert.equal(usageSummary([null]).lanes, 0);
+  });
+  it("sums admitted and used over lanes and rounds utilization", () => {
+    const s = usageSummary([row(2, 4, 0.5, 1, 1, 2), row(4, 8, 1.01, 3, 2, 3), null]);
+    assert.equal(s.lanes, 2);
+    assert.deepEqual(s.admitted, { cpus: 6, mem_gb: 12 });
+    assert.deepEqual(s.used, { cpu_avg: 1.51, cpu_peak: 4, mem_avg_gb: 3, mem_peak_gb: 5 });
+    assert.deepEqual(s.utilization, { cpu: 0.25, mem: 0.25 });
+  });
+  it("queue wait p50/p95 per worker; unattributed rows are skipped", () => {
+    const q = queueWaitByWorker([1, 2, 3, 4].map((i) => ({ phases: { queue_wait: { ms: i * 1000, worker: "w1" } } })).concat([{ phases: { queue_wait: { ms: 9 } } }, {}]));
+    assert.deepEqual(q, { w1: { n: 4, p50_ms: 2000, p95_ms: 4000 } });
   });
 });

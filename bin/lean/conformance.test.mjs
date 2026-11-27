@@ -223,6 +223,12 @@ describe("precheck (deterministic, no reviewer)", () => {
     assert.deepEqual(reproQualityFailures({ quality: "mutation_survivor", enforce: false }), []);
     assert.deepEqual(reproQualityFailures({ quality: "patch_echo", enforce: true }), []);
   });
+  it("an exit 127 under an interpreter is never blamed on the interpreter (Remote sandbox lacks bash)", () => {
+    assert.equal(missingTool({ rc: 127, output: "" }, { command: "bash scripts/tests/new-check.sh" })?.tool === "bash", false);
+    assert.equal(missingTool({ rc: 127, output: "boom" }, { command: "/usr/bin/python3 tools/x.py" })?.tool === "python3", false);
+    assert.deepEqual(missingTool({ rc: 127, output: "" }, { command: "jq . x.json" }), { tool: "jq", kind: "command" });
+    assert.deepEqual(missingTool({ rc: 127, output: "scripts/x.sh: line 3: yq: command not found" }, { command: "bash scripts/x.sh" }), { tool: "yq", kind: "command" });
+  });
   it("#4323 missingTool: commands, python and node modules; paths, relative and repo-tracked names are not the environment", () => {
     assert.deepEqual(missingTool({ rc: 127, output: "sh: 1: jq: not found" }), { tool: "jq", kind: "command" });
     assert.deepEqual(missingTool({ rc: 127, output: "" }, { command: "uv run pytest -q" }), { tool: "uv", kind: "command" });

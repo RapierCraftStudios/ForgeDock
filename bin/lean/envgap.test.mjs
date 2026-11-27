@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { envGapBlockCode, toolGapFailures, packageDirsMissingDeps, failureOutsideDiff } from "./envgap.mjs";
+import { baseMergeOnlyBlock, envGapBlockCode, toolGapFailures, packageDirsMissingDeps, failureOutsideDiff } from "./envgap.mjs";
 
 describe("#6106 env gap classification", () => {
   it("a check that fails on a PATH pass-through wrapper with no real binary is a tool gap", () => {
@@ -49,5 +49,16 @@ describe("#6094 failures outside the diff", () => {
   it("names Go/Java/py test files and strips ./ prefixes", () => {
     assert.equal(failureOutsideDiff("--- FAIL: TestX (0.00s)\n    ./pkg/foo_test.go:12: boom", ["pkg/foo_test.go"]), false);
     assert.equal(failureOutsideDiff("at src/com/x/FooTest.java:9", ["src/Bar.java"]), true);
+  });
+});
+
+describe("#6137 a base merge into the lane branch is never a human gate", () => {
+  it("only-a-base-merge blocks are mechanical; real human reasons stay human", () => {
+    assert.equal(baseMergeOnlyBlock("product-decision", "needs a user-approved merge of staging (CLAUDE.md forbids agent git merge)"), true);
+    assert.equal(baseMergeOnlyBlock("product-decision", "the branch is behind: please merge main into the lane branch first"), true);
+    assert.equal(baseMergeOnlyBlock("product-decision", "needs a user-approved merge of staging, and the Stripe pricing decision from the owner"), false);
+    assert.equal(baseMergeOnlyBlock("product-decision", "merge the PR into main and promote to production"), false);
+    assert.equal(baseMergeOnlyBlock("credentials", "needs a merge of staging"), false);
+    assert.equal(baseMergeOnlyBlock("product-decision", "which pagination style?"), false);
   });
 });

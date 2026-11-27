@@ -17,7 +17,7 @@ import { cmpVersion, versionOf } from "./version.mjs";
  * What the router ships to pool agents (self-update and bootstrap). Every module the agent can load statically from
  * bin/pool/agent.mjs must live under these paths; bin/tests/pool-agent-bundle.test.mjs enforces it.
  */
-export const AGENT_BUNDLE_PATHS = Object.freeze(["package.json", "bin/pool", "bin/lean/concurrency.mjs", "pool"]); // concurrency.mjs: thresholds imported by pool/lane-target.mjs (#6061); it has no imports
+export const AGENT_BUNDLE_PATHS = Object.freeze(["package.json", "bin/pool", "bin/lean/concurrency.mjs", "bin/lean/depcache.mjs", "bin/lean/ledger.mjs", "pool"]); // depcache.mjs+ledger.mjs: pool/project-layer.mjs (#6038); concurrency.mjs: thresholds imported by pool/lane-target.mjs (#6061); it has no imports
 
 const run = promisify(execFile);
 
@@ -460,6 +460,18 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     return { status: 404, body: { error: "no warm sandbox ready" } };
   }
 
+  // #6117: a destroyed sandbox's placing agent, for the agent's log grace period: a late log/result/runlog read still reaches it.
+  const graced = new Map(); // id -> {agent, until}
+  const GRACE_MS = Number(cfg.keep_log_s ?? 600) * 1000;
+  const grace = (id, agent) => { const t = now(); for (const [k, v] of graced) if (v.until <= t) graced.delete(k); graced.set(id, { agent, until: t + GRACE_MS }); }; // expired entries go on every insert
+  async function forwardRead(id, path) {
+    if (own(sbx(), id)) return forward(id, "GET", path);
+    const g = graced.get(id);
+    if (!g || g.until <= now()) { graced.delete(id); return { status: 404, body: { state: "gone" } }; }
+    const a = own(agents(), g.agent);
+    if (!a) return { status: 404, body: { state: "gone" } };
+    try { const r = await agentCall(a, "GET", path); return { status: r.status, body: agentBody(r, g.agent) }; } catch (e) { return { status: 502, body: { error: `agent ${g.agent} unreachable: ${e.message}` } }; }
+  }
   async function forward(id, method, path, timeoutMs) {
     const s = own(sbx(), id);
     const a = s && own(agents(), s.agent);
@@ -467,7 +479,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     s.touched = now(); store.save();
     try {
       const r = await agentCall(a, method, path, undefined, timeoutMs);
-      if (method === "DELETE" && (r.ok || r.status === 404)) { delete sbx()[id]; relayQ.delete(id); store.save(); }
+      if (method === "DELETE" && (r.ok || r.status === 404)) { if (r.ok && GRACE_MS > 0) grace(id, s.agent); delete sbx()[id]; relayQ.delete(id); store.save(); }
       return { status: r.status, body: agentBody(r, s.agent) };
     } catch (e) { return { status: 502, body: { error: `agent ${s.agent} unreachable: ${e.message}` } }; }
   }
@@ -483,7 +495,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       try {
         if (now() - s.touched > abandonMs) {
           const r = await agentCall(a, "DELETE", `/sandboxes/${encodeURIComponent(id)}`, undefined, DESTROY_TIMEOUT_MS);
-          if (r.ok || r.status === 404) { delete sbx()[id]; relayQ.delete(id); log.info?.(`abandoned ${id} destroyed on ${s.agent}`); }
+          if (r.ok || r.status === 404) { if (r.ok && GRACE_MS > 0) grace(id, s.agent); delete sbx()[id]; relayQ.delete(id); log.info?.(`abandoned ${id} destroyed on ${s.agent}`); }
         } else {
           const r = await agentCall(a, "POST", `/sandboxes/${encodeURIComponent(id)}/lease`);
           if (r.status === 404) { delete sbx()[id]; relayQ.delete(id); log.info?.(`${id} gone on ${s.agent}`); }
@@ -657,8 +669,9 @@ bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TM
     [route("GET", "/sandboxes/:id/mirrors"), fd(async ({ id }, _b, url) => seedForward(id, "GET", `/mirrors?${new URLSearchParams([...[...url.searchParams].filter(([k]) => ["slug", "cache_key", "upload"].includes(k)), ["uploader", id]])}`, undefined, url.searchParams.get("slug")))], // #5949; uploader: per-sandbox part file (concurrent identical bundles)
     [route("POST", "/sandboxes/:id/seed"), fd(async ({ id }, body) => seedForward(id, "POST", "/mirrors/seed", { ...(body ?? {}), uploader: id }, body?.slug))],
     [route("GET", "/sandboxes/:id"), fd(async ({ id }) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}`))],
-    [route("GET", "/sandboxes/:id/logs"), fd(async ({ id }, _b, url) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/logs?cursor=${encodeURIComponent(url.searchParams.get("cursor") ?? "0")}`))],
-    [route("GET", "/sandboxes/:id/result"), fd(async ({ id }) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/result`))],
+    [route("GET", "/sandboxes/:id/logs"), fd(async ({ id }, _b, url) => forwardRead(id, `/sandboxes/${encodeURIComponent(id)}/logs?cursor=${encodeURIComponent(url.searchParams.get("cursor") ?? "0")}`))],
+    [route("GET", "/sandboxes/:id/result"), fd(async ({ id }) => forwardRead(id, `/sandboxes/${encodeURIComponent(id)}/result`))],
+    [route("GET", "/sandboxes/:id/runlog"), fd(async ({ id }) => forwardRead(id, `/sandboxes/${encodeURIComponent(id)}/runlog`))], // #6117
     [route("GET", "/sandboxes/:id/usage"), fd(async ({ id }) => { // #4549: the placing agent rides along for per-agent minutes
       const agent = own(sbx(), id)?.agent, r = await forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/usage`);
       return agent && r.status === 200 && r.body && typeof r.body === "object" ? { ...r, body: { ...r.body, agent } } : r;
@@ -674,6 +687,7 @@ bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TM
       const caps = (await capacities()).filter((c) => (acct === null || own(agents(), c.name)?.account === acct) && placeable(c, view)).map((c) => { const a = own(agents(), c.name); return { ...c, ...(a?.account ? { account: a.account } : {}), ...(a?.policy ? { policy: a.policy } : {}) }; }), byName = new Map(caps.map((c) => [c.name, c])), out = {};
       for (const [id, s] of Object.entries(sbx())) { if ((acct !== null || repo) && !byName.has(s?.agent)) continue; const mb = byName.get(s?.agent)?.sandbox_disk_mb?.[id]; out[id] = Number.isFinite(mb) ? { ...s, disk_used_mb: mb } : s; }
       const remote_lanes = Object.keys(sbx()).filter(isLane).length; // #5735: lane sandboxes across all batches and agents
+      // #6062: usage_summary rides on each capacity record (spread above) unchanged
       return { status: 200, body: { agents: caps.map((c) => ({ ...c, lanes: laneView(c.name), ...diskReport(c) })), sandboxes: out, remote_lanes } };
     })],
     [route("POST", "/device/code"), { fn: async () => deviceStart(), auth: "none" }], // #5886
@@ -767,7 +781,7 @@ bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TM
     }
   }
 
-  return { handle, launch, claim, tick, autoscale, enroll, issueCode, capacities, status, store };
+  return { handle, launch, claim, tick, autoscale, enroll, issueCode, capacities, status, store, forward, forwardRead };
 }
 
 /** tokenbaton's usage dir (#5165): router.json `usage_source`, else `$TOKENBATON_HOME`, else `~/.tokenbaton`. */

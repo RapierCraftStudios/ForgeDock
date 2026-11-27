@@ -385,7 +385,7 @@ export function openBatch(root, id) {
     /** #5975: the pause record, or null when missing or invalid. */
     readPause: () => { const v = readJson(f("pause")); return v && typeof v === "object" && !Array.isArray(v) && typeof v.since === "string" ? v : null; },
     /** #5975: lift the pause. @returns {boolean} whether one was set */
-    clearPause: () => { const had = !!self.readPause(); try { rmSync(f("pause"), { force: true }); } catch { /* already gone */ } return had; },
+    clearPause: () => { const had = !!self.readPause(); try { rmSync(f("pause"), { force: true }); } catch { /* already gone */ } if (had) try { put(f("pause-cleared"), new Date().toISOString() + "\n"); } catch { /* advisory: the stall clock marker */ } return had; },
     /** #5975: lift the pause when its `expiresAt` has passed. @returns {object|null} the expired record (with `ownerGone`) */
     expirePause: (now = Date.now()) => {
       const p = self.readPause();
@@ -415,6 +415,16 @@ export function openBatch(root, id) {
     lastProgressMs: () => {
       let best = null;
       for (const n of ["state.json", "log.jsonl"]) { try { const m = statSync(f(n)).mtimeMs; if (best === null || m > best) best = m; } catch { /* absent */ } }
+      return best;
+    },
+    /**
+     * The dispatch-stall clock: the newer of the last progress and the last operator input that can make an issue ready (a `--release`
+     * or hold expiry, `--requeue`, `--add`, a live K / placement change, an unpause, a cleared breaker). Without it a release after
+     * hours of holds reads as hours of idle and the runner is declared stalled the moment the issue turns ready.
+     */
+    lastDispatchClockMs: () => {
+      let best = self.lastProgressMs();
+      for (const n of ["hold", "hold-info", "requeue", "add", "parallel", "execution", "gates", "pause-cleared", "clear-breaker"]) { try { const m = statSync(f(n)).mtimeMs; if (best === null || m > best) best = m; } catch { /* absent */ } }
       return best;
     },
     /** The lane updates in `log.jsonl`, in order (unparsable lines skipped). */

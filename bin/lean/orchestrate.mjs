@@ -217,6 +217,9 @@ export const transientRetryDelayMs = (k) => Math.min(TRANSIENT_BACKOFF_S * 4 ** 
 // the batch stays open up to ENV_HOLD_MAX_MS re-checking every ENV_WATCH_MS for an engine version change, a batch env change or the tool.
 export const ENV_HOLD_MAX_MS = 24 * 3600_000;
 export const ENV_WATCH_MS = 30_000;
+/** #6123: after a re-admit (env issue closed / tool probe passed) ends in the same env signature, the next re-admit waits 15 m, then 1 h, then 4 h. */
+export const ENV_READMIT_BACKOFF_MS = [15 * 60_000, 3600_000, 4 * 3600_000];
+export const envReadmitBackoffMs = (k) => ENV_READMIT_BACKOFF_MS[Math.min(Math.max(1, k), ENV_READMIT_BACKOFF_MS.length) - 1];
 /** #5805: `code|first message line`, with times, hex ids and numbers normalised, so a pid or path id does not make a repeat look new. */
 export function failureSignature(code, detail) {
   const line = String(detail ?? "").split("\n").find((l) => l.trim()) ?? "";
@@ -381,6 +384,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // `deterministic`: `version|signature` seen twice (never relaunched again on that version); `toolReadmits`: `issue|signature`
   // already re-admitted because the probe found the tool (a lane that still misses it waits for an engine or env change instead).
   const ehOn = !!envHold || !!envIssue;
+  const envReadmits = new Map(); // #6123: issue -> {sig, count, at} of the last env-issue/tool-probe re-admit
   // #5755: env.* failures are one engine/env defect per signature: `envSigs` signature -> {issues, number} (the env issue the `envIssue` seam
   // filed or updated); affected product issues are held on it (never needs-human) and 2+ issues on a signature stop admitting lanes that need it.
   const envSigs = toMap(saved?.envSigs);
@@ -457,7 +461,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   let budgetLocal = false; // the execution budget refused a remote lane under on_budget local: the rest run on the host
   // #4256: where a lane goes before capacity: `remote.place` (hybrid) or `remote.isRemote` (remote mode).
   const hostFallbackOn = () => remote?.hostFallback !== false; // #5652: unset keeps the host re-placement
-  const placeOf = (n) => {
+  const placeRaw = (n) => {
     if (!remote) return null;
     // #4542: a lane recovering from a remote capability block runs on the host, which has the capability.
     // #4785: a tool-missing recovery too: the sandbox that lacked the tool is not chosen again.
@@ -487,6 +491,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       }
       return remote.isRemote?.(n) ? { where: "remote", reason: "mode remote" } : { where: "local", reason: "local" };
     } catch { return hostFallbackOn() ? { where: "local", reason: "placement failed" } : { where: "remote", reason: "placement failed, host fallback off: retry remotely" }; } // #5746
+  };
+  // #5746: in remote mode the host is orchestrator-only unless host_fallback is true: whatever branch below picks the host (a `needs`
+  // capability, a host pin, a failed placement), the lane is placed remotely instead. An operator's live `--set-placement local` is not a fallback.
+  const placeOf = (n) => {
+    const p = placeRaw(n);
+    if (p?.where === "local" && remote?.mode === "remote" && !hostFallbackOn() && p.reason !== "live placement: local") return { where: "remote", reason: `host fallback off, not on the host: ${p.reason}` };
+    return p;
   };
   const isRemote = (n) => placeOf(n)?.where === "remote";
   const placed = new Map(); // issue -> {where, reason} granted this pass, picked up by start()
@@ -1091,8 +1102,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         row.minutes = Math.round(((Number(row.minutes) || 0) + (Number(p.minutes) || 0)) * 10) / 10;
       }
       const triggers = [...(envIssueNo ? [`env issue #${envIssueNo} closing`] : []), "an engine upgrade", ...(envHold?.envFingerprint ? ["a --set-env"] : []), ...(tools?.length && envHold?.missingTools ? [`${tools.join(", ")} found on the host`] : [])];
-      const final = { ...row, outcome: "held", detail: `waiting on engine/env change: ${why}; re-admitted on ${triggers.join(" or ")}\n${String(row.detail ?? "")}`,
-        envHold: { kind, sig, from: row.outcome, version: curVersion(), env: curEnv(), ...(tools?.length ? { tools } : {}), ...(envIssueNo ? { envIssue: envIssueNo } : {}), since: now() }, waiting: true };
+      // #6123: the previous re-admit (env issue closed / tool found) ended in this same signature: back off before the next one
+      const prior = envReadmits.get(n);
+      let notBefore = null;
+      if (prior && prior.sig === sig) { prior.count += 1; notBefore = now() + envReadmitBackoffMs(prior.count); }
+      else if (prior) envReadmits.delete(n);
+      const final = { ...row, outcome: "held", detail: `waiting on engine/env change: ${why}; re-admitted on ${triggers.join(" or ")}${notBefore ? ` (not before ${new Date(notBefore).toISOString()}: the same ${sig.split("|")[0]} repeated after a re-admit)` : ""}\n${String(row.detail ?? "")}`,
+        envHold: { kind, sig, from: row.outcome, version: curVersion(), env: curEnv(), ...(tools?.length ? { tools } : {}), ...(envIssueNo ? { envIssue: envIssueNo } : {}), ...(notBefore ? { notBefore } : {}), since: now() }, waiting: true };
       results.set(n, final); done(); save();
       decided({ issue: n, what: `held: waiting on engine/env change (${why})`, why: firstLine(row.detail) || row.outcome,
         alternative: kind === "engine" ? "relaunch into the same engine-error, or end engine-error and wait for a manual --requeue" : "launch a recovery that fails the same way, or end needs-human and wait for a manual --requeue" });
@@ -1462,7 +1478,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     const lane = ln?.lane;
     if (relabelled.delete(n)) save(); // #4315: the recovery lane launches after all; it removes needs-human itself
-    const pl = placed.get(n);
+    // #5746: every running entry records where it runs; a lane admitted without a recorded placement (a requeue path) is derived, never left blank
+    const pl = placed.get(n) ?? (remote ? (remoteRun.has(n) ? { where: "remote", reason: "mode remote" } : (placeOf(n) ?? undefined)) : undefined);
     placed.delete(n);
     const queueMs = Number.isFinite(enqueued.get(n)) ? Math.max(0, now() - enqueued.get(n)) : null; // #4908: queue_wait in the phase ledger
     heads.delete(n); enqueued.delete(n); busyNoted.delete(n);
@@ -1972,8 +1989,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           continue;
         }
       }
-      let why = null;
-      if (h.envIssue && typeof envIssue?.isClosed === "function") { let c = false; try { c = (await envIssue.isClosed(h.envIssue)) === true; } catch { c = false; } if (c) why = `env issue #${h.envIssue} closed`; }
+      let why = null, probeOrIssue = false;
+      const backedOff = Number(h.notBefore) > now(); // #6123
+      if (!backedOff && h.envIssue && typeof envIssue?.isClosed === "function") { let c = false; try { c = (await envIssue.isClosed(h.envIssue)) === true; } catch { c = false; } if (c) { why = `env issue #${h.envIssue} closed`; probeOrIssue = true; } }
       // R6/R8: a remote lane runs on a pool agent, so its engine is the agent's, not this host's. While every placeable agent is below the engine
       // the lane needs, the hold stays; an agent upgrade (not the orchestrator's) is the trigger.
       const av = r.placement?.where === "remote" ? await agentVersionOf() : null;
@@ -1983,8 +2001,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         else if (needMM && vmm2(av) === needMM && v && h.version && v !== h.version) why = `engine version changed v${h.version} → v${v}`;
       } else if (!why && v && h.version && v !== h.version) why = `engine version changed v${h.version} → v${v}`;
       if (why) { /* env issue closed */ } else if (fp && h.env && fp !== h.env) why = "batch env changed (--set-env)";
-      else if (h.tools?.length && !toolReadmits.has(`${n}|${h.sig}`) && (await missingTools(h.tools))?.length === 0) { why = `${h.tools.join(", ")} now found on the host`; toolReadmits.add(`${n}|${h.sig}`); }
-      if (why) { if (!(await gateAdmit(n))) continue; engineSigs.delete(n); releaseHeld(n, true, `re-admitted: ${why}`); continue; }
+      else if (!backedOff && h.tools?.length && !toolReadmits.has(`${n}|${h.sig}`) && (await missingTools(h.tools))?.length === 0) { why = `${h.tools.join(", ")} now found on the host`; toolReadmits.add(`${n}|${h.sig}`); probeOrIssue = true; }
+      if (why) { if (!(await gateAdmit(n))) continue; engineSigs.delete(n); if (probeOrIssue) envReadmits.set(n, { sig: h.sig, count: envReadmits.get(n)?.sig === h.sig ? envReadmits.get(n).count : 0, at: now() }); releaseHeld(n, true, `re-admitted: ${why}`); continue; }
       if (now() - (Number(h.since) || 0) >= ehMaxMs && !/no engine\/env change within/.test(r.detail ?? "")) { // the wait is over: the row stays held (resumable, --requeue), the batch may end
         const { waiting, ...rest } = r;
         const [head, ...tail] = String(rest.detail ?? "").split("\n");
@@ -2507,7 +2525,7 @@ export function formatTable(rows) {
  */
 export function phasesOf(r, rec) {
   if (!r?.phases || typeof r.phases !== "object" || !Object.keys(r.phases).length) return null;
-  return { ...(Number.isFinite(rec?.queueMs) && rec.queueMs > 0 ? { queue_wait: { ms: Math.round(rec.queueMs) } } : {}), ...r.phases };
+  return { ...(Number.isFinite(rec?.queueMs) && rec.queueMs > 0 ? { queue_wait: { ms: Math.round(rec.queueMs), ...((r.sandbox?.agent ?? r.agent) ? { worker: r.sandbox?.agent ?? r.agent } : {}) } } : {}), ...r.phases };
 }
 
 export function formatWaitSummary(rows, heavyStats = null) {

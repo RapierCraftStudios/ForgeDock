@@ -1006,6 +1006,7 @@ const KIND_NAME = { "forgedock-path": "forgedock install path", command: "comman
  * Returns {tool, kind: command|python-module|node-module} or null. A path, a relative specifier or a name the repo tracks
  * (`repoHas(name)`) is null: a module the change forgot to create is a code defect, not the environment.
  */
+const INTERPRETER_RE = /^(?:ba|z|da|k)?sh$|^env$|^python[0-9.]*$|^node$|^bun$|^deno$|^ruby$|^perl$/;
 export function missingTool({ rc, output } = {}, { repoHas = () => false, command = "" } = {}) {
   const out = String(output ?? "");
   const local = (name) => !name || name.startsWith(".") || name.startsWith("/") || name.startsWith("file:") || repoHas(name);
@@ -1021,7 +1022,11 @@ export function missingTool({ rc, output } = {}, { repoHas = () => false, comman
   }
   const po = POETRY_NOT_FOUND_RE.exec(out)?.[1]; // #5020: `poetry run pytest` in an env that was never installed
   if (po) return local(po) ? null : { tool: po, kind: "command" };
-  const cmd = CMD_NOT_FOUND_RE.exec(out)?.[1] ?? (rc === 127 ? SH_NOT_FOUND_RE.exec(out)?.[1] ?? String(command).trim().split(/\s+/)[0] : null);
+  // An exit 127 with no "not found" line is blamed on the command's first word, unless that word is an interpreter: then the
+  // 127 came from inside the script it runs (a missing script or a command the script calls), never from the interpreter.
+  const first = String(command).trim().split(/\s+/)[0] ?? "";
+  const fallback = INTERPRETER_RE.test(first.split("/").pop()) ? null : first;
+  const cmd = CMD_NOT_FOUND_RE.exec(out)?.[1] ?? (rc === 127 ? SH_NOT_FOUND_RE.exec(out)?.[1] ?? fallback : null);
   if (!cmd || cmd.includes("/") || local(cmd)) return envSignature(out); // #5371
   return { tool: cmd, kind: "command" };
 }

@@ -161,6 +161,7 @@ export function liveRemote(base, { exec, readOverride = () => null, place, onCha
   };
   return Object.defineProperties(base, {
     max: { get: () => current().maxRemote, enumerable: true, configurable: true },
+    mode: { get: () => current().mode, enumerable: true, configurable: true }, // #5746: the effective mode (the live override included)
     fallbackLocal: { get: () => { const e = current(); return e.mode === "hybrid" && Number.isInteger(e.maxRemote) && e.maxRemote >= 1; }, enumerable: true, configurable: true },
     place: {
       value: (n) => {
@@ -172,6 +173,8 @@ export function liveRemote(base, { exec, readOverride = () => null, place, onCha
           const reason = live?.maxRemote !== undefined ? "max_remote 0 (live override)" : "max_remote 0";
           return base.hostFallback === false ? { where: "remote", reason, hold: true } : { ...p, reason };
         }
+        // #5746: remote mode never places on the host unless host_fallback is true (a host-only `needs` capability, headroom, ...)
+        if (e.mode === "remote" && p?.where === "local" && base.hostFallback === false) return { where: "remote", reason: `host fallback off, not on the host: ${p.reason}` };
         return p;
       },
       enumerable: true, configurable: true, writable: true,

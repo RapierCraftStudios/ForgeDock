@@ -40,6 +40,40 @@ export function classifyFailure(text) {
   const hit = INFRA_SIGNATURES.find(([, re]) => re.test(String(text ?? "")));
   return hit ? { class: "infra", signature: hit[0] } : { class: "unknown", signature: null };
 }
+/** #6015: a deploy or rehearsal workflow is never a CI flake: its failures go through release-deploy recover (classify, file, bounded rerun). */
+export const isDeployWorkflow = (name) => /deploy|rehears|migrat/i.test(String(name ?? ""));
+
+const STEP_SECRETS = /decrypt|sops|secrets?\b|age[- ]key|gpg/i, STEP_SSH = /\bssh\b|scp\b|rsync/i;
+const LOG_SECRETS = /failed to decrypt|decryption failed|sops.*(error|failed)|no matching keys|cannot decrypt|age: error/i;
+const LOG_SSH = /permission denied \(publickey|ssh: connect to host|ssh_exchange_identification|kex_exchange_identification|host key verification failed|ssh: .*(timed out|refused)/i;
+
+/** The step named by the first `--log-failed` line (`job<TAB>step<TAB>time line`) or the first failed step of `steps` [{name, conclusion}]. */
+function failedStepName(steps, log) {
+  const s = (steps ?? []).find((x) => x?.conclusion === "failure" || x?.conclusion === "timed_out");
+  if (s?.name) return String(s.name);
+  const m = /^[^\t\n]*\t([^\t\n]+)\t/m.exec(String(log ?? ""));
+  return m ? m[1].trim() : null;
+}
+
+/**
+ * #6015: name the failed deploy step (DEPLOY_FREEZE / LIVE_CHECK semantics of #5560 via `reason`). Pure.
+ * Secrets decrypt, SSH, rehearsal, migration, freeze and live-check failures are never transient; only a network/infra signature
+ * (shared INFRA_SIGNATURES or `sigs`) in some other step is. @returns {{class, transient: boolean, step: string|null, excerpt: string}}
+ */
+export function classifyFailedStep({ steps, log, reason, sigs } = {}) {
+  const text = String(log ?? ""), step = failedStepName(steps, text), name = step ?? "";
+  const excerpt = text.trim().slice(-400), out = (cls, transient = false) => ({ class: cls, transient, step, excerpt });
+  if (/DEPLOY_FREEZE|\bfreeze\b/i.test(String(reason ?? ""))) return out("freeze");
+  if (/LIVE_CHECK/.test(String(reason ?? ""))) return out("live-check");
+  if (STEP_SECRETS.test(name) || LOG_SECRETS.test(text)) return out("secrets");
+  if (STEP_SSH.test(name) || (!step && LOG_SSH.test(text))) return out("ssh");
+  if (/rehears/i.test(name)) return out("rehearsal");
+  if (/migrat/i.test(name) || (!step && /migrat/i.test(text))) return out("migration");
+  const configured = (sigs ?? []).some((x) => { try { return new RegExp(x, "i").test(text); } catch { return text.includes(x); } });
+  if (INFRA_SIGNATURES.some(([, re]) => re.test(text)) || configured) return out("infra", true);
+  return /migrat/i.test(text) ? out("migration") : out("deterministic");
+}
+
 export const signatureHash = (check, test, signature) => createHash("sha256").update([check, test ?? "", signature ?? ""].join("\0")).digest("hex").slice(0, 16);
 
 /** Same-SHA flips in `runs` [{sha, check, test?, conclusion, id, at}]: a check that failed and then passed on one sha. */

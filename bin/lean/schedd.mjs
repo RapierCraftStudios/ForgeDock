@@ -78,7 +78,7 @@ export function batchVerdicts(root, { now = Date.now(), windowMin = DEFAULT_STAL
     try {
       const b = openBatch(root, id);
       if (!b.readPlan()?.daemon || b.isTerminal()) continue;
-      const state = b.store.peek(), stall = evaluateDispatchStall(state, { held: b.readHeld(), parallel: b.readParallel(), hosted: false, paused: b.readPause?.() ?? null, lastProgressMs: b.lastProgressMs(), now, windowMin, lanesAliveMs: lanesAlive(b, state) });
+      const state = b.store.peek(), stall = evaluateDispatchStall(state, { held: b.readHeld(), parallel: b.readParallel(), hosted: false, paused: b.readPause?.() ?? null, lastProgressMs: b.lastDispatchClockMs(), now, windowMin, lanesAliveMs: lanesAlive(b, state) });
       const decision = stall ? decideStallAction(stall, { recovery: readHealth(b.dir)?.stallRecovery ?? null, hosted: false, now, windowMin }) : null;
       out.push(batchVerdict(id, stall, decision));
     } catch { /* one unreadable batch has no verdict */ }
@@ -657,7 +657,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
         if (b.isTerminal() && (!Number.isFinite(created) || now - created >= 24 * 3600_000)) continue; // nothing left to report or re-host
         const reported = !!b.readReport(), cancelled = !!b.readCancel(), state = b.store.peek(), isHosted = hosted.has(id) || starting.has(id);
         await efficiencyTick(b, plan, state, { now, reported, cancelled }); // #5987: advisory; never throws, never changes dispatch
-        const stallOpts = { held: b.readHeld(), paused: b.readPause?.() ?? null, parallel: b.readParallel(), hosted: isHosted, lastProgressMs: b.lastProgressMs(), now, windowMin: stallMin, cancelled, reported, lanesAliveMs: lanesAlive(b, state) };
+        const stallOpts = { held: b.readHeld(), paused: b.readPause?.() ?? null, parallel: b.readParallel(), hosted: isHosted, lastProgressMs: b.lastDispatchClockMs(), now, windowMin: stallMin, cancelled, reported, lanesAliveMs: lanesAlive(b, state) };
         let stall = evaluateDispatchStall(state, stallOpts);
         if (stall && preflight) { // #5745: name the preflight gate holding admission (advisory; dispatch decisions are unchanged)
           let gates = [];
