@@ -81,6 +81,10 @@ export const dockerCli = {
     return out ? out.split("\n").filter(Boolean) : [];
   },
   async pull(image) { return docker(["pull", "-q", image], { timeoutMs: 30 * 60000 }); },
+  /** #6166: retags a local image (the pulled ghcr.io image becomes forgedock-lane:<version>). */
+  async tag(src, dst) { return docker(["tag", src, dst], { timeoutMs: 30000 }); },
+  /** #6166: one label of a local image ("" when unset or the image is missing). */
+  async imageLabel(ref, label) { try { return await docker(["image", "inspect", "--format", `{{index .Config.Labels "${label}"}}`, ref], { timeoutMs: 20000 }); } catch { return ""; } },
   async load(file) { return docker(["load", "-q", "-i", file], { timeoutMs: 30 * 60000 }); },
   async hasImage(ref) { try { await docker(["image", "inspect", ref], { timeoutMs: 20000 }); return true; } catch { return false; } },
   /** {name: {cpu (cores), mem_gb}} for running containers with the label. */

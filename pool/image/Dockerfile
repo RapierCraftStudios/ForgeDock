@@ -16,7 +16,9 @@ ARG POETRY_VERSION=2.4.3
 ARG YQ_VERSION=4.44.3
 ARG PLAYWRIGHT_VERSION=1.49.1
 
-LABEL org.opencontainers.image.version=$FORGEDOCK_VERSION
+# Image recipe hash (versionOf().image); pool agents check it after pulling the published image (#6166).
+ARG FORGEDOCK_RECIPE=
+LABEL org.opencontainers.image.version=$FORGEDOCK_VERSION forgedock.recipe=$FORGEDOCK_RECIPE
 RUN test -n "$FORGEDOCK_VERSION" || { echo "FORGEDOCK_VERSION build arg is required" >&2; exit 1; }
 
 ENV IS_SANDBOX=1 DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 PLAYWRIGHT_BROWSERS_PATH=/opt/playwright UV_PYTHON_INSTALL_DIR=/opt/uv-python PATH=/opt/cs/bin:/opt/node/bin:/root/.local/bin:$PATH
@@ -34,8 +36,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" | tar -xJ -C /opt \
     && mv "/opt/node-v${NODE_VERSION}-linux-x64" /opt/node \
-    && npm install -g "corepack@${COREPACK_VERSION}" "forgedock@${FORGEDOCK_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-    && npm cache clean --force
+    && NODE_OPTIONS=--dns-result-order=ipv4first npm install -g --include=optional "corepack@${COREPACK_VERSION}" "forgedock@${FORGEDOCK_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && npm cache clean --force \
+    && claude --version && forgedock --version   # smoke: a missing native binary (failed optional download) fails the build, never a lane
 
 RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | env UV_INSTALL_DIR=/usr/local/bin sh \
     && uv tool install "poetry==${POETRY_VERSION}" \
