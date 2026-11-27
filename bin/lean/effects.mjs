@@ -467,12 +467,26 @@ export async function reapContainers(label, { timeoutMs = 20000, env = process.e
   } catch { return []; }
 }
 
+/**
+ * #6117: `path` with the system dirs appended when missing. A lane env whose PATH holds only toolchain pins (`/opt/x`) made
+ * the preflight probe's `spawn("bash")` ENOENT (rc 127), parking the lane "Remote sandbox lacks bash" while /usr/bin/bash existed.
+ * Appended last, so a pinned tool still wins and nothing already on the PATH moves. Not applied on Windows.
+ */
+export const SYSTEM_DIRS = Object.freeze(["/usr/local/bin", "/usr/bin", "/bin"]);
+export function withSystemDirs(path, { platform = process.platform } = {}) {
+  if (platform === "win32") return path;
+  const have = String(path ?? "").split(":").filter(Boolean);
+  return [...have, ...SYSTEM_DIRS.filter((d) => !have.includes(d))].join(":");
+}
+
 export function runCheckCommand({ command, cwd, timeoutMs = 300000, env = null, graceMs = 2000 }) {
   const reapLabel = `forgedock.reap=${randomBytes(8).toString("hex")}`;
   const inner = new Promise((finish) => {
     let out = "", timedOut = false, child;
     const add = (b) => { out += String(b); if (out.length > 2 * CHECK_OUTPUT_CAP) out = out.slice(-CHECK_OUTPUT_CAP); };
-    try { child = spawn("bash", ["-c", String(command)], { cwd, detached: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...(env ?? {}), FORGE_REAP_LABEL: reapLabel } }); }
+    const childEnv = { ...process.env, ...(env ?? {}), FORGE_REAP_LABEL: reapLabel };
+    childEnv.PATH = withSystemDirs(childEnv.PATH); // #6117
+    try { child = spawn("bash", ["-c", String(command)], { cwd, detached: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: childEnv }); }
     catch (e) { finish({ rc: 127, output: String(e?.message ?? e) }); return; }
     const kill = (sig) => { try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch { /* gone */ } } };
     const timer = setTimeout(() => { timedOut = true; kill("SIGTERM"); setTimeout(() => kill("SIGKILL"), graceMs).unref(); }, timeoutMs);
