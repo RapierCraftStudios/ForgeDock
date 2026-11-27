@@ -3778,6 +3778,12 @@ Filing: `file_issues` is **opt-in, default off** (only an explicit `file_issues:
 - `watchdog` takes a separate `restart` dep (wired in `scheddFromCli`). Heartbeat down while `unit()` is `active`/`activating`: ALERT, `schedd.unit-no-daemon`, `restart()`, never `start()`. Only an inactive or absent unit with unfinished batches goes through `start()`.
 - Result gains `restarted`; `started` is `false` (and the failure is logged) when `restart()` throws.
 
+## Entry 2026-11-25 — one GitHub read client per schedd (#5990)
+
+- `bin/lean/gh-reader.mjs` (`makeGhReader`) is the dispatcher's read path: one GraphQL call per `READER_CHUNK` (100) issues returns state, labels, milestone, comment count and `updatedAt`; results sit in a 30 s TTL cache. A failed refresh serves the last good entry, so `labelNames`, the milestone pre-read and `makeDispatchCheck` (`engine-cli.mjs`) cost no per-issue `gh` spawn. `runBatch` refreshes once per pass. Writes still use `gh` subprocesses.
+- `isNetworkError` separates transport failures from content errors. `resolveLane` returns `gh.unavailable` (transient, uncapped 60 s defer) for a network error on the milestone read, never `lane.unresolved`; other read errors keep the `lane.unresolved` retry. `orchestrate.mjs` defers it without a lane failure or a lost admission.
+- Reads run under `nice -n 10` (`readGh` in `effects.mjs`, not on win32). Every read spawn is counted; `passBudget` (60) caps spawns per pass (the cache is served beyond it) and `endPass` logs the count. `viewOf` still spawns a full `gh issue view`, but counted and niced.
+
 ## Entry 2026-11-25 — per-resource halts instead of batch halts (#5988)
 
 - `backend.auth`: `orchestrate` probes the login every `AUTH_PROBE_MS` (5 min) through an injectable `authProbe`, resumes at once on success, and on failure tries the next rotator account (`rotator.nextAccountAfterAuthFailure`, tried first on resume). After `AUTH_ESCALATE_MS` (30 min) it escalates once (`auth-escalation` row, `onEscalate` notify + one issue comment). The pause no longer runs to the quoted reset; rate_limited/quota.exhausted holds keep their known-reset delay.
