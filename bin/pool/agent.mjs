@@ -130,16 +130,23 @@ export async function buildWithRetry(build, { sleep = (ms) => new Promise((r) =>
   }
 }
 
-/** A regular file the lane may have written, read without following symlinks (a lane can plant a link to a host file); "" otherwise. */
 const BURY_TIMEOUT_MS = 30000; // evidence copy before a destroy (run logs out of the container) never holds the destroy longer
-export function readLaneFile(path) {
+/** An fd for a regular file a lane may have written, opened without following a symlink and without blocking on a FIFO; null otherwise. Caller closes it. */
+export function openLaneFile(path) {
   let fd = null;
   try {
-    if (!lstatSync(path).isFile()) return "";
-    fd = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
-    if (!fstatSync(fd).isFile()) return "";
-    return readFileSync(fd, "utf8");
-  } catch { return ""; } finally { if (fd !== null) { try { closeSync(fd); } catch { /* closed */ } } }
+    if (!lstatSync(path).isFile()) return null;
+    fd = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
+    if (fstatSync(fd).isFile()) return fd;
+  } catch { /* gone, a link, or not a file */ }
+  if (fd !== null) { try { closeSync(fd); } catch { /* closed */ } }
+  return null;
+}
+/** A regular file the lane may have written, read without following symlinks (a lane can plant a link to a host file); "" otherwise. */
+export function readLaneFile(path) {
+  const fd = openLaneFile(path);
+  if (fd === null) return "";
+  try { return readFileSync(fd, "utf8"); } catch { return ""; } finally { try { closeSync(fd); } catch { /* closed */ } }
 }
 export function createAgent(cfg, { docker, now = () => Date.now(), log = console, live = liveHeadroom, hostDisk = null, hostMem = null, net = netState, vm = vmSize, trim = runFstrim, mirrorRunner = null } = {}) {
   const stateDir = cfg.state_dir;
@@ -731,7 +738,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     while (graveyard.size >= GRAVE_MAX) graveyard.delete(graveyard.keys().next().value);
     try {
       let text = "", size = 0;
-      try { size = statSync(join(r.dir, "out", "lane.log")).size; const fd = openSync(join(r.dir, "out", "lane.log"), "r"); try { const len = Math.min(size, GRAVE_LOG_MAX); const buf = Buffer.alloc(len); readSync(fd, buf, 0, len, size - len); text = buf.toString("utf8"); } finally { closeSync(fd); } } catch { /* no log */ }
+      const fd = openLaneFile(join(r.dir, "out", "lane.log")); // no symlink, no FIFO: a lane can plant either (#6145 delta review)
+      if (fd !== null) { try { size = fstatSync(fd).size; const len = Math.min(size, GRAVE_LOG_MAX); const buf = Buffer.alloc(len); readSync(fd, buf, 0, len, size - len); text = buf.toString("utf8"); } catch { /* no log */ } finally { closeSync(fd); } }
       graveyard.set(r.id, { until: now() + keepLogMs, log: { from: size - Buffer.byteLength(text), size, text }, tail: logTail(r), runLog: await readRunLog(r), result: readResult(r) });
     } catch { /* best effort: the destroy goes on */ }
   }
