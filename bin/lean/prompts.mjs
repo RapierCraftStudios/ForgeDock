@@ -322,15 +322,7 @@ export function buildOpeningNote({ paths = [], tests = [], packFiles = [] } = {}
 /** #4857: validate-command rules for the plan prompt (the implement session resumes it), kept out of the shared templates (their token caps are guarded). */
 export function unrunnableValidateNote(testRunners = null) {
   const map = testRunners && typeof testRunners === "object" ? Object.entries(testRunners).map(([k, v]) => `${k}/ -> ${v}`).join("; ") : "";
-  return `\n\nValidate and repro commands must pass bash -n (no prose notes), select tests that exist, and run from the right cwd (never combine \`poetry -C <dir>\` or \`uv run --project <dir>\` with repo-root-relative paths: use \`cd <dir> && poetry run pytest <dir-relative paths>\`)${map ? ` (forge.yaml verification.test_runners: ${map})` : ""}. An unrunnable validate (missing tool, wrong cwd, no tests selected) is never a block or "human" product-decision: run an equivalent through the repo's toolchain and record {"kind":"substitute-validate","validate":"V#","command":"<runnable equivalent>","why":""} in ${RESULT_FILE} amendments. A post-deploy requirement needs a registered check id; one that is a manual or production-credential action with no runnable check is disposition "defer" with bucket "owner:<action>" only when it needs credentials, spend, an account, a third party or a customer; read-only prod data is "host". forge.yaml validate.recipes rewrite matching commands at freeze, and the engine rewrites an unrunnable command from the repo's CI-derived command catalogue: prefer the repo's own CI test commands over free-form paths. A substitute that runs the same test ids with the same result is recorded, not failed. A criterion only time or production can show (a 14-day metric, a corpus re-run, a published scorecard) is post-deploy or defer with a bucket: never narrow it into something the lane can observe.`;
-}
-
-/** #5419: the R-docs rule for the planner; "" when forge.yaml docs.required_for is unset. */
-export function docsPlanNote(cfg) {
-  if (!cfg?.required_for?.length) return "";
-  const where = cfg.paths?.length ? ` under ${cfg.paths.join(", ")}` : "";
-  const reg = cfg.registries?.length ? ` and their registration (${cfg.registries.join(", ")})` : "";
-  return `\n\nThis repo requires user docs for user-facing surfaces (${cfg.required_for.join(", ")}). When the issue adds or changes one (a public API endpoint, MCP tool, dashboard page or feature, CLI command or SDK method), ${CONTRACT_FILE} must carry a requirement R-docs and a deliverable for each docs page${where} to create or update${reg}. A \`/docs/...\` link the change adds must resolve to a page. If no docs apply, say why in the result file as docs: [{"surface":"<kind>","justification":"<why>"}].`;
+  return `\n\nValidate and repro commands must pass bash -n (no prose notes), select tests that exist, and run from the right cwd (never combine \`poetry -C <dir>\` or \`uv run --project <dir>\` with repo-root-relative paths: use \`cd <dir> && poetry run pytest <dir-relative paths>\`)${map ? ` (forge.yaml verification.test_runners: ${map})` : ""}. An unrunnable validate (missing tool, wrong cwd, no tests selected) is never a block or "human" product-decision: run an equivalent through the repo's toolchain and report its real result in ${RESULT_FILE}. A post-deploy requirement needs a registered check id; one that is a manual or production-credential action with no runnable check is disposition "defer" with bucket "owner:<action>" only when it needs credentials, spend, an account, a third party or a customer; read-only prod data is "host". forge.yaml validate.recipes rewrite matching commands at freeze, and the engine rewrites an unrunnable command from the repo's CI-derived command catalogue: prefer the repo's own CI test commands over free-form paths. A criterion only time or production can show (a 14-day metric, a corpus re-run, a published scorecard) is post-deploy or defer with a bucket: never narrow it into something the lane can observe.`;
 }
 
 /** #5428: the page_gate rule for the planner; "" when forge.yaml pages is off. */
@@ -426,27 +418,23 @@ export function contractCorrectionPrompt(problems) {
   return `Your ${CONTRACT_FILE} is not valid:\n${problems.slice(0, 20).map((p) => `- ${p}`).join("\n")}\n\nFix the contract (planning only, no code, no commit) and stop. Do not push or touch GitHub.`;
 }
 
-/** #5089: the builder's amendments name an unknown kind or miss a field; one correction before the conformance gate. */
-export function amendmentCorrectionPrompt(problems) {
-  return `The amendments in ${RESULT_FILE} are not valid:\n${problems.slice(0, 20).map((p) => `- ${p}`).join("\n")}\n\nRewrite them with a valid kind (${AMEND_KINDS.join(", ")}). A validate-row id (G2) is never a supersedes guard: use {"kind":"substitute-validate","validate":"G2","command":"<runnable equivalent>","why":""}. A deliverable that is impossible on this platform is {"kind":"defer","requirement":"R#","why":""}, not a changed deliverable. Edit only ${RESULT_FILE} (commit nothing else) and stop. Do not push or touch GitHub.`;
-}
-
 /** The one bounded correction round, in the builder's own session. */
 export function conformanceResumePrompt(failures, mode = "local", lane = "") {
   const baseMoved = lane && failures.some((f) => f?.kind === "validate_failed")
     ? `\n\nIf a validate command fails only because origin/${lane} moved on after this branch started (the change itself is fine), bring the branch up to date with \`git merge --no-edit origin/${lane}\` (already fetched; never rebase or force), resolve any conflicts, then re-run every validate command and record the results.`
     : "";
-  return `The change does not conform to the frozen contract and the issue:\n${failures.slice(0, 30).map((f) => `- ${f.code}: ${String(f.detail).slice(0, 900)}`).join("\n")}${baseMoved}\n\nFix each item in the code, or record a typed amendment with a why in ${RESULT_FILE}. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+  // #6058: a requirement with no status row was skipped, not failed: name each id with its quote and ask for the work and a row
+  const skipped = failures.filter((f) => f?.kind === "requirement_no_status" && f.reqId);
+  const rest = skipped.length ? failures.filter((f) => !skipped.includes(f)) : failures;
+  const targeted = skipped.length
+    ? `You skipped ${skipped.length === 1 ? "a requirement" : `${skipped.length} requirements`}: ${RESULT_FILE} has no status row for ${skipped.map((f) => f.reqId).join(", ")}, so ${skipped.length === 1 ? "it was" : "they were"} not addressed at all:\n${skipped.map((f) => `- ${f.reqId}: "${String(f.quote ?? "").slice(0, 400)}"`).join("\n")}\n\nFor each one, implement it now (a file it needs that no deliverable names is an \`add-deliverable\` amendment), then add its row {"id","status","evidence"} to the requirements array of ${RESULT_FILE}, keeping the rows already there.${rest.length ? "\n\nAlso:\n" : ""}`
+    : "The change does not conform to the frozen contract and the issue:\n";
+  return `${targeted}${rest.slice(0, 30).map((f) => `- ${f.code}: ${String(f.detail).slice(0, 900)}`).join("\n")}${baseMoved}\n\nFix each item in the code, or record a typed amendment with a why in ${RESULT_FILE}. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
 /** forge#4159: the one resume for package.json edges between workspace packages the contract does not name. */
 export function structurePrompt(edges, mode = "local") {
   return `This change adds dependencies between workspace packages that the frozen contract does not name:\n${edges.slice(0, 30).map((e) => `- ${e.from} -> ${e.to} (${e.kind}, ${e.manifest})`).join("\n")}\n\nFor each one, add it to the contract with a reason, or remove it: either record {"kind":"add-deliverable","path":"<that package.json>","why":"<names the package and why this dependency is right>"} in ${RESULT_FILE}, or drop the dependency from the package.json and the code that needs it. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
-}
-
-/** The repo's devdocs freshness rule failed on the committed change: add a decision record (conflict-free) and commit. */
-export function docsPrompt(output, mode = "local") {
-  return `The repository's docs freshness check (scripts/check-devdocs-freshness.sh) fails on this change:\n${String(output ?? "").slice(0, 4000)}\n\nAdd a new devdocs/decisions/<issue>-<slug>.md describing the behaviour you changed in a few lines (a new file never conflicts with parallel lanes; edit a shared dossier only when the check accepts nothing else). ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
 /**
@@ -603,7 +591,7 @@ export function reproFlagNote(flag) {
 
 export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", ignore = [`${LEAN_DIR}/`], skeleton = null, investigationVerdict = null, domains = [], relaxations = [], reproFlag = null }) {
   const notes = comments.map((c) => String(c?.body ?? "")).filter((b) => !/^<!-- FORGE:/.test(b.trim()));
-  const decisions = comments.filter((c) => isDecision(c?.body) && isTrustedIssueComment(c)).map((c) => String(c.body)); // #4901: operator decisions bind the review; other FORGE: records stay out
+  const decisions = comments.filter((c) => isDecision(c?.body) && isTrustedIssueComment(c)).map((c) => `Binding operator decision (trusted; judge the rows against it, as the builder was told):\n${String(c.body)}`); // #4901/#6051: operator decisions bind the review and the builder alike; other FORGE: records stay out
   notes.push(...decisions);
   const sk = JSON.stringify(skeleton ?? reviewSkeleton(contract ?? {}, files, ignore), null, 1);
   return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n${investigationVerdict ? `<investigation_verdict>${investigationVerdict}</investigation_verdict>\n${VERDICT_RULE}\n\n` : ""}<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<rubric>\n${REVIEW_RUBRIC}\n</rubric>\n\n<row_skeleton>\n${cap(sk, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}${domainChecksBlock(domains)}${relaxationBlock(relaxations)}${reproFlagNote(reproFlag)}`;

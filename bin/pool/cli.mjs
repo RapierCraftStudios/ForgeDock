@@ -11,6 +11,7 @@ import { startRouter } from "./router.mjs";
 import { dockerCli } from "./docker.mjs";
 import { readSecret } from "./store.mjs";
 import { call as httpCall } from "./http.mjs";
+import { agentsLeftBehind, leftBehindLine } from "./version.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const loadJson = (p) => JSON.parse(readFileSync(p, "utf8"));
@@ -59,23 +60,41 @@ export async function keptRows(root, { now = Date.now() } = {}) {
   } catch { return []; }
 }
 export const keptLines = (rows) => rows.length ? [`kept sandboxes (${rows.length}):`, ...rows.map((k) => `  #${k.issue} batch ${k.batch} age ${Math.round((k.ageMs ?? 0) / 60000)}m phase ${k.phase ?? "?"}`)] : [];
+/** #6062: queue_wait p50/p95 (ms) per worker from batch report rows whose phases.queue_wait names the worker. */
+export function queueWaitByWorker(rows) {
+  const by = {};
+  for (const r of rows ?? []) { const q = r?.phases?.queue_wait; if (q?.worker && Number.isFinite(q.ms)) (by[q.worker] ??= []).push(q.ms); }
+  const pct = (xs, p) => xs[Math.min(xs.length - 1, Math.ceil(p * xs.length) - 1)];
+  return Object.fromEntries(Object.entries(by).map(([w, xs]) => { xs.sort((a, b) => a - b); return [w, { n: xs.length, p50_ms: pct(xs, 0.5), p95_ms: pct(xs, 0.95) }]; }));
+}
+export async function queueRows(root) {
+  try {
+    const B = await import("../lean/batch.mjs"), out = [];
+    for (const id of B.listBatches(root)) out.push(...(B.openBatch(root, id).readReport()?.rows ?? []));
+    return out;
+  } catch { return []; }
+}
 const num = (x) => (Number.isFinite(x) ? String(Math.round(x * 10) / 10) : "-");
+const usedCell = (u) => (u?.used && u.admitted ? `${num(u.used.cpu_avg)}/${num(u.used.mem_avg_gb)} vs ${num(u.admitted.cpus)}/${num(u.admitted.mem_gb)}` : "-");
+const queueCell = (q) => (q && Number.isFinite(q.p50_ms) ? `${num(q.p50_ms / 1000)}/${num(q.p95_ms / 1000)}` : "-");
 /** #5885: one row per host: used/borrowable/total cpus and memory, lane counts, pause state and why lanes are throttled or drained. */
 export function statusTable(agents) {
   const withAccount = agents.some((a) => a.account); // #5886: the column appears only when an agent has an account
-  const head = ["HOST", ...(withAccount ? ["ACCOUNT"] : []), "CPUS used/borrow/total", "MEM GB used/borrow/total", "ACTIVE", "THROTTLED", "PAUSED", "REASON"];
+  const withEngine = agents.some((a) => a.engine_version); // the ENGINE column appears only when an agent reports its lane engine
+  const head = ["HOST", ...(withAccount ? ["ACCOUNT"] : []), "CPUS used/borrow/total", "MEM GB used/borrow/total", "ACTIVE", "THROTTLED", "PAUSED", ...(withEngine ? ["ENGINE"] : []), "REASON", "USED cpu/mem vs admitted", "QUEUE p50/p95 s"];
   const rows = agents.map((a) => {
     const name = a.name ?? a.host ?? "?";
     const acct = withAccount ? [a.account ?? "-"] : [];
-    if (a.ok === false) return [name, ...acct, "-", "-", "-", "-", "-", `unreachable${a.error ? `: ${a.error}` : ""}`];
+    if (a.ok === false) return [name, ...acct, "-", "-", "-", "-", ...(withEngine ? ["-"] : []), "-", `unreachable${a.error ? `: ${a.error}` : ""}`, "-", "-"];
     const used = (tot, free) => (Number.isFinite(tot) && Number.isFinite(free) ? tot - Math.max(0, free) : null);
     const borrow = (b, free) => num(b ?? free);
     const paused = a.owner_paused ? "owner" : a.paused ? (a.pending_resize ? "resize" : "yes") : "no";
     const why = [a.owner_paused ? "paused by owner" : null, a.paused && !a.owner_paused && a.pending_resize ? "draining for resize" : null,
+      Number.isInteger(a.lane_target) ? `lane target ${a.lane_target}/${a.lane_ceiling ?? "-"}` : null, a.draining && !a.owner_paused && !a.pending_resize ? `draining: ${a.draining_reason ?? "yes"}` : null,
       a.idle_gate ? `owner busy: ${a.idle_gate}` : null, a.last_drain ? `last drain ${a.last_drain.sandbox} at ${a.last_drain.at}: ${a.last_drain.reason}` : null].filter(Boolean).join("; ");
     return [name, ...acct, `${num(used(a.cpus_total, a.cpus_free))}/${borrow(a.cpus_borrowable, a.cpus_free)}/${num(a.cpus_total)}`,
       `${num(used(a.mem_total_gb, a.mem_free_gb))}/${borrow(a.mem_borrowable_gb, a.mem_free_gb)}/${num(a.mem_total_gb)}`,
-      String(a.active ?? "-"), String(a.throttled ?? 0), paused, why || "-"];
+      String(a.active ?? "-"), String(a.throttled ?? 0), paused, ...(withEngine ? [a.engine_version ? `${a.engine_version}${a.engine_skew ? " SKEW" : ""}` : "-"] : []), why || "-", usedCell(a.usage_summary), queueCell(a.queue_wait)];
   });
   const w = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
   return [head, ...rows].map((r) => r.map((c, i) => (i === r.length - 1 ? c : c.padEnd(w[i]))).join("  ")).join("\n");
@@ -137,7 +156,9 @@ export async function runPoolCli(argv, deps = {}) {
     case "status": {
       const cfg = routerConfig();
       const r = await call(`http://${cfg.listen.host}:${cfg.listen.port}`, "GET", `/agents${flag("account") ? `?account=${encodeURIComponent(flag("account"))}` : ""}`, { token: cfg.forgedock_token });
-      const kept = await keptRows((await import("../lean/batch.mjs")).batchRoot());
+      const root = (await import("../lean/batch.mjs")).batchRoot(), kept = await keptRows(root);
+      const qw = queueWaitByWorker(await queueRows(root)); // #6062
+      if (Array.isArray(r.data?.agents)) r.data = { ...r.data, agents: r.data.agents.map((a) => (qw[a?.name] ? { ...a, queue_wait: qw[a.name] } : a)) };
       if (rest.includes("--json")) console.log(JSON.stringify(r.data && typeof r.data === "object" && !Array.isArray(r.data) && kept.length ? { ...r.data, kept_sandboxes: kept } : r.data, null, 2));
       else if (!r.ok) throw new Error(`router refused: HTTP ${r.status} ${JSON.stringify(r.data)}`);
       else console.log(statusTable(r.data?.agents ?? []));
@@ -292,6 +313,13 @@ export async function runPoolCli(argv, deps = {}) {
         if (r.status === 409) throw new Error(`${a.name}: ${r.data?.active ?? "some"} active sandbox(es); not upgraded (HTTP 409)`);
         console.log(`${a.name}: HTTP ${r.status} ${JSON.stringify(r.data)}`);
       }
+      // R5: name the agents still on an older engine once the pushes are done (an agent restarts asynchronously, so this can lag briefly).
+      const behind = deps.leftBehind ? await deps.leftBehind(base, cfg) : deps.call ? [] : await (async () => { // a custom `call` seam is a fixture without /status
+        const get = (p) => httpCall(base, "GET", p, { token: cfg.forgedock_token }).catch(() => null);
+        const target = (await get("/version"))?.data?.version;
+        return agentsLeftBehind((await get("/status"))?.data?.agents, target).map((r) => ({ ...r, target }));
+      })();
+      if (behind.length) console.log(leftBehindLine(behind, behind[0].target));
       break;
     }
     case "remove": {

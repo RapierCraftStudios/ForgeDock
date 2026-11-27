@@ -43,6 +43,7 @@ export const TYPES = {
   "verification.ci_local.extra_commands": "list",
   "verification.ci_local.budget_minutes": "number",
   "verification.ci_local.max_parallel": "number",
+  "review.max_parallel": "posint", // #6098: release-review reviewers in flight at once (default max(2, cores/2))
   "orchestration.merge_train": { enum: ["off", "on"] }, // #5836: lanes end pr-ready and the batch merge train merges (default off)
   "orchestration.merge_train_batch": "posint", // #5837: up to N green PRs of one base validated together on a candidate ref (default 4)
   "orchestration.max_attempts_per_issue": "posint", // #5986: lifetime lanes per issue before one FORGE:ESCALATION (default 4)

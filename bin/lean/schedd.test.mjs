@@ -582,7 +582,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await d.close(); }
   });
 
-  it("#5806: a hosted runner wedged in setup restarts the daemon once (decision logged); the same stall again alerts and never loops", async () => {
+  it("#5806: a hosted runner wedged in setup restarts the daemon (decision logged); the same stall again is healed again after the backoff, no alert (#6082)", async () => {
     const dir = tmpDir("schedd-stall-setup-"), root = join(dir, "batches"), id = "b20261121-000000-5806";
     const b = openBatch(root, id);
     b.writePlan({ daemon: true, repo: "o/r", created: new Date().toISOString() });
@@ -598,10 +598,9 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
       assert.ok(lines.some((l) => /FORGE:DECISION batch .+ stall-recovery: restart the hosting schedd/.test(l)), lines.join("\n"));
       assert.equal(JSON.parse(readFileSync(join(b.dir, "health.json"), "utf8")).stallRecovery.action, "restart-daemon");
       utimesSync(join(b.dir, "state.json"), old, old);
-      await until(() => readFileSync(join(b.dir, "health.json"), "utf8").includes("stalled again after auto-recovery"), 8000);
-      await new Promise((r) => setTimeout(r, 300));
-      assert.equal(restarts.length, 1, "recovered once, then alerted");
-      assert.match(readFileSync(join(b.dir, "batch.log"), "utf8"), /BATCH UNHEALTHY .*\(stuck in setup, 0\/2 issues read\).*probed: stalled again after auto-recovery/);
+      await until(() => restarts.length >= 2, 8000);
+      assert.equal(JSON.parse(readFileSync(join(b.dir, "health.json"), "utf8")).stallRecovery.count >= 2, true, "a second recovery is recorded");
+      assert.doesNotMatch(readFileSync(join(b.dir, "batch.log"), "utf8"), /BATCH UNHEALTHY/, "no operator alert while self-heal has attempts left");
     } finally { await d.close(); }
   });
 
@@ -657,6 +656,24 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
       await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: ["1"], cwd: dir, env: {} });
       await new Promise((r) => setTimeout(r, 2000));
       assert.equal(calls.length, 1, "a tripped breaker holds the batch for an operator --resume");
+    } finally { await d.close(); }
+  });
+
+  it("#6042: a batch whose breaker is environmental is re-hosted by the timer", async () => {
+    const dir = tmpDir("schedd-rehost-env-"), root = join(dir, "batches"), id = "b20261031-000000-6042";
+    const calls = [];
+    const runBatch = async ({ argv, sink }) => {
+      calls.push(argv);
+      const b = openBatch(root, id);
+      if (argv[0] !== "--resume") { b.writePlan({ daemon: true, repo: "o/r" }); b.store.save({ v: 1, order: [1], results: {}, running: {}, pending: [1], notBefore: { 1: Date.now() + 300 }, breaker: { at: Date.now(), errors: 3, environmental: true } }); }
+      sink.batch({ id, dir: b.dir });
+      return {};
+    };
+    const d = await startDaemon({ dir, root, runBatch, log: () => {}, resumeOnStart: false });
+    try {
+      await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: ["1"], cwd: dir, env: {} });
+      await until(() => calls.length >= 2, 8000);
+      assert.equal(calls[1][0], "--resume");
     } finally { await d.close(); }
   });
 
@@ -853,6 +870,44 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     v2 = "1.52.0";
     await until(() => exits2.length > 0);
     assert.deepEqual(exits2, [1]);
+  });
+
+  it("#5983: unitless, the hard bound does not cut the successor waits short of the re-host; a hung close still exits", async () => {
+    const dir = tmpDir("schedd-bound-"), lines = [], exits = [];
+    let version = "1.51.0";
+    const d = await startDaemon({ dir, root: join(dir, "batches"), log: (m) => lines.push(m), resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => null,
+      exit: (c) => exits.push(c), hardExitMs: 100, respawn: () => {}, probe: async () => false, successorMs: 150, successorPollMs: 10, runBatch: async () => ({}) });
+    version = "1.52.0";
+    await until(() => d.rehosted());
+    try {
+      assert.equal(d.rehosted().running, true, "re-hosted after waits longer than hardExitMs");
+      await new Promise((r) => setTimeout(r, 250));
+      assert.deepEqual(exits, [], "the hard timer did not fire");
+    } finally { await d.rehosted().close(); }
+    const dir2 = tmpDir("schedd-bound2-"), exits2 = [];
+    let v2 = "1.51.0";
+    await startDaemon({ dir: dir2, root: join(dir2, "batches"), log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => v2, unit: () => null,
+      exit: (c) => exits2.push(c), hardExitMs: 150, stopMs: 400, respawn: () => {}, probe: async () => false, successorMs: 50, successorPollMs: 10,
+      runBatch: ({ sink }) => { sink.batch({ id: "x", dir: dir2 }); return new Promise(() => {}); } }).then(async (d3) => {
+      request(await connectDaemon({ dir: dir2, spawnDaemon: null }), { op: "submit", argv: ["x"], cwd: dir2, env: {} }).catch(() => {});
+      await until(() => d3.running);
+      v2 = "1.52.0";
+      await until(() => exits2.length > 0);
+      assert.deepEqual(exits2, [1]);
+      await until(() => d3.rehosted()); // the stop carries on after the bound fired; release what it re-hosts
+      await d3.rehosted().close();
+    });
+  });
+
+  it("#5983: unitless re-host that hangs still exits via the last-resort timer", async () => {
+    const dir = tmpDir("schedd-bound3-"), exits = [];
+    let version = "1.51.0";
+    await startDaemon({ dir, root: join(dir, "batches"), log: () => {}, resumeOnStart: false, lockCheckMs: 30, installedVersion: () => version, unit: () => null,
+      exit: (c) => exits.push(c), hardExitMs: 100, respawn: () => {}, probe: async () => false, successorMs: 30, successorPollMs: 10,
+      rehost: () => new Promise(() => {}), runBatch: async () => ({}) });
+    version = "1.52.0";
+    await until(() => exits.length > 0);
+    assert.deepEqual(exits, [1]);
   });
 
   it("#5984 handover: settled() outlives closed until the successor is spawned and probed (CLI exits only after it)", async () => {

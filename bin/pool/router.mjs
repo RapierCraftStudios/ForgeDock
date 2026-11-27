@@ -11,13 +11,13 @@ import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
 import { createCiEvents, MAX_WAIT_S } from "./ci-events.mjs";
 import { createAutoscaler } from "./ci-autoscale.mjs";
 import { jsonStore } from "./store.mjs";
-import { versionOf } from "./version.mjs";
+import { cmpVersion, versionOf } from "./version.mjs";
 
 /**
  * What the router ships to pool agents (self-update and bootstrap). Every module the agent can load statically from
  * bin/pool/agent.mjs must live under these paths; bin/tests/pool-agent-bundle.test.mjs enforces it.
  */
-export const AGENT_BUNDLE_PATHS = Object.freeze(["package.json", "bin/pool", "pool"]);
+export const AGENT_BUNDLE_PATHS = Object.freeze(["package.json", "bin/pool", "bin/lean/concurrency.mjs", "bin/lean/depcache.mjs", "bin/lean/ledger.mjs", "pool"]); // depcache.mjs+ledger.mjs: pool/project-layer.mjs (#6038); concurrency.mjs: thresholds imported by pool/lane-target.mjs (#6061); it has no imports
 
 const run = promisify(execFile);
 
@@ -248,26 +248,49 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   }
   /** #5967: host free memory and the other-VM (vmmem) working sets per agent. */
   const memReport = (c) => Number.isFinite(c.host_mem_free_gb) ? { host_mem_free_gb: c.host_mem_free_gb, ...(Array.isArray(c.vmmem) && c.vmmem.length ? { vmmem: c.vmmem } : {}), ...(c.host_mem_low === true ? { host_mem_low: true } : {}) } : {};
+  const pending = new Map(); // agent -> Set of lane ids reserved by an in-flight launch or claim
+  const dropPending = (name) => { pending.delete(name); }; // #6061: a worker that stopped answering must not hold batch slots
+  const reportedTarget = new Map(); // #6061: agent -> lane_target from its last answered /capacity
   async function capacities() {
     const out = [];
     for (const [name, a] of Object.entries(agents())) {
       try {
         const r = await agentCall(a, "GET", "/capacity", undefined, 5000);
+        if (r.ok && Number.isInteger(r.data?.lane_target)) reportedTarget.set(name, r.data.lane_target); else reportedTarget.delete(name);
+        if (!r.ok) dropPending(name);
         out.push(r.ok ? { name, ok: true, ...(a.transport ? { transport: a.transport } : {}), ...r.data } : { name, ok: false, error: `HTTP ${r.status}` });
-      } catch (e) { out.push({ name, ok: false, ...(a.transport ? { transport: a.transport } : {}), error: String(e.message ?? e) }); }
+      } catch (e) { reportedTarget.delete(name); dropPending(name); out.push({ name, ok: false, ...(a.transport ? { transport: a.transport } : {}), error: String(e.message ?? e) }); }
     }
     return out;
   }
 
+  const repoCfg = (spec) => cfg.repos?.[spec?.repo?.slug] ?? {};
+  /** #5886: a spec naming an account is placed only on that account's agents; without one, any enrolled agent (as before). */
+  const inAccount = (c, spec) => typeof spec?.account !== "string" || own(agents(), c.name)?.account === spec.account;
+  /** #6041: per-repo placement. `repos.<slug>.agents` (honoured only when a non-empty string array) is an allowlist; `exclude_agents` subtracts from it. Unset = any agent, as before. */
+  const names = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
+  const placeable = (c, spec) => {
+    if (!inAccount(c, spec) || c.draining || c.accepting === false) return false; // #6061: a draining worker takes no new lanes
+    const rc = repoCfg(spec), allow = names(rc.agents);
+    return (!allow.length || allow.includes(c.name)) && !names(rc.exclude_agents).includes(c.name);
+  };
+  /** Lane-engine version: the agent's /capacity version against the router's own target. Unknown (older agent) never skews or refuses. */
+  const targetVersion = () => { try { return versionOf(cfg.repo_root).version; } catch { return undefined; } };
+  const engineOf = (c) => (typeof c?.version === "string" ? c.version : undefined);
+  const engineBelow = (c, want) => { const d = cmpVersion(engineOf(c), want); return d !== null && d < 0; };
+  const engineRank = (c, target) => (engineBelow(c, target) ? 1 : 0); // 0 = on (or above) the orchestrator's engine, 1 = behind it
+  const byEngine = (target) => (a, b) => engineRank(a, target) - engineRank(b, target);
+  /** R2: with spec.min_lane_engine set, agents below it are dropped; unset keeps lower agents as the fallback. */
+  const minEngine = (spec) => (typeof spec?.min_lane_engine === "string" && spec.min_lane_engine ? spec.min_lane_engine : null);
+  const engineOld = (spec, below) => ({ status: 503, body: { error: `no host runs lane engine ${minEngine(spec)} or newer`, code: "pool.engine_old", min_lane_engine: minEngine(spec), agents: below.map((c) => ({ name: c.name, version: engineOf(c) })) }, retryAfter: cfg.engine_old_retry_after_s ?? cfg.retry_after_s ?? 60 });
   /** Agent liveness for the scheduler (#4547): an agent is online when it answers and is not paused. */
-  async function status() {
-    const caps = await capacities();
-    const agentsView = caps.map((c) => ({ name: c.name, ok: c.ok, paused: Boolean(c.paused), transport: c.transport ?? "direct", ...diskReport(c), ...memReport(c) }));
+  async function status(repo) {
+    const caps = (await capacities()).filter((c) => placeable(c, repo ? { repo: { slug: repo } } : null));
+    const agentsView = caps.map((c) => ({ name: c.name, ok: c.ok, paused: Boolean(c.paused), transport: c.transport ?? "direct", ...(engineOf(c) ? { engine_version: engineOf(c), engine_skew: engineBelow(c, targetVersion()) } : {}), ...diskReport(c), ...memReport(c) }));
     return { online: agentsView.filter((a) => a.ok && !a.paused).length, total: agentsView.length, agents: agentsView };
   }
 
   /** Per-repo extras: the gitignored forge.yaml, and a private Docker daemon (with a bigger reservation) when enabled. */
-  const repoCfg = (spec) => cfg.repos?.[spec?.repo?.slug] ?? {};
   // Placement counts the (small) reservation; `limit` is each container's hard burst cap (burst model, when configured).
   const sizeFor = (spec) => {
     const docker = Boolean(repoCfg(spec).docker), dind = cfg.dind ?? { cpus: 1, mem_gb: 2 };
@@ -292,13 +315,17 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   // awaited agent call, so concurrent launches cannot overshoot.
   const isLane = (id) => typeof id === "string" && id.startsWith("fdrsbx-");
   const validCeiling = (v) => Number.isInteger(v) && v >= 0;
-  function ceilingOf(name) {
+  function configuredCeiling(name) {
     const st = own(agents(), name)?.max_lanes;
     if (validCeiling(st)) return st;
     const c = cfg.agents && Object.hasOwn(cfg.agents, name) ? cfg.agents[name]?.max_lanes : undefined;
     return validCeiling(c) ? c : null;
   }
-  const pending = new Map(); // agent -> Set of lane ids reserved by an in-flight launch or claim
+  // #6061: the lower of the configured ceiling and the agent's own lane_target (from its last /capacity).
+  function ceilingOf(name) {
+    const c = configuredCeiling(name), t = reportedTarget.get(name);
+    return t === undefined ? c : c === null ? t : Math.min(c, t);
+  }
   const lanesOn = (name) => {
     const ids = new Set(pending.get(name) ?? []);
     for (const [id, s] of Object.entries(sbx())) if (s?.agent === name && isLane(id)) ids.add(id);
@@ -330,8 +357,9 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       const r = c.reservations.find((x) => x.name === spec.reservation) ?? (spec.reservation ? null : c.reservations.length === 1 ? c.reservations[0] : null);
       return Boolean(r) && r.cpus_free >= size.cpus && r.mem_free_gb >= size.mem_gb;
     }
-    const cpusFree = prio === "normal" && Number.isFinite(c.cpus_free_unreserved) ? c.cpus_free_unreserved : c.cpus_free;
-    const memFree = prio === "normal" && Number.isFinite(c.mem_free_unreserved_gb) ? c.mem_free_unreserved_gb : c.mem_free_gb;
+    const elastic = c.elastic_lanes === true && Number.isFinite(c.cpus_free_elastic) && Number.isFinite(c.mem_free_gb_elastic); // #6047: base reservations plus held heavy tokens
+    const cpusFree = prio === "normal" && Number.isFinite(c.cpus_free_unreserved) ? c.cpus_free_unreserved : elastic ? c.cpus_free_elastic : c.cpus_free;
+    const memFree = prio === "normal" && Number.isFinite(c.mem_free_unreserved_gb) ? c.mem_free_unreserved_gb : elastic ? c.mem_free_gb_elastic : c.mem_free_gb;
     return cpusFree >= size.cpus && memFree >= size.mem_gb;
   };
   const headroom = (c, spec) => (spec?.priority === "borrow" && Number.isFinite(c.cpus_free_unreserved) ? c.cpus_free_unreserved : 0);
@@ -339,28 +367,35 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   // when it is known, else the best-fitting one) and remembered, so launch() prefers it and the seeded mirror is the one the lane uses.
   const seedPick = new Map(); // sandbox id -> {agent, at}
   const SEED_CHUNK_B64_MAX = 768 * 1024;
-  async function seedAgent(id) {
+  async function seedAgent(id, slug) {
     const known = own(sbx(), id);
     if (known && own(agents(), known.agent)) return known.agent;
     const hit = seedPick.get(id);
     if (hit && own(agents(), hit.agent) && now() - hit.at < 30 * 60000) return hit.agent;
     for (const [k, v] of seedPick) if (now() - v.at >= 30 * 60000) seedPick.delete(k);
-    const fits = (await capacities()).filter((c) => c.ok && !c.paused && c.host_disk_low !== true && c.disk_capped !== true).sort((a, b) => b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
+    const spec = slug ? { repo: { slug } } : null; // the repo is known from the seed request when it names one
+    const tv = targetVersion();
+    const fits = (await capacities()).filter((c) => c.ok && !c.paused && placeable(c, spec) && c.host_disk_low !== true && c.disk_capped !== true).sort((a, b) => byEngine(tv)(a, b) || b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
     if (!fits.length) return null;
     seedPick.set(id, { agent: fits[0].name, at: now() });
     return fits[0].name;
   }
-  async function seedForward(id, method, path, body) {
+  async function seedForward(id, method, path, body, slug) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)) return { status: 400, body: { error: "bad sandbox id" } };
     if (typeof body?.data_b64 === "string" && body.data_b64.length > SEED_CHUNK_B64_MAX) return { status: 413, body: { error: "chunk too large" } };
-    const name = await seedAgent(id), a = name && own(agents(), name);
+    const name = await seedAgent(id, typeof slug === "string" ? slug : undefined), a = name && own(agents(), name);
     if (!a) return { status: 503, body: { error: "no agent available to seed" }, retryAfter: cfg.retry_after_s ?? 60 };
     try { const r = await agentCall(a, method, path, body, 120000); return { status: r.status, body: agentBody(r, name) }; }
     catch (e) { return { status: 502, body: { error: `agent ${name} unreachable: ${e.message}` } }; }
   }
-  /** #5886: a spec naming an account is placed only on that account's agents; without one, any enrolled agent (as before). */
-  const inAccount = (c, spec) => typeof spec?.account !== "string" || own(agents(), c.name)?.account === spec.account;
-  async function launch(spec) {
+  /** #6063: router.json repos.<slug>.priority (reserved|normal|borrow) and .reservation override the lane spec's class; invalid = ignored. */
+  const withRepoPriority = (spec) => {
+    const rc = repoCfg(spec);
+    if (!["reserved", "normal", "borrow"].includes(rc.priority)) return spec;
+    return { ...spec, priority: rc.priority, ...(typeof rc.reservation === "string" ? { reservation: rc.reservation } : {}) };
+  };
+  async function launch(spec0) {
+    const spec = spec0 && typeof spec0 === "object" ? withRepoPriority(spec0) : spec0;
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id)) return { status: 400, body: { error: "spec.id required ([A-Za-z0-9._-], max 128)" } };
     const known = own(sbx(), spec.id);
     if (known && own(agents(), known.agent)) {
@@ -371,11 +406,14 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       delete sbx()[spec.id]; store.save();
     }
     const size = sizeFor(spec);
-    const sized = (await capacities()).filter((c) => c.ok && !c.paused && inAccount(c, spec) && fitsPriority(c, spec, size));
+    const tv = targetVersion(), min = minEngine(spec);
+    const placed = (await capacities()).filter((c) => c.ok && !c.paused && placeable(c, spec) && fitsPriority(c, spec, size));
+    const tooOld = min ? placed.filter((c) => engineBelow(c, min)) : [];
+    const sized = tooOld.length ? placed.filter((c) => !tooOld.includes(c)) : placed;
     const diskLow = sized.filter((c) => c.host_disk_low === true).map((c) => c.name); // #5733: never POST to a host whose drive is short
     const capped = sized.filter((c) => c.disk_capped === true && c.host_disk_low !== true).map((c) => c.name); // #5884: lane disk at its hard cap
     const memLow = sized.filter((c) => c.host_mem_low === true && c.host_disk_low !== true && c.disk_capped !== true).map((c) => c.name); // #5967: host memory under the floor
-    const fits = sized.filter((c) => c.host_disk_low !== true && c.disk_capped !== true && c.host_mem_low !== true).sort((a, b) => headroom(b, spec) - headroom(a, spec) || b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
+    const fits = sized.filter((c) => c.host_disk_low !== true && c.disk_capped !== true && c.host_mem_low !== true).sort((a, b) => byEngine(tv)(a, b) || headroom(b, spec) - headroom(a, spec) || b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
     const laneId = isLane(spec.id), laneCapped = []; // #5735: agents skipped because their lane ceiling is reached
     let busy = null; // the last agent 503 (e.g. lane_tools image building): its body and Retry-After are passed back
     const seeded = seedPick.get(spec.id)?.agent; // #5949: the agent holding this lane's seeded mirror goes first
@@ -384,14 +422,15 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       if (laneId && atCeiling(c.name)) { laneCapped.push({ name: c.name, ...laneView(c.name) }); continue; }
       if (laneId) reserve(c.name, spec.id);
       try {
-        const r = await agentCall(own(agents(), c.name), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...size }, 120000);
+        const r = await agentCall(own(agents(), c.name), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...size, ...(ceilingOf(c.name) !== null ? { max_lanes: ceilingOf(c.name) } : {}) }, 120000);
         if (r.status === 503) { busy = { r, name: c.name }; continue; } // raced with another launch, or still building; try the next host
         if (r.ok) { sbx()[spec.id] = { agent: c.name, issue: spec.issue ?? null, batch: spec.batch ?? null, createdAt: now(), touched: now() }; store.save(); }
-        return { status: r.status, body: { ...agentBody(r, c.name), agent: c.name } };
+        return { status: r.status, body: { ...agentBody(r, c.name), agent: c.name, ...(engineOf(c) ? { engine_version: engineOf(c) } : {}) } };
       } finally { if (laneId) release(c.name, spec.id); }
     }
     if (laneCapped.length && !busy) return { status: 503, body: { error: "pool.host_lane_ceiling", code: "pool.host_lane_ceiling", agents: laneCapped }, retryAfter: cfg.retry_after_s ?? 60 };
     if (busy) return { status: 503, body: { ...agentBody(busy.r, busy.name), agent: busy.name }, retryAfter: busy.r.retryAfter ?? cfg.retry_after_s ?? 60 };
+    if (tooOld.length && !sized.length) return engineOld(spec, tooOld); // a deferral: the lane waits for an upgraded host
     if (diskLow.length) return { status: 503, body: { error: "no host has free disk", code: "pool.disk_low", agents: diskLow }, retryAfter: cfg.disk_low_retry_after_s ?? 300 }; // a capacity deferral, not a failure
     if (capped.length) return { status: 503, body: { error: "no host has lane disk below its cap", code: "pool.disk_cap", agents: capped }, retryAfter: cfg.disk_low_retry_after_s ?? 300 };
     if (memLow.length) return { status: 503, body: { error: "no host has free memory", code: "pool.host_mem", reason: "host_mem", agents: memLow }, retryAfter: cfg.host_mem_retry_after_s ?? 60 }; // a capacity deferral, not a failure
@@ -399,12 +438,15 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   }
 
   /** #4912: hand the lane to an agent's ready warm sandbox; 404 when no agent has one (the caller then launches cold). */
-  async function claim(spec) {
+  async function claim(spec0) {
+    const spec = spec0 && typeof spec0 === "object" ? withRepoPriority(spec0) : spec0; // #6063
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id)) return { status: 400, body: { error: "spec.id required ([A-Za-z0-9._-], max 128)" } };
     if (own(sbx(), spec.id)) return launch(spec); // already placed: the same idempotent path
     const size = sizeFor(spec);
     const laneId = isLane(spec.id);
-    for (const c of (await capacities()).filter((x) => x.ok && !x.paused && inAccount(x, spec))) {
+    const tv = targetVersion(), min = minEngine(spec);
+    const claimable = (await capacities()).filter((x) => x.ok && !x.paused && placeable(x, spec) && !(min && engineBelow(x, min))).sort(byEngine(tv));
+    for (const c of claimable) {
       if (laneId && atCeiling(c.name)) continue; // #5735: the 404 makes the caller cold-launch, which gets the ceiling 503
       if (laneId) reserve(c.name, spec.id);
       try {
@@ -473,12 +515,13 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   /** #5886: per-box policy, allowlisted keys only; pushed to the agent's /admin/policy (the agent keeps its owner pause). */
   function validPolicy(b) {
     if (!b || typeof b !== "object" || Array.isArray(b)) return "policy must be an object";
-    const bad = Object.keys(b).filter((k) => !["cpus", "mem_gb", "idle_only", "paused", "floors"].includes(k));
+    const bad = Object.keys(b).filter((k) => !["cpus", "mem_gb", "idle_only", "paused", "floors", "elastic_lanes"].includes(k));
     if (bad.length) return `unknown policy key: ${bad[0]}`;
     const int = (v, hi) => Number.isInteger(v) && v >= 1 && v <= hi;
     if ("cpus" in b && !int(b.cpus, 256)) return "cpus must be an integer 1-256";
     if ("mem_gb" in b && !int(b.mem_gb, 1024)) return "mem_gb must be an integer 1-1024";
     if (("idle_only" in b && typeof b.idle_only !== "boolean") || ("paused" in b && typeof b.paused !== "boolean")) return "idle_only and paused must be booleans";
+    if ("elastic_lanes" in b && typeof b.elastic_lanes !== "boolean") return "elastic_lanes must be a boolean";
     if ("floors" in b && !(b.floors && typeof b.floors === "object" && Object.keys(b.floors).every((k) => k === "host_disk_gb" && Number.isFinite(b.floors[k]) && b.floors[k] >= 0))) return "floors accepts only host_disk_gb >= 0";
     return null;
   }
@@ -611,8 +654,8 @@ bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TM
     [route("GET", "/health"), { fn: async () => ({ status: 200, body: { ok: true, agents: Object.keys(agents()).length, sandboxes: Object.keys(sbx()).length } }), auth: "none" }],
     [route("POST", "/sandboxes"), fd(async (_p, body) => launch(body))],
     [route("POST", "/sandboxes/claim"), fd(async (_p, body) => claim(body))],
-    [route("GET", "/sandboxes/:id/mirrors"), fd(async ({ id }, _b, url) => seedForward(id, "GET", `/mirrors?${new URLSearchParams([...url.searchParams].filter(([k]) => ["slug", "cache_key", "upload"].includes(k)))}`))], // #5949
-    [route("POST", "/sandboxes/:id/seed"), fd(async ({ id }, body) => seedForward(id, "POST", "/mirrors/seed", body))],
+    [route("GET", "/sandboxes/:id/mirrors"), fd(async ({ id }, _b, url) => seedForward(id, "GET", `/mirrors?${new URLSearchParams([...[...url.searchParams].filter(([k]) => ["slug", "cache_key", "upload"].includes(k)), ["uploader", id]])}`, undefined, url.searchParams.get("slug")))], // #5949; uploader: per-sandbox part file (concurrent identical bundles)
+    [route("POST", "/sandboxes/:id/seed"), fd(async ({ id }, body) => seedForward(id, "POST", "/mirrors/seed", { ...(body ?? {}), uploader: id }, body?.slug))],
     [route("GET", "/sandboxes/:id"), fd(async ({ id }) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}`))],
     [route("GET", "/sandboxes/:id/logs"), fd(async ({ id }, _b, url) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/logs?cursor=${encodeURIComponent(url.searchParams.get("cursor") ?? "0")}`))],
     [route("GET", "/sandboxes/:id/result"), fd(async ({ id }) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/result`))],
@@ -624,12 +667,14 @@ bash "$TMP/pool/install/install-agent-$OS.sh" "$@" --token "$CODE" --bundle "$TM
     [route("POST", "/sandboxes/:id/relay/:rid"), fd(async (p, body) => relayAnswer(p, body))],
     [route("POST", "/sandboxes/:id/stop"), fd(async ({ id }) => forward(id, "POST", `/sandboxes/${encodeURIComponent(id)}/stop`))], // #5274
     [route("DELETE", "/sandboxes/:id"), fd(async ({ id }) => forward(id, "DELETE", `/sandboxes/${encodeURIComponent(id)}`, DESTROY_TIMEOUT_MS))],
-    [route("GET", "/status"), fd(async () => ({ status: 200, body: await status() }))],
+    [route("GET", "/status"), fd(async (_p, _b, url) => ({ status: 200, body: await status(url.searchParams.get("repo") ?? undefined) }))],
     [route("GET", "/agents"), fd(async (_p, _b, url) => { // #5535: each sandbox carries disk_used_mb from its agent's sandbox_disk_mb when the agent reports it
       const acct = url.searchParams.get("account"); // #5886: ?account= is the per-account view; `account` and `policy` ride on enrolled records that have them
-      const caps = (await capacities()).filter((c) => acct === null || own(agents(), c.name)?.account === acct).map((c) => { const a = own(agents(), c.name); return { ...c, ...(a?.account ? { account: a.account } : {}), ...(a?.policy ? { policy: a.policy } : {}) }; }), byName = new Map(caps.map((c) => [c.name, c])), out = {};
-      for (const [id, s] of Object.entries(sbx())) { if (acct !== null && !byName.has(s?.agent)) continue; const mb = byName.get(s?.agent)?.sandbox_disk_mb?.[id]; out[id] = Number.isFinite(mb) ? { ...s, disk_used_mb: mb } : s; }
+      const repo = url.searchParams.get("repo"), view = repo ? { repo: { slug: repo } } : null; // #6041: ?repo= is the per-repo view (allowlist and exclude list)
+      const caps = (await capacities()).filter((c) => (acct === null || own(agents(), c.name)?.account === acct) && placeable(c, view)).map((c) => { const a = own(agents(), c.name); return { ...c, ...(a?.account ? { account: a.account } : {}), ...(a?.policy ? { policy: a.policy } : {}) }; }), byName = new Map(caps.map((c) => [c.name, c])), out = {};
+      for (const [id, s] of Object.entries(sbx())) { if ((acct !== null || repo) && !byName.has(s?.agent)) continue; const mb = byName.get(s?.agent)?.sandbox_disk_mb?.[id]; out[id] = Number.isFinite(mb) ? { ...s, disk_used_mb: mb } : s; }
       const remote_lanes = Object.keys(sbx()).filter(isLane).length; // #5735: lane sandboxes across all batches and agents
+      // #6062: usage_summary rides on each capacity record (spread above) unchanged
       return { status: 200, body: { agents: caps.map((c) => ({ ...c, lanes: laneView(c.name), ...diskReport(c) })), sandboxes: out, remote_lanes } };
     })],
     [route("POST", "/device/code"), { fn: async () => deviceStart(), auth: "none" }], // #5886

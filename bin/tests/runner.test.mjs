@@ -1680,6 +1680,14 @@ describe("runCliBackend env scrub (issue #2021)", () => {
 // ---------------------------------------------------------------------------
 
 describe("runCliBackend spawnFn seam (issue #2033)", () => {
+  it("drops NUL bytes from the prompt so the spawn never throws on argv (2026-11-26)", () => {
+    let argv = null, input = null;
+    const spawnFn = (_bin, a, opts) => { argv = a; input = opts?.input ?? null; return { status: 0, stdout: "ok", stderr: "", error: undefined }; };
+    runCliBackend({ spec: loadCommandSpec(COMMANDS_DIR, "work-on"), userMessage: "Issue #1: bad\0byte", args: ["1"], cwd: TMP, logger: { log: () => {} }, bin: "claude", spawnFn });
+    const all = [...(argv ?? []), String(input ?? "")].join(" ");
+    assert.ok(!all.includes("\0"), "no NUL reaches argv or stdin");
+    assert.ok(all.includes("badbyte"));
+  });
   it("uses the injected spawnFn instead of the real spawnSync, and forwards argv/opts", () => {
     let capturedBin, capturedArgv, capturedOpts;
     const spawnFn = (bin, argv, opts) => {
@@ -4110,6 +4118,32 @@ describe("#5762 CLI failure facts and err.cliFailed", () => {
     const e = run('{"duration_api_ms":0,"stop_reason":"stop_sequence","session_id":"x","total_cost_usd":0,');
     assert.equal(e.cliFailed, true);
     assert.equal(e.authFailure, undefined);
+  });
+});
+
+describe("#6105 an API-terminated session carries its id and is err.apiError", () => {
+  const run = (stdout) => {
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"), userMessage: "Execute: /work-on 6105", args: ["6105"],
+        cwd: TMP, logger: { log: () => {} }, bin: "claude",
+        spawnFn: () => ({ status: 1, signal: null, stdout, stderr: "", error: undefined }),
+      });
+    } catch (err) { thrown = err; }
+    return thrown;
+  };
+  it("is_error with terminal_reason api_error after real API time: apiError, session id and reason kept, not cliFailed", () => {
+    const e = run(JSON.stringify({ is_error: true, terminal_reason: "api_error", session_id: "sess-abc", duration_api_ms: 1920000, num_turns: 50, result: "API Error: 500" }));
+    assert.equal(e.apiError, true);
+    assert.equal(e.cliSessionId, "sess-abc");
+    assert.equal(e.cliTerminalReason, "api_error");
+    assert.equal(e.cliFailed, undefined);
+  });
+  it("a login failure, a usage limit, a non-API reason or a non-error envelope is never apiError", () => {
+    assert.equal(run(JSON.stringify({ is_error: true, terminal_reason: "api_error", session_id: "s", duration_api_ms: 5, result: "Please run /login" })).apiError, undefined);
+    assert.equal(run(JSON.stringify({ is_error: true, terminal_reason: "max_turns", session_id: "s", duration_api_ms: 5, result: "x" })).apiError, undefined);
+    assert.equal(run(JSON.stringify({ is_error: false, terminal_reason: "api_error", session_id: "s", duration_api_ms: 5, result: "x" })).apiError, undefined);
   });
 });
 

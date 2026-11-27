@@ -139,11 +139,6 @@
       "count": 1
     }
   },
-  "bin/pool/agent.mjs": {
-    "no-use-before-define": {
-      "count": 11
-    }
-  },
   "bin/stats/efficiency.mjs": {
     "no-use-before-define": {
       "count": 2

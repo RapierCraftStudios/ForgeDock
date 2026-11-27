@@ -20,6 +20,7 @@ function world(o = {}) {
       if (a[0] === "run" && a[1] === "list") { const r = w.runs[Math.min(w.reran ?? 0, w.runs.length - 1)]; return JSON.stringify(r ? [r] : []); }
       if (a[0] === "run" && a[1] === "view") return w.log;
       if (a[0] === "run" && a[1] === "rerun") { w.reran = (w.reran ?? 0) + 1; return ""; }
+      if (a[0] === "issue") { w.issues = w.issues ?? []; w.issues.push({ a, at: w.reran ?? 0 }); return a[1] === "list" ? "[]" : a[1] === "create" ? "https://github.com/o/r/issues/77" : ""; }
       if (a[0] === "workflow" || a[0] === "pr") return "";
       throw new Error(`unexpected gh ${a.join(" ")}`);
     },
@@ -67,7 +68,7 @@ describe("release deploy stages (#5560)", () => {
   it("rerun_max bounds the reruns, then escalates", async () => {
     const { w, io } = world({ live: [OLD], log: "429 Too Many Requests", runs: [{ databaseId: 9, status: "completed", conclusion: "failure" }] });
     const out = await deployStep(mk(io));
-    assert.match(out.reason, /recovery spent/); assert.equal(w.reran, 2);
+    assert.match(out.reason, /recovery spent/); assert.equal(w.reran, 1);
   });
   it("max_attempts bounds the actions", async () => {
     const { w, io } = world({ live: [OLD], log: "429 Too Many Requests", runs: [{ databaseId: 9, status: "completed", conclusion: "failure" }] });
@@ -111,7 +112,8 @@ describe("release deploy stages (#5560)", () => {
       const c = mk(io);
       try { await deployStep(c); } catch { /* killed */ }
       const out = await deployStep(c);
-      assert.equal(out.live, true, dieOn);
+      if (dieOn === "run rerun") assert.ok(out.blocked, dieOn); // #6015: a crash after the counted rerun leaves a second recorded failure: stop, never a third attempt
+      else assert.equal(out.live, true, dieOn);
       assert.ok((w.reran ?? 0) <= 1, `${dieOn}: one rerun`); 
       assert.equal(w.gh.filter((g) => g.startsWith("workflow run")).length, 0, dieOn);
     }
@@ -152,7 +154,7 @@ describe("deploy observation and recovery (#5560)", () => {
     assert.equal((await deployStep(mk(ok.io))).live, true); assert.equal(ok.w.reran, undefined);
     const bad = world({ live: [OLD], runs: [{ databaseId: 9, status: "completed", conclusion: "cancelled" }], log: "the runner received a shutdown signal" });
     const out = await deployStep(mk(bad.io));
-    assert.equal(bad.w.reran, 2); assert.match(out.reason, /recovery spent/);
+    assert.equal(bad.w.reran, 1); assert.match(out.reason, /recovery spent/);
   });
   it("shared INFRA_SIGNATURES count as transient without any configured signature", async () => {
     const { w, io } = world({ live: [OLD, SHA], log: "fatal: ECONNRESET", runs: [{ databaseId: 9, status: "completed", conclusion: "failure" }, { databaseId: 9, status: "completed", conclusion: "success" }] });
@@ -221,5 +223,50 @@ describe("deploy helpers", () => {
     const base = { schema: 1, deploy: { ...POLICY } };
     assert.deepEqual(validatePolicy(base).filter((f) => /deploy\.recovery/.test(f)), []);
     assert.ok(validatePolicy({ ...base, deploy: { ...POLICY, recovery: { rerun_max: "2" } } }).some((f) => /rerun_max/.test(f)));
+  });
+});
+
+describe("deploy failure classification and one issue (#6015)", () => {
+  const FAIL = [{ databaseId: 9, status: "completed", conclusion: "failure" }];
+  const creates = (w) => (w.issues ?? []).filter((i) => i.a[1] === "create");
+  it("two failed attempts yield exactly one issue and no third rerun", async () => {
+    const { w, io } = world({ live: [OLD], log: "build\tCompile\t2026 429 Too Many Requests", runs: FAIL });
+    const out = await deployStep(mk(io));
+    assert.equal(creates(w).length, 1); assert.equal(w.reran, 1); assert.equal(out.hold?.kind, "deploy-failed"); assert.match(out.reason, /issues\/77/);
+    assert.equal((w.issues ?? []).filter((i) => i.a[1] === "comment").length, 1);
+    const again = await deployStep(mk(io, { state: { steps: { "post-merge": { result: { merge: SHA } } }, deploy: undefined } })); // a fresh state still finds the marker, never a third rerun beyond the cap
+    assert.ok((w.reran ?? 0) <= 2); assert.ok(again.blocked || again.live === undefined);
+  });
+  it("the cap cannot be raised above 2 by deploy.recovery", async () => {
+    const { w, io } = world({ live: [OLD], log: "429 Too Many Requests", runs: FAIL });
+    await deployStep(mk(io, {}, { ...POLICY, recovery: { rerun_max: 9, max_attempts: 9, signatures: ["429"] } }));
+    assert.equal(w.reran, 1);
+  });
+  it("a secrets decrypt or SSH failure is never rerun, but the issue is filed", async () => {
+    for (const [log, cls] of [["deploy\tDecrypt secrets\t2026 sops: failed to decrypt ETIMEDOUT", "secrets"], ["deploy\tDeploy via SSH\t2026 ssh: connect to host x port 22: ETIMEDOUT", "ssh"]]) {
+      const { w, io } = world({ live: [OLD], log, runs: FAIL });
+      const c = mk(io); const out = await deployStep(c);
+      assert.equal(w.reran, undefined, cls); assert.equal(out.hold?.kind, cls); assert.equal(creates(w).length, 1);
+      assert.equal(c.state.deploy.failures[0].class, cls); assert.equal(c.state.deploy.failures[0].runId, 9);
+    }
+  });
+  it("the issue is filed before the rerun", async () => {
+    const { w, io } = world({ live: [OLD, SHA], log: "ECONNRESET", runs: [...FAIL, { databaseId: 9, status: "completed", conclusion: "success" }] });
+    const order = []; const g = io.gh;
+    io.gh = async (a) => { if (a[0] === "issue" && a[1] === "create") order.push("issue"); if (a[1] === "rerun") order.push("rerun"); return g(a); };
+    const out = await deployStep(mk(io));
+    assert.deepEqual(order, ["issue", "rerun"]); assert.equal(out.live, true);
+  });
+  it("a class is rerun once only", async () => {
+    const { w, io } = world({ live: [OLD], log: "ECONNRESET", runs: FAIL });
+    const c = mk(io, {}, { ...POLICY, recovery: { rerun_max: 2, max_attempts: 3 } });
+    c.state.deploy = { phase: "DEPLOYING", attempts: 1, reruns: 1, rerunClasses: ["infra"], failures: [{ class: "infra", step: null, runId: 9, excerpt: "x", rerunsAt: 0 }] };
+    await deployStep(c); assert.equal(w.reran, undefined);
+  });
+  it("a failing issue filing blocks the rerun", async () => {
+    const { w, io } = world({ live: [OLD], log: "ECONNRESET", runs: FAIL }); const g = io.gh;
+    io.gh = async (a) => { if (a[0] === "issue") throw new Error("HTTP 500"); return g(a); };
+    const out = await deployStep(mk(io));
+    assert.match(out.reason, /tracking issue/); assert.equal(w.reran, undefined);
   });
 });

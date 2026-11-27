@@ -10,6 +10,28 @@ last_compacted: "2026-11-15"
 
 Rolling per-module knowledge log. Hard cap: 150 lines.
 
+## Entry 2026-11-26 — project-deps image layer (#6038)
+`bin/pool/project-layer.mjs`. `deriveProjectDeps(worktree, fs)` returns `{ecosystems, lockfiles, node, python, files, hash}`: lockfiles come from depcache `detect`
+(pnpm/npm/yarn/uv/poetry, nested service dirs), runtimes from `.nvmrc`, `.tool-versions`, `.python-version` and CI `setup-node`/`setup-python`; `hash` covers lockfile+manifest
+contents, runtimes and arch (null when nothing to install). A launch spec carrying `project_deps` {hash, lockfiles, files, node, python} runs on the layer
+`<lane image>-p<12 hex>` (FROM the lane image, i.e. the `-t` lane_tools tag when tools are listed; the `-t` and `-p` tags never collide). Deps install under
+`/opt/project-deps[/<dir>]` from the frozen-install commands of depcache `depCommands`. The build is single-flight and runs in the background: a launch never waits, it runs the
+lane image while the layer builds or after a failed build (failure memo 10 min). `isProjectLayerTagOf` marks `-p` tags as owned in the image prune. Specs without `project_deps` use the same image as before.
+
+## Entry 2026-11-26 — light lanes + heavy-phase tokens (#6047)
+Default-off `cfg.elastic_lanes` (pushed through the router `/policy` allowlist). On: a lane is admitted on its base reservation, and each
+heavy step leases a token from the agent: `POST /sandboxes/:id/heavy/acquire|release|renew` (sandbox credential, like `creds`/`relay`;
+agent-local, reached by the lane at `CS_HEAVY_BASE` via host.docker.internal, so no production ingress rule is involved, as in the relay
+entry above). Weight = max(`heavy_weight`, p90 repo history - base) from `estimateFor`, so docker lanes take a token sized from their own
+history. A grant needs base reservations + held tokens + weight within effective capacity and live MemAvailable; denied returns
+`{granted:false, retry_after_s}` and the client polls; the first holder is always granted. Tokens live in `store.data.heavy`, are refcounted
+per sandbox and expire with `heavy_ttl_s` (renewed by the client), on sandbox exit and on destroy. `projectedUse` becomes base + held
+tokens, `/capacity` adds `elastic_lanes`, `heavy_tokens`, `heavy_held`, `cpus_free_elastic`, `mem_free_gb_elastic` (the router places on
+these) and `lanes_ceiling_derived`. With no explicit ceiling (the router passes its `max_lanes` in the launch body) the agent refuses at the
+derived ceiling = default-weight tokens the host holds x `elastic_lane_factor` (3); an explicit `pool limit` or router.json `max_lanes` wins.
+Waiting phases hold no token so they already count only the base. Promotion of the flag (R13) needs the live measurement: >=2x lanes at the
+same peak memory, no rise in OOM kills or lane wall time. The lane env also gets `CS_CPU_QUOTA` (its `--cpus`).
+
 ## Entry 2026-11-24 — dispatcher-seeded repo mirrors (#5949)
 
 - A lane no longer depends on the pool host's own GitHub link. Agent `GET /mirrors?slug=&cache_key=[&upload=]` returns `{mirrors: {<slug>: {<ref>: <sha>} | "absent"}, upload_offset?}` (`bin/pool/agent.mjs`); `POST /mirrors/seed` takes a base64 chunk `{slug, cache_key, upload (bundle sha256), offset, data_b64, sha256}` (a wrong offset is 409 with the resume `offset`) or `{finish: {size}}`.
@@ -23,6 +45,7 @@ Rolling per-module knowledge log. Hard cap: 150 lines.
 
 - Decision: `devdocs/decisions/5735-host-lane-ceiling.md`.
 - `bin/pool/router.mjs`: a lane sandbox is one whose id starts with `fdrsbx-`. Ceiling = the agent state entry's `max_lanes`, else router.json `agents.<name>.max_lanes`; no valid value = no ceiling. Used = placed `fdrsbx-` sandboxes on the agent plus in-flight reservations, taken synchronously before the agent POST (launch and warm claim) and released in `finally`.
+- `bin/pool/router.mjs` (#6063): router.json `repos.<owner/repo>.priority` (`reserved|normal|borrow`) and `.reservation` override the lane spec's priority class (the dispatcher sends `borrow` for every repo) in `launch()` and `claim()` placement and in the spec posted to the agent; unset or invalid keeps the spec's class.
 - `launch()` skips agents at the ceiling for a new lane id. When none is left and one was skipped for the ceiling: 503 `{error, code: "pool.host_lane_ceiling", agents: [{name, used, ceiling}]}` with Retry-After (a capacity deferral in the dispatcher). Re-launch of a placed id is not re-checked. `claim()` skips capped agents (404, then a cold launch).
 - `GET /agents`: each agent gains `lanes {used, ceiling|null}`; the body gains `remote_lanes`. `POST /agents/:name/limit {max_lanes: N|null}` (fd token; 404 unknown agent, 400 bad value) sets or clears the ceiling; re-enrollment keeps it.
 - `bin/pool/cli.mjs`: `forgedock pool limit <agent> --lanes N|none`; `status` adds `<agent>: lanes used/ceiling` and `remote lanes across batches: N`. `bin/lean/sandbox-remote.mjs` `agentLanes()` feeds the `--set-max-remote` note.
@@ -111,7 +134,7 @@ The router ships agents only `AGENT_BUNDLE_PATHS` (`package.json`, `bin/pool`, `
 ## Entry 2026-11-22 — cache volume hygiene (#5757)
 
 - `bin/pool/cache-sweep.mjs`: pure `planCacheCap` (oldest-first, live work dirs never chosen) and `planIdleEviction` (last use known, idle, unreferenced, not never-evict); `sweepVolume` runs in a lane-image container (`docker.sweepCache`, 10 min timeout, source passed via env) and ages out uv/npm/pip/poetry, forge-depcache, env entries, prunes pnpm, `git gc --auto`.
-  - #5901: depcache is swept per snapshot (`forge-depcache/<repo>/<eco>-<key>`): age-out and LRU trim (`planDepcacheCap`, `depcache_max_gb`, default 40) go by the snapshot's `last-used` stamp, locked snapshots are kept, and the sweep result carries `depcache_bytes` per repo (surfaced in `/capacity` and `pool status`).
+  - #5901: depcache is swept per snapshot (`forge-depcache/<repo>/<eco>-<key>`): age-out and LRU trim (`planDepcacheCap`, `depcache_max_gb`, default 40) go by the snapshot's `last-used` stamp (then manifest `created`, then mtime), a snapshot with a `.lock` under 2h old is kept (also by the volume cap, #5898), stale tmp dirs and locks are cleaned, and the sweep result carries `depcache_bytes` per repo (surfaced in `/capacity` and `pool status`).
 - `agent.mjs` `cacheSweep` runs from `reap()` every `cache_sweep_interval_s`; failures land in `/capacity` `cache_sweep_error` (also work-dir sweep/destroy failures), sizes in `cache_volumes`. Volumes are created with label `computeshare.cache=1` (`docker.createVolume`); `gc.mjs` reports them, never reclaims (`forgedock.owner=1` stays the only reclaim label). Entrypoint writes `/cache/.last-used`.
 - #5901: the per-repo depcache cap also runs at the start of each new launch (throttled to once a minute), so it is trimmed before the lane writes a new snapshot.
 
@@ -140,3 +163,22 @@ The router ships agents only `AGENT_BUNDLE_PATHS` (`package.json`, `bin/pool`, `
 ## Entry 2026-11-24 — package cache layout pinned to entrypoint (#5969)
 
 - `pool/image/entrypoint.sh` points `UV_CACHE_DIR`, `npm_config_cache`, `POETRY_CACHE_DIR` and `PIP_CACHE_DIR` at `/cache/forge-depcache/stores/*`, the same layout as `depcache.mjs` `env()`. `cache-sweep.mjs` `PACKAGE_STORES` still includes `LEGACY_STORES` (`uv`, `npm`, `pip`, `poetry`) so old volumes and old images stay swept, capped and pruned. `pool-cache.test.mjs` pins every `/cache/...` path exported by the entrypoint to a `PACKAGE_STORES` entry.
+
+## Entry 2026-11-26 — per-worker lane target and draining (#6061)
+
+- `lane-target.mjs` is pure: `step()` moves a worker's lane target with the orchestrator's AIMD thresholds (imported from `lean/concurrency.mjs`): +1 per `lane_hold_s` (60) window while load is under 1.0/core and free memory is above floor + headroom, halve (min 1) on load above 1.5/core or memory under the floor, never above the ceiling. `drainState()` says draining when paused (owner, policy, config) or the host stayed pressured for `drain_busy_s` (300).
+- The agent evaluates it once per `reap()` (`laneTick`). The loop is on only with an integer `cfg.max_lanes` (the ceiling) and `cfg.lane_autoscale` not false; it starts at `cfg.lane_start` (1). `capacity()` adds `lane_target`, `lane_ceiling` (loop on only), `draining`, `draining_reason`, `accepting`. `launch` answers 503 `pool.draining` while draining and 503 `pool.lane_target` when `active >= lane_target`. Draining never stops a running lane; `drainOne` stays only for idle_only borrowed lanes and the disk/mem pauses are unchanged.
+- Router: `ceilingOf` is the lower of the configured `max_lanes` and the `lane_target` from the agent's last `/capacity` (no report = the static ceiling, as before; `pool limit` is unchanged). Placement (`launch`, `claim`) skips agents reporting `draining` or `accepting:false`. A join/leave mid-batch is safe: an agent that stops answering has its pending reservations and reported target dropped, and a newly enrolled agent is eligible on the next `capacities()` poll.
+- `pool status` shows `lane target N/ceiling` and `draining: <reason>` in REASON. Tests: `bin/tests/pool-lane-target.test.mjs`.
+
+## Entry 2026-11-26 — per-repo agent affinity (#6041)
+
+- `router.json` `repos.<slug>.agents` (allowlist) and `exclude_agents` pin a repo to hosts. `placeable(c, spec)` in `router.mjs` is the one eligibility rule: account (#5886) AND allowlist AND not excluded. `launch()`, `claim()` and `seedAgent()` all use it, so no placement path bypasses it. A repo whose allowed agents are all busy gets the usual 503 capacity deferral, never another host.
+- `agents` counts only when a non-empty array of strings; empty or any other type is unset (any agent), so unset config behaves exactly as before. `exclude_agents` subtracts from the allowlist. Seed picks use the slug of the `/sandboxes/:id/mirrors` query or `/seed` body.
+- `GET /status?repo=<slug>` and `GET /agents?repo=<slug>` return only the repo's placeable agents (and their sandboxes); `httpTransport.capacity({repo})` sends it, so the dispatcher admits against capacity the repo can use. No `?repo=` = unchanged. Tests: `bin/pool/affinity.test.mjs`.
+
+## Entry 2026-11-26 — engine-aware placement (#6091)
+- `launch()`, `claim()` and `seedAgent()` order agents on the router's own engine (`versionOf(repo_root).version`) before headroom/cpus; an agent with no version in `/capacity` is neutral (capacity order, as before). `execution.min_lane_engine` rides in the launch spec: agents below it are dropped and, if none is left, the launch is a 503 `pool.engine_old` deferral (retry after `engine_old_retry_after_s`/`retry_after_s`). Unset, lower-engine agents stay a fallback.
+- `status()` agents carry `engine_version` and `engine_skew` (below the target); `pool status` shows an ENGINE column and `SKEW`. `pool upgrade` and `forgedock update` name agents still on an older engine.
+- The orchestrator re-admits an engine-held remote lane on the agent's engine (`envHold.agentVersion`, from the router status), not its own.
+

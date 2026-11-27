@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { computeInputHash, emptyLedger, normalizeLedger, recordFailure, breach, admitInput, markEscalated, blockerSignature, frozenContractHash, renderEscalation, renderAttempts, parseAttempts, validateAmendments, budgets, makeAttemptsSeam } from "./attempts.mjs";
+import { computeInputHash, emptyLedger, normalizeLedger, recordFailure, breach, admitInput, markEscalated, blockerSignature, frozenContractHash, renderEscalation, renderAttempts, parseAttempts, budgets, makeAttemptsSeam } from "./attempts.mjs";
 import { renderContract } from "./render.mjs";
 import { postKeyed } from "./statuscomment.mjs";
 
@@ -70,18 +70,6 @@ describe("#5986 contract hash in the input hash", () => {
     assert.equal(frozenContractHash([mk({ requirements: [] }, "aaa111aaa111")], () => false), null, "untrusted comments are ignored");
     const h = (contractHash) => computeInputHash({ ...base, contractHash });
     assert.notEqual(h("aaa111aaa111"), h("bbb222bbb222"));
-  });
-});
-
-describe("#5986 shared amendment schema", () => {
-  it("accepts valid shapes and rejects wrong types with a message", () => {
-    assert.deepEqual(validateAmendments([{ kind: "add-deliverable", path: "a.mjs", why: "x" }, { kind: "decision", decision: { choice: "c", anchors: ["a.mjs"] }, why: "y" }]), []);
-    assert.deepEqual(validateAmendments(undefined), []);
-    assert.ok(validateAmendments([{ kind: "nope" }]).length);
-    assert.match(validateAmendments([{ kind: "add-deliverable", path: 5 }])[0], /path/);
-    assert.match(validateAmendments([{ kind: "supersedes", guard: "abc", why: "x" }]).join(), /guard/);
-    assert.match(validateAmendments([{ kind: "decision", decision: { anchors: "a" }, why: "x" }]).join(), /choice/);
-    assert.match(validateAmendments({ kind: "x" })[0], /array/);
   });
 });
 
