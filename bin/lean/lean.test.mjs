@@ -1094,6 +1094,8 @@ describe("core work-on", () => {
     const pd = (summary) => code(world({ result: { status: "blocked", summary, block: { kind: "human", why: "product-decision" } } }));
     assert.equal(await pd("the yaml lane-tools recipe lives in the engine, so the lane cannot install it"), "env.tool_missing");
     assert.equal(await rb("no Python 3.11 interpreter in the sandbox (only 3.12.3)"), "env.tool_missing");
+    assert.equal(await pd("needs a user-approved merge of staging (CLAUDE.md forbids agent git merge)"), "base.conflict"); // #6137
+    assert.equal(await pd("needs a user-approved merge of staging, plus owner approval of the Stripe pricing"), "builder.blocked");
     assert.equal(await pd("needs Stripe approval before the pricing change ships"), "builder.blocked");
     assert.equal(await rb("needs the production API key and credentials from the owner"), "builder.blocked");
     assert.equal(await rb("this lane has no sops/age key", { ...remote, hostCaps: undefined }), "builder.blocked");
@@ -10216,6 +10218,14 @@ describe("#5749 freeze-time runnability: host-only commands, recipes, check tail
     assert.equal(r.code, "env.tool_missing"); assert.equal(r.terminalReason, "needs-human");
     assert.ok(prepared.length >= 2, "deps prepared at setup and once more after the missing tool");
     assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 0, "no builder resume");
+  });
+  it("#6138 a module missing at run time (isolated interpreter) is installed system-wide once, then env.tool_missing, never ci.red", async () => {
+    const w = world(); const cmds = [];
+    w.io.runCommand = async ({ command }) => { cmds.push(command); return /pip install/.test(command) ? { rc: 0, output: "" } : { rc: 1, output: "Traceback\nModuleNotFoundError: No module named 'yaml'" }; };
+    const r = await atIdleLoad(() => run(w, { precheck: { commands: ["python3 -I check.py"] }, verify: { ...parseVerify({}), precheckBlock: true } }));
+    assert.equal(r.code, "env.tool_missing");
+    const installs = cmds.filter((c) => /pip install/.test(c));
+    assert.equal(installs.length, 1); assert.doesNotMatch(installs[0], /--user/);
   });
   it("#6094 a check that fails in a test file the diff does not touch is rerun once: green on rerun is no fix round; red twice stays ci.red", async () => {
     const out = "not ok 3 - ten concurrent\n  location: '/w/bin/tests/mirror-script.test.mjs:48:3'";
