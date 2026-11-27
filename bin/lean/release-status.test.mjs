@@ -65,9 +65,9 @@ describe("release status / explain (#5554)", () => {
     assert.equal(out, [
       `${ID}  o/r  status=running next=promotion  source=ledger  hold=no  intake=unknown`,
       "  wave: unknown  lane: unknown", "  lease: holder=h epoch=2 heartbeat_age_s=unknown", "  cut: s1",
-      "  [x] preflight  T1", "  [ ] host-preflight", "  [x] release-pr  T2", "  [ ] review", "  [ ] fixes", "  [ ] mark-ready", "  [ ] rehearsal", "  [ ] promotion  T3", "  [ ] post-merge",
+      "  [x] preflight  T1", "  [ ] host-preflight", "  [x] release-pr  T2", "  [ ] ci-green", "  [ ] review", "  [ ] fixes", "  [ ] mark-ready", "  [ ] rehearsal", "  [ ] promotion  T3", "  [ ] post-merge",
       `  PR #7  head ${HEAD}  gate marker=pass deploy-gate=success  ci: total=1 failed=0 pending=0`,
-      `  review: verdict=GATE_PASS head=${HEAD}`, "  merge: unknown", "  deploy: unknown", "  rollback: target=unknown auto=unknown",
+      "  timing: unknown", `  review: verdict=GATE_PASS head=${HEAD}`, "  merge: unknown", "  deploy: unknown", "  rollback: target=unknown auto=unknown",
       "  release set: #5 #12  picks=0",
       "  next:",
       `    forgedock release --resume ${ID} --repo o/r`,

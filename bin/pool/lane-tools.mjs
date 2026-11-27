@@ -4,6 +4,9 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loadImageManifest, manifestProvides } from "./image-manifest.mjs";
+
+const IMAGE = loadImageManifest();
 
 /**
  * Per-repo lane images (#5650): forge.yaml `execution.lane_tools` lists the tools a repo's lanes need (`name` or
@@ -12,11 +15,13 @@ import { join } from "node:path";
  * Dockerfile instructions (Debian/Ubuntu base, building as root) that install it.
  */
 const apt = (...pkgs) => `RUN apt-get update && apt-get install -y --no-install-recommends ${pkgs.join(" ")} && rm -rf /var/lib/apt/lists/*`;
+/** @deprecated Fallback only (#6017, #6037): pool/image/manifest.json is the source of truth for tools the image ships. */
 export const RECIPES = {
   "postgresql-client": { versioned: true, steps: (v) => [apt(v ? `postgresql-client-${v}` : "postgresql-client")] },
   python: { versioned: true, steps: (v) => [apt(v ? `python${v} python${v}-venv` : "python3 python3-venv")] },
   xvfb: { versioned: false, steps: () => [apt("xvfb xauth")] }, // headless X for browser/GUI tests that call xvfb-run
   shellcheck: { versioned: false, steps: () => [apt("shellcheck")] }, // shell-script linter for validate commands
+  yaml: { versioned: false, steps: () => [apt("python3-yaml")] }, // PyYAML for validate commands that `import yaml` (#5749)
   playwright: { versioned: true, steps: (v) => [`RUN npx --yes playwright${v ? `@${v}` : ""} install --with-deps chromium`] },
   // Example of a release-tarball tool; the version is required.
   promtool: { versioned: true, steps: (v) => [`RUN curl -fsSL https://github.com/prometheus/prometheus/releases/download/v${v ?? "2.54.1"}/prometheus-${v ?? "2.54.1"}.linux-amd64.tar.gz | tar -xz --strip-components=1 -C /usr/local/bin --wildcards '*/promtool'`] },
@@ -55,14 +60,20 @@ export function recipeFor(tool) {
 }
 
 /** True when `name` has a lane_tools recipe, directly or as a binary one provides (#5652, #5764). */
+/** @deprecated Fallback only; see pool/image/manifest.json (#6017). */
 export function hasRecipe(name) { return recipeFor(name) !== null; }
 
 /**
  * In-sandbox install commands (#5652) for one tool: the recipe's Dockerfile `RUN` steps as shell commands, `sudo` prefixed
- * when the sandbox user is not root. Empty for a tool with no recipe. Pure; the image build keeps using `steps`.
+ * when the sandbox user is not root. Empty for a tool with no recipe or one the image manifest provides (#6037).
+ * @deprecated Fallback only; pool/image/manifest.json replaces it (#6017).
+ * Pure; the image build keeps using `steps`.
  */
 export function installCommands(entry, { root = true } = {}) {
   const { name, version } = parseLaneTool(entry);
+  // the image covers the tool only when no version is pinned, or the manifest entry carries that same version (#6147)
+  const baked = (IMAGE?.tools ?? []).find((e) => e.name === name || e.binary === name);
+  if (manifestProvides(IMAGE, name) && (!version || String(baked?.version ?? "") === String(version))) return [];
   const recipe = recipeFor(name);
   if (!recipe) return [];
   const sh = (s) => s.replace(/^RUN\s+/, "");
@@ -74,17 +85,29 @@ export function installCommands(entry, { root = true } = {}) {
  * Generic install for a tool no recipe covers (2026-11-26 unclog): a missing Python module is pip-installed, a missing
  * Node package npm-installed into the worktree, a missing command apt-installed. Replaces adding one recipe per tool
  * (77 of 215 needs-human parks on open issues were "Remote sandbox lacks X"). `miss`: {kind, tool} from the validate
- * preflight. Returns [] for an unsafe name or a kind nothing can install (environment, forgedock-path).
+ * preflight. Returns [] for an image-manifest tool, an unsafe name or a kind nothing can install (environment, forgedock-path).
+ * @deprecated Fallback only; pool/image/manifest.json replaces it (#6017, #6037).
  */
 const PYPI = { yaml: "PyYAML", PIL: "Pillow", cv2: "opencv-python-headless", bs4: "beautifulsoup4", sklearn: "scikit-learn", dateutil: "python-dateutil", jwt: "PyJWT", dotenv: "python-dotenv", google: "protobuf", attr: "attrs", magic: "python-magic", Crypto: "pycryptodome", OpenSSL: "pyOpenSSL", serial: "pyserial", usb: "pyusb", zmq: "pyzmq", git: "GitPython", jose: "python-jose", multipart: "python-multipart" };
 const SAFE = /^@?[A-Za-z0-9][A-Za-z0-9._/+-]*$/;
+/** Debian/Ubuntu package stems where the import name differs (python3-<stem>). */
+const APT_PY = { PIL: "pil", cv2: "opencv", bs4: "bs4", sklearn: "sklearn", dateutil: "dateutil", jwt: "jwt", dotenv: "dotenv", serial: "serial", git: "git", magic: "magic" };
+/** Python modules a failed run's output reports missing (`No module named 'yaml'`, top-level name only). */
+export function missingPythonModules(output) {
+  return [...new Set([...String(output ?? "").matchAll(/No module named ['"]?([A-Za-z0-9_]+)/gi)].map((m) => m[1]))];
+}
 export function genericInstallCommands(miss, { root = true } = {}) {
   const tool = String(miss?.tool ?? "").trim();
-  if (!tool || !SAFE.test(tool) || tool.includes("..")) return [];
+  if (!tool || !SAFE.test(tool) || tool.includes("..") || (miss.kind === "command" && manifestProvides(IMAGE, tool))) return [];
   const su = (c) => (root ? c : `sudo sh -c ${JSON.stringify(c)}`);
   if (miss.kind === "python-module") {
-    const pkg = PYPI[tool.split(".")[0]] ?? tool.split(".")[0];
-    return [`python3 -m pip install --user --quiet ${pkg} || python3 -m pip install --user --quiet --break-system-packages ${pkg}`];
+    const mod = tool.split(".")[0], pkg = PYPI[mod] ?? mod;
+    // 2026-11-26: lane images may ship python3 without pip; the distro package (python3-<module>) is the fallback
+    const deb = `python3-${(APT_PY[mod] ?? mod).toLowerCase().replace(/_/g, "-")}`;
+    // #6138: install into the interpreter the validate runs, system-wide (no --user: `python3 -I` ignores user site-packages), then the distro package
+    const pip = `python3 -m pip install --quiet --break-system-packages ${pkg} || python3 -m pip install --quiet ${pkg}`;
+    const apt = `apt-get update -qq && apt-get install -y --no-install-recommends ${deb} && rm -rf /var/lib/apt/lists/*`;
+    return [root ? `${pip} || (${apt})` : `${su(pip)} || (${su(apt)})`];
   }
   if (miss.kind === "node-module") return [`npm install --no-save --no-audit --no-fund ${tool}`];
   if (miss.kind === "command" && !tool.includes("/")) return [su(`apt-get update -qq && apt-get install -y --no-install-recommends ${tool} && rm -rf /var/lib/apt/lists/*`)];
@@ -92,6 +115,7 @@ export function genericInstallCommands(miss, { root = true } = {}) {
 }
 
 /**
+ * @deprecated Fallback only; see pool/image/manifest.json (#6017).
  * Installs `tools` in the running sandbox through the injected `run({command, timeoutMs})` -> {rc, stdout, stderr}.
  * Never throws: {ok:true} or {ok:false, tool, stderrTail}.
  */

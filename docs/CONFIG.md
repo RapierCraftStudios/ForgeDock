@@ -488,6 +488,22 @@ orchestration:
 
 ---
 
+## `orchestrate.lane_audit` (OPTIONAL)
+
+Engine-gap filing of the lane audit (#6078). When a lane ends needs-human or engine-error on an active pipeline/env/pool signature, the audit can file an issue in the engine repo.
+
+```yaml
+orchestrate:
+  lane_audit:
+    file_gaps: false              # default false; only the string true enables
+    repo: RapierCraftStudios/ForgeDock   # optional: engine repo to file in
+    label: engine-gap             # optional
+```
+
+One issue per signature: it is found by the `<!-- forge-gap: SIGNATURE -->` marker among open issues with the label; a further lane with the same signature updates its occurrence count and affected-lane list (`#N`, a lane is counted once). Nothing is filed for `fixed_in_later` signatures or genuine/spec classes. Redaction: the body holds only the signature, class, owner, action, engine version, count and lane issue numbers; any text in it has the lane's repo name, `owner/name` patterns and absolute paths replaced by `<repo>`/`<path>`. Filing failures are ignored and never change how the lane ends.
+
+---
+
 ## `orchestrate.health` and `notify` (OPTIONAL)
 
 Early batch health (#5167). `forgedock orchestrate` checks each batch at T+15 and T+60 minutes after it was created (`plan.json` `created`), and once more when the batch ends. When the batch starts, it prints the schedule: `health checks: T+15 14:05Z, T+60 14:50Z, and at batch end; forgedock status --batch <id>`. The first unhealthy check raises one `BATCH UNHEALTHY <id>` alert, which lists the top causes and the exact recovery commands (`--requeue`, a relaunch, `--resume`, `--cancel`). `health.json` in the batch dir records the checkpoints already done and the alert, so a daemon restart arms only the remaining checks and a batch never alerts twice. Checks and alerts never fail, delay or change the batch.
@@ -834,6 +850,26 @@ release:
 
 `forgedock release verify <release id>` (#5562) re-runs the deploy verification of a release that passed LIVE_CHECK; a release id (`rYYYYMMDD-HHMMSS-N`) is never mistaken for a sha. Policy `verify` block (default branch, `.forge/release.yaml`): `results` (list of `{workflow, kind: smoke|edge|convergence}`, layer 1), `workflow` (verification workflow dispatched through the epoch fence, layer 2), `slis` (layer 3, entries `{name, tolerance, worse: higher|lower, abs}` read through an injected read-only metric source; without one the layer reports `sli: skipped (no host)`), `post_deploy_checks_file` (layer 4, each issue's `[check:id]` runs once; entries with `for` are windowed and become rollup follow-ups), `flags` (layer 5, `{flag, off_command}` verified in the off state, never activated) and `close_requires: verified|deployed`. With `verified` (default once the block is set) an issue is closed only after a `FORGE:VERIFIED <deploy sha>` comment; `deployed` closes without it. Soak minutes by risk class: low 10, medium 20, full 30, p0 15, overridden by `lanes.<lane>.soak_min` (a number or a map by class). An empty `verify` block leaves VERIFYING a bare transition to LIVE.
 
+### Default release flow: the v1.0 contract (#6164)
+
+`forgedock release` and `forgedock review-staging` follow the original release contract of `commands/review-pr-staging.md` (commit dcfb86bf, 2026-06-05), restored as the default for every repo. There is no switch to turn it off.
+
+1. **Open-finding gate first**: an open `review-finding` issue blocks the release before CI or any reviewer.
+2. **`ci-green` step** before `review`: waits for every required check on the release PR head (protection, rulesets and `gate.required_checks`; `forgedock/verify`, `forge/deploy-gate` and the gate-marker check excluded). A failed check is rerun once; a pass on the rerun counts as green and files a `flaky-test` issue naming the test when the log shows it. A check still red after its rerun gets one CI fix round in the release PR, then CI is awaited again. A draft release PR (host preflight mode) has no Actions CI yet, so the step skips it.
+3. **One review pass** on the green head. Every finding is filed as an issue (Phase 7). Nothing the review finds is fixed inside the release PR: no review fix lanes and no review-driven delta passes. A head that moves during review stops the job; re-run it.
+4. **Verdict**: a CONFIRMED CRITICAL/HIGH finding (or a failed guard) means BLOCK. The job stops with `blocked: review blockers #A #B`, the release PR is closed, the blocker issues are added to the repo's open orchestrate batch (`orchestrate --add`) when one exists, and the next release starts fresh after they merge (the open-finding gate enforces it). Without blockers the release merges on GATE_PASS and everything else stays filed for later.
+5. `forgedock review-staging <PR>` pre-dispatch (also `--delta`) runs the gate, then refuses while a required check is pending or failing (`CI not green on <sha> (pending: ..., failing: ...)`); `--allow-ci-pending` overrides and is recorded in the route marker. `--gate-only` runs just the open-finding gate.
+6. `release status` prints `timing`: `ci_green_min`, `review_min`, `fix_rounds`, `review_passes`; the release ledger mirrors them.
+
+Drift this removes: #4358 and #4360 (pre-dispatch and delta passes in the review loop), #5212 (review step fix lanes and delta passes), #5567 (CI and panel started on the same head, `ci.fix.co_start`, now ignored).
+
+```yaml
+release:
+  block_severity: high        # lowest blocking severity: critical | high | medium (default high)
+  ci_green_max_wait_min: 40   # how long ci-green waits for pending checks before it blocks (max 240)
+  review_fixes: false         # compatibility only: true restores the #5212 review fix lanes and delta passes
+```
+
 ### `.forge/release.yaml` (#5551)
 
 Nested release policy (`schema: 1`) lives in a committed `.forge/release.yaml`, not in the host-local forge.yaml. It is read from the default branch with `git show origin/<default>:.forge/release.yaml`, never from the PR head or the worktree, so a PR cannot weaken its own gates. The flat `release.*` keys above stay the fallback when the file is absent there. Sections: `branches`, `trust`, `state`, `units`, `couplings`, `contracts`, `forces`, `classify`, `risk`, `plan`, `lanes`, `merge`, `ci`, `preflight`, `deploy`, `verify`, `rollback`, `controls`.
@@ -851,6 +887,7 @@ The forge.yaml reader handles two levels, so the rehearsal block is written as t
 | `publish_workflow` | string | No | Workflow file post-merge looks for (and dispatches when no run appears) for the merge commit. Default: `publish.yml`. |
 
 | `preflight_command` | string | No | Shell command run on the host (not as Actions minutes) in the repo checkout on the staging head **before** the release PR is opened (#5277), again after each fix round, and once more on the final head before the PR is marked ready. Put the repo's own suites here, e.g. `preflight_command: npm test`. Setting it also opens the release PR as a **draft** and marks it ready only after review and a passing preflight, so Actions CI runs once on the final head. Unset: no preflight, the PR is opened ready as before. |
+| `allow_red_staging` | bool | No | Staging-health gate (#6013): before a release is cut, every check-run of the staging head must be finished and green; otherwise the preflight step refuses and names **all** failed checks (classified regression or runner) and pending ones, so the fixes go out together and the next snapshot is cut once. `allow_red_staging: true` proceeds with a recorded warning. Default `false`. The ledger records each round (`rounds`: pr, head, outcome, cause, times) and `forgedock stats --release-ledger` trends snapshot rounds per release. |
 | `preflight_timeout` | integer | No | Seconds before the command is killed (counts as a failure). Default: `1200`. |
 | `preflight_blocking` | boolean | No | `true` (default): a failure files one `release-blocker` issue per head (a re-run comments on it) and stops the job before the PR is opened or marked ready; fix it and `--resume <id>`. `false`: the failure is recorded and the release goes on. |
 | `rehearsal_command` | string | No | Shell command run on the host (not as Actions minutes) in the repo checkout, on the release-PR head after review and before promotion (#5253). Wire the project's deploy dry-run here: bundle build, env load and the trusted-runtime closure check, e.g. `rehearsal_command: ./scripts/deploy-dry-run.sh` where the script builds the release bundle, loads the production env file in check mode and verifies the trusted-runtime closure, exiting non-zero on the first failure. Unset: no rehearsal, release behavior is unchanged. |
@@ -1753,6 +1790,7 @@ execution:
 | `warm_sandboxes` | integer | No | Warm sandboxes per repo the pool agent keeps ready (checkout at the base ref, dependency cache primed). When `N > 0` the launch spec carries `warm: N` and the lane first calls `POST {endpoint}/sandboxes/claim`; a ready warm sandbox takes the lane (refreshed to the lane's base ref with an incremental fetch before work starts), and when none is ready, the claim fails or the endpoint lacks the route the lane starts cold. Default `0` (off): no claim call and the launch spec is unchanged (forge#4912). |
 | `unreachable_window_min` | number | No | Remote providers: how long a lane keeps polling (with backoff, up to 30s) after the provider's transport fails (connection refused/reset, `fetch failed`, timeout, 502/503/504) before it ends `deferred` with `sandbox.unreachable` (forge#4672). Inside the window the lane never ends and the sandbox is never torn down; after it the sandbox is kept and adopted on the next attempt or `--resume`; the engine-error breaker does not count it. `adopt` applies the same window. Default: 5 |
 | `on_budget` | string | No | `stop` (default): running lanes finish and the rest end `held` (`execution budget: ...`) for a later `--resume`. `local`: the rest run as detached host lanes. |
+| `min_lane_engine` | string | No | Lowest lane-engine version (e.g. `1.67`) a pool agent may run this batch's lanes on (forge#6091). Placement always prefers agents on the orchestrator's engine version; unset (default), a lower-version agent is still used as a fallback when it is the only one free. Set, agents below it are skipped and, when none qualifies, the launch is deferred (`pool.engine_old`) until an agent upgrades. |
 | `host_capabilities` | list | No | Host-only capabilities the dispatching host has and a sandbox does not relay (forge#4542): names such as `sops`, `prod_monitor`, `ops_credentials`. A lane whose issue text names one (built-in signals: `.secrets/*.enc.yaml`, `sops`, `ssh *-monitor`, `obs-psql`, `credentials.yaml`; a declared name written out; `host_capability_patterns`) is placed `local` in `remote` and `hybrid` mode with the reason `host capability: <name>`, unless the provider relays it (`relay_commands`, forge#4778; otherwise remote providers relay none). A remote lane that still blocks as `credentials` naming only a declared capability ends `env.capability_remote` (recoverable) and is rerun locally once. |
 | `host_capability_patterns` | list | No | `name:regex` entries (case-insensitive) that also mean the lane needs capability `name`, e.g. `vault:vault\s+kv`. An invalid entry is ignored. |
 | `relay_commands` | list | No | Read-only capability relay (forge#4778): `capability:command` entries, e.g. `prod_monitor:obs-psql` or `prod_monitor:obs-*` (exact name, or a prefix glob with one trailing `*`; no `/`, whitespace or other glob characters). A `remote`/`pool` lane needing a listed capability is placed remote: the sandbox runs the command unchanged (a `cs-relay` shim), the request goes sandbox -> pool agent -> router queue, and the dispatching host picks it up on its status poll, gates it against this list and runs it with no shell, a 120 s timeout and a 1 MB output cap, redacting known secrets; a refused command gets rc 126 and the key never leaves the host. List only read-only wrappers, never `sops` or `ops_credentials`. The frozen contract's simple validate / repro_test commands that pass the gate are pre-fetched at dispatch and shipped with the lane (96 KB cap). An older router or agent without the relay makes `cs-relay` exit 125, the lane blocks as `credentials` and is recovered locally once, as before. |
@@ -2035,6 +2073,7 @@ review:
     auth: "JWT + refresh token rotation; sessions stored in Redis"
     database: "Always use docker exec <container> for psql/migrations"
 
+  # max_parallel: 2         # release review: reviewers running at once (default max(2, cores/2)); the rest queue. Reviewers run at nice 19 / ionice idle (#6098)
   # max_filed_findings: 2   # per-review cap on filed findings (default 2; 1 on review-finding lineage)
 
   # key_paths:
@@ -2964,3 +3003,25 @@ A failed or timed-out sweep (10 min limit) shows as `cache_sweep_error` in the a
 ## Complete Example
 
 See [`forge.yaml.example`](../forge.yaml.example) at the repository root for a fully annotated example covering all sections.
+
+---
+
+## Router config: `ci_autoscale` (#5695)
+
+Keys of the pool router's own config file (not `forge.yaml`). The CI runner autoscaler is off by default.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `ci_autoscale.enabled` | `false` | Turns on `POST /ci/workflow-job` tracking and the reconcile at the end of each router tick. |
+| `ci_autoscale.dry_run` | `false` | Log every scale decision with its inputs but start or stop nothing. |
+| `ci_autoscale.repo` | unset | `owner/name` for `generate-jitconfig` and the jobs-API poll fallback. Uses the router host's `gh auth token`. |
+| `ci_autoscale.poll_s` | `300` | Seconds between jobs-API polls. |
+| `ci_autoscale.runner_group_id` | `1` | Runner group for JIT runners. |
+| `ci_autoscale.labels.<label>` | none | One entry per runner label: `min` (warm runners), `max` (hard cap), `size` `{cpus, mem_gb}` (default 1 / 2). Only jobs carrying a configured label are counted. |
+| `ci_autoscale.floors.mem_available_gb` | `3` | MemAvailable that must remain after the reservation. |
+| `ci_autoscale.floors.load_per_cpu` | `0.8` | Load per vCPU allowed after the reservation. |
+| `ci_autoscale.floors.net_rx_mbps_max` | unset | Refuse starts above this host RX rate (deploy exempt). |
+| `ci_autoscale.lane_floor` | `{cpus: 2, mem_gb: 3}` | Pool `cpus_free`/`mem_free_gb` left for lanes. CI never takes it. |
+| `ci_autoscale.windows` | `[]` | `[{from, to, why}]` ISO times: no starts or stops inside a window. |
+
+Priority is deploy label > release branch (`release/*`, `hotfix/*`) > lanes > ordinary PR CI. Agent config `runner_image` (default `ghcr.io/actions/actions-runner:latest`) is the runner container image.

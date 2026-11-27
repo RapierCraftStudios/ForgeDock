@@ -4,7 +4,7 @@
 // itself runs inside a short-lived container of the lane image with the cache volume on /cache. The agent ships this
 // file's source in CS_CACHE_SWEEP_SRC and the options in CS_CACHE_SWEEP_OPTS; the JSON result goes to stdout.
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 export const CACHE_LABEL = "computeshare.cache=1";
@@ -15,6 +15,7 @@ export const PACKAGE_STORES = ["pnpm-store", ...["pnpm-store", "npm-cache", "uv-
 /** #5881: owner label; the reaper and sweeps touch only containers and volumes carrying their own agent's label. */
 export const agentLabel = (id) => `computeshare.agent=${id}`;
 const DAY = 86400000;
+const LOCK_LIVE_MS = 2 * 3600000; // a depcache key lock younger than this may belong to a running install or lane
 
 /**
  * Oldest-first deletion plan to bring `entries` ({path, bytes, mtimeMs, live}) under `capBytes`. Live entries (the work
@@ -55,22 +56,42 @@ const sizeOf = (p) => (Number(sh("du", ["-sk", p]).split(/\s/)[0]) || 0) * 1024;
 const kids = (dir) => sh("find", [dir, "-mindepth", "1", "-maxdepth", "1", "-printf", "%p\t%T@\n"]).split("\n").filter(Boolean).map((l) => { const i = l.lastIndexOf("\t"); return { path: l.slice(0, i), mtimeMs: Number(l.slice(i + 1)) * 1000 }; });
 
 const SNAP = /^[a-z]+-[0-9a-f]{16}$/;
+const num = (p) => { try { const n = Number(readFileSync(p, "utf8").trim()); return Number.isFinite(n) && n > 0 ? n : null; } catch { return null; } };
+const mtimeOf = (p) => { try { return statSync(p).mtimeMs; } catch { return null; } };
+/** #5898: a snapshot is in use while its `<snap>.lock` is younger than LOCK_LIVE_MS (the container cannot check pids). */
+const lockLive = (p, now) => { const m = mtimeOf(`${p}.lock`); return m !== null && now - m < LOCK_LIVE_MS; };
 /** Last use of a depcache snapshot: its `last-used` file (epoch ms, written on every hit), else the directory mtime. */
-const snapLastUsed = (k) => { try { const n = Number(readFileSync(join(k.path, "last-used"), "utf8").trim()); if (n > 0) return n; } catch { /* none yet */ } return k.mtimeMs; };
+const snapLastUsed = (k) => {
+  let created = null;
+  try { created = Number(JSON.parse(readFileSync(join(k.path, "manifest.json"), "utf8")).created) || null; } catch { /* no manifest */ }
+  return num(join(k.path, "last-used")) ?? created ?? k.mtimeMs;
+};
+/** Every depcache snapshot as {path, lastUsedMs, live}; last use falls back to manifest `created`, then mtime. */
+function depcacheSnaps(dc, now) {
+  const out = [];
+  for (const repo of kids(dc)) {
+    if (repo.path.endsWith("/stores")) continue;
+    for (const k of kids(repo.path)) {
+      if (!SNAP.test(k.path.slice(repo.path.length + 1))) continue;
+      out.push({ ...k, lastUsedMs: snapLastUsed(k), live: lockLive(k.path, now) });
+    }
+  }
+  return out;
+}
 
 /**
  * #5901: depcache is `<dc>/<repoKey>/<eco>-<key>/`. Each snapshot (not the repo dir, whose mtime moves with every new
  * snapshot) ages out by its last use and is trimmed least-recently-used past the per-repo cap. A snapshot with a lock file
  * is in use and kept. Fills `depcacheBytes[repoKey]` with what remains.
  */
-function sweepDepcache(dc, { cutoff, capBytes, rm, depcacheBytes }) {
+function sweepDepcache(dc, { cutoff, now, capBytes, rm, depcacheBytes }) {
   for (const repo of kids(dc)) {
     const rk = repo.path.slice(dc.length + 1);
     if (rk === "stores") continue;
-    if (SNAP.test(rk)) { if (repo.mtimeMs < cutoff) rm(repo.path); continue; } // an entry of the flat layout (no repo level)
+    if (SNAP.test(rk)) { if (snapLastUsed(repo) < cutoff && !lockLive(repo.path, now)) rm(repo.path); continue; } // an entry of the flat layout (no repo level)
     let snaps = kids(repo.path).filter((k) => SNAP.test(k.path.slice(repo.path.length + 1)));
-    const live = (k) => existsSync(`${k.path}.lock`);
-    snaps = snaps.map((k) => ({ ...k, lastUsedMs: snapLastUsed(k), live: live(k) }));
+    for (const k of kids(repo.path)) if (/\.(tmp-\d+|lock)$/.test(k.path) && k.mtimeMs < cutoff) rm(k.path); // dead publishers' tmp dirs, old locks
+    snaps = snaps.map((k) => ({ ...k, lastUsedMs: snapLastUsed(k), live: lockLive(k.path, now) }));
     for (const k of snaps.filter((x) => x.lastUsedMs < cutoff && !x.live)) rm(k.path);
     snaps = snaps.filter((x) => existsSync(x.path));
     if (!snaps.length) { if (repo.mtimeMs < cutoff) rm(repo.path); continue; } // nothing left in it and untouched for the max age
@@ -94,7 +115,7 @@ export function sweepVolume({ root = "/cache", maxAgeDays = 14, maxGb = null, ma
   const ageOut = (dir, skip = []) => { for (const k of kids(dir)) if (k.mtimeMs < cutoff && !skip.includes(k.path)) rm(k.path); };
   const dc = join(root, "forge-depcache");
   const depcacheBytes = {};
-  if (existsSync(dc)) { ageOut(join(dc, "stores")); sweepDepcache(dc, { cutoff, capBytes: Number.isFinite(maxDepcacheGb) ? maxDepcacheGb * 1024 ** 3 : null, rm, depcacheBytes }); } // store entries, then snapshots per repo
+  if (existsSync(dc)) { ageOut(join(dc, "stores")); sweepDepcache(dc, { cutoff, now, capBytes: Number.isFinite(maxDepcacheGb) ? maxDepcacheGb * 1024 ** 3 : null, rm, depcacheBytes }); } // store entries, then snapshots per repo
   if (existsSync(join(root, "env"))) ageOut(join(root, "env"));
   const ps = join(root, "pnpm-store");
   if (existsSync(ps)) sh("pnpm", ["store", "prune", "--store-dir", ps]);
@@ -103,12 +124,12 @@ export function sweepVolume({ root = "/cache", maxAgeDays = 14, maxGb = null, ma
     const entries = [];
     const keepSet = new Set(keep);
     for (const k of kids(join(root, "work"))) entries.push({ ...k, bytes: sizeOf(k.path), live: keepSet.has(k.path) });
-    for (const d of [...PACKAGE_STORES, "env", "forge-depcache", "forge-depcache/stores"]) for (const k of kids(join(root, d))) if (!k.path.endsWith("/stores")) entries.push({ ...k, bytes: sizeOf(k.path), live: false });
+    for (const d of [...PACKAGE_STORES, "env", "forge-depcache/stores"]) for (const k of kids(join(root, d))) entries.push({ ...k, bytes: sizeOf(k.path), live: false });
+    for (const k of depcacheSnaps(dc, now)) entries.push({ path: k.path, mtimeMs: k.lastUsedMs, bytes: sizeOf(k.path), live: k.live });
     const plan = planCacheCap(entries, maxGb * 1024 ** 3);
     for (const p of plan.delete) rm(p);
   }
-  let last = null;
-  try { const n = Number(readFileSync(join(root, ".last-used"), "utf8").trim()); if (Number.isFinite(n) && n > 0) last = n * 1000; } catch { /* never recorded */ }
+  const lastSec = num(join(root, ".last-used")), last = lastSec === null ? null : lastSec * 1000;
   return { size_bytes: sizeOf(root), last_used_ms: last, depcache_bytes: depcacheBytes, removed: removed.length, errors: errors.slice(0, 5) };
 }
 

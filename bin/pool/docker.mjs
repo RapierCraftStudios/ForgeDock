@@ -4,6 +4,9 @@ import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { PACKAGE_STORES } from "./cache-sweep.mjs";
 
+/** #6047: the lane's CPU quota as env, for lanes whose cgroup files are hidden (read by quotaCores in lean/admission.mjs). */
+export const cpuQuotaEnv = (cpus) => (Number.isFinite(cpus) && cpus > 0 ? { CS_CPU_QUOTA: String(cpus) } : {});
+
 /** #5757: work-dir and cache sweeps walk big trees (node_modules): 10 min, not the 120 s of a small rm. */
 export const SWEEP_TIMEOUT_MS = 10 * 60000;
 const SWEEP_SRC = new URL("./cache-sweep.mjs", import.meta.url);
@@ -29,6 +32,8 @@ export const dockerCli = {
       throw e;
     }
   },
+  /** #6117: copies `src` (a path inside container `name`, running or exited) into the host dir `dest`. */
+  async copyOut(name, src, dest) { await docker(["cp", `${name}:${src}`, dest], { timeoutMs: 60000 }); },
   async remove(name) { try { await docker(["rm", "-f", "-v", name], { timeoutMs: 60000 }); } catch (e) { if (!/No such container/i.test(e.stderr ?? "")) throw e; } },
   /** Signal the container's main process (the lane). False when the container is gone or already stopped. */
   async kill(name, signal = "TERM") {

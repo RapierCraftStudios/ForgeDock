@@ -137,13 +137,13 @@ describe("release ledger (#5550)", () => {
     const g = fakeGh(), seen = [];
     const mkIo = () => ({ print() {}, now: () => 1_700_000_000_000, runningLanes: async () => [], batches: async () => [], setParallel: async () => {}, gh: async () => { throw new Error("no gh"); }, api: g.api });
     const step = (name, die) => async () => { if (die) throw new Error("kill -9"); seen.push(name); return {}; };
-    const all = (dieAt) => ({ preflight: step("preflight"), "host-preflight": async () => ({ skipped: true }), deploy: async () => ({ skipped: true }), "release-pr": async () => { if (dieAt === "release-pr") throw new Error("kill -9"); seen.push("release-pr"); return { pr: 7 }; }, review: step("review"), fixes: step("fixes"), "mark-ready": async () => ({ skipped: true }), rehearsal: async () => ({ skipped: true }), promotion: step("promotion"), "post-merge": step("post-merge") });
+    const all = (dieAt) => ({ preflight: step("preflight"), "host-preflight": async () => ({ skipped: true }), deploy: async () => ({ skipped: true }), "release-pr": async () => { if (dieAt === "release-pr") throw new Error("kill -9"); seen.push("release-pr"); return { pr: 7 }; }, "ci-green": step("ci-green"), review: step("review"), fixes: step("fixes"), "mark-ready": async () => ({ skipped: true }), rehearsal: async () => ({ skipped: true }), promotion: step("promotion"), "post-merge": step("post-merge") });
     const run = (io, dieAt, root) => runRelease({ io, repo: REPO, root, mounts: DISK, id: ID, opts: {}, config: { managed: true }, branches: {}, steps: all(dieAt) });
     await assert.rejects(() => run(mkIo(), "release-pr", tmpDir("ledgerA-")), /kill -9/);
     assert.deepEqual(seen, ["preflight"]);
     const out = await run(mkIo(), null, tmpDir("ledgerB-")); // host B: empty disk
     assert.equal(out.status, "done");
-    assert.deepEqual(seen, ["preflight", "release-pr", "review", "fixes", "promotion", "post-merge"]);
+    assert.deepEqual(seen, ["preflight", "release-pr", "ci-green", "review", "fixes", "promotion", "post-merge"]);
   });
 });
 
@@ -165,7 +165,7 @@ describe("release fencing through the job (#5553)", () => {
       throw new Error(`unexpected gh ${j}`);
     } });
   const skip = async () => ({ skipped: true }), ok = async () => ({});
-  const steps = (over = {}) => withStubs({ preflight: ok, "host-preflight": skip, "release-pr": async () => ({ pr: 7 }), review: ok, fixes: ok, "mark-ready": skip, rehearsal: skip, "post-merge": ok, ...over });
+  const steps = (over = {}) => withStubs({ preflight: ok, "host-preflight": skip, "release-pr": async () => ({ pr: 7 }), "ci-green": ok, review: ok, fixes: ok, "mark-ready": skip, rehearsal: skip, "post-merge": ok, ...over });
   const go = (io, st, root) => runRelease({ io, repo: REPO, root, mounts: DISK, id: ID, opts: { merge: true }, config: { managed: true }, branches: { staging: "staging", default: "main" }, steps: st ?? steps() });
 
   it("the job takes the lease after release-pr and the merge carries the Forge-Epoch trailer and a write-ahead intent", async () => {
@@ -215,7 +215,7 @@ describe("release fencing through the job (#5553)", () => {
     for (const dieAt of RELEASE_STEPS) {
       const g = fakeGh(), calls = [], ran = [];
       const track = (name, fn) => async (...a) => { if (name === dieAt && !ran.includes(`die:${name}`)) { ran.push(`die:${name}`); throw new Error("kill -9"); } ran.push(name); return fn(...a); };
-      const base = { preflight: ok, "host-preflight": skip, "release-pr": async () => ({ pr: 7 }), review: ok, fixes: ok, "mark-ready": skip, rehearsal: skip, "post-merge": ok, deploy: skip };
+      const base = { preflight: ok, "host-preflight": skip, "release-pr": async () => ({ pr: 7 }), "ci-green": ok, review: ok, fixes: ok, "mark-ready": skip, rehearsal: skip, "post-merge": ok, deploy: skip };
       const wrapped = withStubs(Object.fromEntries(Object.entries(withStubs(base)).map(([k, fn]) => [k, track(k, fn)])));
       await assert.rejects(() => go(mkIo(g, "hostA", calls), wrapped, tmpDir("fe1-")), /kill -9/, dieAt);
       const out = await go(mkIo(g, "hostB", calls), wrapped, tmpDir("fe2-")); // another host, empty disk
@@ -254,5 +254,28 @@ describe("recordSync (#5566)", async () => {
     const line = JSON.parse(files["controls.jsonl"].trim());
     assert.equal(line.verb, "sync");
     assert.equal(line.milestones, 1);
+  });
+});
+
+describe("release ledger rounds (#6013)", () => {
+  it("records rounds with count, wall time and cause, redacted on write and read back", async () => {
+    const { recordReleaseRound, roundStats } = await import("./release-ledger.mjs");
+    const gh = fakeGh(), ctx = ctxOf(gh);
+    const state = { status: "running" };
+    recordReleaseRound(state, { pr: 9, head: "a1", outcome: "fail", cause: "regression", startedAt: "2026-11-01T10:00:00Z", endedAt: "2026-11-01T10:30:00Z" });
+    recordReleaseRound(state, { pr: 10, head: "b2", outcome: "pass", cause: "bogus", startedAt: "2026-11-01T11:00:00Z", endedAt: "2026-11-01T11:45:00Z" });
+    assert.deepEqual(state.rounds.map((r) => r.n), [1, 2]);
+    assert.equal(state.rounds[1].cause, null, "unknown cause is not recorded");
+    const s = roundStats(state.rounds);
+    assert.equal(s.snapshots, 2);
+    assert.equal(s.wallMin, 105);
+    assert.deepEqual(s.causes, { regression: 1, flake: 0, runner: 0 });
+    assert.equal(roundStats(undefined).snapshots, 0);
+    state.rounds[0].head = "ghp_" + "a".repeat(36);
+    await createReleaseLedger(ctx, ID, state);
+    const back = (await readLedger(ctx, ID)).state;
+    assert.equal(back.rounds.length, 2);
+    assert.ok(!JSON.stringify(back).includes("ghp_aaaa"), "secrets are redacted");
+    assert.equal(roundStats(back.rounds).snapshots, 2);
   });
 });

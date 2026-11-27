@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /**
- * End-to-end run of `forgedock release` through the real job (preflight, release-pr, review, fixes, promotion) against an
+ * (Legacy, `release.review_fixes: true`; the default flow stops at review blockers: release-review.test.mjs.) End-to-end run of `forgedock release` through the real job (preflight, release-pr, review, fixes, promotion) against an
  * in-memory GitHub (#5212, R1): the release PR exists, the panel runs, a HIGH finding is filed and blocks, a fix lane merges
  * to staging, the delta review passes, and the job stops at GATE_PASS with the merge command, with no manual step. GitHub, the
  * model and the lane process are in memory (as in conformance.e2e.test.mjs); the job, steps, state and resume are real.
@@ -29,6 +29,7 @@ function world() {
       throw new Error(`unexpected gh ${j}`);
     },
   };
+  io.ciGreen = { now: () => 0, sleep: async () => {}, isDraft: async () => false, headOf: async () => sha(w.head), checks: async () => [], required: async () => [] }; // CI is green at once
   io.review = {
     pre: async ({ delta }) => ({ code: 0, lines: [], data: { pr: 7, headSha: sha(w.head), bundle: [1, 2], scopeMode: "full", contextFile: "/sd/ctx.json", launchedFile: "/sd/l", briefs: [{ domain: "security", path: "/sd/b" }], delta: delta ? { from: delta, files: ["f"] } : null } }),
     headOf: async () => sha(w.head),
@@ -55,7 +56,7 @@ function world() {
 describe("forgedock release, review to gate (e2e on in-memory GitHub)", () => {
   it("reviews, files the blocking finding, fixes it on staging, re-reviews the delta and stops at GATE_PASS with the merge command", async () => {
     const { w, io } = world();
-    const out = await runRelease({ io, repo: "o/r", root: tmpDir("rel-e2e-"), mounts: DISK, id: newReleaseId(), opts: {}, config: {}, branches: { staging: "staging", default: "main" } });
+    const out = await runRelease({ io, repo: "o/r", root: tmpDir("rel-e2e-"), mounts: DISK, id: newReleaseId(), opts: {}, config: { reviewFixes: true }, branches: { staging: "staging", default: "main" } });
     assert.equal(out.status, "stopped");
     assert.equal(out.step, "promotion");
     assert.match(out.reason, /GATE_PASS/);
@@ -69,7 +70,7 @@ describe("forgedock release, review to gate (e2e on in-memory GitHub)", () => {
   it("a killed job resumes after the review step without re-running it", async () => {
     const { w, io } = world();
     const root = tmpDir("rel-e2e-"), id = newReleaseId();
-    const args = { io, repo: "o/r", root, mounts: DISK, id, opts: {}, config: {}, branches: { staging: "staging", default: "main" } };
+    const args = { io, repo: "o/r", root, mounts: DISK, id, opts: {}, config: { reviewFixes: true }, branches: { staging: "staging", default: "main" } };
     await runRelease(args);
     const agents = w.agents.length;
     assert.equal(openRelease(root, id, DISK).load().steps.fixes.done, true);

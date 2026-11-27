@@ -52,6 +52,20 @@ describe("#5947 mirror.sh", () => {
     assert.equal(readFileSync(log, "utf8").trim().split("\n").length, 1);
   });
 
+  it("#6094 a mirror that looks invalid only because another process holds the lock and is writing is waited for, never quarantined", async () => {
+    const src = source(), cache = tmpDir("mirror-cache-"), m = join(cache, "o_r.git"), held = join(cache, "held");
+    assert.equal((await prepare(src, m)).out, "ok");
+    const inflight = join(m, "objects", "pack", "inflight-writer");
+    writeFileSync(inflight, ""); // an empty file mid-write, as a concurrent fetch leaves
+    const holder = new Promise((res) => execFile("flock", [m + ".lock", "sh", "-c", `touch '${held}'; sleep 1; rm -f '${inflight}'`], () => res()));
+    for (let i = 0; i < 100 && !existsSync(held); i++) await new Promise((r) => setTimeout(r, 50)); // lock-ordering, not wall-clock: wait until the lock is held
+    assert.ok(existsSync(held), "the writer holds the lock");
+    const r = await prepare(src, m);
+    await holder;
+    assert.equal(r.out, "ok");
+    assert.deepEqual(readdirSync(cache).filter((n) => n.includes(".corrupt-")), []);
+  });
+
   it("a failing fetch leaves no <name>.git and no tmp dir behind, and the lane is told 'direct'", async () => {
     const cache = tmpDir("mirror-cache-"), m = join(cache, "o_r.git");
     mkdirSync(cache, { recursive: true });

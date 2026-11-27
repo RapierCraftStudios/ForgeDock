@@ -73,7 +73,7 @@ describe("depcache cap (#5901)", () => {
 });
 
 describe("sweepVolume age-out", () => {
-  it("deletes package cache, depcache and env entries older than the max age", () => {
+  it("deletes package cache and env entries older than the max age", () => {
     const root = tmpDir("cs-sweep-");
     const old = (Date.now() - 40 * DAY) / 1000;
     for (const f of ["forge-depcache/stores/uv-cache/a/x.bin", "pnpm-store/y.bin"]) { mkdirSync(join(root, f, ".."), { recursive: true }); writeFileSync(join(root, f), "x"); utimesSync(join(root, f), old, old); }
@@ -116,6 +116,29 @@ describe("sweepVolume age-out", () => {
     for (const d of LEGACY_STORES) assert.ok(!existsSync(join(root, d, "k/blob")), d);
     assert.ok(existsSync(fresh));
     assert.equal(r.errors.length, 0);
+  });
+  it("depcache snapshots age by last-used, not dir mtime, and a live lock protects them (#5898)", () => {
+    const root = tmpDir("cs-sweep-");
+    const oldS = (Date.now() - 40 * DAY) / 1000, freshMs = Date.now() - DAY;
+    const mk = (n, lastMs) => { const d = join(root, "forge-depcache/rk", n); mkdirSync(d, { recursive: true }); writeFileSync(join(d, "manifest.json"), JSON.stringify({ created: Date.now() - 40 * DAY })); writeFileSync(join(d, "last-used"), String(lastMs)); utimesSync(d, oldS, oldS); return d; };
+    const inUse = mk("pnpm-aaaaaaaaaaaaaaaa", freshMs), idle = mk("pnpm-bbbbbbbbbbbbbbbb", Date.now() - 40 * DAY), locked = mk("npm-cccccccccccccccc", Date.now() - 40 * DAY);
+    writeFileSync(`${locked}.lock`, "{}");
+    utimesSync(join(root, "forge-depcache/rk"), oldS, oldS);
+    const r = sweepVolume({ root, maxAgeDays: 14, keep: [] });
+    assert.ok(existsSync(inUse), "recently used snapshot kept");
+    assert.ok(!existsSync(idle), "idle snapshot removed");
+    assert.ok(existsSync(locked), "snapshot with a live lock kept");
+    assert.equal(r.errors.length, 0);
+  });
+  it("cap never deletes a locked depcache snapshot (#5898)", () => {
+    const root = tmpDir("cs-sweep-");
+    const big = "x".repeat(300000), t0 = Date.now() - DAY;
+    const mk = (n, lastMs) => { const d = join(root, "forge-depcache/rk", n); mkdirSync(d, { recursive: true }); writeFileSync(join(d, "manifest.json"), "{}"); writeFileSync(join(d, "blob"), big); writeFileSync(join(d, "last-used"), String(lastMs)); return d; };
+    const locked = mk("pnpm-aaaaaaaaaaaaaaaa", t0 - 5 * DAY), other = mk("pnpm-bbbbbbbbbbbbbbbb", t0);
+    writeFileSync(`${locked}.lock`, "{}");
+    sweepVolume({ root, maxAgeDays: 14, maxGb: 0.0003, keep: [] });
+    assert.ok(existsSync(locked), "locked snapshot survives the cap");
+    assert.ok(!existsSync(other), "unlocked snapshot is evicted instead");
   });
   it("cap shrinks work dirs oldest-first but keeps live ones; reports last use", () => {
     const root = tmpDir("cs-sweep-");

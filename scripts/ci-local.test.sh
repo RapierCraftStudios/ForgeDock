@@ -518,7 +518,8 @@ echo '{"a":1}' > "$r/lib/data.json"; P=$(plan "$r")
 has "jest: a changed data file widens (not reachable through imports)" "$(step_field "$P" task:npm:test 1 '.scope.widen_reason')" "unknown-language"
 
 # ------------------------------------------------------------------------------------------------ ForgeDock's own workflows
-P=$(bash "$S" plan --repo "$ROOT" --base HEAD --base-branch staging --head-branch feat/spec-change --files "commands/work-on/build.md" --json --no-cache 2>/dev/null)
+# PR CI runs only on release PRs to main (owner decision 2026-11-27); staging is checked on push.
+P=$(bash "$S" plan --repo "$ROOT" --base HEAD --base-branch main --head-branch release/spec-change --files "commands/work-on/build.md" --json --no-cache 2>/dev/null)
 if [ -z "$P" ]; then bad "plan on ForgeDock's own workflows produced no output"; else
   eq "ForgeDock: a spec change selects a check-commands job" runnable "$(state "$P" gha:check-commands:check-native-conflicts)"
   eq "ForgeDock: a spec change selects the ci unit-tests job" runnable "$(state "$P" gha:ci:unit-tests)"
@@ -529,7 +530,7 @@ if [ -z "$P" ]; then bad "plan on ForgeDock's own workflows produced no output";
   eq "ForgeDock: portability checks run" runnable "$(state "$P" portability:builtin)"
   # Narrowing is asserted on a spec with a small reference reach (design-bench.md: ~10 referrers). Specs that name the release engine
   # (build.md, review-pr-staging.md) sit near the 600-file fan-out cap, so any growth in bin/lean widens them to the full suite; that is the cap working.
-  PN=$(bash "$S" plan --repo "$ROOT" --base HEAD --base-branch staging --head-branch feat/spec-change --files "commands/design-bench.md" --json --no-cache 2>/dev/null)
+  PN=$(bash "$S" plan --repo "$ROOT" --base HEAD --base-branch main --head-branch release/spec-change --files "commands/design-bench.md" --json --no-cache 2>/dev/null)
   eq "ForgeDock: the unit-test step is narrowed by the reference graph" scoped "$(printf '%s' "$PN" | jq -r '[.jobs[] | select(.id == "gha:ci:unit-tests") | .steps[] | select(.scope.selector == "refgraph-nodetest") | .scope.mode][0]')"
 fi
 
@@ -1133,6 +1134,17 @@ OUT=$(FORGE_CI_LOCAL_NO_CACHE=1 FORGE_CI_LOCAL_SLOTS=1 bash "$S" run --repo "$r"
 FIRST=$(printf '%s\n' "$OUT" | grep '^CI_LOCAL_JOB: pass' | head -n 1)
 has "4057: the cheapest known job runs first (small before big)" "$FIRST" "gha:ci:small"
 FORGE_TELEMETRY=off bash -c 'grep -q "wait_ms" "$0"' "$S" && ok || bad "4057: ci-local.sh forwards wait_ms to telemetry"
+
+# 6049: a workflow that only runs on a push to the release branch is a gate with --release-branch, not without it
+r=$(blank rel); mkdir -p "$r/.github/workflows"
+printf 'name: Release\non:\n  push:\n    branches: [main]\njobs:\n  fmt:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo fmt-check\n' > "$r/.github/workflows/release.yml"
+commit_base "$r"; echo x > "$r/a.txt"
+P=$(plan "$r" --base-branch dev --files "a.txt" | jq -c .)
+eq "release-only push workflow is not a lane gate without --release-branch" not-applicable "$(state "$P" gha:release)"
+P=$(plan "$r" --base-branch dev --files "a.txt" --release-branch main | jq -c .)
+eq "release-only push workflow is a gate with --release-branch" runnable "$(state "$P" gha:release:fmt)"
+P=$(plan "$r" --base-branch dev --files "a.txt" --release-branch other | jq -c .)
+eq "a different release branch does not select it" not-applicable "$(state "$P" gha:release)"
 
 echo "ci-local.test.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

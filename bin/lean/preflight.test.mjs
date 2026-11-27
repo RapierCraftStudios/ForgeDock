@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, delimiter } from "node:path";
-import { manifestDepOwner, venvPythonRewrite, testRunnerProblems, shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems, runProbeMiss, unsetEnvVars, runPreflight, knownToContract, contractCommands, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, collectOnlyCommand, collectImportMiss, declaredEnv } from "./preflight.mjs";
+import { manifestDepOwner, venvPythonRewrite, testRunnerProblems, shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems, runProbeMiss, unsetEnvVars, runPreflight, knownToContract, contractCommands, depInstallFailures, toolMissingInstalls, testRunSummary, projectBinDirs, withLocalBins, collectOnlyCommand, collectImportMiss, declaredEnv, hostEnvDefects } from "./preflight.mjs";
 import { runCheckCommand } from "./effects.mjs";
 import { repoTracks } from "./conformance.mjs";
 import { tmpDir } from "../tests/_tmp.mjs";
@@ -242,6 +242,23 @@ describe("#5683 sub-project manifest deps and venv python", () => {
   });
 });
 
+describe("#5749 host-only and busy-loop validates", () => {
+  const V = (...commands) => ({ deliverables: [], validate: commands.map((command, i) => ({ id: `V${i + 1}`, command })) });
+  it("#5749 hostOnlyProblems rejects host-only and busy-loop validates", async () => {
+    const { hostOnlyProblems } = await import("./preflight.mjs");
+    const bad = [`legion-run bash -lc 'for i in $(seq $(nproc)); do (timeout 300 sh -c "while :; do :; done") & done; npx vitest run'`, "ssh build-host make test", "bash /home/u/x/check.sh", "yes > /dev/null & npx vitest run"];
+    for (const c of bad) assert.equal(hostOnlyProblems(V(c)).length, 1, c);
+    assert.match(hostOnlyProblems(V(bad[0]))[0], /^V1: /);
+    assert.deepEqual(hostOnlyProblems(V("npx vitest run", "python -m pytest tests/x.py", "while read l; do echo $l; done < f", "git diff origin/staging...HEAD --stat")), []);
+    assert.equal(hostOnlyProblems({ ...V("npx vitest run"), repro_test: { path: "t.py", id: "t", command: "ssh h pytest t.py" } }).length, 1);
+  });
+  it("#5749 repro_test python -m pytest is probed at freeze", () => {
+    const c = { ...V("npx vitest run"), repro_test: { path: "tests/x.py", id: "t", command: "python -m pytest tests/x.py::t" } };
+    const got = preflightProbes(c).probes.map((p) => [p.kind, p.tool, p.ids.join(",")]);
+    assert.deepEqual(got.filter((x) => x[2] === "repro_test"), [["command", "python", "repro_test"], ["python-module", "pytest", "repro_test"]]);
+  });
+});
+
 describe("#5753 collect-only import preflight and tracked-dir env names", () => {
   it("collectOnlyCommand adds --collect-only -q after the pytest invocation, dropping later segments", () => {
     assert.equal(collectOnlyCommand("cd services/worker && poetry run pytest ../../shared/t.py -x"), "cd services/worker && poetry run pytest --collect-only -q ../../shared/t.py -x");
@@ -262,5 +279,25 @@ describe("#5753 collect-only import preflight and tracked-dir env names", () => 
     const c = { test_plan: [{ requirement: "R1", env: ["shared", "pytest"] }] };
     assert.deepEqual(declaredEnv(c, ["shared/detection/test_x.py", "services/worker/pyproject.toml"]), ["pytest"]);
     assert.deepEqual(declaredEnv(c), ["shared", "pytest"], "without tracked paths the name is unchanged");
+  });
+});
+
+describe("hostEnvDefects (#5917)", () => {
+  it("surfaces a poisoned poetry host config as an env defect, not a miss", () => {
+    const d = tmpDir("preflight-poetry-"); writeFileSync(join(d, "config.toml"), "[virtualenvs]\ncreate = false\n");
+    const r = hostEnvDefects({ env: { POETRY_CONFIG_DIR: d } });
+    assert.equal(r.length, 1);
+    assert.equal(r[0].code, "env.host_poetry_config");
+    assert.deepEqual(hostEnvDefects({ env: { POETRY_CONFIG_DIR: tmpDir("preflight-empty-") } }), []);
+  });
+});
+
+describe("#6037 provided() skips image-manifest command probes", () => {
+  it("skips provided tools, still probes others and modules", () => {
+    const c = C("shellcheck x.sh && yq . a.yml && ripgrep foo && python3 -c 'import yaml'");
+    const provided = (n) => ["shellcheck", "yq", "python3"].includes(n);
+    assert.deepEqual(needs(c, { provided }), [["command", "ripgrep", null, "V1"], ["python-module", "yaml", "python3", "V1"]]);
+    assert.deepEqual(needs(c), needs(c, {}));
+    assert.ok(needs(c).some((p) => p[1] === "shellcheck"));
   });
 });

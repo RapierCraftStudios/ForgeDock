@@ -1404,8 +1404,11 @@ export function redactCliText(text) {
 /**
  * forge#5762: the facts a failed CLI run reports: `result` and `is_error` (redacted, capped) and whether the CLI never
  * reached the API (`duration_api_ms` 0, read from the raw text when the envelope is cut off). Never throws.
- * @returns {{cliResult?:string, cliIsError?:boolean, cliApiMs?:number}}
+ * @returns {{cliResult?:string, cliIsError?:boolean, cliApiMs?:number, cliTerminalReason?:string, cliSessionId?:string}}
  */
+/** #6105: terminal reasons of a session the API cut short (overload, 5xx, stream reset): transient, the session itself is fine to resume. */
+const API_TERMINAL_RE = /^(api_error|overloaded(_error)?|server_error|internal_server_error|service_unavailable|stream_(reset|error|interrupted)|connection_(reset|error))$/i;
+export const isApiTerminalReason = (r) => typeof r === "string" && API_TERMINAL_RE.test(r.trim());
 export function cliFailureFacts(stdout) {
   const env = parseCliEnvelope(stdout);
   const facts = {};
@@ -1413,6 +1416,8 @@ export function cliFailureFacts(stdout) {
     if (typeof env.result === "string") facts.cliResult = sanitizeAndCap(redactCliText(env.result), MAX_CLI_RESULT_LEN);
     if (typeof env.is_error === "boolean") facts.cliIsError = env.is_error;
     if (typeof env.duration_api_ms === "number") facts.cliApiMs = env.duration_api_ms;
+    if (typeof env.terminal_reason === "string") facts.cliTerminalReason = sanitizeAndCap(env.terminal_reason, 80); // #6105
+    if (typeof env.session_id === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(env.session_id)) facts.cliSessionId = env.session_id; // #6105: what `--resume` takes
   } else if (typeof stdout === "string") {
     const m = /"duration_api_ms"\s*:\s*(\d+)/.exec(stdout.slice(0, 4096));
     if (m) facts.cliApiMs = Number(m[1]);
@@ -1693,6 +1698,10 @@ export function runCliBackend({
   // `mkdtempSync` succeeds — before `writeFileSync` runs — so a failure in
   // `writeFileSync` still leaves `tmpDir` set and the already-created
   // directory gets cleaned up.
+  // 2026-11-26: a NUL byte in the prompt (from a file read or tool output) made the spawn throw "args[1] must be a string without null bytes"
+  // (engine-error, lane held); NULs carry no meaning in a prompt, so they are dropped from both the prompt and the system prompt
+  if (typeof userMessage === "string" && userMessage.includes("\0")) userMessage = userMessage.replace(/\0/g, "");
+  if (typeof systemPrompt === "string" && systemPrompt.includes("\0")) systemPrompt = systemPrompt.replace(/\0/g, "");
   let tmpDir = null;
   // forge#4129: a prompt over the argv bound is sent on stdin instead of as the `--print` argument.
   // forge#4763: the other argv (flags, system-prompt file path) counts toward the Windows command-line cap.
@@ -1943,6 +1952,8 @@ export function runCliBackend({
       // forge#5762: keep the CLI's own result text; an exit that never reached the API and is no login or limit is transient.
       Object.assign(err, cliFailureFacts(stdout));
       if (!err.usageLimit && !err.authFailure && err.cliApiMs === 0 && result.status === 1) err.cliFailed = true;
+      // forge#6105: a session that did real work and then ended is_error with an API terminal reason can be resumed by id (never a relaunch)
+      if (!err.usageLimit && !err.authFailure && !err.cliFailed && err.cliIsError === true && isApiTerminalReason(err.cliTerminalReason)) err.apiError = true;
       if (resetAt) {
         err.resetAt = resetAt;
         // forge#2524: also attach a machine-usable epoch-ms timestamp so

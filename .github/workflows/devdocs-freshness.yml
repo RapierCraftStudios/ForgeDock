@@ -8,6 +8,7 @@ name: Devdocs freshness
 
 on:
   pull_request:
+    branches: [main]  # PR CI only on release PRs; staging is checked on push (owner, 2026-11-27)
     types: [opened, synchronize, reopened, edited]
 
 permissions:

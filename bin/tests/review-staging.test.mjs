@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { reviewStagingFromCli, parseArgs, renderBrief, buildManifest, stagingVerdict, classifyChecks, cancelOnlyChecks, requiredSet, readConfig, CI_EXCLUDED_CHECKS } from "../review-staging.mjs";
+import { reviewStagingFromCli, parseArgs, renderBrief, buildManifest, stagingVerdict, classifyChecks, cancelOnlyChecks, requiredSet, readConfig, CI_EXCLUDED_CHECKS, ciState } from "../review-staging.mjs";
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 const FROM = "fedcba9876543210fedcba9876543210fedcba98";
@@ -40,11 +40,14 @@ function world(o = {}) {
       if (k === "pr view") return `${o.head ?? HEAD}\n`;
       if (k === "pr comment") return "";
       if (a[0] === "api" && a.join(" ").includes("FORGE:SELFTEST")) { if (o.selftestErr) throw new Error(o.selftestErr); const row = (b) => JSON.stringify({ body: b, author_association: "OWNER", user: { login: "m", type: "User" } }); return o.selftest === undefined ? `${row(`<!-- FORGE:SELFTEST result=pass sha=${o.head ?? HEAD} step=none -->`)}\n` : o.selftest.split("\n").filter(Boolean).map((l) => row(JSON.parse(l))).join("\n"); }
+      if (a[0] === "api" && a.join(" ").includes("/rules/branches")) return "";
+      if (a[0] === "api" && a.join(" ").includes("required_status_checks")) { if (o.required) return JSON.stringify({ contexts: o.required }); throw new Error("HTTP 404 Not Found"); }
       if (a[0] === "api") return o.priorRoutes ?? "0\n";
       if (k === "issue list") return JSON.stringify(a.includes("open") ? [{ number: 7, title: "bug (PR #42)", body: "" }, { number: 8, title: "bug (PR #420)", body: "" }] : []);
       throw new Error(`unexpected gh ${a.join(" ")}`);
     },
     run: async (cmd, args, opts) => {
+      if (cmd === "gh") { w.gh.push(args); return { code: o.ciCode ?? 0, stdout: o.ci ?? "[]", stderr: "" }; } // pre-dispatch CI read
       const script = args[0].split("/").pop(), sub = args[1];
       w.scripts.push({ script, sub, args, env: opts.env });
       if (script === "review-staging-pre.sh" && sub === "bundle") { w.files[`${SD}/42_bundle-prs.txt`] = o.bundlePrs ?? "5\n"; return { code: 0, stdout: "PRs in staging→main bundle: 5", stderr: "" }; }
@@ -69,7 +72,7 @@ const comments = (w) => w.gh.filter((a) => a[0] === "pr" && a[1] === "comment").
 
 describe("review-staging args", () => {
   it("accepts a number, a PR URL, --thorough and --json", () => {
-    assert.deepEqual(parseArgs(["42"]), { pr: 42, thorough: false, json: false, mode: "pre", testGateOutput: null, notesDropped: 0, filed: [], delta: null, domain: null, bodyFile: null });
+    assert.deepEqual(parseArgs(["42"]), { pr: 42, thorough: false, json: false, mode: "pre", testGateOutput: null, notesDropped: 0, filed: [], delta: null, domain: null, bodyFile: null, allowCiPending: false, gateOnly: false });
     assert.equal(parseArgs(["https://github.com/o/r/pull/77", "--json"]).pr, 77);
     assert.equal(parseArgs([]).pr, null);
     assert.equal(parseArgs(["--thorough"]).thorough, true);
@@ -333,7 +336,7 @@ const flagOf = (args, f) => args[args.indexOf(f) + 1];
 
 describe("review-staging post-dispatch args", () => {
   it("parses --finalize/--summary and their options", () => {
-    assert.deepEqual(parseArgs(["42", ...FIN, "--notes-dropped", "2"]), { pr: 42, thorough: false, json: false, mode: "finalize", testGateOutput: "tg.txt", notesDropped: 2, filed: [], delta: null, domain: null, bodyFile: null });
+    assert.deepEqual(parseArgs(["42", ...FIN, "--notes-dropped", "2"]), { pr: 42, thorough: false, json: false, mode: "finalize", testGateOutput: "tg.txt", notesDropped: 2, filed: [], delta: null, domain: null, bodyFile: null, allowCiPending: false, gateOnly: false });
     assert.deepEqual(parseArgs(["--summary", "--filed", "101", "--filed", "#102,103"]).filed, [101, 102, 103]);
   });
   it("rejects bad combinations with exit 2 and touches nothing", async () => {
@@ -810,5 +813,52 @@ describe("readConfig gate.required_checks (#5504)", () => {
     const extra = readConfig(cfgIo('  required_checks: ["CI"]\n')).extraRequiredChecks;
     const ck = [{ name: "CI", bucket: "pass" }, { name: "macos", bucket: "fail" }];
     assert.deepEqual(classifyChecks(ck, requiredSet({ checks: [] }, extra)), { blocking: 0, warnings: ["macos"] });
+  });
+});
+
+describe("pre-dispatch refuses until CI is green (#6164)", () => {
+  const ck = (rows) => JSON.stringify(rows.map(([name, bucket]) => ({ name, bucket, link: "" })));
+  const blockerOf = (w) => w.err.concat(w.out).join("\n");
+  it("ciState lists pending (incl. required-but-unreported) and failing required checks; excluded checks never count", () => {
+    const st = ciState([{ name: "build", bucket: "pending" }, { name: "lint", bucket: "fail" }, { name: "forge/deploy-gate", bucket: "fail" }], ["build", "lint", "e2e"]);
+    assert.deepEqual(st, { pending: ["build", "e2e"], failing: ["lint"], green: false });
+    assert.equal(ciState([{ name: "build", bucket: "pass" }], ["build"]).green, true);
+    assert.equal(ciState([{ name: "build", bucket: "pass" }, { name: "build", bucket: "cancel" }], []).green, true, "a pass beats a cancelled duplicate (#5502)");
+  });
+  it("a pending required check refuses after the open-finding gate, naming the sha", async () => {
+    const w = world({ ci: ck([["build", "pending"], ["lint", "fail"]]), required: ["build", "lint"] });
+    assert.equal(await reviewStagingFromCli(["42"], w.io), 1);
+    assert.match(blockerOf(w), new RegExp(`REVIEW_RESULT: status: BLOCKED, blocker: CI not green on ${HEAD.slice(0, 7)} \\(pending: build, failing: lint\\); review starts after CI is green`));
+    assert.deepEqual(w.scripts.map((x) => x.sub), ["bundle", "gate"], "the open-finding gate runs first; no scope, prepare or briefs after the CI refusal");
+  });
+  it("applies to --delta too", async () => {
+    const w = world({ ci: ck([["build", "fail"]]), required: ["build"] });
+    assert.equal(await reviewStagingFromCli(["42", "--delta", "f".repeat(40)], w.io), 1);
+    assert.match(blockerOf(w), /CI not green on/);
+  });
+  it("an open-finding block wins over CI: the gate runs first and CI is never read", async () => {
+    const w = world({ gate: { code: 1, stdout: "RESULT: BLOCK DEPLOY", stderr: "" }, ci: ck([["build", "pending"]]), required: ["build"] });
+    assert.equal(await reviewStagingFromCli(["42"], w.io), 1);
+    assert.ok(!w.gh.some((a) => a[0] === "pr" && a[1] === "checks"));
+  });
+  it("--gate-only runs bundle and gate only (no route marker, no CI read, no briefs)", async () => {
+    const w = world();
+    assert.equal(await reviewStagingFromCli(["42", "--gate-only"], w.io), 0, w.err.join("\n"));
+    assert.deepEqual(w.scripts.map((x) => x.sub), ["bundle", "gate"]);
+    assert.deepEqual(comments(w), []);
+    assert.match(w.out.join("\n"), /OPEN_FINDING_GATE: PASS on PR #42/);
+  });
+  it("green CI proceeds; --allow-ci-pending overrides and is recorded in the route marker", async () => {
+    const ok = world({ ci: ck([["build", "pass"]]), required: ["build"] });
+    assert.equal(await reviewStagingFromCli(["42"], ok.io), 0, ok.err.join("\n"));
+    assert.ok(!comments(ok)[0].includes("allow_ci_pending"));
+    const w = world({ ci: ck([["build", "pending"]]), required: ["build"] });
+    assert.equal(await reviewStagingFromCli(["42", "--allow-ci-pending"], w.io), 0, w.err.join("\n"));
+    assert.match(comments(w)[0], /sha=0123456 allow_ci_pending=true -->$/);
+  });
+  it("an unreadable CI read fails closed; --allow-ci-pending belongs to the pre-dispatch", async () => {
+    const w = world({ ciCode: 1, ci: "" });
+    assert.equal(await reviewStagingFromCli(["42"], w.io), 1);
+    assert.equal(await reviewStagingFromCli(["42", "--summary", "--allow-ci-pending"], world().io), 2);
   });
 });

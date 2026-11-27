@@ -48,6 +48,39 @@ describe("forgedock pool (#4544)", () => {
     const ups = s.calls.filter((c) => c.method === "POST");
     assert.deepEqual(ups.map((c) => c.path), ["/agents/a1/upgrade"]);
   });
+  describe("upgrade guard (#5726)", () => {
+    const agents = (active) => ({ ok: true, status: 200, data: { agents: [{ name: "a1", active }] } });
+    const runDeps = async (argv, s, r, deps) => {
+      const log = console.log; console.log = () => {};
+      try { await poolFromCli([...argv, "--config", s.config], { poolDeps: { call: s.reply(r), ...deps } }); } finally { console.log = log; }
+    };
+    it("pool upgrade refuses while sandboxes are active", async () => {
+      const s = setup();
+      await assert.rejects(run(["upgrade", "a1"], s, agents(2)), /2 active sandbox/);
+      assert.deepEqual(s.calls.filter((c) => c.method === "POST"), []);
+    });
+    it("pool upgrade --wait polls until idle then upgrades, and times out", async () => {
+      const s = setup(); let polls = 0, t = 0;
+      const deps = { sleep: async (ms) => { t += ms; }, now: () => t, pollMs: 1000 };
+      await runDeps(["upgrade", "a1", "--wait"], s, (m, path) => (m === "GET" ? agents(++polls < 3 ? 1 : 0) : { ok: true, status: 200, data: {} }), deps);
+      assert.equal(polls, 3);
+      assert.deepEqual(s.calls.filter((c) => c.method === "POST").map((c) => c.path), ["/agents/a1/upgrade"]);
+      const s2 = setup(); t = 0;
+      await assert.rejects(runDeps(["upgrade", "a1", "--wait", "--timeout", "3"], s2, agents(1), deps), /after 3s/);
+      assert.deepEqual(s2.calls.filter((c) => c.method === "POST"), []);
+    });
+    it("pool upgrade --now posts force:true; idle or unreported active upgrades as before", async () => {
+      const s = setup(); const bodies = [];
+      const reply = async (base, method, path, o) => { if (method === "POST") bodies.push(o.body); return agents(3); };
+      await poolFromCli(["upgrade", "a1", "--now", "--config", s.config], { poolDeps: { call: reply } });
+      assert.deepEqual(bodies, [{ force: true }]);
+      for (const a of [0, undefined]) { const s3 = setup(); await runDeps(["upgrade", "a1"], s3, agents(a)); assert.equal(s3.calls.filter((c) => c.method === "POST").length, 1); }
+    });
+    it("a router 409 fails naming the active count", async () => {
+      const s = setup();
+      await assert.rejects(run(["upgrade", "a1"], s, (m) => (m === "GET" ? agents(undefined) : { ok: false, status: 409, data: { active: 4 } })), /4 active sandbox/);
+    });
+  });
   it("remove deletes the named agent; needs a name; surfaces router errors", async () => {
     const s = setup();
     const { out } = await run(["remove", "a1"], s, { ok: true, status: 200, data: {} });
@@ -165,5 +198,19 @@ describe("forgedock pool (#4544)", () => {
   });
   it("an unknown verb is a usage error", async () => {
     await assert.rejects(poolFromCli(["bogus"], { poolDeps: {} }), /usage: forgedock pool/);
+  });
+});
+
+describe("#6062 statusTable usage and queue columns", () => {
+  const base = { name: "w1", cpus_total: 8, cpus_free: 4, mem_total_gb: 16, mem_free_gb: 8, active: 1 };
+  it("shows used vs admitted and queue p50/p95, '-' when absent", async () => {
+    const { statusTable } = await import("../pool/cli.mjs");
+    const lines = statusTable([
+      { ...base, usage_summary: { lanes: 1, admitted: { cpus: 4, mem_gb: 8 }, used: { cpu_avg: 1.5, mem_avg_gb: 3 } }, queue_wait: { p50_ms: 2000, p95_ms: 9000 } },
+      { ...base, name: "w2" }, { name: "w3", ok: false }]).split("\n");
+    assert.match(lines[0], /USED cpu\/mem vs admitted\s+QUEUE p50\/p95 s/);
+    assert.match(lines[1], /1\.5\/3 vs 4\/8\s+2\/9$/);
+    assert.match(lines[2], /-\s+-$/);
+    assert.match(lines[3], /unreachable\s+-\s+-$/);
   });
 });

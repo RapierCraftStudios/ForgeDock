@@ -36,6 +36,23 @@ describe("selector reconcile (R2, R13)", () => {
     const d = diffSelection({ open: [{ number: 5 }], members: [5, 7, 9], pending: [7, 9], running: new Set(), results: new Map(), matched: new Set([5, 7]) });
     assert.deepEqual(d, { join: [], leave: [7] });
   });
+  it("#6029 a selector-matched member closed during a resume's downtime leaves; unmatched pending members still run", async () => {
+    const saves = [];
+    const store = { load: () => ({ v: 1, order: [7, 9], pending: [7, 9], results: {}, selMatched: [7] }), save: (s) => saves.push(s), log: () => {} };
+    const ac = new AbortController();
+    let polls = 0;
+    const r = await harness({ issues: [], reconcile: { everyMs: 5000, list: async () => { if (++polls >= 3) ac.abort(); return [{ number: 9 }]; } }, extra: { store, signal: ac.signal } });
+    assert.deepEqual(r.calls, [9]);
+    assert.ok(r.rows.find((x) => x.issue === 7)?.outcome !== "merged");
+    assert.ok(saves.some((s) => Array.isArray(s.selMatched) && s.selMatched.includes(9)), "save() persists selMatched");
+  });
+  it("#6029 old state without selMatched restores an empty set: a closed pending member does not leave", async () => {
+    const store = { load: () => ({ v: 1, order: [7], pending: [7], results: {} }), save: () => {}, log: () => {} };
+    const ac = new AbortController();
+    let polls = 0;
+    const r = await harness({ issues: [], reconcile: { everyMs: 5000, list: async () => { if (++polls >= 3) ac.abort(); return []; } }, extra: { store, signal: ac.signal } });
+    assert.deepEqual(r.calls, [7]);
+  });
   it("a failed read leaves nothing (parseSelected null)", () => {
     assert.equal(parseSelected("not json"), null);
     assert.deepEqual(parseSelected('[{"number":3,"labels":[{"name":"x"}]}]'), [{ number: 3, labels: ["x"] }]);

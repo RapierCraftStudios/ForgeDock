@@ -419,6 +419,9 @@ export async function requiredChecksRead({ gh, repo, lane }) {
 
 export const requiredChecksFor = async (opts) => (await requiredChecksRead(opts)).checks;
 
+/** Command-failure messages keep short args verbatim and replace any longer than 200 chars with its length, so stderr stays visible. */
+export const elideArgs = (args) => (args ?? []).map((a) => { const t = String(a); return t.length > 200 ? `<${t.length} chars>` : t; }).join(" ");
+
 /** #5592: stdout cap of a lane-path git/gh/docker call; output past it is cut, never an error. */
 export const EXEC_CAPPED_BYTES = 100 * 1024 * 1024;
 /**
@@ -444,7 +447,8 @@ export function execCapped(bin, args, { cwd, env, timeout = 120000, cap = EXEC_C
       if (timer) clearTimeout(timer);
       const out = Buffer.concat(chunks).toString("utf8") + (cut ? `\n[forgedock: output truncated at ${cap} bytes]\n` : "");
       if (cut || code === 0) return res(out);
-      const e = new Error(`Command failed: ${bin} ${args.join(" ")}${timedOut ? " (timed out)" : ""}\n${err}`);
+      // 2026-11-26: a long argument (a --body of a FORGE:CONTRACT) filled the recorded detail and hid stderr, the actual reason
+      const e = new Error(`Command failed: ${bin} ${elideArgs(args)}${timedOut ? " (timed out)" : ""}\n${err}`);
       Object.assign(e, { code: timedOut ? null : code, signal, killed: timedOut, stdout: out, stderr: err });
       rej(e);
     });
@@ -463,12 +467,26 @@ export async function reapContainers(label, { timeoutMs = 20000, env = process.e
   } catch { return []; }
 }
 
+/**
+ * #6117: `path` with the system dirs appended when missing. A lane env whose PATH holds only toolchain pins (`/opt/x`) made
+ * the preflight probe's `spawn("bash")` ENOENT (rc 127), parking the lane "Remote sandbox lacks bash" while /usr/bin/bash existed.
+ * Appended last, so a pinned tool still wins and nothing already on the PATH moves. Not applied on Windows.
+ */
+export const SYSTEM_DIRS = Object.freeze(["/usr/local/bin", "/usr/bin", "/bin"]);
+export function withSystemDirs(path, { platform = process.platform } = {}) {
+  if (platform === "win32") return path;
+  const have = String(path ?? "").split(":").filter(Boolean);
+  return [...have, ...SYSTEM_DIRS.filter((d) => !have.includes(d))].join(":");
+}
+
 export function runCheckCommand({ command, cwd, timeoutMs = 300000, env = null, graceMs = 2000 }) {
   const reapLabel = `forgedock.reap=${randomBytes(8).toString("hex")}`;
   const inner = new Promise((finish) => {
     let out = "", timedOut = false, child;
     const add = (b) => { out += String(b); if (out.length > 2 * CHECK_OUTPUT_CAP) out = out.slice(-CHECK_OUTPUT_CAP); };
-    try { child = spawn("bash", ["-c", String(command)], { cwd, detached: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...(env ?? {}), FORGE_REAP_LABEL: reapLabel } }); }
+    const childEnv = { ...process.env, ...(env ?? {}), FORGE_REAP_LABEL: reapLabel };
+    childEnv.PATH = withSystemDirs(childEnv.PATH); // #6117
+    try { child = spawn("bash", ["-c", String(command)], { cwd, detached: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: childEnv }); }
     catch (e) { finish({ rc: 127, output: String(e?.message ?? e) }); return; }
     const kill = (sig) => { try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch { /* gone */ } } };
     const timer = setTimeout(() => { timedOut = true; kill("SIGTERM"); setTimeout(() => kill("SIGKILL"), graceMs).unref(); }, timeoutMs);
@@ -534,11 +552,11 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
      * #5820: the scripts/ci-local plan of the lane's change (CI definitions from the base ref plus the lane's edits, change
      * scoped), in a child process so the yq calls never block the lane. Rejects with ci-local's DEGRADED reason (no yq).
      */
-    async ciLocalPlan({ repo: wt, base, baseBranch, files = [] }) {
+    async ciLocalPlan({ repo: wt, base, baseBranch, releaseBranch = "", files = [] }) {
       const list = join(wt, ".forge-lean", "ci-precheck", "files.txt");
       mkdirSync(dirname(list), { recursive: true }); writeFileSync(list, `${files.join("\n")}\n`);
       try {
-        const { stdout } = await pexec(process.execPath, [script("ci-local/cli.mjs"), "plan", "--repo", wt, "--base", base, "--base-branch", baseBranch, "--files-from", list, "--json"], { cwd: wt, timeout: 120000, maxBuffer: 64 * 1024 * 1024 });
+        const { stdout } = await pexec(process.execPath, [script("ci-local/cli.mjs"), "plan", "--repo", wt, "--base", base, "--base-branch", baseBranch, ...(releaseBranch ? ["--release-branch", releaseBranch] : []), "--files-from", list, "--json"], { cwd: wt, timeout: 120000, maxBuffer: 64 * 1024 * 1024 });
         return JSON.parse(String(stdout));
       } catch (e) {
         const why = /CI_LOCAL_RESULT: DEGRADED reason=(.*)/.exec(String(e?.stdout ?? ""))?.[1] ?? String(e?.stderr || e?.message || e).split("\n")[0];
@@ -728,22 +746,6 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
         const headOutput = outDir ? tailOf("head.out") : undefined, baseOutput = outDir ? tailOf("base.out") : undefined;
         return { base: m[1], head: m[2], ...(m[3] ? { pristine: m[3] } : {}), ...(headOutput != null ? { headOutput } : {}), ...(baseOutput != null ? { baseOutput } : {}) }; // #5544: pristine only when the base's own test version failed
       } catch { return null; } finally { if (outDir) rmSync(outDir, { recursive: true, force: true }); }
-    },
-    /**
-     * The target repo's own docs-move-with-code rule, when it has one (scripts/check-devdocs-freshness.sh, forge#4185),
-     * over base...HEAD in cwd. null when the repo has no such script or it cannot run (exit 2+, timeout): never blocks.
-     * Otherwise {ok, output} with the script's stdout+stderr (exit 0 = ok, exit 1 = stale docs).
-     */
-    async docsFreshness({ cwd, base }) {
-      const s = join(cwd, "scripts", "check-devdocs-freshness.sh");
-      if (!existsSync(s)) return null;
-      try {
-        const r = await pexec("bash", [s, base], { cwd, timeout: 60000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, PR_BODY: "" } });
-        return { ok: true, output: String(r.stdout ?? "") };
-      } catch (e) {
-        if (e?.code !== 1) return null;
-        return { ok: false, output: `${e.stdout ?? ""}${e.stderr ?? ""}`.slice(0, 6000) };
-      }
     },
     /** #5825: is the lane folder a worktree of this repo (toplevel + common dir), and moving aside a folder that is not. */
     confine: { verify: ({ wt, cwd }) => verifyLaneWorktree({ git: run("git"), exists: async (p) => existsSync(p), wt, cwd }), quarantine: async ({ wt }) => quarantineDir(wt) },
