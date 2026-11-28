@@ -78,6 +78,15 @@ describe("merge ledger keying (#6230)", () => {
     const fp = (repo) => mergeRecords([{ id: `b20261123-000000-${repo}`, repo: `o/${repo}`, created: T0, rows }], ledgers)[0].firstPass;
     assert.deepEqual([fp("a"), fp("b")], [true, false]);
   });
+  it("reads a legacy bare ledger only for a repo-less batch", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ml-")), led = JSON.stringify({ event: "MERGE_LEDGER", first_pass: false, ts: "2026-11-23T01:00:00Z" }) + "\n";
+    writeFileSync(join(dir, "5.jsonl"), led);
+    const ledgers = readMergeLedgers({ home: dir, env: { FORGE_RUNS_DIR: dir } });
+    const rows = [{ t: T0 + M, outcome: "merged", issue: 5, pr: 1, wall_ms: M }];
+    const fp = (repo) => mergeRecords([{ id: "b20261123-000000-x", repo, created: T0, rows }], ledgers)[0].firstPass;
+    assert.equal(fp(null), false);
+    assert.notEqual(fp("o/a"), false);
+  });
 });
 
 describe("escape linker", () => {
