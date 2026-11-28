@@ -116,6 +116,10 @@ describe("pre-filter (#4123)", () => {
     assert.equal(prodFailureSignal([status]), null);
     assert.equal(prodFailureSignal([{ ...owner, body: "<!-- FORGE:DECISION -->\nDeploy window moved to Friday.\nThe flaky test failed once on CI." }]), null);
     assert.ok(prodFailureSignal([status, decision]), "a real production-failure decision still blocks next to the status comment");
+    // #6297: the engine's own park notice quotes the guard's prose ("FORGE:DECISION comment ... failing in production") and must not re-trigger it
+    const parked = { ...bot, body: "<!-- FORGE:PARKED code=builder.no_evidence -->\n## Parked\nBuilder reported \"already-fixed\", but a trusted comment records the fix failing in production (FORGE:DECISION comment by rapiercraft-forgedock records the fix failing in production: https://x)" };
+    assert.equal(prodFailureSignal([parked]), null);
+    assert.equal(prodFailureSignal([{ ...owner, body: "Note: FORGE:DECISION in prose, deployed fix failing in production" }]), null, "prose without the marker is no signal");
     assert.ok(prodFailureSignal([{ ...decision, author: { login: "me" }, authorAssociation: "NONE" }], ["me"]), "an own login is trusted");
     assert.equal(prodFailureSignal([{ ...owner, body: "<!-- FORGE:DECISION -->\nKeep the retry budget at 3." }]), null);
     assert.equal(prodFailureSignal([{ ...owner, body: "Verified failing in prod" }]), null, "no marker, no signal");
