@@ -27,7 +27,7 @@ ENV NODE_OPTIONS=--dns-result-order=ipv4first IS_SANDBOX=1 DEBIAN_FRONTEND=nonin
 # lane_tools variant builds FROM this image (#6187).
 RUN echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git jq xz-utils build-essential python3 python3-venv python3-dev python3-yaml gnupg pkg-config libpq-dev \
+      ca-certificates curl git jq xz-utils build-essential python3 python-is-python3 python3-pip python3-pytest python3-venv python3-dev python3-yaml gnupg pkg-config libpq-dev \
       shellcheck xvfb xauth postgresql-client redis-tools \
     && install -d -m 0755 /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli.gpg \
@@ -41,7 +41,7 @@ RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-l
     && mv "/opt/node-v${NODE_VERSION}-linux-x64" /opt/node \
     && NODE_OPTIONS=--dns-result-order=ipv4first npm install -g --include=optional "corepack@${COREPACK_VERSION}" "forgedock@${FORGEDOCK_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force \
-    && claude --version && forgedock --version   # smoke: a missing native binary (failed optional download) fails the build, never a lane
+    && claude --version && forgedock --version && python --version && python -m pytest --version && pip --version   # smoke: a missing native binary (failed optional download) fails the build, never a lane
 
 RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | env UV_INSTALL_DIR=/usr/local/bin sh \
     && uv tool install "poetry==${POETRY_VERSION}" \
