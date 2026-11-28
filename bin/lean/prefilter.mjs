@@ -96,10 +96,13 @@ export function prodFailureSignal(comments, own = [bareLogin(APP_SLUG)]) {
     const body = String(c?.body ?? "");
     if (!PROD_MARKER_RE.test(body) || !(trusted(c) || mine.has(bareLogin(loginOf(c))))) continue;
     const probe = probeResultOf(body);
-    const text = noComments(body, " ");
-    const failed = probe ? probe.result === "fail" : PROD_RE.test(text) && PROD_FAIL_RE.test(text) && !PROD_OK_RE.test(text);
+    // #6292: the batch runner's own scheduling sections ("## Decision (batch ...)": requeue, relaunch, dependency edges)
+    // never record a production outcome; and production + failure wording must share a line, not just the comment.
+    const text = noComments(body, " ").split(/^(?=## Decision \(batch )/m).filter((sec) => !/^## Decision \(batch /.test(sec)).join("\n");
+    const prodFailLine = (l) => PROD_RE.test(l) && PROD_FAIL_RE.test(l) && !PROD_OK_RE.test(l);
+    const failed = probe ? probe.result === "fail" : text.split("\n").some(prodFailLine);
     if (failed) {
-      const line = text.split("\n").map((l) => l.trim()).find((l) => PROD_FAIL_RE.test(l)) ?? text.trim();
+      const line = text.split("\n").map((l) => l.trim()).find((l) => (probe ? PROD_FAIL_RE.test(l) : prodFailLine(l))) ?? text.trim();
       const kind = probe ? "FORGE:PROBE" : /FORGE:VERIFIED/.test(body) ? "FORGE:VERIFIED" : "FORGE:DECISION";
       hit = { why: `${kind} comment by ${loginOf(c) || "unknown"} records the fix failing in production`, url: c?.url ?? null, excerpt: line.replace(/\s+/g, " ").slice(0, 200) };
     } else if (probe?.result === "pass" || (!probe && /FORGE:VERIFIED/.test(body))) hit = null;

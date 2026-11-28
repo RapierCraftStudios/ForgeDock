@@ -508,6 +508,13 @@ export function mockedDeliverable(reason, deliverables) {
   }
   return null;
 }
+/** #6288: a no-repro row's reason, wherever the builder put it: `reason` (canonical), a common alias, or inline after "no-repro:". */
+export const isNoRepro = (repro) => /^no-repro\b/i.test(String(repro ?? "").trim());
+export function noReproReason(t) {
+  for (const k of ["reason", "repro_reason", "no_repro_reason", "noReproReason"]) if (typeof t?.[k] === "string" && t[k].trim()) return t[k].trim();
+  const inline = /^no-repro\b\s*[:(\-–—]\s*(.+?)\)?\s*$/is.exec(String(t?.repro ?? "").trim());
+  return inline ? inline[1].trim() : "";
+}
 const TEST_PLAN_RULES = [["test_plan.mock", /level_reason mocks /], ["test_plan.echo", /proof restates a deliverable/], ["test_plan.proof", /test_plan proof /], ["test_plan.level", /test_plan level/], ["test_plan.repro", /test_plan (?:repro|no-repro)/], ["test_plan.command", /test_plan (?:needs the exact command|command)/], ["test_plan.row", /test_plan (?:needs a row|row |must be an array)/]];
 /** #5587: the rule id of a contract problem for `contract.invalid` telemetry: a test_plan rule, else "other". Pure. */
 export const contractRuleId = (problem) => TEST_PLAN_RULES.find(([, re]) => re.test(String(problem)))?.[0] ?? "other";
@@ -544,7 +551,7 @@ export function testPlanProblems(c, { required = false } = {}) {
       if (mocked) problems.push(`${id}: test_plan level_reason mocks \"${mocked.phrase}\", which is in deliverable ${mocked.id}; level_reason must not contain the words mock/stub/fake unless negated or aimed outside the deliverables; describe the real component exercised and where the I/O boundary is; allowed: a real instance of ${mocked.id}'s component, with stubs only at its I/O boundary (clock, network, browser factory) and, for DB code, a real database session`);
     }
     if (blank(t.repro)) problems.push(`${id}: test_plan repro must be a test id (red on base, green on head) or "no-repro" with a reason; a test id is a file path plus test name, e.g. \`tests/test_scrape.py::test_listing_returns_json\` or \`test/scrape.test.js#listing returns json\`, not a sentence`);
-    else if (/^no-repro$/i.test(String(t.repro).trim()) && blank(t.reason)) problems.push(`${id}: test_plan no-repro needs a reason the reviewer can reject`);
+    else if (isNoRepro(t.repro) && blank(noReproReason(t))) problems.push(`${id}: test_plan no-repro needs a reason the reviewer can reject: set "reason" on this test_plan row (or write repro as "no-repro: <reason>"), naming the probe run and what it observed`);
     if (blank(t.command)) problems.push(`${id}: test_plan needs the exact command validate runs`);
     else {
       for (const p of tmpdirInputs(t.command)) problems.push(tmpInputProblem(id, p));
@@ -1966,7 +1973,7 @@ export function unverifiedRequirements(contract, { runs = [], reruns = null, ciC
  * of `file::Class::name`, `file#name` or `Class.name`). A repro of "no-repro" names nothing.
  */
 function planRowRefs(row) {
-  const repro = /^no-repro$/i.test(String(row?.repro ?? "").trim()) ? "" : String(row?.repro ?? "").replace(/[`'"]/g, "").trim();
+  const repro = isNoRepro(row?.repro) ? "" : String(row?.repro ?? "").replace(/[`'"]/g, "").trim();
   const toks = `${repro} ${row?.command ?? ""}`.split(/[\s,;]+/).map((t) => t.replace(/(?:::|#).*$/, "")).filter((t) => t && isTestPath(t));
   const nm = repro.split(/\s+/)[0]?.split(/::|#/).filter(Boolean).pop() ?? "";
   const name = /^[A-Za-z_][\w.$ -]{2,}$/.test(nm) && !isTestPath(nm) ? nm.split(".").pop() : "";
