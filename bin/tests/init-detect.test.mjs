@@ -737,14 +737,18 @@ it("#5450 detectSandboxes proposes postgres/redis images, compose services and a
 import { detectDocker } from "../init-detect.mjs";
 it("#6196 detectSandboxes proposes pool `docker: true` when tests or compose reference docker/testcontainers/postgres images", () => {
   const files = { "/p/tests/db.test.mjs": "import { GenericContainer } from 'testcontainers';" };
-  const fs = { existsSync: (f) => f === "/p/tests" || f in files, readFileSync: (f) => files[f], readdirSync: (d) => (d === "/p/tests" ? [{ name: "db.test.mjs", isDirectory: () => false }] : []) };
+  const fs = { existsSync: (f) => f === "/p/tests" || f in files, readFileSync: (f) => files[f], readdirSync: (d) => (d === "/p" ? [{ name: "tests", isDirectory: () => true }] : d === "/p/tests" ? [{ name: "db.test.mjs", isDirectory: () => false }] : []) };
   assert.equal(detectDocker("/p", fs), true);
   assert.match(sandboxesProposalYaml(detectSandboxes("/p", fs)), /^#   docker: true$/m);
   const cfs = { existsSync: (f) => f === "/c/compose.yml", readFileSync: () => "services:\n  db:\n    image: postgres:16\n" };
   assert.equal(detectDocker("/c", cfs), true);
+  // a python test nested under a package is found too
+  const pf = { "/y/svc/tests/test_db.py": "def test(): run('docker run postgres:16')" };
+  const pfs = { existsSync: () => false, readFileSync: (f) => pf[f], readdirSync: (d) => (d === "/y" ? [{ name: "svc", isDirectory: () => true }] : d === "/y/svc" ? [{ name: "tests", isDirectory: () => true }] : d === "/y/svc/tests" ? [{ name: "test_db.py", isDirectory: () => false }] : []) };
+  assert.equal(detectDocker("/y", pfs), true);
   // negative: no docker reference anywhere
   const nfiles = { "/n/tests/a.test.mjs": "assert.equal(1, 1) // a dockerfile is mentioned only as a word" };
-  const nfs = { existsSync: (f) => f === "/n/tests" || f in nfiles, readFileSync: (f) => nfiles[f], readdirSync: () => [{ name: "a.test.mjs", isDirectory: () => false }] };
+  const nfs = { existsSync: (f) => f === "/n/tests" || f in nfiles, readFileSync: (f) => nfiles[f], readdirSync: (d) => (d === "/n" ? [{ name: "tests", isDirectory: () => true }] : [{ name: "a.test.mjs", isDirectory: () => false }]) };
   assert.equal(detectDocker("/n", nfs), false);
   assert.doesNotMatch(sandboxesProposalYaml(detectSandboxes("/n", nfs)), /docker: true/);
 });

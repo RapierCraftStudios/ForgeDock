@@ -535,26 +535,27 @@ export function detectSandboxes(cwd, fs = { existsSync, readFileSync }) {
 
 // #6196: docker/testcontainers/postgres-image references in test files or compose files => propose the pool repo entry `docker: true`
 const DOCKER_REF_RE = /testcontainers|\bdocker(?:-compose)?\s+(?:run|compose|exec)\b|\bpostgres:\d|pgvector\/pgvector|image present locally/i;
-const DOCKER_TEST_DIRS = ["tests", "test", "__tests__", "spec", "scripts"];
-const DOCKER_TEST_FILE_RE = /(?:\.(?:test|spec)\.[cm]?[jt]sx?|(?:^|\/)test_[^/]*\.py|_test\.(?:py|go)|\.sh)$/;
-/** True when a compose file or a (bounded scan of) test file references docker, testcontainers or a postgres image. Pure over `fs`; readdirSync is optional. */
+const DOCKER_SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", "vendor", ".venv", "venv", "__pycache__", "target"]);
+const DOCKER_TEST_DIR_RE = /^(?:tests?|__tests__|specs?|e2e|integration|scripts)$/i;
+const DOCKER_TEST_FILE_RE = /(?:\.(?:test|spec)\.[cm]?[jt]sx?|(?:^|\/)test_[^/]*\.py|(?:^|\/)conftest\.py|_test\.(?:py|go|rb)|Tests?\.java|\.sh)$/;
+/** True when a compose file or a (bounded scan of the repo's) test file references docker, testcontainers or a postgres image. Pure over `fs`; readdirSync is optional. */
 export function detectDocker(cwd, fs = { existsSync, readFileSync, readdirSync }, compose = COMPOSE_FILES.find((f) => fs.existsSync(join(cwd, f)))) {
   const read = (f) => { try { return String(fs.readFileSync(f, "utf8")); } catch { return ""; } };
   if (compose && DOCKER_REF_RE.test(read(join(cwd, compose)))) return true;
   if (typeof fs.readdirSync !== "function") return false;
-  let budget = 200; // files read
-  const walk = (dir, depth) => {
+  let budget = 500; // files read
+  const walk = (dir, depth, inTests) => {
     let ents = [];
     try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return false; }
     for (const e of ents) {
       if (budget <= 0) return false;
       const full = join(dir, e.name);
-      if (e.isDirectory()) { if (depth < 3 && e.name !== "node_modules" && walk(full, depth + 1)) return true; }
-      else if (DOCKER_TEST_FILE_RE.test(e.name) && budget-- > 0 && DOCKER_REF_RE.test(read(full))) return true;
+      if (e.isDirectory()) { if (depth < 6 && !DOCKER_SKIP_DIRS.has(e.name) && walk(full, depth + 1, inTests || DOCKER_TEST_DIR_RE.test(e.name))) return true; }
+      else if ((DOCKER_TEST_FILE_RE.test(e.name) || (inTests && /\.(?:[cm]?[jt]sx?|py|go|rb|sh)$/.test(e.name))) && budget-- > 0 && DOCKER_REF_RE.test(read(full))) return true;
     }
     return false;
   };
-  return DOCKER_TEST_DIRS.some((d) => fs.existsSync(join(cwd, d)) && walk(join(cwd, d), 0));
+  return walk(cwd, 0, false);
 }
 
 /** The commented forge.yaml block for a detected proposal; "" when there is none. */
