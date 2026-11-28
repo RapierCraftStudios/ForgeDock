@@ -21,6 +21,9 @@ export const remoteLaneImage = (version) => `${LANE_REGISTRY_IMAGE}:${version}`;
 /** Tag carrying the image recipe hash, pushed beside the version tag (identifies the recipe independent of a version bump). */
 export const remoteRecipeImage = (recipe) => `${LANE_REGISTRY_IMAGE}:r-${recipe}`;
 
+/** Remote ref of a lane_tools variant: the local tag `<base>-t<12 hex>` published as `forgedock-lane:<version>-t<12 hex>` (#6187). */
+export const remoteVariantImage = (version, tag) => `${LANE_REGISTRY_IMAGE}:${version}${String(tag).slice(String(tag).lastIndexOf("-t"))}`;
+
 let pinDepth = 0; // concurrent pins share one /etc/hosts edit; the last one out removes it
 /**
  * Run `fn` with temporary /etc/hosts IPv4 pins for the registry hosts (lines tagged `# forgedock-ipv4-pin`), removed afterwards,
@@ -92,4 +95,13 @@ export async function provideLaneImage({ docker, image, version, recipe, publish
   }
   await withIpv4Fallback(build, { ...pinOpts, log });
   return "built";
+}
+
+/** Pull the published variant for local `tag` and retag it as `tag` (#6187). Rejects when the registry has none; the caller builds. */
+export async function pullVariantImage({ docker, tag, version, log = null, pinOpts = {} }) {
+  const remote = remoteVariantImage(version, tag);
+  await withIpv4Fallback(() => docker.pull(remote), { ...pinOpts, log });
+  await docker.tag(remote, tag);
+  log?.info?.(`${tag} pulled from ${remote}; no build`);
+  return true;
 }
