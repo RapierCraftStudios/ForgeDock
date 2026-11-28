@@ -347,8 +347,16 @@ export async function fixStep(ctx) {
     ctx.save();
     return { blocked: true, held: true, reason };
   }
-  if (res.ciFailing > 0) return blocked(`required checks of #${res.pr} are not green at ${String(res.head).slice(0, 7)} (${res.ciPendingOnly ? "pending" : "red"}); re-run the release: ci-green waits and fixes CI once, then one review pass`);
-  return blocked(`${res.verdict} (${res.marker}) on #${res.pr} at ${String(res.head).slice(0, 7)} with no blocking finding and no red CI: the gate summary names the blocker; read it and re-run the release`);
+  if (res.ciFailing > 0) return blockedForRerun(ctx, `required checks of #${res.pr} are not green at ${String(res.head).slice(0, 7)} (${res.ciPendingOnly ? "pending" : "red"}); re-run the release: ci-green waits and fixes CI once, then one review pass`);
+  return blockedForRerun(ctx, `${res.verdict} (${res.marker}) on #${res.pr} at ${String(res.head).slice(0, 7)} with no blocking finding and no red CI: the gate summary names the blocker; read it and re-run the release`);
+}
+
+/** #6175: a block that tells the operator to re-run must leave ci-green and review undone, else the resume re-reads the same stale review result. */
+function blockedForRerun(ctx, reason) {
+  delete ctx.state.steps["ci-green"];
+  delete ctx.state.steps.review;
+  ctx.save();
+  return blocked(reason);
 }
 
 /**
@@ -375,11 +383,11 @@ async function legacyFixStep(ctx) {
       if (s.err) return blocked(s.err);
       r = s.r;
       if (r.marker === "FORGE:GATE_PASS") break;
-      if (r.ciCancelOnly) return blocked(`required checks of #${r.pr} still cancelled after a rerun, with no failure to fix`);
+      if (r.ciCancelOnly) return blockedForRerun(ctx, `required checks of #${r.pr} still cancelled after a rerun, with no failure to fix`);
       continue;
     }
     // Required checks that are only still pending (#5519) have not failed: no CI issue or lane, the release re-runs once CI finishes.
-    if (!r.blocking?.length && r.ciFailing > 0 && r.ciPendingOnly) return blocked(`required checks of #${r.pr} still pending, with no failure to fix; re-run the release once CI finishes`);
+    if (!r.blocking?.length && r.ciFailing > 0 && r.ciPendingOnly) return blockedForRerun(ctx, `required checks of #${r.pr} still pending, with no failure to fix; re-run the release once CI finishes`);
     if (roundsAt(ctx.state, r.head) >= cfg.maxRounds) {
       const s = await secondRound(ctx, seam, r, cfg);
       if (s.blocked) return s;
