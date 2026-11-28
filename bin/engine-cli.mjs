@@ -56,6 +56,7 @@ import * as batchHealth from "./lean/batch-health.mjs";
 import { makeAttemptsSeam } from "./lean/attempts.mjs";
 import { cmpVersion } from "./pool/version.mjs";
 import * as _autoChildren from "./lean/autochildren.mjs";
+import { ensureFiledIssueDetailed, updateWaiters, withWaiters } from "./lean/filed-issue.mjs";
 
 /**
  * Workflow labels that mark an issue as "in the pipeline" (not yet terminal).
@@ -2759,19 +2760,26 @@ export function makeEnvIssue({ gh, repo }) {
     ensure: async ({ sig, code, issues = [], evidence = "", number = null }) => {
       const m = mark(sig);
       let no = Number.isInteger(number) ? number : null;
-      if (!no) {
-        const found = JSON.parse(await gh(["issue", "list", "-R", repo, "--state", "open", "--search", `"${m.slice(5, -4).trim()}" in:body`, "--json", "number,body", "--limit", "10"]) || "[]");
-        no = found.find((x) => String(x.body ?? "").includes(m))?.number ?? null;
-      }
-      if (!no) {
-        const out = await gh(["issue", "create", "-R", repo, "--title", `fix(env): ${code} (${sig.split("|")[1] ?? ""})`.slice(0, 120),
-          "--body", `Environment defect \`${code}\` (engine/env, not product code). Affected: ${list(issues)}. They wait on this issue and are requeued when it closes.\n\n\`\`\`\n${String(evidence).slice(0, 3000)}\n\`\`\`\n\n${m}`]);
-        no = Number(/\/issues\/(\d+)/.exec(String(out))?.[1]) || null;
+      if (no) {
+        try { await updateWaiters({ ghc: gh, repo, number: no, add: issues }); } catch { /* best effort */ }
       } else {
-        try { await gh(["issue", "comment", String(no), "-R", repo, "--body", `Affects ${list(issues)}.`]); } catch { /* best effort */ }
+        const body = withWaiters(`Environment defect \`${code}\` (engine/env, not product code). Affected: ${list(issues)}. They wait on this issue and are requeued when it closes.\n\n\`\`\`\n${String(evidence).slice(0, 3000)}\n\`\`\`\n\n${m}`, issues);
+        const r = await ensureFiledIssueDetailed({ ghc: gh, repo, key: m, title: `fix(env): ${code} (${sig.split("|")[1] ?? ""})`, body, occurrence: "" });
+        no = r.number;
+        if (no && !r.created) { try { await updateWaiters({ ghc: gh, repo, number: no, add: issues }); } catch { /* best effort */ } }
       }
       for (const i of issues) { try { await gh(["issue", "edit", String(i), "-R", repo, "--add-label", "waiting-dependency"]); } catch { /* best effort */ } }
       return no;
+    },
+    /** #6238: `issue` no longer waits on env issue `number`; closes it with a note when its waiter list empties. */
+    release: async ({ number, issue }) => {
+      const r = await updateWaiters({ ghc: gh, repo, number, remove: [issue] });
+      if (r.hadBlock && r.waiters.length === 0 && r.state === "OPEN") {
+        await gh(["issue", "comment", String(number), "-R", repo, "--body", `No issue waits on this any more (last: #${issue} closed, delivered or released). Closing; it reopens if the defect recurs.`]);
+        await gh(["issue", "close", String(number), "-R", repo]);
+        return true;
+      }
+      return false;
     },
     isClosed: async (number) => JSON.parse(await gh(["issue", "view", String(number), "-R", repo, "--json", "state"]))?.state === "CLOSED",
   };

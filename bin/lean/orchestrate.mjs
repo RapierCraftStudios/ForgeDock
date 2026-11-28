@@ -1959,8 +1959,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       return false;
     } catch { return true; }
   };
+  // #6238: a waiter that closes, is delivered or leaves the hold is removed from its env issue's waiter list (the seam closes the issue when none is left). Best effort; a no-op without `envIssue.release`.
+  const releaseEnvWaiter = async (row) => {
+    const no = row?.envHold?.envIssue;
+    if (!Number.isInteger(no) || typeof envIssue?.release !== "function") return;
+    try { await envIssue.release({ number: no, issue: row.issue }); } catch { /* best effort */ }
+  };
   // #5162: held rows behind `root` return to pending (and the root too when `withRoot`: requeued, counters reset), parents first via the edges.
   const releaseHeld = (root, withRoot, why) => {
+    for (const [, r] of results) if (r?.outcome === "held" && r.envHold && (r.root === root || (withRoot && r.issue === root))) void releaseEnvWaiter(r);
     const moved = withRoot && results.has(root) ? [root] : [];
     if (moved.length) results.delete(root);
     for (const [m, r] of [...results]) if (r?.outcome === "held" && r.root === root) { results.delete(m); moved.push(m); }
@@ -1992,6 +1999,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         let g = null;
         try { g = (await dispatchCheck(n)) ?? null; } catch { g = null; }
         if (g && (g.final || SATISFIED.has(g.outcome))) {
+          await releaseEnvWaiter(r);
           const { waiting, envHold: _h, ...rest } = r;
           results.set(n, { ...rest, outcome: SATISFIED.has(g.outcome) ? g.outcome : "invalid", pr: Number.isInteger(g.pr) ? g.pr : rest.pr, detail: g.detail ?? `closed while waiting on engine/env change` });
           update(results.get(n));

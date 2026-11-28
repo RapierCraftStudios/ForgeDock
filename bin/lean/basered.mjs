@@ -9,6 +9,7 @@
 import * as nodeFs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ensureFiledIssueDetailed, findFiledIssues } from "./filed-issue.mjs";
 
 const TIMEOUT_RC = 124, MISSING_RC = 127;
 const FILE_RE = /(?:^|[\s"'`(=:])((?:\.{0,2}\/)?[\w.-]+(?:\/[\w.-]+)+\.(?:py|mjs|cjs|js|jsx|ts|tsx|go|rs|rb|sh|ya?ml|json))\b/g;
@@ -130,14 +131,8 @@ export async function reportTrainBaseRed({ ghc, repo, base, baseSha, checks = []
   return fileBaseRed({ ghc, repo, att: null, key, body, title: `fix: ${base} is red on required check ${checks[0]?.name ?? ""}` });
 }
 
-/** Issues carrying `key`, newest first: [{number, state, closedAt, createdAt}]. Empty on any failure. */
-async function findKeyed({ ghc, repo, key }) {
-  try {
-    const raw = await ghc(["issue", "list", "-R", repo, "--state", "all", "--search", `${key.replace(/^<!-- | -->$/g, "")} in:body`, "--json", "number,state,closedAt,createdAt,body", "--limit", "20"]);
-    const rows = JSON.parse(String(raw));
-    return (Array.isArray(rows) ? rows : []).filter((r) => String(r?.body ?? "").includes(key)).sort((x, y) => Number(y.number) - Number(x.number));
-  } catch { return []; }
-}
+/** Issues carrying `key`, newest first: [{number, state, closedAt, createdAt}]. Local marker filter over the issue list (#6238); empty on any failure. */
+const findKeyed = findFiledIssues;
 
 async function fileBaseRed({ ghc, repo, att, body, title, key, commitDate }) {
   try {
@@ -230,11 +225,9 @@ export async function reportParityGaps({ ghc, repo, release, gaps = [] }) {
   for (const g of gaps) {
     const key = `<!-- FORGE:PARITY_GAP ${String(g.context).replace(/[^\w .:/()-]/g, "_")} -->`;
     try {
-      if ((await findKeyed({ ghc, repo, key })).length) continue;
       const body = `${key}\n## Lane-check parity gap\nThe required check \`${g.context}\` on \`${release}\` has no lane equivalent, so a lane cannot catch its failures before the release PR: ${g.reason}.`;
-      const url = String(await ghc(["issue", "create", "-R", repo, "--title", `ci: required release check ${g.context} has no lane pre-PR check`.slice(0, 120), "--body", body])).trim();
-      const n = url.match(/\/issues\/(\d+)/);
-      if (n) filed.push(Number(n[1]));
+      const r = await ensureFiledIssueDetailed({ ghc, repo, key, body, title: `ci: required release check ${g.context} has no lane pre-PR check`, occurrence: "" });
+      if (r.created && r.number) filed.push(r.number);
     } catch { /* best effort */ }
   }
   return filed;

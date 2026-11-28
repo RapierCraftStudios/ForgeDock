@@ -1,4 +1,5 @@
 // Gap audit of an active pipeline/env/pool failure (#6078): opt-in (forge.yaml orchestrate.lane_audit.file_gaps, default off) engine-gap issue per signature with a count and the affected lanes.
+import { findFiledIssues } from "./filed-issue.mjs";
 export const GAP_CLASSES = Object.freeze(["pipeline", "env", "pool"]);
 export const DEFAULT_GAP = Object.freeze({ fileGaps: false, repo: "RapierCraftStudios/ForgeDock", label: "engine-gap" });
 
@@ -44,8 +45,8 @@ export function makeGapAuditor({ gh, cfg = DEFAULT_GAP, repo = "" } = {}) {
       const sig = String(c.signature), marker = `<!-- forge-gap: ${sig} -->`, lane = Number(bundle?.issue);
       if (!Number.isSafeInteger(lane)) return null;
       const version = bundle?.stamp?.engine_version ?? null;
-      const list = JSON.parse(String(await gh(["issue", "list", "--repo", cfg.repo, "--label", cfg.label, "--state", "open", "--search", `"${sig}" in:body`, "--json", "number,body"])) || "[]");
-      const found = list.find((i) => String(i.body ?? "").includes(marker));
+      const found = (await findFiledIssues({ ghc: gh, repo: cfg.repo, key: marker }))[0]; // #6238: state all, local marker filter
+      if (found && String(found.state).toUpperCase() !== "OPEN") await gh(["issue", "reopen", String(found.number), "--repo", cfg.repo]);
       if (found) {
         const lanes = lanesOf(String(found.body));
         if (lanes.includes(lane)) return { issue: found.number, count: lanes.length, action: "unchanged" };

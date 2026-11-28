@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { classifyBaseRed, baseRedPaths, issueOf, attribute, runOnBase, reportBaseRed, probeBase, bypassesGuard, cachedBaseVerdict, recordBaseVerdict, clearBaseVerdicts, BASE_PROBE_TTL_MS } from "./basered.mjs";
+import { classifyBaseRed, baseRedPaths, issueOf, attribute, runOnBase, reportBaseRed, reportParityGaps, probeBase, bypassesGuard, cachedBaseVerdict, recordBaseVerdict, clearBaseVerdicts, BASE_PROBE_TTL_MS } from "./basered.mjs";
 
 const SHA = "13834f1c51".padEnd(40, "0");
 
@@ -182,5 +182,45 @@ describe("#5992: path-scoped guard bypass", () => {
     assert.equal(bypassesGuard({ laneFiles: ["a"], att: null }), false);
     assert.equal(bypassesGuard({ laneFiles: [], att }), false);
     assert.equal(bypassesGuard({ laneFiles: ["tests/directory.mjs"], att }), true);
+  });
+});
+
+// #6238: a fake issue tracker whose search ignores hidden markers (as GitHub's does): dedupe must not rely on it.
+const tracker = () => {
+  const issues = []; const log = [];
+  const ghc = async (a) => {
+    log.push(a);
+    if (a[1] === "list") return JSON.stringify(issues);
+    if (a[1] === "create") { issues.push({ number: issues.length + 1, state: "OPEN", closedAt: null, createdAt: new Date().toISOString(), body: a[a.indexOf("--body") + 1] }); return `https://github.com/o/r/issues/${issues.length}`; }
+    if (a[1] === "reopen") { issues.find((i) => i.number === Number(a[2])).state = "OPEN"; return ""; }
+    return "";
+  };
+  return { issues, log, ghc };
+};
+describe("#6238 engine-filed issue dedupe", () => {
+  it("a parity gap with a punctuated context name is filed once over repeated runs", async () => {
+    const t = tracker();
+    const gaps = [{ context: "CI / build (linux): e2e", reason: "no lane equivalent" }];
+    const first = await reportParityGaps({ ghc: t.ghc, repo: "o/r", release: "main", gaps });
+    const second = await reportParityGaps({ ghc: t.ghc, repo: "o/r", release: "main", gaps });
+    assert.deepEqual(first, [1]);
+    assert.deepEqual(second, []);
+    assert.equal(t.issues.length, 1);
+  });
+  it("a closed parity-gap issue is reopened, not refiled", async () => {
+    const t = tracker();
+    const gaps = [{ context: "CI", reason: "x" }];
+    await reportParityGaps({ ghc: t.ghc, repo: "o/r", release: "main", gaps });
+    t.issues[0].state = "CLOSED"; t.issues[0].closedAt = new Date().toISOString();
+    assert.deepEqual(await reportParityGaps({ ghc: t.ghc, repo: "o/r", release: "main", gaps }), []);
+    assert.equal(t.issues.length, 1);
+    assert.equal(t.issues[0].state, "OPEN");
+  });
+  it("base-red reported repeatedly for one base sha is one issue", async () => {
+    const t = tracker();
+    const a = { ghc: t.ghc, repo: "o/r", base: "main", att: null, laneIssue: 5, commands: ["npm test"], outputs: {}, baseSha: "abcdef1234567890" };
+    const x = await reportBaseRed(a), y = await reportBaseRed(a);
+    assert.equal(x, y);
+    assert.equal(t.issues.length, 1);
   });
 });

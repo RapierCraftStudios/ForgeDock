@@ -384,6 +384,57 @@ describe("#5988: breaker scoped by signature and agent", () => {
   });
 });
 
+describe("#6238 env issue lifecycle", () => {
+  // a stateful in-memory env issue seam over makeEnvIssue's real gh protocol
+  const live = async () => {
+    const { makeEnvIssue } = await import("../engine-cli.mjs");
+    const issues = [], comments = [];
+    const gh = async (a) => {
+      const n = Number(a[2]);
+      if (a[1] === "list") return JSON.stringify(issues);
+      if (a[1] === "create") { issues.push({ number: 900 + issues.length, state: "OPEN", closedAt: null, body: a[a.indexOf("--body") + 1] }); return `https://x/issues/${899 + issues.length}`; }
+      if (a[1] === "view") { const i = issues.find((x) => x.number === n); return JSON.stringify({ state: i.state, body: i.body, comments: [] }); }
+      if (a[1] === "edit" && a.includes("--body")) { issues.find((x) => x.number === n).body = a[a.indexOf("--body") + 1]; return ""; }
+      if (a[1] === "close") { const c = issues.find((x) => x.number === n); c.state = "CLOSED"; c.closedAt = new Date().toISOString(); return ""; }
+      if (a[1] === "reopen") { issues.find((x) => x.number === n).state = "OPEN"; return ""; }
+      if (a[1] === "comment") comments.push(a[a.indexOf("--body") + 1]);
+      return "";
+    };
+    return { issues, comments, seam: makeEnvIssue({ gh, repo: "o/r" }) };
+  };
+  it("the same signature across attempts and a second waiter is one issue", async () => {
+    const { issues, seam } = await live();
+    const a = { sig: "env.capability_remote|sops", code: "env.capability_remote", evidence: "x" };
+    const n1 = await seam.ensure({ ...a, issues: [1] });
+    const n2 = await seam.ensure({ ...a, issues: [1] });
+    const n3 = await seam.ensure({ ...a, issues: [1, 2] });
+    assert.equal(new Set([n1, n2, n3]).size, 1);
+    assert.equal(issues.length, 1);
+    assert.match(issues[0].body, /FORGE:WAITERS 1,2 -->/);
+  });
+  it("closes the env issue with a note when its last waiter is released, and never orphans it", async () => {
+    const { issues, comments, seam } = await live();
+    const a = { sig: "env.capability_remote|sops", code: "env.capability_remote", evidence: "x" };
+    const no = await seam.ensure({ ...a, issues: [1, 2] });
+    assert.equal(await seam.release({ number: no, issue: 1 }), false);
+    assert.equal(issues[0].state, "OPEN");
+    assert.equal(await seam.release({ number: no, issue: 2 }), true);
+    assert.equal(issues[0].state, "CLOSED");
+    assert.match(comments.at(-1), /No issue waits/);
+    await seam.ensure({ ...a, issues: [3] }); // the defect recurs: the same issue reopens
+    assert.equal(issues.length, 1);
+    assert.equal(issues[0].state, "OPEN");
+  });
+  it("orchestrate releases a held waiter from the env issue when it is delivered", async () => {
+    const released = [];
+    const e = { ensure: async () => 900, isClosed: async () => false, release: async (a) => { released.push(a); } };
+    let held = false;
+    await harness({ script: { 1: [miss("html2text")], 2: [miss("html2text")] }, envHold: null, onRow: (r) => { if (r.outcome === "held") held = true; },
+      extra: { envIssue: e, dispatchCheck: async () => (held ? { outcome: "merged", final: true, pr: 5 } : null) } });
+    assert.ok(released.some((r) => r.number === 900));
+  });
+});
+
 describe("#6196 env.capability_docker", () => {
   const dock = (more = {}) => ({ terminalReason: "needs-human", code: "env.capability_docker", detail: "Environment error: a validate command needs a Docker daemon or image this sandbox lacks", placement: { where: "remote" }, ...more });
   const rem = (hostFallback) => ({ max: 2, isRemote: () => true, place: () => ({ where: "remote", reason: "test" }), admit: () => ({ ok: true }), onBudget: "stop", costPerMinute: 0, ...(hostFallback === undefined ? {} : { hostFallback }) });
