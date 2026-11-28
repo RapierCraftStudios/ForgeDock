@@ -383,11 +383,11 @@ async function legacyFixStep(ctx) {
       if (s.err) return blocked(s.err);
       r = s.r;
       if (r.marker === "FORGE:GATE_PASS") break;
-      if (r.ciCancelOnly) return blocked(`required checks of #${r.pr} still cancelled after a rerun, with no failure to fix`);
+      if (r.ciCancelOnly) return blockedForRerun(ctx, `required checks of #${r.pr} still cancelled after a rerun, with no failure to fix`);
       continue;
     }
     // Required checks that are only still pending (#5519) have not failed: no CI issue or lane, the release re-runs once CI finishes.
-    if (!r.blocking?.length && r.ciFailing > 0 && r.ciPendingOnly) return blocked(`required checks of #${r.pr} still pending, with no failure to fix; re-run the release once CI finishes`);
+    if (!r.blocking?.length && r.ciFailing > 0 && r.ciPendingOnly) return blockedForRerun(ctx, `required checks of #${r.pr} still pending, with no failure to fix; re-run the release once CI finishes`);
     if (roundsAt(ctx.state, r.head) >= cfg.maxRounds) {
       const s = await secondRound(ctx, seam, r, cfg);
       if (s.blocked) return s;

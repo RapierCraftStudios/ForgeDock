@@ -707,6 +707,18 @@ describe("default flow (v1.0 contract, dcfb86bf): one review pass, nothing found
     await fixStep(c);
     assert.ok(c.state.steps["ci-green"].done && c.state.steps.review.done);
   });
+  it("#6175: the legacy pending-only block clears ci-green and review so a resume re-runs them", async () => {
+    const s = fakeSeam({ heads: [H1] });
+    const res = { pr: 7, head: H1, verdict: "BLOCK DEPLOY", marker: "FORGE:GATE_FAILURE", blocking: [], guards: [], ciFailing: 1, ciPendingOnly: true };
+    const c = ctx(s, { "ci-green": { done: true }, review: { done: true, result: res } });
+    s.summary = async () => ({ code: 0, data: res, lines: [] });
+    let saved = 0; c.save = () => { saved++; };
+    const r = await fixStep(c);
+    assert.equal(r.blocked, true);
+    assert.equal(c.state.steps["ci-green"], undefined);
+    assert.equal(c.state.steps.review, undefined);
+    assert.ok(saved > 0);
+  });
   it("coStartCi is not run in the default flow", async () => {
     const s = fakeSeam(); const c = def(s); c.config.fix = { coStart: true };
     const gh = []; c.io.gh = async (a) => { gh.push(a); return "{}"; };
