@@ -52,3 +52,18 @@ describe("failing-run classification (#6115)", async () => {
     assert.deepEqual(baselineFailures(c.laneOwn).map((r) => r.kind), ["baseline_failed"]);
   });
 });
+
+describe("regression baselines (#6115)", () => {
+  it("base-red and env failures do not block; a lane-own failure does", async () => {
+    const { classifyFailingRuns, baselineEnvFailures } = await import("./baselines.mjs");
+    assert.equal(typeof classifyFailingRuns, "function");
+    const mk = (run, output) => ({ when: "shared/**", run, rc: 1, output });
+    const failed = [mk("both", "FAILED t::a"), mk("gap", "ModuleNotFoundError: No module named 'yaml'"), mk("own", "FAILED t::b")];
+    const baseRuns = [{ command: "both", rc: 1, output: "FAILED t::a" }, { command: "gap", rc: 1, output: "x" }, { command: "own", rc: 0, output: "" }];
+    const c = classifyFailingRuns({ failed, baseRuns });
+    assert.deepEqual(c.baseRed.map((r) => r.run), ["both"]);
+    assert.deepEqual(c.env.map((r) => r.run), ["gap"]);
+    assert.deepEqual(baselineFailures(c.laneOwn).map((r) => r.detail.includes("`own`")), [true]);
+    assert.equal(baselineEnvFailures(c.env)[0].code, "env.tool_missing");
+  });
+});

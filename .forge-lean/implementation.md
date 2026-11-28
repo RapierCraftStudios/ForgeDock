@@ -20,3 +20,6 @@ V1, V2, V3, G1, G2 pass (forgedock check PASS). New tests fail without the fix (
 No env vars. Behavior: suites also failing on base no longer block. No formatter configured for these files.
 ### Precheck failure (ci-local spec-markers)
 Only failure: scripts/symbol-move.test.sh, `libcst required but not available` (sandbox python has no libcst, no pip). Unrelated to bin/lean changes; recorded as an env amendment, no code change.
+
+### Pre-PR check follow-up
+The CI job "Spec marker / placeholder check" fails only in `scripts/symbol-move.test.sh` ("libcst required (SYMBOL_MOVE_REQUIRE_LIBCST=1) but not available"; 10 passed, 1 failed). The host python has no `libcst` (`python3 -c "import libcst"` raises ModuleNotFoundError). This is an environment gap, not caused by this change, which touches only `bin/lean/*`; the other test scripts in that step passed. No code change made.
