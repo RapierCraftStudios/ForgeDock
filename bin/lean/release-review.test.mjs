@@ -703,6 +703,11 @@ describe("default flow (v1.0 contract, dcfb86bf): one review pass, nothing found
       const r = await mk([], async () => ({}), calls).holdReleasePr({ pr: 7, blockers: [100], guards: [], queued: { batch: null } });
       assert.equal(r.closed, false); assert.equal(calls[0][1], "comment"); assert.match(calls[0].join(" "), /stays open/);
     });
+    it("a guard-only hold (no blockers) still closes the PR", async () => {
+      const calls = [];
+      const r = await mk([], async () => ({}), calls).holdReleasePr({ pr: 7, blockers: [], guards: [{ name: "g" }], queued: { batch: null } });
+      assert.equal(r.closed, true); assert.equal(calls[0][1], "close");
+    });
   });
   it("MEDIUM, LOW and unconfirmed findings never block: GATE_PASS stays a pass", async () => {
     const s = fakeSeam({ fins: [fin({ toFile: [{ id: "u", title: "maybe", severity: "HIGH" }, { id: "m", title: "med", severity: "MEDIUM" }], confirmedIds: ["m"] })] });

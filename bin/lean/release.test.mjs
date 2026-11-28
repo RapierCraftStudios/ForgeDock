@@ -647,3 +647,22 @@ describe("default ci-green flow in the conductor (#6164)", () => {
     assert.equal(readReleaseConfig("release:\n  review_fixes: true\n").reviewFixes, true);
   });
 });
+
+describe("realReleaseIo.batches reports paused/cancelled (#6178)", () => {
+  it("flags a paused and a cancelled batch, leaves an open one unflagged", async () => {
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    const { realReleaseIo } = await import("./release.mjs");
+    const root = tmpDir("release-6178");
+    const seed = (id, files = {}) => {
+      const d = join(root, id); mkdirSync(join(d, "lanes"), { recursive: true });
+      writeFileSync(join(d, "plan.json"), JSON.stringify({ repo: REPO })); writeFileSync(join(d, "state.json"), JSON.stringify({ lanes: {} }));
+      for (const [n, v] of Object.entries(files)) writeFileSync(join(d, n), JSON.stringify(v));
+    };
+    seed("b20261110-000000-1"); seed("b20261110-000000-2", { pause: { since: "2026-11-10T00:00:00Z" } }); seed("b20261110-000000-3", { cancel: { at: "2026-11-10T00:00:00Z" } });
+    const io = realReleaseIo({ env: { ...process.env, FORGEDOCK_BATCH_DIR: root }, print: () => {} });
+    const by = Object.fromEntries((await io.batches(REPO)).map((b) => [b.id.slice(-1), b]));
+    assert.deepEqual([by[1].paused, by[1].cancelled], [false, false]);
+    assert.deepEqual([by[2].paused, by[2].cancelled], [true, false]);
+    assert.deepEqual([by[3].paused, by[3].cancelled], [false, true]);
+  });
+});
