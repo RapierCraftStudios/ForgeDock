@@ -2168,7 +2168,7 @@ describe("conformance shadow mode (the default)", () => {
     assert.ok(w.comments.some((c) => /Validate G1, G2 had no recorded result: the engine ran them/.test(c)), "decision note");
     // a failing engine run is an actionable resume, never validate_missing
     const f = world({ contract: GC, validation: vrows, resumeValidation: [...vrows, { id: "G1", command: "x", exit: 0 }, { id: "G2", command: "x", exit: 0 }] });
-    f.io.runCommand = async (a) => (/bar/.test(a.command) ? { rc: 1, output: "AssertionError: bar boom" } : { rc: 0, output: "" });
+    f.io.runCommand = async (a) => (/bar/.test(a.command) && !/basered-/.test(a.cwd ?? "") ? { rc: 1, output: "AssertionError: bar boom" } : { rc: 0, output: "" }); // #6115: red only in the lane (green on the base) is lane-own
     await runShadow(f);
     assert.equal(builders(f).length, 3, "one resume");
     assert.match(builders(f)[2][4], /validate G1 .*failed \(exit 1, run by the engine: no recorded result\)[\s\S]*bar boom/);
@@ -2185,7 +2185,7 @@ describe("conformance shadow mode (the default)", () => {
     const GC = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "G1", command: "node --test test/bar.test.js", regression: true }] };
     const vrows = [{ id: "V1", command: CONTRACT.validate[0].command, exit: 0 }];
     const w = world({ contract: GC, validation: vrows, resumeValidation: [...vrows, { id: "G1", command: "x", exit: 0 }] });
-    w.io.runCommand = async () => ({ rc: 1, output: "AssertionError: bar boom" });
+    w.io.runCommand = async (a) => (/basered-/.test(a.cwd ?? "") ? { rc: 0, output: "" } : { rc: 1, output: "AssertionError: bar boom" }); // #6115: green on the base, red in the lane
     const orig = w.io.runner, seen = []; let thrown = false;
     w.io.runner = async (c) => {
       if (c.role === "builder") seen.push(c.prompt);
