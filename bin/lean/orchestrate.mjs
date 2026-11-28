@@ -125,6 +125,7 @@
  * the queue order except that decomposed sub-issues go first. A settled row carries `est_minutes` (estimated vs. actual).
  */
 import { decideClear, decideAutoReset } from "./clear-breaker.mjs";
+import { createQueueClock } from "./queuecause.mjs";
 import { RECONCILE_MS, BREAKER_COOLDOWN_MS, diffSelection, readmitDue, needsDecisionDigest, environmentalDetail, closesManually } from "./reconcile.mjs";
 import { parseDependsOn } from "../engine/phases.mjs";
 import { classifyNeedsHuman, recoveryCodeOf, recoveryClassOf, OUTCOME_CODES, ENV_VALIDATE_PLACEMENT, ENV_VALIDATE_TIMEOUT, MECHANICAL_CODES } from "../engine/outcome-codes.mjs";
@@ -404,6 +405,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const missingTools = async (tools) => { if (typeof envHold?.missingTools !== "function") return null; try { const m = await envHold.missingTools(tools); return Array.isArray(m) ? m : null; } catch { return null; } };
   const checked = toMap(saved?.prefilter); // issue -> pre-filter result
   const estimates = toMap(saved?.estimates); // #4409: issue -> estimated lane minutes; only with `estimate`
+  const queueClock = createQueueClock(saved?.queueClock); // #6203: queue_wait by cause, from first ready; a requeue does not reset it
   const enqueued = toMap(saved?.enqueued); // #4409: issue -> when it last entered the queue (starvation guard)
   const heads = new Set(saved?.heads ?? []); // #4409: decomposed sub-issues not started yet: the head of their priority band
   let errorTimes = [...(saved?.errorTimes ?? [])];
@@ -555,7 +557,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       ...(stackedTried.size ? { stacked: toObj(stackedOf), stackedTried: [...stackedTried] } : {}),
       ...(requeueApplied.size ? { requeueApplied: [...requeueApplied], requeued: toObj(requeuedInfo) } : {}),
       ...(relabelled.size ? { relabelled: [...relabelled] } : {}), ...(cancelled ? { cancelled } : {}), ...(train ? { train: train.snapshot() } : {}),
-      ...(estimate ? { estimates: toObj(estimates), enqueued: toObj(enqueued) } : {}), ...(heads.size ? { heads: [...heads] } : {}),
+      ...(estimate ? { estimates: toObj(estimates), enqueued: toObj(enqueued) } : {}), queueClock: queueClock.toJSON(), ...(heads.size ? { heads: [...heads] } : {}),
       ...(engineSigs.size ? { engineSigs: toObj(engineSigs) } : {}), ...(heldSigs.size ? { heldSigs: toObj(heldSigs) } : {}), ...(deterministic.size ? { deterministicSigs: [...deterministic] } : {}), ...(toolReadmits.size ? { toolReadmits: [...toolReadmits] } : {}), ...(select ? { select } : {}), ...(readmit.size ? { readmit: toObj(readmit) } : {}), ...(envSigs.size ? { envSigs: toObj(envSigs) } : {}), ...(ledgers.size ? { attempts: toObj(ledgers) } : {}), ...(selMatched.size ? { selMatched: [...selMatched] } : {}) });
   };
   const update = (row) => { store?.log?.(row); onUpdate(row); };
@@ -1482,8 +1484,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const pl = placed.get(n) ?? (remote ? (remoteRun.has(n) ? { where: "remote", reason: "mode remote" } : (placeOf(n) ?? undefined)) : undefined);
     placed.delete(n);
     const queueMs = Number.isFinite(enqueued.get(n)) ? Math.max(0, now() - enqueued.get(n)) : null; // #4908: queue_wait in the phase ledger
+    const qc = queueClock.take(n, now()); // #6203
     heads.delete(n); enqueued.delete(n); busyNoted.delete(n);
-    const rec = { startedAt: now(), ...(plan ? { plan: true } : {}), ...(stackedOn ? { stackedOn } : {}), ...(queueMs != null ? { queueMs } : {}), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}), ...(pl ? { placement: pl } : {}) };
+    const rec = { startedAt: now(), ...(plan ? { plan: true } : {}), ...(stackedOn ? { stackedOn } : {}), ...(queueMs != null ? { queueMs } : {}), ...(qc ? { queueCauses: qc.causes, queueTotalMs: qc.total_ms } : {}), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}), ...(pl ? { placement: pl } : {}) };
     if (!firstAdmit.has(n)) firstAdmit.set(n, rec.startedAt); // #5834: chain wall time starts at the first admission, plan lane included
     runRecs.set(n, rec); keptBoxes.delete(n); notBefore.delete(n); capReasons.delete(n); save();
     track(n, (async () => {
@@ -2175,6 +2178,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       await refreshBlocked();
       await refreshBaseWaits();
       checkGates();
+      queueClock.tick(pending, (n) => { // #6203: why each pending issue waits right now (the order is the precedence)
+        if (opPause) return "pause";
+        if (tripped) return "breaker";
+        if (opHeld.has(n)) return "hold";
+        if (blocked.has(n) || edges(n).some((d) => !(results.has(d) && SATISFIED.has(results.get(d).outcome)))) return "dependency";
+        if (poolDown && isRemote(n)) return "host_offline";
+        if (running.size >= K() || (notBefore.get(n) ?? 0) > t || capReasons.has(n) || baseHeld.has(n) || pfAll) return "capacity";
+        return "other";
+      }, t);
       // #4866: lane preflight. A failing check holds admission (all lanes, or only remote ones by its scope), says why once per batch,
       // and is re-checked every pass so the batch resumes on its own; it is not an engine-error, so the breaker never sees it.
       pfAll = false; pfRemote = false;
@@ -2525,7 +2537,7 @@ export function formatTable(rows) {
  */
 export function phasesOf(r, rec) {
   if (!r?.phases || typeof r.phases !== "object" || !Object.keys(r.phases).length) return null;
-  return { ...(Number.isFinite(rec?.queueMs) && rec.queueMs > 0 ? { queue_wait: { ms: Math.round(rec.queueMs), ...((r.sandbox?.agent ?? r.agent) ? { worker: r.sandbox?.agent ?? r.agent } : {}) } } : {}), ...r.phases };
+  return { ...(Number.isFinite(rec?.queueMs) && rec.queueMs > 0 ? { queue_wait: { ms: Math.round(Math.max(rec.queueMs, rec.queueTotalMs ?? 0)), ...(rec.queueCauses ? { causes: rec.queueCauses } : {}), ...((r.sandbox?.agent ?? r.agent) ? { worker: r.sandbox?.agent ?? r.agent } : {}) } } : {}), ...r.phases };
 }
 
 export function formatWaitSummary(rows, heavyStats = null) {
