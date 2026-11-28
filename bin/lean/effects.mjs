@@ -543,6 +543,14 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
     gh: run("gh"), git: run("git"), docker: run("docker"), killGroup: async (pid, marker) => killLedgerPid(pid, marker), ledger: (opts) => makeLedger(opts), runTmp: makeRunTmp(), host: makeHostProbe(), heavy: guardHeavyDisk(makeHeavyIo({ host: makeHostProbe() }), { host: makeHostProbe(), minFreeGb: async () => (await import("../gc.mjs")).readHygiene(process.cwd()).min_free_gb, gc: async () => { const g = await import("../gc.mjs"); return g.runOwnedGc({ probes: g.makeGcProbes({ cwd: process.cwd() }), hygiene: g.readHygiene(process.cwd()), budgetMs: 60000 }); } }), projector: makeProjector({ gh: base.gh }, { repo }), runner: makeLeanRunner({ subagentModel }), waitCiGreen: base.waitCiGreen,
     /** Shared dependency cache (#4220): the repo's own package manager, argv only, bounded by the cache's timeout. */
     deps: makeDepCache({ exec: async (cmd, args, { cwd, env, timeoutMs } = {}) => String((await pexec(cmd, args, { cwd, env: { ...process.env, ...(env ?? {}) }, timeout: timeoutMs ?? 0, maxBuffer: 100 * 1024 * 1024 })).stdout) }),
+    /** #6206: the cheap login probe (`claude auth status`, no model call) the admit probe runs before any builder session; `ok` false only when claude ran and said no. */
+    async claudeAuthProbe() {
+      const { spawnSync } = await import("node:child_process");
+      const r = spawnSync("claude", ["auth", "status"], { timeout: 15000, stdio: "ignore" });
+      return r.error || r.status === null ? { ok: null } : { ok: r.status === 0 }; // a missing binary or a timeout is no evidence
+    },
+    /** #6206: the admit probe's own read of the required checks (a separate seam, so the precheck's and the merge policy's reads are unchanged). */
+    async baseRequiredChecks(lane) { return requiredChecksFor({ gh: run("gh"), repo, lane }); },
     /** Names of the checks the base branch requires: classic protection plus rulesets (#4158). [] when neither has any. */
     async requiredChecks(lane) { return requiredChecksFor({ gh: run("gh"), repo, lane }); },
     /**
