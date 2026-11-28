@@ -126,7 +126,15 @@ export const NON_STOPPABLE_CODES = Object.freeze(new Set([
 ]));
 /** Families that are transient or infrastructure by prefix: sandbox.*, lane.*, engine.*, infra.*, backend.*, net.*, gh.*, and deferred/dependency holds. */
 const NON_STOPPABLE_PREFIX = /^(sandbox|lane|engine|infra|backend|net|gh|dependency|pool|deferred)[.:_]/;
+/**
+ * #6243: non-stoppable codes whose identical repeat is still a deterministic loop (a crash, a timeout, a dead CLI): they are never stamped, but the
+ * second identical failure still parks once as FAILURE_REPEATED (itself non-stoppable) instead of rerunning a full builder every admission.
+ */
+export const REPEAT_COUNTED_CODES = Object.freeze(new Set([
+  OUTCOME_CODES.ENGINE_ERROR, OUTCOME_CODES.CLI_TIMEOUT, OUTCOME_CODES.CLI_IDLE, OUTCOME_CODES.BACKEND_CLI_FAILED, OUTCOME_CODES.RUN_INTERRUPTED,
+]));
 export const isNonStoppable = (code) => NON_STOPPABLE_CODES.has(code) || NON_STOPPABLE_PREFIX.test(String(code ?? ""));
+export const repeatCounted = (code) => !isNonStoppable(code) || REPEAT_COUNTED_CODES.has(code);
 export const stampable = (code) => Boolean(code) && !isNonStoppable(code);
 
 /**

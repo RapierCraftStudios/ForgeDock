@@ -100,6 +100,7 @@ function statusLogical(w, body) {
   for (const [key, { markers, text }] of parseStatus(body)) {
     if (w.statusSections[key] === text) continue;
     w.statusSections[key] = text;
+    if (key === "FORGE:STAGE") continue; // #6245: the live stage line is telemetry, not part of the comment order these tests pin
     w.comments.push(`${markers.map((m) => `<!-- ${m} -->`).join("\n")}\n${text}`);
   }
 }
@@ -265,6 +266,7 @@ describe("core work-on", () => {
     assert.equal(r.terminalReason, "merged");
     assert.equal(r.pr, 77);
     assert.deepEqual(w.comments.map(markerOf), ["FORGE:STARTED", "FORGE:INVESTIGATION", "FORGE:CONTRACT", "FORGE:IMPLEMENTATION", "FORGE:REVIEW", "FORGE:FACTS", "FORGE:TRAJECTORY"]);
+    assert.match(w.statusSections["FORGE:STAGE"] ?? "", /^\*\*stage:\*\* \w+ - started \S+, last activity \S+$/, "#6245: the status comment carries the lane stage line");
     assert.match(w.comments[1], /<!-- FORGE:VALIDATE -->/, "VALIDATE stays as an alias marker");
     assert.match(w.comments[1], /^<!-- FORGE:INVESTIGATION -->\n<!-- FORGE:VALIDATE -->\n## Investigation Report\n\*\*Verdict\*\*: CONFIRMED/);
     assert.match(w.comments[2], /^<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n## Builder Contract \(frozen `[0-9a-f]{12}`\)/, "PLAN stays as an alias marker");
@@ -2166,7 +2168,7 @@ describe("conformance shadow mode (the default)", () => {
     assert.ok(w.comments.some((c) => /Validate G1, G2 had no recorded result: the engine ran them/.test(c)), "decision note");
     // a failing engine run is an actionable resume, never validate_missing
     const f = world({ contract: GC, validation: vrows, resumeValidation: [...vrows, { id: "G1", command: "x", exit: 0 }, { id: "G2", command: "x", exit: 0 }] });
-    f.io.runCommand = async (a) => (/bar/.test(a.command) ? { rc: 1, output: "AssertionError: bar boom" } : { rc: 0, output: "" });
+    f.io.runCommand = async (a) => (/bar/.test(a.command) && !/basered-/.test(a.cwd ?? "") ? { rc: 1, output: "AssertionError: bar boom" } : { rc: 0, output: "" }); // #6115: red only in the lane (green on the base) is lane-own
     await runShadow(f);
     assert.equal(builders(f).length, 3, "one resume");
     assert.match(builders(f)[2][4], /validate G1 .*failed \(exit 1, run by the engine: no recorded result\)[\s\S]*bar boom/);
@@ -2183,7 +2185,7 @@ describe("conformance shadow mode (the default)", () => {
     const GC = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "G1", command: "node --test test/bar.test.js", regression: true }] };
     const vrows = [{ id: "V1", command: CONTRACT.validate[0].command, exit: 0 }];
     const w = world({ contract: GC, validation: vrows, resumeValidation: [...vrows, { id: "G1", command: "x", exit: 0 }] });
-    w.io.runCommand = async () => ({ rc: 1, output: "AssertionError: bar boom" });
+    w.io.runCommand = async (a) => (/basered-/.test(a.cwd ?? "") ? { rc: 0, output: "" } : { rc: 1, output: "AssertionError: bar boom" }); // #6115: green on the base, red in the lane
     const orig = w.io.runner, seen = []; let thrown = false;
     w.io.runner = async (c) => {
       if (c.role === "builder") seen.push(c.prompt);
@@ -7095,7 +7097,7 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
   });
 
   it("#5448 a declared baseline runs when a shared path changes and a failing one blocks the merge", async () => {
-    const mk = (rc) => { const w = world({ changed: ["shared/content/a.js", "src/foo.js", "test/foo.test.js"] }); w.ran = []; const f = w.io.runCommand; w.io.runCommand = async (a) => { w.ran.push(a.command); return a.command === "make stealth-baseline" ? { rc, output: "stealth drift" } : f ? f(a) : { rc: 0, output: "" }; }; return w; };
+    const mk = (rc) => { const w = world({ changed: ["shared/content/a.js", "src/foo.js", "test/foo.test.js"] }); w.ran = []; const f = w.io.runCommand; w.io.runCommand = async (a) => { w.ran.push(a.command); return a.command === "make stealth-baseline" ? { rc: /basered-/.test(String(a.cwd)) ? 0 : rc, output: "stealth drift" } : f ? f(a) : { rc: 0, output: "" }; }; return w; };
     const b = [{ when: "shared/content/**", run: "make stealth-baseline" }];
     const ok = mk(0); await run(ok, { verify: { baselines: b } });
     assert.ok(ok.ran.includes("make stealth-baseline"), "baseline ran for the shared change");
@@ -7877,6 +7879,31 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
     assert.equal(w.dupArgs.cwd, WT);
   });
 
+  const XB = [{ path: "bin/run.sh", kind: "missing-x", why: "has a shebang but mode is 100644" }];
+  it("#6239 exec-bit: a 100644 shebang script is fixed mechanically and committed with no builder round", async () => {
+    const w = hworld(); const f = [XB, []]; w.xfix = null;
+    w.io.execBits = async () => (f.length > 1 ? f.shift() : f[0]);
+    w.io.execBitsFix = async (x) => { w.xfix = x; return x.findings.map((y) => y.path); };
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(w.xfix.findings[0].path, "bin/run.sh");
+    assert.equal(builders(w).length, 2, "plan and build only");
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "commit" && /executable bit set by the engine/.test(c.join(" "))));
+  });
+  it("#6239 exec-bit: an unfixable finding leaves an anomaly and never blocks", async () => {
+    const w = hworld();
+    w.io.execBits = async () => XB;
+    w.io.execBitsFix = async () => [];
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(builders(w).length >= 3, "one builder round");
+  });
+  it("#6239 exec-bit: verify.exec_bits false skips the gate", async () => {
+    const w = hworld(); let n = 0;
+    w.io.execBits = async () => { n++; return XB; };
+    await run(w, { verify: { execBits: false } });
+    assert.equal(n, 0);
+  });
+
   it("#5348 an enumerating-test omission and a duplicate export the detectors name are fixed without a model session", async () => {
     const w = hworld({ missing: [MISS, []] }); const d = [DUP, []]; w.mech = [];
     w.io.duplicateExports = async () => (d.length > 1 ? d.shift() : d[0]);
@@ -8423,7 +8450,7 @@ describe("#4362 attempt triggers", () => {
         const r = await orig(c);
         return c.role === "builder" && seen.length === 1 ? { ...r, endTokens: planTokens, text: "planned.\nBuild reads: src/foo.js:1-20", toolUses: [{ msg: "m1", name: "Read", path: "src/bar.js" }] } : r;
       };
-      return { w, seen, go: async () => { const dir = tmpDir("core-route-"); const r = await run(w, { dir, contextCeilingTokens: 120000, ...opts }); return { r, log: readLog(dir, 7) }; } };
+      return { w, seen, go: async () => { const dir = tmpDir("core-route-"); const r = await run(w, { dir, contextCeilingTokens: 120000, splitPlan: true, ...opts }); return { r, log: readLog(dir, 7) }; } };
     };
     const big = lane(96000);
     const { r, log } = await big.go();
@@ -8444,6 +8471,12 @@ describe("#4362 attempt triggers", () => {
     await small.go();
     assert.equal(small.seen[1].resume, "sess-1", "a planning session under the bound is resumed (its cache is cheaper)");
     assert.doesNotMatch(small.seen[1].prompt, /Route hand-off/);
+    const single = lane(96000, { splitPlan: false }); // #6207: the default is one builder session: the big plan is resumed, never digested
+    const singleRun = await single.go();
+    assert.equal(single.seen[1].resume, "sess-1", "single-session lane resumes the plan session");
+    assert.equal(singleRun.log.find((e) => e.event === "ROUTE_HANDOFF").mode, "resume");
+    const term = singleRun.log.find((e) => e.event === "RUN_TERMINAL");
+    assert.equal(term.split_plan, false); assert.ok(term.builder_sessions >= 1);
     const off = lane(96000, { routeHandoffTokens: 0 });
     const offRun = await off.go();
     assert.equal(off.seen[1].resume, "sess-1", "0 turns the hand-off off");

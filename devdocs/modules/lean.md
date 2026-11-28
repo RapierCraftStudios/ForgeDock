@@ -35,6 +35,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    if still low, refuses the heavy step with `DISK_LOW` (`heavyAcquire` rethrows only that code). `hygiene.schedule` installs a
    systemd user timer or cron entry (`gc-schedule.mjs`, by `doctor --fix` / `init`) running `gc --apply`. Lanes get
    `COMPOSE_PROJECT_NAME=forgedock-lane-<issue>`; gc owns compose volumes/containers of that project.
+   #6242: a heavy-gate denial (exit 75 plus the `HEAVY_DEFER_MARKER` stderr line) is mapped by `runCheckCommand` to rc 124 (infra class: timeout retry / CI cover), never a code failure; a bare exit 75 stays 75.
    Heavy steps are gated separately by the host heavy-step semaphore (`heavy.mjs`); #4777: that covers pytest,
    promtool check/test, `poetry|uv|pipenv|pdm|hatch run <heavy>` / install / sync / build, pip install, ruff/black/
    flake8/pylint, make/cmake/ninja and `python -m pytest|mypy|tox|unittest` (python shim).
@@ -266,7 +267,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    **Route hand-off** (#5812): the runner reports `endTokens` (the last turn's context). The plan and correction calls record
    it, along with the files planning read and its "Build reads:" reply. At the build, `routeHandoff` (`ceiling.mjs`) compares it
    with `engine.route_handoff_tokens` (`readCoreLimits` → `routeHandoffTokens`; default 40000, capped at half the lane
-   ceiling; 0 = always resume). Above the bound the build does not resume the planning session. It starts fresh with the
+   ceiling; 0 = always resume; #6207: default 0 unless `engine.split_plan: true`). Above the bound the build does not resume the planning session. It starts fresh with the
    implement prompt plus `routeDigestPrompt` (at most 32 KB): deliverables, contract decisions, open non-deliver rows,
    planning's reads and build reads, and the branch state from `restartFacts`. At or under the bound, or when no size was
    reported, the build resumes as before. Every build logs
@@ -3829,3 +3830,7 @@ line. It is best effort: any error yields an empty section and the PR is still c
 ## Entry 2026-11-28 — admit probe before any builder session (#6206)
 
 `bin/lean/admit.mjs` + `admitProbe()` in `lean.mjs`: the failure-fingerprint stop (a park's `sig=F base=<head12> in=<hash16> code=<code>` stamp; same base head and input hash means `failure.repeated`, no session), the base head's required checks (`base.red`, deferred with check links), the `claude auth status` probe (`backend.auth`), and the dry-run of a reused frozen contract (Docker-only gaps deferred to CI by FORGE:DECISION, other missing tools `env.tool_missing`). One `ADMIT_PROBE` telemetry event per lane, `builder_spend_usd: 0`. `o.admitProbe: false` disables it. Decision: `decisions/admit-probe-6206.md`.
+
+## Entry 2026-11-28 — Executable-bit gate (#6239)
+
+Lanes create files as 100644 and, with PR CI off for staging (#6150), only the repo's own exec-bit CI would catch it. `execBitGate` (`lean.mjs`, beside `duplicateGate`, at hand-off before the PR) runs `io.execBits` (`bin/lean/execbit.mjs`): for files changed `base...HEAD` it flags a 100644 file with a `#!` shebang, or a `*.sh` that a workflow, `scripts/`, `package.json` or `Makefile` invokes directly (`./x.sh` or `x.sh`, never `bash x.sh`/`sh`/`source`), plus a 100755 -> 100644 regression. Deleted files, symlinks and fixture dirs are skipped. Fix order: `io.execBitsFix` (`git update-index --chmod=+x` plus `chmod`), an engine commit, re-detect; leftovers get one builder round (`execBitsPrompt`, stage `exec_bits`), then an anomaly. It never blocks. Events: `EXEC_BIT_FINDINGS`. Opt out with forge.yaml `verify.exec_bits: false` (only the literal `false`; `vcfg.execBits` is omitted at the default).

@@ -20,7 +20,7 @@ export const STATUS_SEP = "<!-- FORGE:STATUS:SEP -->";
 import { createHash } from "node:crypto";
 
 /** Markers folded into the status comment, keyed by the FIRST marker of a post. */
-export const STATUS_SECTIONS = Object.freeze(["FORGE:STARTED", "FORGE:CONTEXT", "FORGE:LANE_BRANCH", "FORGE:LITE", "FORGE:TRAJECTORY", "FORGE:DECISION"]);
+export const STATUS_SECTIONS = Object.freeze(["FORGE:STARTED", "FORGE:CONTEXT", "FORGE:LANE_BRANCH", "FORGE:LITE", "FORGE:TRAJECTORY", "FORGE:DECISION", "FORGE:STAGE"]);
 /** Sections that keep their last N entries instead of only the newest. */
 export const APPEND_SECTIONS = Object.freeze({ "FORGE:DECISION": 5 });
 export const ENTRY_SEP = "\n\n---\n\n";

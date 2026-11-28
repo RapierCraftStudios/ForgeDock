@@ -38,13 +38,14 @@ function waitOf(ms, modelMs, typed = {}, id) {
 }
 
 /** Sequential ledger starting in `first` at `start`. `now` is the lane clock. */
-export function createLedger(now, first = "sandbox_start", start = now()) {
+export function createLedger(now, first = "sandbox_start", start = now(), onEnter = null) { // #6245: onEnter(phase) fires on every real transition
   let cur = LANE_PHASES.includes(first) ? first : null, since = start;
   const ms = {}, model = {}, usd = {}, wait = {}, steps = {};
   const close = (t) => { if (cur) ms[cur] = (ms[cur] ?? 0) + Math.max(0, t - since); };
   const enter = (phase) => {
     if (!LANE_PHASES.includes(phase) || phase === cur) return;
     const t = now(); close(t); cur = phase; since = t;
+    try { onEnter?.(phase); } catch { /* a status hook never breaks the lane */ }
   };
   return {
     enter,

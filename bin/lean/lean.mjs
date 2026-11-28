@@ -28,12 +28,13 @@ import { areaOf, acquireHotArea } from "./hotarea.mjs"; // #5751
 import { isEnvValidateFailure, outputTail, contractRuleCounts, onlyTestPlanProblems, isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, applyRequirementDecisions, dedupeAddRequirements, loneE2eRows, reproEnvMiss, resolveForgedockPaths, resolvingIo, portableForgedockPaths, FORGEDOCK_CHECKS_VAR, FORGEDOCK_ENTRY_VAR, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, splitAdvisory, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, convertDelivered } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, quotaCores, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment, prodFailureSignal } from "./prefilter.mjs";
+import { createStageReporter, fixReason } from "./stage.mjs";
 import { writeStatus, postUpsert, postKeyed, isKeyedPost, isStatusPost, isUpsertPost, hasSection, clearPipelineLabels, IN_PLACE_MARKERS, commentId, contractKey } from "./statuscomment.mjs";
 import { decidePost } from "./commentstate.mjs"; // #5979
 import { repeatSignature, countIdentical, shouldPark, summaryComment } from "./failure-stop.mjs"; // #5979
-import { baseHealth, fetchBaseChecks, baseRedComment, hasAdmitComment, classifyDryRun, renderStamp, stampable, isNonStoppable, inputOf, fingerprintStop, stopReason, admitEvent } from "./admit.mjs"; // #6206
+import { baseHealth, fetchBaseChecks, baseRedComment, hasAdmitComment, classifyDryRun, renderStamp, stampable, repeatCounted, inputOf, fingerprintStop, stopReason, admitEvent } from "./admit.mjs"; // #6206
 import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs";
-import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
+import { matchBaselines, baselineFailures, foldRegression, classifyFailingRuns, baselineEnvFailures } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
 import { loadImageManifest, manifestProvides } from "../pool/image-manifest.mjs";
@@ -71,7 +72,7 @@ export function contractSelfCorrectable(problems) {
 export function missingToolBlock(summary) { return MISSING_TOOL_RE.test(String(summary ?? "")); }
 import { reserveForBuild, revalidate } from "./seqreserve.mjs";
 import { patchEcho, mutationsOf, runReproMutations, classifyRepro } from "./reproquality.mjs";
-import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, pagePlanNote, contextPackNote, buildOpeningNote, sequenceBuildRule, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, routeDigestPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
+import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, pagePlanNote, contextPackNote, buildOpeningNote, sequenceBuildRule, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, routeDigestPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, execBitsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
 import { reportParityGaps, classifyBaseRed, diffTouchesGuard, attribute as attributeBaseRed, runOnBase, reportBaseRed, recordBaseVerdict, bypassesGuard } from "./basered.mjs"; // #5239
 import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
@@ -367,7 +368,10 @@ export async function runCore(o) {
   const armed = applyArmOverrides(o, o.issue); o = armed.options; // #5206: the arm's overrides shape the lane before any config is parsed
   o = { ...o, io: resolvingIo(o.io, { exists: existsSync, checksCli: CHECKS_CLI, forgedockCli: FORGEDOCK_CLI }) }; // #5727: every executed command names this install's forgedock entry points
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
-    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, validateRegenerate = null, validateCatalogSources = null, routeReachability = null, docsConfig = null, outcomeEvidenceConfig = null, ciBudget = null, pagesConfig = null, designConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, mergeTrain = "off", holdMergesDuringReleaseCi = true, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", reproQuality = "shadow", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = null, contextWindowShare = WINDOW_SHARE, contextRestartCostUsd = RESTART_COST_USD, contextCeilingBySize = null, routeHandoffTokens = 40000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, contractMaxCorrections = 3, reviewMaxResumes = 3, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, contextWaitSeconds = 5, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, testRunners = null, coupledFiles = null, validateRecipes = null, validateRegenerate = null, validateCatalogSources = null, routeReachability = null, docsConfig = null, outcomeEvidenceConfig = null, ciBudget = null, pagesConfig = null, designConfig = null, prodParity = null, envSetup = null, ciMaxMinutes = 360, mergeTrain = "off", holdMergesDuringReleaseCi = true, conformance = "shadow", conformanceKinds = null, conformanceMutation = "off", reviewIncomplete = "needs-human", reproTest = "prefer", reproQuality = "shadow", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = null, contextWindowShare = WINDOW_SHARE, contextRestartCostUsd = RESTART_COST_USD, contextCeilingBySize = null, routeHandoffTokens: routeHandoffCfg = null, splitPlan = false, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, contractMaxCorrections = 3, reviewMaxResumes = 3, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, contextWaitSeconds = 5, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+  // #6207: one builder session by default. The plan session is always resumed by the build (no digest restart); `engine.split_plan: true` restores the
+  // two-session path, where a plan above engine.route_handoff_tokens (default 40000) hands the build a digest. An explicit route_handoff_tokens wins.
+  const routeHandoffTokens = routeHandoffCfg ?? (splitPlan === true ? 40000 : 0);
   const now = io.now ?? (() => Date.now());
   const rotator = io.rotator !== undefined ? io.rotator : openRotator({ kind: o.accountRotator }); // #5094
   // #5205: a rotator with pick() relaunches a limited phase pinned to another account; lane-level rotations and limited accounts
@@ -386,7 +390,7 @@ export async function runCore(o) {
   const riskPaths = Array.isArray(o.reviewTrigger?.riskPaths) ? o.reviewTrigger.riskPaths : [];
   const enforceDomains = parseEnforceDomains(o.reviewTrigger?.enforceDomains ?? []); // #5099
   const verifierCfg = parseVerifierConfig(o.verifier ?? {});
-  const routingCfg = parseBuilderRouting(o.builderRouting ?? {});
+  const routingCfg = parseBuilderRouting({ ...(o.builderRouting ?? {}), tier: o.builderModelTier }); // #6207: engine.builder_model_tier
   // #4394: the build's model tier, routed from the frozen contract; a failed validate round on the mid tier escalates once
   // #5810: before the contract, the pre-contract sessions run on a provisional route from the issue's own signals
   let route = null, escalated = false, preRoute = null;
@@ -407,13 +411,14 @@ export async function runCore(o) {
   let branch = `feat/issue-${issue}-lean`; // #5469: an adopted PR's own head branch replaces it
   const wt = join(o.worktreeRoot ?? join(cwd, ".claude", "worktrees"), `lean-${issue}`);
   const t0 = now();
-  const phaseLedger = createLedger(now, "sandbox_start", t0); // #4908: where the lane wall time goes
+  let stageRep = null; // #6245: created once post() exists (below); each ledger transition updates the FORGE:STAGE line (<= 1 edit/min) and appends LANE_STAGE
+  const phaseLedger = createLedger(now, "sandbox_start", t0, (p) => stageRep?.enter(p)); // #4908: where the lane wall time goes
   const usage = { cost_usd: 0, input: 0, output: 0, cache: 0 };
   const sessionCosts = new Map(); // #4407: session id -> last reported cumulative cost
   let sessionId = null;
 
   let ciVerifies = 0, ciMergeFixRounds = 0; // #6203: counted off the run-log events for the MERGE_LEDGER record
-  const ev = (e) => { if (e?.event === "CI_VERIFY") ciVerifies++; else if (e?.event === "CI_FIX_ROUND") { if (e.trigger === "merge") ciMergeFixRounds++; } return appendEvent(dir, issue, e, { repo }); }; // #4432: the run log is keyed by repo + issue
+  const ev = (e) => { if (e?.event !== "LANE_STAGE") stageRep?.touch(); if (e?.event === "CI_VERIFY") ciVerifies++; else if (e?.event === "CI_FIX_ROUND") { if (e.trigger === "merge") ciMergeFixRounds++; } return appendEvent(dir, issue, e, { repo }); }; // #4432: the run log is keyed by repo + issue
   /** #5435: time one sandbox_start step (SANDBOX_STEP event + ledger sub-timing); the result and errors pass through. */
   const step = async (name, fn) => {
     const s0 = now();
@@ -478,14 +483,15 @@ export async function runCore(o) {
   let iss; // the issue as read at intake; declared early so the comment helpers below can see it
   const localPosts = []; // #5979: comments this lane created, so a second post in the same run sees them
   const allComments = () => [...(iss?.comments ?? []), ...localPosts];
+  let statusQ = Promise.resolve(); // #6245: status writes run one at a time, so a stage edit never overwrites a section a concurrent post just wrote
   let statusCache = null; // #5592: {id, sections} of this issue's one FORGE:STATUS comment, edited in place
   let postContractHash = null; // #5931: the frozen contract hash once known; in-place comments are keyed to it
   const post = async (marker, body, on = issue) => {
     if (on === issue && isStatusPost(marker)) { // machine-state markers: a section of the one status comment, not a comment of their own
       try {
-        const r = await writeStatus({ known: statusCache, comments: iss?.comments, trusted: isTrustedIssueComment, markers: Array.isArray(marker) ? marker : [marker], text: body, cap: capComment,
+        const r = await (statusQ = statusQ.catch(() => {}).then(() => writeStatus({ known: statusCache, comments: iss?.comments, trusted: isTrustedIssueComment, markers: Array.isArray(marker) ? marker : [marker], text: body, cap: capComment,
           create: async (b) => /https?:\/\/\S+/.exec(String(await ghw(["issue", "comment", String(on), "-R", repo, "--body", b])))?.[0] ?? null,
-          patch: (id, b) => ghw(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${id}`, "-f", `body=${b}`]) });
+          patch: (id, b) => ghw(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${id}`, "-f", `body=${b}`]) })));
         statusCache = { id: r.id, sections: r.sections };
         return r.url;
       } catch (e) { if (e?.deferCode) throw e; /* a failed status edit falls back to a plain comment below */ }
@@ -513,6 +519,7 @@ export async function runCore(o) {
     if (on === issue) localPosts.push({ body: full, url, __mine: true });
     return url;
   };
+  stageRep = createStageReporter({ now, write: (text) => post("FORGE:STAGE", text), emit: (e) => ev(e) }); // #6245
   /** Best effort; `true` when the transition succeeded (#4337: the decomposed close needs to know). */
   const label = async (state) => { try { await retrying(() => io.transitionLabel(issue, state), { transient: GH_TRANSIENT_RE, attempts: 4, sleep: sleepFn, random }); return true; } catch { /* labels are best effort */ return false; } };
   const postRun = makePostRun({ ev, sleep: sleepFn, now }); // #5437: bookkeeping after RUN_TERMINAL, idempotent and retried
@@ -547,7 +554,7 @@ export async function runCore(o) {
   }
 
   // Pipeline trajectory (posted once at the end): phase rows, decisions, anomalies.
-  let depResults = [], gateProvisioned = false; // #5447
+  let depResults = [], gateProvisioned = false, gatePyTried = new Set(); // #5447
   const T = { issue, validate: null, plan: null, implement: null, review: null, pr: null, merge: null, close: null, decisions: [], anomalies: [] };
   const failureClasses = new Set(); // forge#4275: conformance failure codes seen this run (gate failures, shadow would-fail)
   const ctxBase = parseContextPackConfig(o.contextPack ?? {});
@@ -752,6 +759,7 @@ export async function runCore(o) {
     return finishing;
   }
   async function finishOnce(reason, detail = "", extra = {}, codeOverride = null) {
+    stageRep?.close(); // #6245
     await flushInflight(); // #5334: a signal mid-attempt: the session's usage so far is recorded before RUN_TERMINAL
     try { io.host?.recordPeakRss?.(Math.ceil(process.resourceUsage().maxRSS / 1024)); } catch { /* fail-open (#5845): the learned lane footprint is best effort */ }
     try { seqLease?.release(); } catch { /* fail-open */ }
@@ -786,8 +794,9 @@ export async function runCore(o) {
     const term = { event: "RUN_TERMINAL", reason, code, ...(extra.cliResult != null ? { cli_result: extra.cliResult } : {}), ...(typeof extra.cliIsError === "boolean" ? { cli_is_error: extra.cliIsError } : {}), ...(extra.account ? { account: extra.account } : {}), // #5762
       ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}), ...(verifiedLane != null ? { verified: verifiedLane } : {}),
       ...(reproQ ? { repro_quality: reproQ } : {}), conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}), ...(firstReview ? { first_review: firstReview } : {}), ...(adequacyTel ?? {}),
-      ...(laneHead && reason !== "merged" ? { lane_branch: laneHead.pushedTo ?? "unpushed", lane_sha: laneHead.sha } : {}), context_pack: ctxCfg.mode, ...ctxAb, ...expTag, explore: exploreCfg.mode, wall_ms: now() - t0, ...(guardAddedMs ? { guard_added_ms: guardAddedMs } : {}), model_ms: modelMs, ...(usageUnknown ? { usage_unknown: true } : {}), light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(laneApiResumes ? { api_resumes: laneApiResumes } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
-      ...(route ? { builder_tier: route.tier, builder_class: route.class, builder_escalated: escalated, builder_model: route.model ?? "default" } : {}) }; // forge#4275: the on/off A/B groups runs by these; #4394: per-tier stats
+      ...(laneHead && reason !== "merged" ? { lane_branch: laneHead.pushedTo ?? "unpushed", lane_sha: laneHead.sha } : {}), context_pack: ctxCfg.mode, ...ctxAb, ...expTag, explore: exploreCfg.mode, wall_ms: now() - t0, ...(guardAddedMs ? { guard_added_ms: guardAddedMs } : {}), model_ms: modelMs, ...(usageUnknown ? { usage_unknown: true } : {}), light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(laneApiResumes ? { api_resumes: laneApiResumes } : {}), builder_sessions: sessionCosts.size, split_plan: splitPlan === true, // #6207
+      ...(tb.record() ? { turns: tb.record() } : {}),
+      ...(routingCfg.tier !== "auto" ? { builder_tier_setting: routingCfg.tier } : {}), ...(route ? { builder_tier: route.tier, builder_class: route.class, builder_escalated: escalated, builder_model: route.model ?? "default" } : {}) }; // forge#4275: the on/off A/B groups runs by these; #4394: per-tier stats
     Object.assign(term, overheadStats(null, term.wall_ms, term.model_ms)); // fixed_overhead_ms + model_share for the SLO
     const phases = phaseLedger.snapshot(); // #4908: run log gets the nested ledger, FORGE:TELEMETRY the flattened scalars
     ev({ ...term, phases });
@@ -795,7 +804,7 @@ export async function runCore(o) {
     if (reason === "merged") { // #6203: one MERGE_LEDGER record per merge (first_pass, human touches, test delta, CI attempts, deduped cost, wall per phase)
       try {
         await emit(buildMergeLedger({ firstPass: firstPassOf(builderTriggers), recovered: Boolean(recover), attempt: recover?.attempt ?? o.attempt ?? 1, ciVerifies: ciVerifies + ciMergeFixRounds, ciFixRounds: builderTriggers.filter((x) => x.trigger === "ci_red" || x.trigger === "merge_ci").length,
-          files: String(await git(["diff", "--name-only", `${base}...HEAD`]).catch(() => "")).split("\n"), comments: allComments(), sinceMs: Date.now() - (now() - t0), costUsd: usage.cost_usd, phases, wallMs: now() - t0, engineVersion: ENGINE_VERSION, tier: route?.tier, model: route?.model, pr: extra.pr }));
+          files: String(await git(["diff", "--name-only", `${base}...HEAD`]).catch(() => "")).split("\n"), comments: allComments(), sinceMs: Date.now() - (now() - t0), costUsd: usage.cost_usd, phases, wallMs: now() - t0, engineVersion: ENGINE_VERSION, tier: route?.tier, model: route?.model, builderSessions: sessionCosts.size, splitPlan: splitPlan === true, pr: extra.pr }));
       } catch { /* the ledger is best effort */ }
     }
     // #4297: only a final failure the runner never requeues puts needs-human back (needsHuman() relabels on its own path). invalid,
@@ -899,7 +908,7 @@ export async function runCore(o) {
       }
       // #5979: the second identical failure (same code and normalised detail as an earlier NEEDS_HUMAN/PARKED of this issue) parks with one summary, no recovery
       const sig = repeatSignature(code, why);
-      const stoppable = !isNonStoppable(code); // #6231: the one non-stoppable list (admit.mjs)
+      const stoppable = repeatCounted(code); // #6231/#6243: non-stoppable codes do not count, except the deterministic REPEAT_COUNTED_CODES (admit.mjs)
       const identical = stoppable ? countIdentical(allComments(), sig, (c) => c?.__mine === true || isTrustedIssueComment(c)) + 1 : 1;
       if (shouldPark(identical)) {
         try { await post("FORGE:PARKED", summaryComment({ attempts: identical, code, detail: why, sig: `${sig}${await admitStamp(code)}` })); } catch (e) { labelFailed("comment", e); }
@@ -1337,7 +1346,7 @@ export async function runCore(o) {
         if (timeoutRetries++ >= 1) { e.deferCode = hostKilled ? OUTCOME_CODES.CLI_HOST_KILLED : idle ? OUTCOME_CODES.CLI_IDLE : OUTCOME_CODES.CLI_TIMEOUT; e.deferDetail = `builder ${reason}; work checkpointed to ${branch}; rerun resumes from it. ${String(e.message).slice(0, 300)}`; throw e; }
         T.anomalies.push(`builder ${reason}: checkpointed, retried once`);
         T.decisions.push(`Builder ${reason}: uncommitted work checkpointed to the lane branch; retrying once from the checkpoint`);
-        p = restart(); resume = null; opts.restartOf ??= opts.trigger ?? null; opts.trigger = "timeout_restart";
+        p = restart(); resume = splitPlan === true || !hostKilled || opts.trigger === "plan" ? null : (e.cliSessionId ?? sessionId ?? null); opts.restartOf ??= opts.trigger ?? null; opts.trigger = "timeout_restart"; // #6207: a host kill (not a hang) resumes the same session in the single-session lane instead of a cold restart
       }
     }
   }
@@ -1927,23 +1936,8 @@ export async function runCore(o) {
     const setupP = (async () => {
     // #4220: link node_modules/.venv from the shared cache keyed by lock hash (or install once and publish). Never fails the run.
     // After 2b (#4347): installs run with the toolchain env, so a pm only its shim provides resolves; no env is the host PATH.
-    if (io.deps?.prepare) {
-      const tD = now();
-      let res;
-      try { res = await io.deps.prepare({ wt, repoKey: depcacheNamespace({ repo, fallback: repoKey(cwd) }), env: toolchain?.env ?? undefined }); } catch (e) { res = [{ status: "failed", eco: null, key: null, ms: 0, reason: String(e?.message ?? e).slice(0, 300) }]; }
-      depResults = Array.isArray(res) ? res : []; // #5447: classified against the changed files at the gate
-      setupStep("deps", tD);
-      for (const r of Array.isArray(res) ? res : []) {
-        ev({ event: "DEPS_PREPARED", status: r?.status ?? null, eco: r?.eco ?? null, key: r?.key ?? null, ms: r?.ms ?? null, reason: r?.reason ?? null });
-        if (r?.restore) { // #5819: a failed publish/materialize touched tracked files; depcache checked them out again
-          ev({ event: "DEPS_WORKTREE_RESTORED", eco: r.eco ?? null, status: r.status ?? null, ...r.restore });
-          T.anomalies.push(r.restore.error ? `Dependency cache (${r.eco}): restoring tracked files after a failed ${r.status} failed: ${r.restore.error}` : `Dependency cache (${r.eco}): ${r.restore.restored} tracked file(s) missing after a failed ${r.status} were restored${r.restore.missing ? ` (${r.restore.missing} still missing)` : ""} (#5819)`);
-        }
-        if (r?.eco) T.decisions.push(`Dependencies (${r.eco}${r.key ? ` ${r.key}` : ""}): ${r.status}${r.reason ? ` (${r.reason})` : ""}${Number.isFinite(r.ms) ? ` in ${Math.round(r.ms / 100) / 10}s` : ""}`);
-      }
-    }
-    depsSettled();
-    // ---- 2c. heavy-step shims (#4169): after the toolchain, so a heavy shim's real binary is the pinned toolchain shim ----
+    // ---- 2c. heavy-step shims (#4169): after the toolchain (a heavy shim's real binary is the pinned toolchain shim); #6207: concurrent with the dependency install, awaited before env.setup ----
+    const shimsP = (async () => {
     const tH = now();
     if (heavyOn) {
       try {
@@ -1962,6 +1956,24 @@ export async function runCore(o) {
       } catch (e) { T.anomalies.push(`Heavy-step shims not written (builder steps ungated): ${String(e?.message ?? e).slice(0, 200)}`); }
     }
     setupStep("heavy_shims", tH);
+    })();
+    if (io.deps?.prepare) {
+      const tD = now();
+      let res;
+      try { res = await io.deps.prepare({ wt, repoKey: depcacheNamespace({ repo, fallback: repoKey(cwd) }), env: toolchain?.env ?? undefined }); } catch (e) { res = [{ status: "failed", eco: null, key: null, ms: 0, reason: String(e?.message ?? e).slice(0, 300) }]; }
+      depResults = Array.isArray(res) ? res : []; // #5447: classified against the changed files at the gate
+      setupStep("deps", tD);
+      for (const r of Array.isArray(res) ? res : []) {
+        ev({ event: "DEPS_PREPARED", status: r?.status ?? null, eco: r?.eco ?? null, key: r?.key ?? null, ms: r?.ms ?? null, reason: r?.reason ?? null });
+        if (r?.restore) { // #5819: a failed publish/materialize touched tracked files; depcache checked them out again
+          ev({ event: "DEPS_WORKTREE_RESTORED", eco: r.eco ?? null, status: r.status ?? null, ...r.restore });
+          T.anomalies.push(r.restore.error ? `Dependency cache (${r.eco}): restoring tracked files after a failed ${r.status} failed: ${r.restore.error}` : `Dependency cache (${r.eco}): ${r.restore.restored} tracked file(s) missing after a failed ${r.status} were restored${r.restore.missing ? ` (${r.restore.missing} still missing)` : ""} (#5819)`);
+        }
+        if (r?.eco) T.decisions.push(`Dependencies (${r.eco}${r.key ? ` ${r.key}` : ""}): ${r.status}${r.reason ? ` (${r.reason})` : ""}${Number.isFinite(r.ms) ? ` in ${Math.round(r.ms / 100) / 10}s` : ""}`);
+      }
+    }
+    depsSettled();
+    await shimsP;
     if (typeof envSetup === "string" && envSetup.trim()) {
       const tE = now();
       let r;
@@ -2491,7 +2503,7 @@ export async function runCore(o) {
      * #4363: one fix round. Mechanical failures (and a conformance/review FAIL citing file:line) run in a fresh session on
      * the fix model with a narrow prompt; one resume of the build session follows when it made no commit. Else: a resume.
      */
-    function fixRound(...a) { return phaseLedger.during("fix", () => fixRoundRaw(...a)); } // #5649: fix rounds are their own ledger phase
+    function fixRound(...a) { stageRep?.note(fixReason(a[3], a[2])); return phaseLedger.during("fix", () => fixRoundRaw(...a)); } // #5649: fix rounds are their own ledger phase
     // #5728: a context-ceiling restart of a fix resume carries the failure list (no diff), not the full build prompt
     const fixResumeRestart = (task) => () => fixSessionPrompt({ task, stat: "", base, contract: frozen, title: iss?.title ?? "", summary: issueSummary(iss?.body) });
     async function fixRoundRaw(kind, task, failures, trigger, failureText = "", narrow = null) { // #5348: `narrow` {files} = the minimal profile (no diff, no lane text)
@@ -2954,7 +2966,7 @@ export async function runCore(o) {
           buildPrompt = implementPrompt + digest; buildResume = null;
           T.decisions.push(`Route hand-off: the planning session ended at ${ho.planTokens} context tokens (bound ${ho.bound}); the build starts fresh from a ${Buffer.byteLength(digest)}-byte digest instead of resuming it`);
         }
-        const rec = { event: "ROUTE_HANDOFF", mode: ho.digest ? "digest" : "resume", plan_tokens: ho.planTokens, bound: ho.bound, ...(ho.digest ? { digest_bytes: Buffer.byteLength(buildPrompt) - Buffer.byteLength(implementPrompt) } : {}), pack_bytes: ctxPack?.bytes ?? null, lane_profile: laneProfile.name };
+        const rec = { event: "ROUTE_HANDOFF", mode: ho.digest ? "digest" : "resume", split_plan: splitPlan === true, plan_tokens: ho.planTokens, bound: ho.bound, ...(ho.digest ? { digest_bytes: Buffer.byteLength(buildPrompt) - Buffer.byteLength(implementPrompt) } : {}), pack_bytes: ctxPack?.bytes ?? null, lane_profile: laneProfile.name };
         ev(rec); await emit(rec);
       }
       if (!lightDone) { // #5346: a session certain to restart is narrowed (or, when the named files alone exceed the ceiling, left uncapped) before it starts
@@ -3328,6 +3340,29 @@ export async function runCore(o) {
       return mech;
     }
     await duplicateGate("hand-off");
+    /** #6239: 100644 shebang / directly-invoked *.sh files and dropped +x: the engine's `git update-index --chmod=+x` first, then one builder round, then an anomaly. Never blocks. */
+    async function execBitGate(trigger) {
+      if (!io.execBits || isSplit || vcfg.execBits === false) return;
+      const found = async () => (await io.execBits({ cwd: wt, base }).catch(() => null)) ?? [];
+      let bad = await found();
+      if (!bad.length) return;
+      ev({ event: "EXEC_BIT_FINDINGS", trigger, count: bad.length });
+      T.decisions.push(`Exec-bit finding(s) (${trigger}): ${bad.slice(0, 5).map((f) => f.path).join(", ")}`);
+      const fixed = (await io.execBitsFix?.({ cwd: wt, findings: bad }).catch(() => null)) ?? [];
+      if (fixed.length) {
+        try { await git(["commit", "--no-verify", "-m", "fix(forge): executable bit set by the engine, no model session (#6239)"]); } catch { /* the detector re-run decides */ }
+        files = await changedFiles();
+        bad = await found();
+      }
+      if (bad.length && sessionId) {
+        await fixRound("exec_bits", execBitsPrompt(bad, vcfg.mode), [], "exec_bits", bad.map((f) => `${f.path}: ${f.why}`).join("\n"), { files: bad.map((f) => f.path) });
+        result = (await readResult()) ?? result;
+        files = await changedFiles();
+        bad = await found();
+      }
+      if (bad.length) T.anomalies.push(`Exec-bit problem(s) remain (${trigger}): ${bad.slice(0, 5).map((f) => `${f.path} (${f.why})`).join("; ")}`);
+    }
+    await execBitGate("hand-off");
     /** #4591: lane-added migrations the repo's generator did not produce: one builder round (stage "sequence"), then an anomaly. */
     async function migrationGate(trigger) {
       if (!io.migrationGenerator || isSplit) return;
@@ -3822,6 +3857,26 @@ export async function runCore(o) {
       // #4693: guards run beside the validate rerun
       const validatePhase = phaseLedger.during("validate", async () => ({ runs: await rerunFailedValidatesRaw(effective, { ciVerified }) })).finally(() => { validateMs = now() - gateT0; });
       const [{ runs: validateRuns }, guardFailures] = await Promise.all([validatePhase, guardGate(files)]);
+      const regRows = (effective.validate ?? []).filter((v) => v?.regression && validateRuns?.[v.id] && validateRuns[v.id].rc !== 0);
+      const regBase = {};
+      if (regRows.length && io.runCommand) { // #6115: a regression row failing on a missing module gets the generic install and one rerun; the rest are compared with the base
+        const installFor = async (outputs) => {
+          const mods = missingPythonModules(outputs.join("\n")).filter((m) => !gatePyTried.has(m)), root = process.getuid?.() === 0;
+          for (const m of mods) { gatePyTried.add(m); for (const command of genericInstallCommands({ kind: "python-module", tool: m }, { root })) await io.runCommand({ command, cwd: wt, timeoutMs: 600000, env: laneEnv() }).catch(() => null); }
+          return mods;
+        };
+        const rerunRow = async (v) => { try { const x = await io.runCommand({ command: v.command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }); const r = x?.r ?? x; validateRuns[v.id] = { ...validateRuns[v.id], rc: Number.isInteger(r?.rc) ? r.rc : 1, output: String(r?.output ?? "") }; } catch { /* keep the first run */ } };
+        const gapRows = regRows.filter((v) => toolGapFailures([validateRuns[v.id]]).length);
+        if (gapRows.length) {
+          const mods = await installFor(gapRows.map((v) => validateRuns[v.id].output));
+          if (mods.length) { ev({ event: "REGRESSION_MODULE_INSTALL", modules: mods }); for (const v of gapRows) await rerunRow(v); }
+        }
+        const need = regRows.filter((v) => validateRuns[v.id].rc !== 0 && !toolGapFailures([validateRuns[v.id]]).length);
+        if (need.length && !isSplit) {
+          const br = await heavyStep("precheck", () => runOnBase({ commands: need.map((v) => v.command), git, runCommand: io.runCommand, mergeBase: base, cwd: wt, env: laneEnv(), timeoutMs: vcfg.precheckTimeoutSeconds * 1000 }));
+          for (const v of need) { const b = br.find((x) => x.command === v.command); if (b) regBase[v.id] = b; }
+        }
+      }
       // #5087: forge.yaml topology.route_reachability gates the route handlers this diff adds; unset = no check
       const routeFailures = routeReachability && io.runCommand ? await routeReachabilityFailures({ command: routeReachability, paths: routePathsFromFiles(String(await git(["diff", "--name-only", "--diff-filter=A", `${base}...HEAD`]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)), run: async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } }) : [];
       // #5419: forge.yaml docs: user-facing surfaces need docs, and added /docs links must resolve; unset = no check
@@ -3860,7 +3915,26 @@ export async function runCore(o) {
         baselineRuns.push({ ...b, rc: Number.isInteger(x?.rc) ? x.rc : 1, output: String(x?.output ?? "") });
       }
       if (baselineRuns.length) ev({ event: "BASELINES_RUN", runs: baselineRuns.map((b) => ({ run: b.run, rc: b.rc })) });
-      const pc = precheck({ baselineFailures: baselineFailures(baselineRuns), contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, repro: (adequacyIn.repro = repro), validateRuns, repoHas, frozen, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, outcomeEvidenceFailures: outcomeFail, pageFailures: [...pageFail, ...designFail], seamFailures: seamFail, prodParityFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), removedPaths });
+      let baselineRows = [];
+      { // #6115: a failing baseline suite is classified: tool gap (install, rerun once, else env.tool_missing), also red on base (recorded), or lane-own (blocking)
+        let bad = baselineRuns.filter((b) => b.rc !== 0);
+        if (bad.length && io.runCommand) {
+          const gapB = bad.filter((b) => toolGapFailures([b]).length);
+          const mods = missingPythonModules(gapB.map((b) => b.output).join("\n")).filter((m) => !gatePyTried.has(m)), root = process.getuid?.() === 0;
+          for (const m of mods) { gatePyTried.add(m); for (const command of genericInstallCommands({ kind: "python-module", tool: m }, { root })) await io.runCommand({ command, cwd: wt, timeoutMs: 600000, env: laneEnv() }).catch(() => null); }
+          if (mods.length) {
+            ev({ event: "BASELINE_MODULE_INSTALL", modules: mods });
+            for (const b of gapB) { try { const x = await io.runCommand({ command: b.run, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }); const r = x?.r ?? x; b.rc = Number.isInteger(r?.rc) ? r.rc : 1; b.output = String(r?.output ?? ""); } catch { /* keep */ } }
+            bad = baselineRuns.filter((b) => b.rc !== 0);
+          }
+          const nonGap = bad.filter((b) => !toolGapFailures([b]).length);
+          const br = nonGap.length && !isSplit ? await heavyStep("precheck", () => runOnBase({ commands: nonGap.map((b) => b.run), git, runCommand: io.runCommand, mergeBase: base, cwd: wt, env: laneEnv(), timeoutMs: vcfg.precheckTimeoutSeconds * 1000 })) : [];
+          const cls = classifyFailingRuns({ failed: bad, baseRuns: br });
+          for (const b of cls.baseRed) { const note = `Baseline suite \`${b.run}\` also fails on ${base}: base-red, recorded, not blocking (#6115)`; if (!T.decisions.includes(note)) T.decisions.push(note); ev({ event: "BASELINE_BASE_RED", run: b.run }); }
+          baselineRows = [...baselineFailures(cls.laneOwn), ...baselineEnvFailures(cls.env)];
+        } else baselineRows = baselineFailures(baselineRuns);
+      }
+      const pc = precheck({ baselineFailures: baselineRows, baseRuns: regBase, contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, repro: (adequacyIn.repro = repro), validateRuns, repoHas, frozen, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, outcomeEvidenceFailures: outcomeFail, pageFailures: [...pageFail, ...designFail], seamFailures: seamFail, prodParityFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), removedPaths });
       // #5447: an install failure for a package the changed files import blocks (env.tool_missing); unrelated ones are logged
       const depFail = depInstallFailures({ results: depResults, changedFiles: files });
       for (const l of depFail.logged) if (!T.decisions.includes(l)) T.decisions.push(l);

@@ -86,6 +86,7 @@ export function parseVerify(sec = {}) {
   const rawFlaky = Array.isArray(s.flaky) ? s.flaky : str(s.flaky).trim().replace(/^\[(.*)\]$/s, "$1").split(",");
   const flaky = [...new Set(rawFlaky.map((x) => String(x ?? "").trim().replace(/^(["'])(.*)\1$/s, "$2").trim()).filter(Boolean))];
   const duplicateExports = str(s.duplicate_exports).toLowerCase() !== "false";
+  const execBits = str(s.exec_bits).toLowerCase() !== "false"; // #6239: off only for the literal `false`; omitted from the result at the default
   const enumeratingMechanical = str(s.enumerating_mechanical).toLowerCase() !== "false"; // #5480: forge.yaml lean.enumerating.mechanical
   const invariants = [...new Set((Array.isArray(s.invariants) ? s.invariants : []).map((x) => String(x ?? "").trim()).filter(Boolean))];
   // #4792: guard_command maps an extension (`.py` or `py`) to a test-file command template; read by engine-cli readYamlMap; the key is omitted when empty so unconfigured repos parse as before
@@ -101,7 +102,7 @@ export function parseVerify(sec = {}) {
   const precheckBlock = str(s.precheck_block).toLowerCase() === "true"; // #5079: a still-failing declared check stops the lane (ci.red)
   const guardBlock = str(s.guard_block).toLowerCase() !== "false"; // #5239: verify.invariants (the pre-merge guard set) block the merge unless false
   const guardBypass = str(s.guard_bypass).toLowerCase() === "true"; // #5992: opt in: a lane clear of a red guard's files proceeds; the guard is re-run at merge
-  return { ...(settle !== "fixed" ? { settle } : {}), ...(parseCancelSuperseded(s.cancel_superseded) !== "off" ? { cancelSuperseded: parseCancelSuperseded(s.cancel_superseded) } : {}), mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, flaky, duplicateExports, enumeratingMechanical, invariants, ...(precheckBlock ? { precheckBlock } : {}), ...(guardBlock ? {} : { guardBlock: false }), ...(Object.keys(guardCommand).length ? { guardCommand } : {}), ...(baselines.length ? { baselines } : {}), ...(Object.keys(sandboxes).length ? { sandboxes } : {}), e2e: parseE2e(s), ...(guardBypass ? { guardBypass } : {}) };
+  return { ...(settle !== "fixed" ? { settle } : {}), ...(parseCancelSuperseded(s.cancel_superseded) !== "off" ? { cancelSuperseded: parseCancelSuperseded(s.cancel_superseded) } : {}), mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, flaky, duplicateExports, ...(execBits ? {} : { execBits: false }), enumeratingMechanical, invariants, ...(precheckBlock ? { precheckBlock } : {}), ...(guardBlock ? {} : { guardBlock: false }), ...(Object.keys(guardCommand).length ? { guardCommand } : {}), ...(baselines.length ? { baselines } : {}), ...(Object.keys(sandboxes).length ? { sandboxes } : {}), e2e: parseE2e(s), ...(guardBypass ? { guardBypass } : {}) };
 }
 
 const globRe = (g) => new RegExp(`^${g.split("**").map((p) => p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")).join(".*")}$`);

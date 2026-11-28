@@ -62,7 +62,8 @@ export function issueSummary(body, max = FIX_CAPS.summary) {
 export const TRIGGERS = Object.freeze(["plan", "build", "block_correction", "contract_correction", "precheck", "structure", "docs", "enumerating",
   "sequence", "ci_unavailable", "ci_red", "conformance", "review", "merge_ci", "timeout_restart", "recovery", "verifier", "post_merge", "duplicate",
   "context_restart", // #4390: a session stopped at the context ceiling, restarted fresh (restart_of: the stopped trigger)
-  "budget_wrapup"]); // #4392: the bounded wrap-up after the implement turn budget is spent (restart_of: the stopped trigger)
+  "budget_wrapup", // #4392: the bounded wrap-up after the implement turn budget is spent (restart_of: the stopped trigger)
+  "exec_bits"]); // #6239: the one builder round for 100644 shebang / directly-invoked scripts the engine could not chmod
 
 /** Builder attempts after the build that mean its diff needed rework (environment and engine repairs do not). */
 export const REWORK_TRIGGERS = Object.freeze(["precheck", "structure", "docs", "enumerating", "sequence", "ci_red", "conformance", "review", "merge_ci", "post_merge", "duplicate"]);

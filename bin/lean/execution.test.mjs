@@ -1486,3 +1486,19 @@ describe("providerLanes: a fresh dispatch clears a stale suspend marker (#6124)"
     await r.postRun?.();
   });
 });
+
+describe("remote provider: the sub-phase from the sandbox run log (#6245)", () => {
+  it("status() puts the newest LANE_STAGE and last event time on the handle and notes a change in the lane log", async () => {
+    const root = tmpDir("exec-stage-"), file = join(root, "7.log");
+    const run = [{ ts: "2026-11-28T10:00:00.000Z", event: "LANE_STAGE", stage: "plan" }, { ts: "2026-11-28T10:03:00.000Z", event: "LANE_STAGE", stage: "fix", round: 1, reason: "conformance.unimplemented R3" }].map((e) => JSON.stringify(e)).join("\n");
+    let polls = 0, t = 1_000_000;
+    const p = remoteProvider({ batch: { id: "b", logFile: () => file }, repo: "o/r", settings: {}, now: () => t, credentials: () => "", gitIdentity: () => ({}),
+      transport: { status: async () => "running", logs: async () => ({ text: "", cursor: 0 }), runlog: async () => { polls++; return { runLog: run, tail: "" }; } } });
+    const h = { id: "s1", issue: 7 };
+    assert.equal(await p.status(h), "running");
+    assert.equal(h.stage.stage, "fix"); assert.equal(h.stage.round, 1); assert.equal(h.stage.lastEventAt, Date.parse("2026-11-28T10:03:00.000Z"));
+    assert.match(readFileSync(file, "utf8"), /\[stage\] fix round 1 \(conformance\.unimplemented R3\)/);
+    await p.status(h); assert.equal(polls, 1, "the run log is read at most every 30 s");
+    t += 31000; await p.status(h); assert.equal(polls, 2);
+  });
+});

@@ -56,6 +56,7 @@ import * as batchHealth from "./lean/batch-health.mjs";
 import { makeAttemptsSeam } from "./lean/attempts.mjs";
 import { cmpVersion } from "./pool/version.mjs";
 import * as _autoChildren from "./lean/autochildren.mjs";
+import { ensureFiledIssueDetailed, updateWaiters, withWaiters } from "./lean/filed-issue.mjs";
 
 /**
  * Workflow labels that mark an issue as "in the pipeline" (not yet terminal).
@@ -453,6 +454,7 @@ export function readHeavy(cwd = process.cwd()) {
  * #5829: unset context_ceiling_tokens = `engine.context_window_share` (default 0.5) of the routed model's window; `engine.context_restart_cost_usd` is the cost gate's restart estimate.
  * #5346: `engine.context_ceiling_by_size` ("S=..,M=..,L=.."; a size without an entry uses context_ceiling_tokens).
  * #5812: `engine.route_handoff_tokens` (default 40000 in runCore; 0 = always resume): a planning session above it is not resumed by the build, which starts from a digest.
+ * #6207: `engine.split_plan` (default false: one builder session, plan folded in; true = the old plan then build sessions); `engine.builder_model_tier` (auto|mid|top, default auto = size/risk routing).
  * #4392: `engine.turn_budget_s|m|l` (implement turn budget per lane size; defaults 25/60/100, always returned; 0 = off).
  */
 export function readCoreLimits(cwd = process.cwd()) {
@@ -472,6 +474,8 @@ export function readCoreLimits(cwd = process.cwd()) {
       ...(String(y.engine?.context_restart_cost_usd ?? "").trim() !== "" && Number(y.engine.context_restart_cost_usd) >= 0 ? { contextRestartCostUsd: Number(y.engine.context_restart_cost_usd) } : {}),
       ...(parseCeilingBySize(y.engine) ? { contextCeilingBySize: parseCeilingBySize(y.engine) } : {}), // #5346
       ...(/^\d+$/.test(String(y.engine?.route_handoff_tokens ?? "").trim()) ? { routeHandoffTokens: Number(y.engine.route_handoff_tokens) } : {}), // #5812
+      ...(String(y.engine?.split_plan ?? "").trim().toLowerCase() === "true" ? { splitPlan: true } : {}), // #6207: the old two-session plan/build path
+      ...(["auto", "mid", "top"].includes(String(y.engine?.builder_model_tier ?? "").trim().toLowerCase()) ? { builderModelTier: String(y.engine.builder_model_tier).trim().toLowerCase() } : {}), // #6207
       turnBudgets: parseTurnBudgets(y.engine) ?? { ...TURN_BUDGET_DEFAULTS }, // #4392: lanes are budgeted by default
     };
   } catch { return { laneLimits: {}, turnBudgets: { ...TURN_BUDGET_DEFAULTS } }; }
@@ -1440,14 +1444,17 @@ async function statusBatch({ id, root, io, print = (l) => console.log(l) }) {
   const kept = b.keptSandboxes(!b.readReport() && b.lastProgressMs() !== null && Date.now() - b.lastProgressMs() <= 10 * 60000); // #6008: a batch with no progress for 10 min has no dispatcher
   const showKept = () => { if (kept.length) print(`kept sandboxes (${kept.length}): ${kept.map((k) => `#${k.issue} age ${Math.round((k.ageMs ?? 0) / 60000)}m phase ${k.phase ?? "?"}`).join(", ")}`); };
   showKept();
+  const { laneStageLines, quietMinOf } = await import("./lean/stage.mjs");
+  const stageLines = () => { for (const l of laneStageLines(st, { quietMin: quietMinOf() })) print(`  ${l}`); }; // #6245: per running lane `#N <sub-phase> for Xm (last activity Ys ago)`
   const select = flag(plan.argv ?? [], "--select");
-  if (!select) { print(`batch ${id}: no selector (a fixed list); ${(st.pending ?? []).length} pending, ${Object.keys(st.running ?? {}).length} running`); return { ok: true, batch: id, unscheduled: [] }; }
+  if (!select) { print(`batch ${id}: no selector (a fixed list); ${(st.pending ?? []).length} pending, ${Object.keys(st.running ?? {}).length} running`); stageLines(); return { ok: true, batch: id, unscheduled: [] }; }
   const open = parseSelected(await io.gh(selectArgs(plan.repo, select)));
   if (!open) throw new Error(`cannot read the issues matching '${select}'`);
   const c = batchMod.coverage({ state: st, open });
   const n = (k) => c[k].length;
   print(`batch ${id} selector '${select}': ${open.length} matching open = ${n("running")} running + ${n("queued")} queued + ${n("backingOff")} backing-off + ${n("waitingDeps")} waiting on deps + ${n("humanBlocked")} human-blocked + ${n("unscheduled")} unscheduled`);
   if (c.humanBlocked.length) print(`human-blocked: ${c.humanBlocked.map((x) => `#${x}`).join(", ")}`);
+  stageLines();
   print(c.unscheduled.length ? `UNSCHEDULED (${c.unscheduled.length}): ${c.unscheduled.map((x) => `#${x}`).join(", ")}` : "unscheduled: 0 (healthy)");
   return { ok: true, batch: id, coverage: c, unscheduled: c.unscheduled, kept };
 }
@@ -2756,19 +2763,26 @@ export function makeEnvIssue({ gh, repo }) {
     ensure: async ({ sig, code, issues = [], evidence = "", number = null }) => {
       const m = mark(sig);
       let no = Number.isInteger(number) ? number : null;
-      if (!no) {
-        const found = JSON.parse(await gh(["issue", "list", "-R", repo, "--state", "open", "--search", `"${m.slice(5, -4).trim()}" in:body`, "--json", "number,body", "--limit", "10"]) || "[]");
-        no = found.find((x) => String(x.body ?? "").includes(m))?.number ?? null;
-      }
-      if (!no) {
-        const out = await gh(["issue", "create", "-R", repo, "--title", `fix(env): ${code} (${sig.split("|")[1] ?? ""})`.slice(0, 120),
-          "--body", `Environment defect \`${code}\` (engine/env, not product code). Affected: ${list(issues)}. They wait on this issue and are requeued when it closes.\n\n\`\`\`\n${String(evidence).slice(0, 3000)}\n\`\`\`\n\n${m}`]);
-        no = Number(/\/issues\/(\d+)/.exec(String(out))?.[1]) || null;
+      if (no) {
+        try { await updateWaiters({ ghc: gh, repo, number: no, add: issues }); } catch { /* best effort */ }
       } else {
-        try { await gh(["issue", "comment", String(no), "-R", repo, "--body", `Affects ${list(issues)}.`]); } catch { /* best effort */ }
+        const body = withWaiters(`Environment defect \`${code}\` (engine/env, not product code). Affected: ${list(issues)}. They wait on this issue and are requeued when it closes.\n\n\`\`\`\n${String(evidence).slice(0, 3000)}\n\`\`\`\n\n${m}`, issues);
+        const r = await ensureFiledIssueDetailed({ ghc: gh, repo, key: m, title: `fix(env): ${code} (${sig.split("|")[1] ?? ""})`, body, occurrence: "" });
+        no = r.number;
+        if (no && !r.created) { try { await updateWaiters({ ghc: gh, repo, number: no, add: issues }); } catch { /* best effort */ } }
       }
       for (const i of issues) { try { await gh(["issue", "edit", String(i), "-R", repo, "--add-label", "waiting-dependency"]); } catch { /* best effort */ } }
       return no;
+    },
+    /** #6238: `issue` no longer waits on env issue `number`; closes it with a note when its waiter list empties. */
+    release: async ({ number, issue }) => {
+      const r = await updateWaiters({ ghc: gh, repo, number, remove: [issue] });
+      if (r.hadBlock && r.waiters.length === 0 && r.state === "OPEN") {
+        await gh(["issue", "comment", String(number), "-R", repo, "--body", `No issue waits on this any more (last: #${issue} closed, delivered or released). Closing; it reopens if the defect recurs.`]);
+        await gh(["issue", "close", String(number), "-R", repo]);
+        return true;
+      }
+      return false;
     },
     isClosed: async (number) => JSON.parse(await gh(["issue", "view", String(number), "-R", repo, "--json", "state"]))?.state === "CLOSED",
   };
@@ -2842,6 +2856,7 @@ export async function scheddFromCli(argv, deps = {}) {
       const ln = b.lanes ? `, running ${b.lanes.running}/${b.lanes.k} (local ${b.lanes.local}, remote ${b.lanes.remote})` : "";
       const alive = b.lanesAliveAgeSec == null ? "" : `, lanes alive ${b.lanesAliveAgeSec}s ago`;
       console.log(`  ${b.id}${b.running ? "" : " (not hosted)"}: ${age}${ln}${alive}${pend}`);
+      for (const l of b.stages ?? []) console.log(`    ${l}`); // #6245
     }
     for (const l of schedd.sharedPendingLines(st.batches)) console.log(l); // #5471
     if (st.host) { const h = formatOverload(st.host) ?? formatHostLoad(st.host); if (h) console.log(`schedd: ${st.host.overloaded ? h : `host ${h}`}`); } // #5174
