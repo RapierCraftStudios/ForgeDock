@@ -42,7 +42,7 @@ function agentFixture(opts = {}) {
   let t = 1_000_000;
   const docker = fakeDocker();
   const dir = tmpDir("cs-agent-");
-  const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: dir, allow_cpus: 4, allow_mem_gb: 8, lease_ttl_s: 600, token: "agent-token", ...opts }, { docker, now: () => t, log: quiet, live: opts.live ?? (() => ({ ok: true })), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
+  const agent = createAgent({ elastic_lanes: false, name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: dir, allow_cpus: 4, allow_mem_gb: 8, lease_ttl_s: 600, token: "agent-token", ...opts }, { docker, now: () => t, log: quiet, live: opts.live ?? (() => ({ ok: true })), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
   return { agent, docker, dir, advance: (ms) => { t += ms; } };
 }
 
@@ -1070,7 +1070,7 @@ test("#5885 owner pause refuses launches with 503 until resume, survives a resta
   const refused = await agent.launch({ spec: spec("p1"), cpus: 1, mem_gb: 1 });
   assert.equal(refused.status, 503);
   // a restarted agent on the same state dir stays paused
-  const again = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, state_dir: dir, allow_cpus: 4, allow_mem_gb: 8, token: "agent-token" }, { docker: fakeDocker(), log: quiet, live: () => ({ ok: true }), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
+  const again = createAgent({ elastic_lanes: false, name: "a1", listen: { host: "127.0.0.1", port: 7711 }, state_dir: dir, allow_cpus: 4, allow_mem_gb: 8, token: "agent-token" }, { docker: fakeDocker(), log: quiet, live: () => ({ ok: true }), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }) });
   assert.equal(again.capacity().owner_paused, true);
   // an idle resize clears the resize pause (cfg.paused) but never the owner's
   if (!onWsl) { // an idle resize on WSL would rewrite the real .wslconfig
