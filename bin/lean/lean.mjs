@@ -3971,7 +3971,7 @@ export async function runCore(o) {
         if (!T.decisions.includes(note)) T.decisions.push(note);
       }
       // report-only: a deliver requirement whose test never ran green is named, not judged on prose
-      const unverified = unverifiedRequirements(effective, { runs: result?.validation, reruns: validateRuns, ciCovered: pc.ciCovered });
+      const unverified = unverifiedRequirements(effective, { runs: result?.validation, reruns: validateRuns, ciCovered: pc.ciCovered, readFile: (f) => readFileSync(join(wt, f), "utf8") });
       if (unverified.length) {
         ev({ event: "REQUIREMENT_UNVERIFIED", ids: unverified.map((u) => u.id) });
         const note = `Unverified (no executed evidence test): ${unverified.map((u) => u.id).join(", ")}`;
@@ -3979,7 +3979,7 @@ export async function runCore(o) {
       }
       let mutBlock = [];
       if (conformanceMutation === "report" && io.runCommand) { // #4913: report-only unless conformance_kinds enforces the kind
-        const m = await phaseLedger.during("validate", () => runMutationCheck({ targets: mutationTargets(effective, { runs: result?.validation, reruns: validateRuns, ciCovered: pc.ciCovered }), files, base, git: (a) => git(a), runCommand: (a) => io.runCommand(a), cwd: wt, env: laneEnv(), tmp: runTmp ?? undefined }));
+        const m = await phaseLedger.during("validate", () => runMutationCheck({ targets: mutationTargets(effective, { runs: result?.validation, reruns: validateRuns, ciCovered: pc.ciCovered, readFile: (f) => readFileSync(join(wt, f), "utf8") }), files, base, git: (a) => git(a), runCommand: (a) => io.runCommand(a), cwd: wt, env: laneEnv(), tmp: runTmp ?? undefined }));
         adequacyIn.mutation = m.results;
         const mf = mutationFailures(m.results);
         if (m.results.length || m.skipped) ev({ event: "REQUIREMENT_MUTATION_SURVIVED", ids: mf.map((f) => f.detail.split(" ")[0]), checked: m.results.length, skipped: m.skipped || undefined });

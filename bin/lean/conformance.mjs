@@ -561,6 +561,7 @@ const DEV_WORK_RE = /^\W*(?:\w+\s+){0,2}?(?:find|fix|implement|develop|build|wri
 export function validateContract(c, issueText, { repro = false, pages = null, testPlan = false, readFile = null, baseFiles = null, reproRecipe = false } = {}) {
   const problems = [];
   if (!c || typeof c !== "object" || Array.isArray(c)) return { ok: false, problems: ["contract.json is missing or not a JSON object"] };
+  linkTestPlanDeliverables(c); // #6266: a test_plan row's test file is linked to its requirement before the checks run
   const reqs = Array.isArray(c.requirements) ? c.requirements : [];
   if (!reqs.length) problems.push("the contract lists no requirements");
   const ids = new Set();
@@ -1949,18 +1950,70 @@ export function blockingFailures(failures, { shadow = false, kinds = null, allow
  * builder's result, else CI). Requirements verified out of band are judged by their instrumentation and skipped.
  * @returns {{id: string, reason: string}[]}
  */
-export function unverifiedRequirements(contract, { runs = [], reruns = null, ciCovered = [] } = {}) {
+export function unverifiedRequirements(contract, { runs = [], reruns = null, ciCovered = [], readFile = null } = {}) {
   const out = [];
   for (const r of contract?.requirements ?? []) {
     if (r.disposition !== "deliver" || isOutOfBand(r)) continue;
-    const tests = evidenceTests(contract, r);
+    const tests = evidenceTests(contract, r, { readFile });
     if (!tests.length) { out.push({ id: r.id, reason: "no test deliverable linked to the requirement" }); continue; }
     if (!greenEvidence(contract, tests, { runs, reruns, ciCovered }).length) out.push({ id: r.id, reason: `no executed passing validate runs its test (${tests.join(", ")})` });
   }
   return out;
 }
 
-const evidenceTests = (contract, r) => (contract.deliverables ?? []).filter((d) => (d.requirements ?? []).includes(r.id) && isTestPath(d.path)).map((d) => String(d.path));
+/**
+ * #6266: the test a test_plan row names: the file paths in its repro id and command, and the bare test name (the last segment
+ * of `file::Class::name`, `file#name` or `Class.name`). A repro of "no-repro" names nothing.
+ */
+function planRowRefs(row) {
+  const repro = /^no-repro$/i.test(String(row?.repro ?? "").trim()) ? "" : String(row?.repro ?? "").replace(/[`'"]/g, "").trim();
+  const toks = `${repro} ${row?.command ?? ""}`.split(/[\s,;]+/).map((t) => t.replace(/(?:::|#).*$/, "")).filter((t) => t && isTestPath(t));
+  const nm = repro.split(/\s+/)[0]?.split(/::|#/).filter(Boolean).pop() ?? "";
+  const name = /^[A-Za-z_][\w.$ -]{2,}$/.test(nm) && !isTestPath(nm) ? nm.split(".").pop() : "";
+  return { paths: [...new Set(toks)], name };
+}
+/**
+ * Test files proving requirement `r`: test deliverables that list it, plus (#6266) test deliverables a test_plan row for it
+ * resolves to: by the file path the row names, else by its test name appearing in a deliverable test file's content
+ * (`readFile(path)`; without it a name-only row resolves to nothing). Fails closed.
+ */
+export function evidenceTests(contract, r, { readFile = null } = {}) {
+  const tests = (contract.deliverables ?? []).filter((d) => isTestPath(d.path)).map((d) => String(d.path));
+  const out = new Set((contract.deliverables ?? []).filter((d) => (d.requirements ?? []).includes(r.id) && isTestPath(d.path)).map((d) => String(d.path)));
+  for (const row of Array.isArray(contract.test_plan) ? contract.test_plan : []) {
+    if (row?.requirement !== r.id) continue;
+    const { paths, name } = planRowRefs(row);
+    const has = (t) => { try { return String(readFile(t) ?? "").includes(name); } catch { return false; } }; // unreadable: no evidence
+    const byPath = tests.filter((t) => paths.some((p) => t === p || t.endsWith(`/${p}`) || p.endsWith(`/${t}`)));
+    if (byPath.length) { for (const t of byPath) if (!(name && readFile) || has(t)) out.add(t); continue; } // a named test must be in the file once files are readable
+    if (name && readFile) for (const t of tests) if (has(t)) out.add(t);
+  }
+  return [...out];
+}
+/**
+ * #6266 auto-link (mutates `c`): a deliver requirement whose test_plan row names a test file gets that file as a test
+ * deliverable linked to it: an existing deliverable for the path gains the requirement id, an absent one is added. A row that
+ * names only a test name has no file to add and is left to `evidenceTests`' content lookup. Idempotent; returns the links made.
+ * @returns {{requirement: string, path: string, added: boolean}[]}
+ */
+export function linkTestPlanDeliverables(c) {
+  const rows = Array.isArray(c?.test_plan) ? c.test_plan : [];
+  if (!rows.length || !Array.isArray(c?.requirements)) return [];
+  if (c.deliverables != null && !Array.isArray(c.deliverables)) return [];
+  const dels = c.deliverables ?? (c.deliverables = []), out = [];
+  for (const r of c.requirements) {
+    if (r?.disposition !== "deliver" || !r.id || isOutOfBand(r)) continue;
+    for (const row of rows) {
+      if (row?.requirement !== r.id) continue;
+      for (const path of planRowRefs(row).paths) {
+        const d = dels.find((x) => x && String(x.path) === path);
+        if (!d) { dels.push({ id: `D${dels.length + 1}`, path, change: `test for ${r.id} named by its test_plan row`, requirements: [r.id] }); out.push({ requirement: r.id, path, added: true }); }
+        else if (!(d.requirements ?? []).includes(r.id)) { d.requirements = [...(d.requirements ?? []), r.id]; out.push({ requirement: r.id, path, added: false }); }
+      }
+    }
+  }
+  return out;
+}
 /** The validate commands that name one of `tests` and ran green (the engine's rerun, else the builder's result, else CI). */
 function greenEvidence(contract, tests, { runs = [], reruns = null, ciCovered = [] } = {}) {
   const green = (v) => {
@@ -1984,7 +2037,7 @@ export function mutationTargets(contract, evidence = {}) {
   const out = [];
   for (const r of contract?.requirements ?? []) {
     if (r.disposition !== "deliver" || isOutOfBand(r)) continue;
-    const tests = evidenceTests(contract, r);
+    const tests = evidenceTests(contract, r, { readFile: evidence.readFile });
     const commands = tests.length ? greenEvidence(contract, tests, evidence).map((v) => ({ id: v.id, command: String(v.command) })) : [];
     if (commands.length) out.push({ id: r.id, commands });
   }
