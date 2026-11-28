@@ -10,7 +10,7 @@ on:
         required: true
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: v${{ env.VERSION }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
       - name: Wait for npm to serve this version
@@ -40,14 +40,15 @@ jobs:
       - name: Compute lane image recipe hash
         id: lane
         run: echo "recipe=$(node -e "import('./bin/pool/version.mjs').then((m) => process.stdout.write(m.versionOf().image))")" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push lane image (linux/amd64)
-        uses: docker/build-push-action@v6
+        id: lane_push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: pool/image
           platforms: linux/amd64
@@ -67,3 +68,17 @@ jobs:
           docker logout ghcr.io
           docker pull "ghcr.io/rapiercraftstudios/forgedock-lane:${VERSION}" >/dev/null \
             || echo "::warning::not anonymously pullable yet: set the ghcr package forgedock-lane public (org Packages > forgedock-lane > Package settings)"
+      - name: Record the lane image digest (lane-image.json release asset)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIGEST: ${{ steps.lane_push.outputs.digest }}
+          RECIPE: ${{ steps.lane.outputs.recipe }}
+        run: |
+          # #6185: agents pull the lane image by this digest, not by the mutable version tag.
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::lane_push produced no sha256 digest"; exit 1; }
+          printf '{"version":"%s","recipe":"%s","digest":"%s"}\n' "$VERSION" "$RECIPE" "$DIGEST" > lane-image.json
+          cat lane-image.json
+          TAG="lane-image-v${VERSION}"
+          gh release create "$TAG" lane-image.json --repo "$GITHUB_REPOSITORY" --title "Lane image ${VERSION}" --notes "ghcr.io/rapiercraftstudios/forgedock-lane@${DIGEST}" \
+            || gh release upload "$TAG" lane-image.json --repo "$GITHUB_REPOSITORY" --clobber
+          echo "### Lane image ${VERSION}: ${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
