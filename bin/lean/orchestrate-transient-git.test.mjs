@@ -51,3 +51,22 @@ describe("#5947 git transport failures", () => {
     assert.equal(r.store.peek().breaker ?? null, null);
   });
 });
+
+describe("#6264 unreadable dependency from a network error", () => {
+  const DU = (detail) => ({ terminalReason: "dependency-unreadable", code: "dependency.unreadable", detail });
+  it("a network/transport unreadable is requeued as a net.transient deferral and runs again; the lane is not left terminal", async () => {
+    const r = await run({ issues: [1], script: { 1: [DU('dependency #3 named by the builder could not be read: Post "https://api.github.com/graphql": i/o timeout'), MERGED] } });
+    const d = r.updates.filter((u) => u.outcome === "deferred");
+    assert.equal(d.length, 1);
+    assert.equal(d[0].code, "net.transient");
+    assert.deepEqual(r.rows.map((x) => x.outcome), ["merged"]);
+    assert.equal(r.updates.some((u) => u.outcome === "dependency-unreadable"), false);
+  });
+  it("error connecting to api.github.com is requeued too; a persistent non-network failure stays dependency-unreadable", async () => {
+    const a = await run({ issues: [1], script: { 1: [DU("sub-issue #4 could not be read: error connecting to api.github.com"), MERGED] } });
+    assert.equal(a.updates.find((u) => u.outcome === "deferred")?.code, "net.transient");
+    const b = await run({ issues: [2], script: { 2: [DU("dependency #3 could not be read: Could not resolve to an issue with the number of 3")] } });
+    assert.equal(b.updates.some((u) => u.outcome === "deferred"), false);
+    assert.deepEqual(b.rows.map((x) => x.outcome), ["dependency-unreadable"]);
+  });
+});
