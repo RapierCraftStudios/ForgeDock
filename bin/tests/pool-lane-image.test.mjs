@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createAgent } from "../pool/agent.mjs";
 import { versionOf, repoRoot, laneImageTag, laneBuildArgs } from "../pool/version.mjs";
-import { provideLaneImage, withIpv4Fallback, sweepIpv4Pins, remoteLaneImage, RECIPE_LABEL, IPV6_DIAL_RE } from "../pool/lane-image.mjs";
+import { provideLaneImage, withIpv4Fallback, withIpv4Pins, sweepIpv4Pins, remoteLaneImage, RECIPE_LABEL, IPV6_DIAL_RE } from "../pool/lane-image.mjs";
 import { tmpDir } from "./_tmp.mjs";
 
 const quiet = { info() {}, warn() {}, error() {} };
@@ -101,4 +101,20 @@ test("sweepIpv4Pins removes pins a crashed agent left behind and keeps other lin
   sweepIpv4Pins({ file, log: quiet });
   assert.equal(readFileSync(file, "utf8"), "127.0.0.1 localhost\n10.0.0.5 mine\n");
   sweepIpv4Pins({ file: join(tmpDir("none"), "missing"), log: quiet }); // no hosts file: no throw
+});
+
+test("sweepIpv4Pins leaves a pin-free file byte-identical and skips while a pin is live", async () => {
+  const file = join(tmpDir("hosts-"), "hosts");
+  const plain = "127.0.0.1 localhost\n\n\n10.0.0.5 mine";
+  writeFileSync(file, plain);
+  sweepIpv4Pins({ file, log: quiet });
+  assert.equal(readFileSync(file, "utf8"), plain);
+  writeFileSync(file, "127.0.0.1 localhost\n");
+  await withIpv4Pins(async () => {
+    const live = readFileSync(file, "utf8");
+    assert.match(live, /# forgedock-ipv4-pin/);
+    sweepIpv4Pins({ file, log: quiet });
+    assert.equal(readFileSync(file, "utf8"), live);
+  }, { file, resolve: async () => ["192.0.2.7"] });
+  assert.equal(readFileSync(file, "utf8"), "127.0.0.1 localhost\n");
 });
