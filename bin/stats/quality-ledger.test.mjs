@@ -4,7 +4,10 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { buildMergeLedger, humanTouches, testDelta } from "./quality-ledger.mjs";
 import { createQueueClock } from "../lean/queuecause.mjs";
-import { mergeRecords, queueByCause, spendIncrements, versionAt, weekOf, weeklyScorecard } from "./weekly.mjs";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { mergeRecords, readMergeLedgers, queueByCause, spendIncrements, versionAt, weekOf, weeklyScorecard } from "./weekly.mjs";
 import { blames, gatherEscapes, laneIssueOf, linkEscapes } from "./escapes.mjs";
 
 const T0 = Date.parse("2026-11-23T00:00:00Z"), M = 60000;
@@ -63,6 +66,26 @@ describe("weekly scorecard", () => {
     assert.deepEqual([w.version, w.merges, w.usd_per_merge, w.first_pass_pct, w.issue_to_merge_median_min], ["1.61.0", 1, 3, 1, 90]);
     const all = weeklyScorecard(recs).reduce((s, x) => s + x.non_merged_spend_pct, 0);
     assert.ok(all > 0);
+  });
+});
+
+describe("merge ledger keying (#6230)", () => {
+  it("keeps same-numbered issues of two repos apart", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ml-")), led = (fp) => JSON.stringify({ event: "MERGE_LEDGER", first_pass: fp, ts: "2026-11-23T01:00:00Z" }) + "\n";
+    writeFileSync(join(dir, "o__a__5.jsonl"), led(true)); writeFileSync(join(dir, "o__b__5.jsonl"), led(false));
+    const ledgers = readMergeLedgers({ home: dir, env: { FORGE_RUNS_DIR: dir } });
+    const rows = [{ t: T0 + M, outcome: "merged", issue: 5, pr: 1, wall_ms: M }];
+    const fp = (repo) => mergeRecords([{ id: `b20261123-000000-${repo}`, repo: `o/${repo}`, created: T0, rows }], ledgers)[0].firstPass;
+    assert.deepEqual([fp("a"), fp("b")], [true, false]);
+  });
+  it("reads a legacy bare ledger only for a repo-less batch", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ml-")), led = JSON.stringify({ event: "MERGE_LEDGER", first_pass: false, ts: "2026-11-23T01:00:00Z" }) + "\n";
+    writeFileSync(join(dir, "5.jsonl"), led);
+    const ledgers = readMergeLedgers({ home: dir, env: { FORGE_RUNS_DIR: dir } });
+    const rows = [{ t: T0 + M, outcome: "merged", issue: 5, pr: 1, wall_ms: M }];
+    const fp = (repo) => mergeRecords([{ id: "b20261123-000000-x", repo, created: T0, rows }], ledgers)[0].firstPass;
+    assert.equal(fp(null), false);
+    assert.notEqual(fp("o/a"), false);
   });
 });
 

@@ -284,6 +284,14 @@ describe("check timeout is infrastructure (#4589)", () => {
 });
 
 describe("#5332 timed-out checks are not failing checks", () => {
+  it("#6242 a mapped heavy-gate denial (rc 124) is timedOut, not failed", async () => {
+    const { runCheckCommand } = await import("./effects.mjs");
+    const { HEAVY_DEFER_MARKER } = await import("./heavy.mjs");
+    const r = await runCheckCommand({ command: `echo '${HEAVY_DEFER_MARKER} x deferred, down' >&2; exit 75`, cwd: process.cwd(), timeoutMs: 20000 });
+    const { failed, timedOut } = splitPrecheckResults([{ command: "x", ...r }]);
+    assert.equal(failed.length, 0);
+    assert.equal(timedOut.length, 1);
+  });
   it("splitPrecheckResults separates rc 124 from real failures", () => {
     const r = [{ command: "a", rc: 0 }, { command: "b", rc: 124 }, { command: "c", rc: 1 }];
     const { failed, timedOut } = splitPrecheckResults(r);

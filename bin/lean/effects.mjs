@@ -15,7 +15,7 @@ import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { makeProjector } from "../engine/projector.mjs";
 import { makeLedger, countLiveLanes, ledgerRoot } from "./ledger.mjs";
 import { makeDepCache } from "./depcache.mjs";
-import { makeHeavyIo } from "./heavy.mjs";
+import { makeHeavyIo, HEAVY_DEFER_CODE, HEAVY_DEFER_MARKER } from "./heavy.mjs";
 import { diskLow, ADMISSION_DEFAULTS } from "./admission.mjs";
 import { writeAtomic } from "./batch.mjs";
 import { schedDir } from "./sched.mjs";
@@ -495,6 +495,7 @@ export function runCheckCommand({ command, cwd, timeoutMs = 300000, env = null, 
     child.on("close", (code) => {
       clearTimeout(timer);
       const tail = out.slice(-CHECK_OUTPUT_CAP);
+      if (!timedOut && code === HEAVY_DEFER_CODE && tail.includes(HEAVY_DEFER_MARKER) && / deferred, /.test(tail)) { finish({ rc: 124, output: `${tail}\n(heavy gate unavailable: infra, not a code failure)` }); return; } // #6242
       finish(timedOut ? { rc: 124, output: `${tail}\n(timed out after ${Math.round(timeoutMs / 1000)}s)` } : { rc: Number.isInteger(code) ? code : 1, output: tail });
     });
   });
