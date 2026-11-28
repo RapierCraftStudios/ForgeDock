@@ -16,3 +16,4 @@ No export added; the reviewBlocked path is unchanged.
 
 ## Precheck failure (spec-markers)
 Only failure: scripts/symbol-move.test.sh needs python libcst (SYMBOL_MOVE_REQUIRE_LIBCST=1), absent in this sandbox. Unrelated to this diff (bin/lean/release-review*.mjs only); recorded as an environment-limitation amendment in result.json. No code change.
+- Precheck failure `scripts/symbol-move.test.sh` ("libcst required (SYMBOL_MOVE_REQUIRE_LIBCST=1) but not available"): host environment problem, not this change. `python3 -c "import libcst"` raises ModuleNotFoundError here; the script never touches bin/lean, and every other script in that command passed. Not fixable in code without installing a package on the shared host, so no code change was made.
