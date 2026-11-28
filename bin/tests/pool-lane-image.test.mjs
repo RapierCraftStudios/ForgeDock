@@ -47,7 +47,7 @@ test("#6184: after the retag the ghcr tag is dropped so the prune can free the i
   assert.deepEqual(d.removed, [remote]);
   assert.equal(d.have.has(local), true);
   const e = fake(); e.removeImage = async () => { throw new Error("rmi boom"); };
-  assert.equal(await provideLaneImage({ docker: e, image: local, version: "9.9.9", recipe, build: async () => {} }), "pulled");
+  assert.equal(await provideLaneImage({ docker: e, image: local, version: "9.9.9", recipe, digest: DIG, build: async () => {} }), "pulled");
 });
 
 test("pull fails: falls back to the local build, labelled with the recipe hash", async () => {
