@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
-import { admitRunner, planScale, runnerPriority, PRIORITY } from "../pool/ci-autoscale.mjs";
+import { admitRunner, planScale, runnerPriority, createAutoscaler, PRIORITY } from "../pool/ci-autoscale.mjs";
 import { createRouter } from "../pool/router.mjs";
 import { createAgent, netRx } from "../pool/agent.mjs";
 import { tmpDir } from "./_tmp.mjs";
@@ -194,4 +194,25 @@ test("agent refuses a runner without capacity; netRx reports MB/s between sample
   const dev = (rx) => `h1\nh2\n  lo: 999 0\n eth0: ${rx} 0\n`;
   assert.equal(netRx(1000, () => dev(0)), null);
   assert.deepEqual(netRx(3000, () => dev(4_000_000)), { rx_mbps: 2 });
+});
+
+test("#6129: a runner whose in_progress webhook was missed is not stopped as idle (poll tracks in_progress runs)", async () => {
+  const calls = [];
+  const jobJson = { id: 77, status: "in_progress", labels: ["self-hosted", "alterlab-ci"], runner_name: "busy-1", head_branch: "feat/x" };
+  const fetchFn = async (url) => {
+    const u = String(url);
+    if (u.includes("/actions/runs?status=in_progress")) return json({ workflow_runs: [{ id: 9, head_branch: "feat/x" }] });
+    if (u.includes("/actions/runs?")) return json({ workflow_runs: [] });
+    if (u.includes("/actions/runs/9/jobs")) return json({ jobs: [jobJson] });
+    return json({});
+  };
+  const cap = { name: "h1", ok: true, paused: false, live: { mem_available_gb: 8, load_per_core: 0.1 }, vm: { cpus: 14 }, cpus_free: 10, mem_free_gb: 10, runners: [{ name: "busy-1", label: "alterlab-ci" }] };
+  const as = createAutoscaler({
+    cfg: { ci_autoscale: { ...CFG, poll_s: 1 } }, now: () => 5_000_000, log: quiet, capacities: async () => [cap],
+    agentCall: async (_a, method, path) => { calls.push({ method, path }); return { ok: true }; },
+    githubToken: async () => "t", fetchFn, agents: () => ({ h1: {} }),
+  });
+  await as.reconcile();
+  assert.equal(calls.some((c) => c.method === "DELETE"), false);
+  assert.equal(as.jobs.get(77)?.status, "in_progress");
 });

@@ -114,9 +114,16 @@ export function createAutoscaler({ cfg = {}, now, log, capacities, agentCall, gi
     lastPoll = now();
     const seen = new Set();
     try {
-      const runs = (await gh(`/repos/${c.repo}/actions/runs?status=queued&per_page=20`)).workflow_runs ?? [];
-      for (const run of runs) for (const wj of (await gh(`/repos/${c.repo}/actions/runs/${run.id}/jobs?per_page=100`)).jobs ?? []) {
-        if (wj.status === "queued" && labelOf(wj)) { seen.add(Number(wj.id)); if (!jobs.has(Number(wj.id))) track({ ...wj, head_branch: wj.head_branch ?? run.head_branch }); }
+      // in_progress too: a missed in_progress webhook would otherwise leave a busy runner looking idle to the stop path (#6129)
+      for (const status of ["queued", "in_progress"]) {
+        const runs = (await gh(`/repos/${c.repo}/actions/runs?status=${status}&per_page=20`)).workflow_runs ?? [];
+        for (const run of runs) for (const wj of (await gh(`/repos/${c.repo}/actions/runs/${run.id}/jobs?per_page=100`)).jobs ?? []) {
+          if (wj.status === status && labelOf(wj)) {
+            seen.add(Number(wj.id));
+            const cur = jobs.get(Number(wj.id));
+            if (!cur || cur.status !== status) track({ ...wj, head_branch: wj.head_branch ?? run.head_branch });
+          }
+        }
       }
       for (const [id, j] of jobs) if (j.status === "queued" && !seen.has(id) && now() - j.at > (c.poll_s ?? 300) * 1000) jobs.delete(id); // the API no longer lists it
     } catch (e) { log.warn?.(`ci-autoscale poll: ${e.message}`); }
