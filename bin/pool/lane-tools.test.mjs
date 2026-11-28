@@ -64,3 +64,33 @@ describe("#6037 image manifest tools skip the fallback installers", () => {
     assert.ok((src.match(/@deprecated/g) ?? []).length >= 4);
   });
 });
+
+describe("lane image build errors and retry (#6189)", async () => {
+  const { laneImageNow, resolveLaneImage } = await import("./lane-tools.mjs");
+  const tools = ["shellcheck"];
+  const longErr = () => Object.assign(new Error("failed"), { stderr: `Dockerfile:5\n${Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n")}\nE: apt failed` });
+  const settle = () => new Promise((r) => setTimeout(r, 20));
+  const mk = (build) => ({ hasImage: async () => false, build });
+
+  it("failure message carries the tail of a long stderr", async () => {
+    const docker = mk(async () => { throw longErr(); });
+    await laneImageNow({ tools, baseImage: "base:tail", docker, sleep: async () => {} });
+    await settle();
+    const r = await laneImageNow({ tools, baseImage: "base:tail", docker, sleep: async () => {} });
+    assert.match(r.failed, /E: apt failed/);
+    assert.doesNotMatch(r.failed, /Dockerfile:5/);
+  });
+  it("retries a failed build once and yields the image", async () => {
+    let calls = 0;
+    const docker = mk(async () => { if (++calls === 1) throw longErr(); });
+    const img = await resolveLaneImage({ tools, baseImage: "base:retry", docker, sleep: async () => {} });
+    assert.equal(calls, 2);
+    assert.match(img, /base|lane/);
+  });
+  it("a persistent failure gives build_failed after 2 calls", async () => {
+    let calls = 0;
+    const docker = mk(async () => { calls++; throw longErr(); });
+    await assert.rejects(resolveLaneImage({ tools, baseImage: "base:fail", docker, sleep: async () => {} }), (e) => e.code === "lane_tools.build_failed" && /E: apt failed/.test(e.message));
+    assert.equal(calls, 2);
+  });
+});

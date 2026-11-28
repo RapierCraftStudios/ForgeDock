@@ -12,7 +12,7 @@ import { join, posix } from "node:path";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { detect, pyHint, depCommands } from "../lean/depcache.mjs";
-import { isLaneToolsTagOf } from "./lane-tools.mjs";
+import { isLaneToolsTagOf, buildErrorTail } from "./lane-tools.mjs";
 
 const JS = new Set(["pnpm", "npm", "yarn"]);
 const MANIFESTS = ["package.json", "pnpm-workspace.yaml", ".npmrc", ".yarnrc.yml", "pyproject.toml", ".python-version"];
@@ -116,7 +116,7 @@ async function buildLayer({ tag, baseImage, deps, docker, buildTimeoutMs }) {
     const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`build timed out after ${buildTimeoutMs}ms`)), buildTimeoutMs); });
     await Promise.race([docker.build(dir, tag, {}), timeout]);
   } catch (e) {
-    throw new Error(`project layer ${tag} build failed: ${String(e.stderr || e.message).slice(0, 300)}`);
+    throw new Error(`project layer ${tag} build failed: ${buildErrorTail(e)}`);
   } finally { clearTimeout(timer); rmSync(dir, { recursive: true, force: true }); }
   return tag;
 }
