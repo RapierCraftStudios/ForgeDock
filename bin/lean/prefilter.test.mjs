@@ -110,6 +110,12 @@ describe("pre-filter (#4123)", () => {
     assert.ok(prodFailureSignal([...comments, verified("ok"), verified("verified failing in production again")]));
     assert.ok(prodFailureSignal([probe("fail")]));
     assert.equal(prodFailureSignal([{ ...decision, author: { login: "rando" }, authorAssociation: "NONE" }]), null);
+    // #6292: the batch runner's aggregated status comment (scheduling decisions) is never a production-failure record,
+    // and production and failure wording in different lines/sections of one comment is no signal
+    const status = { ...bot, body: "<!-- FORGE:STATUS -->\n<!-- FORGE:DECISION -->\n## Decision (batch b1)\n**What**: relaunch once after engine-error\n**Why**: the run failed with a transient error\n\n---\n\n## Decision (batch b1)\n**What**: requeued behind #7 (Depends on edge added)\n**Why**: workstream E needs the deployed pricing decision" };
+    assert.equal(prodFailureSignal([status]), null);
+    assert.equal(prodFailureSignal([{ ...owner, body: "<!-- FORGE:DECISION -->\nDeploy window moved to Friday.\nThe flaky test failed once on CI." }]), null);
+    assert.ok(prodFailureSignal([status, decision]), "a real production-failure decision still blocks next to the status comment");
     assert.ok(prodFailureSignal([{ ...decision, author: { login: "me" }, authorAssociation: "NONE" }], ["me"]), "an own login is trusted");
     assert.equal(prodFailureSignal([{ ...owner, body: "<!-- FORGE:DECISION -->\nKeep the retry budget at 3." }]), null);
     assert.equal(prodFailureSignal([{ ...owner, body: "Verified failing in prod" }]), null, "no marker, no signal");
