@@ -347,8 +347,16 @@ export async function fixStep(ctx) {
     ctx.save();
     return { blocked: true, held: true, reason };
   }
-  if (res.ciFailing > 0) return blocked(`required checks of #${res.pr} are not green at ${String(res.head).slice(0, 7)} (${res.ciPendingOnly ? "pending" : "red"}); re-run the release: ci-green waits and fixes CI once, then one review pass`);
-  return blocked(`${res.verdict} (${res.marker}) on #${res.pr} at ${String(res.head).slice(0, 7)} with no blocking finding and no red CI: the gate summary names the blocker; read it and re-run the release`);
+  if (res.ciFailing > 0) return blockedForRerun(ctx, `required checks of #${res.pr} are not green at ${String(res.head).slice(0, 7)} (${res.ciPendingOnly ? "pending" : "red"}); re-run the release: ci-green waits and fixes CI once, then one review pass`);
+  return blockedForRerun(ctx, `${res.verdict} (${res.marker}) on #${res.pr} at ${String(res.head).slice(0, 7)} with no blocking finding and no red CI: the gate summary names the blocker; read it and re-run the release`);
+}
+
+/** #6175: a block that tells the operator to re-run must leave ci-green and review undone, else the resume re-reads the same stale review result. */
+function blockedForRerun(ctx, reason) {
+  delete ctx.state.steps["ci-green"];
+  delete ctx.state.steps.review;
+  ctx.save();
+  return blocked(reason);
 }
 
 /**
