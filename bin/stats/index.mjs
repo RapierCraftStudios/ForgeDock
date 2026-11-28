@@ -38,7 +38,9 @@ import { gitProbes } from "./compounding.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <owner/repo>] [--json] [--refresh]
+export const HELP = `Usage: forgedock stats escapes [--days 14] [--repo <owner/repo>] [--json]   (lane PRs later fixed/reverted/reopened)
+       forgedock stats scorecard --weekly [--repo <owner/repo>] [--json]   (by week and engine version)
+       forgedock stats [--since <version|date>] [--repo <owner/repo>] [--json] [--refresh]
                       [--compact] [--no-local] [--no-cache] [--min-n N] [--release-times FILE]
        forgedock stats --experiment <id> [--require-met] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --by version [--post-metrics <pr>] [--min-n N] [--repo <owner/repo>] [--json]
@@ -533,6 +535,8 @@ export async function buildReport(opts, deps = {}) {
 }
 
 export async function runStats(argv, deps = {}) {
+  if (argv[0] === "escapes") return (await import("./escapes.mjs")).runEscapes(argv.slice(1), deps); // #6203
+  if (argv[0] === "scorecard" && argv.includes("--weekly")) return (await import("./weekly.mjs")).runWeekly(argv.slice(1), deps); // #6203
   let opts;
   try { opts = parseArgs(argv); } catch (err) {
     process.stderr.write(`forgedock stats: ${err.message}\n\n${HELP}`);

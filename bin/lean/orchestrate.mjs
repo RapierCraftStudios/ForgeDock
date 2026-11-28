@@ -125,6 +125,7 @@
  * the queue order except that decomposed sub-issues go first. A settled row carries `est_minutes` (estimated vs. actual).
  */
 import { decideClear, decideAutoReset } from "./clear-breaker.mjs";
+import { createQueueClock } from "./queuecause.mjs";
 import { RECONCILE_MS, BREAKER_COOLDOWN_MS, diffSelection, readmitDue, needsDecisionDigest, environmentalDetail, closesManually } from "./reconcile.mjs";
 import { parseDependsOn } from "../engine/phases.mjs";
 import { classifyNeedsHuman, recoveryCodeOf, recoveryClassOf, OUTCOME_CODES, ENV_VALIDATE_PLACEMENT, ENV_VALIDATE_TIMEOUT, MECHANICAL_CODES } from "../engine/outcome-codes.mjs";
@@ -404,6 +405,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const missingTools = async (tools) => { if (typeof envHold?.missingTools !== "function") return null; try { const m = await envHold.missingTools(tools); return Array.isArray(m) ? m : null; } catch { return null; } };
   const checked = toMap(saved?.prefilter); // issue -> pre-filter result
   const estimates = toMap(saved?.estimates); // #4409: issue -> estimated lane minutes; only with `estimate`
+  const queueClock = createQueueClock(saved?.queueClock); // #6203: queue_wait by cause, from first ready; a requeue does not reset it
   const enqueued = toMap(saved?.enqueued); // #4409: issue -> when it last entered the queue (starvation guard)
   const heads = new Set(saved?.heads ?? []); // #4409: decomposed sub-issues not started yet: the head of their priority band
   let errorTimes = [...(saved?.errorTimes ?? [])];
@@ -472,7 +474,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     // #5652: with host fallback off (execution.host_fallback / host.role: orchestrator) the host is orchestrator-only: no re-placement here
     // #5931: a credentials block pinned the issue to the host (ledger hostPin): applied on readmit whatever host fallback says
     if (ledgers.get(n)?.hostPin) return { where: "local", reason: "host pin: ops_credentials block" };
-    if (hostFallbackOn() && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_ENGINE_SKEW].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
+    if (hostFallbackOn() && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_CAPABILITY_DOCKER, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_ENGINE_SKEW].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
     // #5371: a mechanical recovery never repeats the placement of the run that failed (a remote sandbox env defect recurs there), and a remote validate failure is rerun on the host
     if (recovering.get(n)?.code === ENV_VALIDATE_PLACEMENT || (MECHANICAL_CODES.includes(recovering.get(n)?.code) && recovering.get(n)?.where === "remote")) {
       if (hostFallbackOn()) return { where: "local", reason: `different placement: recovering ${rec.code} off the remote run` };
@@ -507,7 +509,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const recoveryMax = Number.isInteger(recovery?.maxAttempts) && recovery.maxAttempts > 0 ? recovery.maxAttempts : 0;
   // #4725: mechanical/env codes recover on their own budget (>= the conformance one); 0 maxAttempts still turns recovery off.
   const mechMax = recoveryMax && Number.isInteger(recovery?.mechanicalMaxAttempts) && recovery.mechanicalMaxAttempts > 0 ? Math.max(recovery.mechanicalMaxAttempts, recoveryMax) : recoveryMax;
-  const REPEAT_ENV_CODES = [OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, OUTCOME_CODES.ENV_TOOL_MISSING]; // #5232: deterministic for a frozen command (a timeout is load, not listed)
+  const REPEAT_ENV_CODES = [OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_CAPABILITY_DOCKER]; // #6196: a docker-less host repeats identically // #5232: deterministic for a frozen command (a timeout is load, not listed)
   const sigOf = (d) => String(d ?? "").replace(/\s+/g, " ").trim();
   // #5592: env.tool_missing repeats are the same defect when the same tools are missing, whatever else the detail says (probe lines, ids, paths vary per run)
   const toolsOf = (d) => { const m = /(?:host|sandbox) is missing ([^\n]+?), so validate command/i.exec(String(d ?? "")); return m ? m[1].split(/\s*,\s*/).sort().join(",") : null; };
@@ -555,7 +557,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       ...(stackedTried.size ? { stacked: toObj(stackedOf), stackedTried: [...stackedTried] } : {}),
       ...(requeueApplied.size ? { requeueApplied: [...requeueApplied], requeued: toObj(requeuedInfo) } : {}),
       ...(relabelled.size ? { relabelled: [...relabelled] } : {}), ...(cancelled ? { cancelled } : {}), ...(train ? { train: train.snapshot() } : {}),
-      ...(estimate ? { estimates: toObj(estimates), enqueued: toObj(enqueued) } : {}), ...(heads.size ? { heads: [...heads] } : {}),
+      ...(estimate ? { estimates: toObj(estimates), enqueued: toObj(enqueued) } : {}), queueClock: queueClock.toJSON(), ...(heads.size ? { heads: [...heads] } : {}),
       ...(engineSigs.size ? { engineSigs: toObj(engineSigs) } : {}), ...(heldSigs.size ? { heldSigs: toObj(heldSigs) } : {}), ...(deterministic.size ? { deterministicSigs: [...deterministic] } : {}), ...(toolReadmits.size ? { toolReadmits: [...toolReadmits] } : {}), ...(select ? { select } : {}), ...(readmit.size ? { readmit: toObj(readmit) } : {}), ...(envSigs.size ? { envSigs: toObj(envSigs) } : {}), ...(ledgers.size ? { attempts: toObj(ledgers) } : {}), ...(selMatched.size ? { selMatched: [...selMatched] } : {}) });
   };
   const update = (row) => { store?.log?.(row); onUpdate(row); };
@@ -1368,7 +1370,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       const sameHostReplay = !repeatEnv && !prior && row.code === OUTCOME_CODES.ENV_TOOL_MISSING && row.placement?.where !== "remote" && toolsOf(row.detail) !== null;
       // #5805: an env defect the host still has is held until the engine, the batch env or the host changes, not ended or re-run.
       // A tool-missing recovery that would run on the host (not the #5423 remote retry) is not launched while the probe still misses the tool.
-      const envNoHost = !hostFallbackOn() && row.placement?.where === "remote" && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(row.code);
+      const envNoHost = !hostFallbackOn() && row.placement?.where === "remote" && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_CAPABILITY_DOCKER, OUTCOME_CODES.ENV_TOOL_MISSING].includes(row.code);
       const lacking = row.code === OUTCOME_CODES.ENV_TOOL_MISSING ? toolsOf(row.detail) : null;
       if (ehOn && !envNoHost && !row.securityEscalated) {
         let stillLacks = false;
@@ -1390,8 +1392,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         decided({ issue: n, what: `no further recovery for ${row.code}: the same failure repeated`, why: firstLine(row.detail), alternative: "requeue another recovery lane that rebuilds against the same frozen command" });
       }
       // #5652: a remote lane's tool/capability end is not recovered on the host when host fallback is off; the lane message names the fix
-      const noHostRecovery = !hostFallbackOn() && row.placement?.where === "remote" && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(row.code);
-      if (noHostRecovery) decided({ issue: n, what: `no host re-placement for ${row.code}: host fallback is off (execution.host_fallback / host.role: orchestrator)`, why: firstLine(row.detail), alternative: "re-place the lane on the host" });
+      const noHostRecovery = !hostFallbackOn() && row.placement?.where === "remote" && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_CAPABILITY_DOCKER, OUTCOME_CODES.ENV_TOOL_MISSING].includes(row.code);
+      if (noHostRecovery) decided({ issue: n, what: `no host re-placement for ${row.code}: host fallback is off (execution.host_fallback / host.role: orchestrator)${row.code === OUTCOME_CODES.ENV_CAPABILITY_DOCKER ? "; the Docker-dependent validate is deferred to CI" : ""}`, why: firstLine(row.detail), alternative: "re-place the lane on the host" }); // #6196
       // #5749: an env.validate_timeout is host load, so its recovery lane is not started while the host is overloaded (it would time out again)
       if (overload && row.code === ENV_VALIDATE_TIMEOUT && classifyNeedsHuman(facts) === "recoverable" && used < max) {
         const isOver = () => { try { return overload()?.overloaded === true; } catch { return false; } };
@@ -1482,8 +1484,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const pl = placed.get(n) ?? (remote ? (remoteRun.has(n) ? { where: "remote", reason: "mode remote" } : (placeOf(n) ?? undefined)) : undefined);
     placed.delete(n);
     const queueMs = Number.isFinite(enqueued.get(n)) ? Math.max(0, now() - enqueued.get(n)) : null; // #4908: queue_wait in the phase ledger
+    const qc = queueClock.take(n, now()); // #6203
     heads.delete(n); enqueued.delete(n); busyNoted.delete(n);
-    const rec = { startedAt: now(), ...(plan ? { plan: true } : {}), ...(stackedOn ? { stackedOn } : {}), ...(queueMs != null ? { queueMs } : {}), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}), ...(pl ? { placement: pl } : {}) };
+    const rec = { startedAt: now(), ...(plan ? { plan: true } : {}), ...(stackedOn ? { stackedOn } : {}), ...(queueMs != null ? { queueMs } : {}), ...(qc ? { queueCauses: qc.causes, queueTotalMs: qc.total_ms } : {}), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}), ...(pl ? { placement: pl } : {}) };
     if (!firstAdmit.has(n)) firstAdmit.set(n, rec.startedAt); // #5834: chain wall time starts at the first admission, plan lane included
     runRecs.set(n, rec); keptBoxes.delete(n); notBefore.delete(n); capReasons.delete(n); save();
     track(n, (async () => {
@@ -2175,6 +2178,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       await refreshBlocked();
       await refreshBaseWaits();
       checkGates();
+      queueClock.tick(pending, (n) => { // #6203: why each pending issue waits right now (the order is the precedence)
+        if (opPause) return "pause";
+        if (tripped) return "breaker";
+        if (opHeld.has(n)) return "hold";
+        if (blocked.has(n) || edges(n).some((d) => !(results.has(d) && SATISFIED.has(results.get(d).outcome)))) return "dependency";
+        if (poolDown && isRemote(n)) return "host_offline";
+        if (running.size >= K() || (notBefore.get(n) ?? 0) > t || capReasons.has(n) || baseHeld.has(n) || pfAll) return "capacity";
+        return "other";
+      }, t);
       // #4866: lane preflight. A failing check holds admission (all lanes, or only remote ones by its scope), says why once per batch,
       // and is re-checked every pass so the batch resumes on its own; it is not an engine-error, so the breaker never sees it.
       pfAll = false; pfRemote = false;
@@ -2364,6 +2376,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if ((getParallel || getHeld) && pending.length) wake = Math.min(wake ?? pollMs, pollMs);
       if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
       if (pending.some((n) => remoteCapped.has(n))) wake = Math.min(wake ?? pollMs, pollMs); // #5138: a live --set-max-remote raise
+      if ((getAdded || getRequeued) && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #6197: an --add/--requeue is read within one poll even when every pending issue is held or waits on a long timer
       if ((getAdded || getRequeued || (getChildren && addsEpicChildren(autoChildren?.mode))) && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408/#4550: an add or requeue while only lanes run
       if (getRequeued && pending.some((n) => quota.has(n) || notBefore.has(n))) wake = Math.min(wake ?? pollMs, pollMs); // #5203: a --requeue releasing a quota pause
       if ((pfAll || pfRemote || baseRedHold) && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #4866
@@ -2525,7 +2538,7 @@ export function formatTable(rows) {
  */
 export function phasesOf(r, rec) {
   if (!r?.phases || typeof r.phases !== "object" || !Object.keys(r.phases).length) return null;
-  return { ...(Number.isFinite(rec?.queueMs) && rec.queueMs > 0 ? { queue_wait: { ms: Math.round(rec.queueMs), ...((r.sandbox?.agent ?? r.agent) ? { worker: r.sandbox?.agent ?? r.agent } : {}) } } : {}), ...r.phases };
+  return { ...(Number.isFinite(rec?.queueMs) && rec.queueMs > 0 ? { queue_wait: { ms: Math.round(Math.max(rec.queueMs, rec.queueTotalMs ?? 0)), ...(rec.queueCauses ? { causes: rec.queueCauses } : {}), ...((r.sandbox?.agent ?? r.agent) ? { worker: r.sandbox?.agent ?? r.agent } : {}) } } : {}), ...r.phases };
 }
 
 export function formatWaitSummary(rows, heavyStats = null) {

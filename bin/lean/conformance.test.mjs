@@ -178,6 +178,15 @@ describe("precheck (deterministic, no reviewer)", () => {
     const local = precheck({ contract: C, result: failed, changedFiles: files, repoHas: repoTracks(["src/leak/__init__.py"]), validateRuns: { V1: { rc: 1, output: "ModuleNotFoundError: No module named 'leak.core'" } } });
     assert.deepEqual(codes(local), ["conformance.unimplemented"], "a repo module the change did not create is a code defect");
   });
+  it("6196: docker image/daemon-less messages are env failures with a docker tool; assertion output mentioning docker is not", () => {
+    const msgs = ["no scratch Postgres image present locally (tried postgres:15-alpine, pgvector/pgvector:pg15)",
+      "Unable to find image 'postgres:15' locally\ndocker: Error response from daemon: pull access denied for postgres, repository does not exist",
+      "Could not find a valid Docker environment. Please see logs and check configuration"];
+    for (const o of msgs) { assert.equal(isEnvValidateFailure(o), true, o); assert.equal(missingTool({ rc: 1, output: o })?.tool, "Docker daemon", o); }
+    assert.equal(missingTool({ rc: 127, output: "bash: docker: command not found" })?.tool, "docker");
+    for (const o of ["AssertionError: expected docker image tag to equal 'latest'\nno image present locally was reported", "FAILED tests/test_docker.py::test_build - assert 'docker' == 'podman'"]) assert.equal(isEnvValidateFailure(o), false, o);
+  });
+
   it("5730: isEnvValidateFailure matches sandbox-only signatures, never assertion or stale-artifact output", () => {
     for (const o of ["sh: 1: foo: command not found", "connect ECONNREFUSED 127.0.0.1:5432", "dial tcp: lookup db: no such host", "Connection refused", "services/api/.venv/bin/python: No such file or directory", "cannot open display :0", "Cannot connect to the Docker daemon"]) assert.equal(isEnvValidateFailure(o), true, o);
     for (const o of ["AssertionError: 1 != 2", "x.md: missing or out of date (run --render-agent-md)", "ECONNREFUSED\nAssertionError: expected 1 to equal 2", "", undefined]) assert.equal(isEnvValidateFailure(o), false, String(o));

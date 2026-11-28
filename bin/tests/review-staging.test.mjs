@@ -526,7 +526,7 @@ describe("review-staging --summary", () => {
     assert.equal(await reviewStagingFromCli(["--summary"], w.io), 0, w.err.join("\n"));
     const b = posted(w)[0];
     assert.ok(b.startsWith("<!-- FORGE:GATE_PASS -->\n"));
-    assert.match(b, /\| Findings \| 0 CRITICAL \/ 0 HIGH/);
+    assert.match(b, /\| Findings \| 0 CRITICAL \/ 0 HIGH \/ 0 MEDIUM \(CONFIRMED\) \| blocks at HIGH and above/);
     assert.match(b, /resolved \(excluded from the verdict\): HIGH INFRA-1 DCO exemption only on staging \(closed #4564\)/);
   });
 
@@ -685,6 +685,14 @@ describe("review-staging --summary", () => {
     assert.equal(stagingVerdict({ ...base, testGateInvalid: true }).verdict, "BLOCK DEPLOY");
     assert.equal(stagingVerdict({ ...base, confirmedHigh: 2 }).verdict, "NEEDS FIXES FIRST");
   });
+
+  it("stagingVerdict honours release.block_severity (#6174): medium blocks, critical lets HIGH through", () => {
+    const base = { ciFailing: 0, testGateInvalid: false, confirmedCritical: 0, confirmedHigh: 0, confirmedMedium: 0 };
+    assert.equal(stagingVerdict({ ...base, confirmedMedium: 1 }).verdict, "APPROVE FOR DEPLOY");
+    assert.equal(stagingVerdict({ ...base, confirmedMedium: 1, blockSeverity: "MEDIUM" }).verdict, "NEEDS FIXES FIRST");
+    assert.equal(stagingVerdict({ ...base, confirmedHigh: 1, blockSeverity: "CRITICAL" }).verdict, "APPROVE FOR DEPLOY");
+    assert.equal(stagingVerdict({ ...base, confirmedCritical: 1, blockSeverity: "CRITICAL" }).verdict, "BLOCK DEPLOY");
+  });
 });
 
 describe("review-staging --delta (#4360)", () => {
@@ -800,6 +808,16 @@ describe("review-staging --post-reviewer and delivery repair (#5317)", () => {
     assert.throws(() => parseArgs(["--post-reviewer", "Bad Name", "--body-file", "f"]));
     assert.throws(() => parseArgs(["--post-reviewer", "security"]));
     assert.throws(() => parseArgs(["--body-file", "f"]));
+  });
+});
+
+describe("readConfig release.block_severity (#6174)", () => {
+  const cfgIo = (rel) => ({ env: {}, cwd: "/w", readFile: () => `project:\n  owner: o\n  repo: r\n${rel}` });
+  it("parses block_severity, defaults and normalises unknown to HIGH", () => {
+    assert.equal(readConfig(cfgIo("release:\n  block_severity: medium\n")).blockSeverity, "MEDIUM");
+    assert.equal(readConfig(cfgIo("release:\n  block_severity: critical\n")).blockSeverity, "CRITICAL");
+    assert.equal(readConfig(cfgIo("")).blockSeverity, "HIGH");
+    assert.equal(readConfig(cfgIo("release:\n  block_severity: bogus\n")).blockSeverity, "HIGH");
   });
 });
 
