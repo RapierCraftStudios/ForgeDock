@@ -70,3 +70,35 @@ describe("#5893 held needs-human root readmit", () => {
     assert.ok(!again.updates.some((u) => u.outcome === "readmitted"));
   });
 });
+
+// #6197: an --add reaches a batch whose every pending issue is operator-held within one poll.
+describe("#6197 add to an all-held batch", () => {
+  for (const [name, hold] of [["hold expiry", { 1: { expiresAt: new Date(Date.now() + 3600_000).toISOString() } }], ["no expiry (finalise path)", {}]]) {
+    it(`held pending with ${name}: an add dispatches within one pollMs`, async () => {
+      const ran = [], naps = [];
+      let added = [], napped = 0, stop = false;
+      const p = orchestrate({ issues: [1], parallel: 1, pollMs: 50, store: memStore(), getHeld: () => [1], getHoldInfo: () => hold, expireHolds: () => [], getCancelled: () => (stop ? { at: new Date().toISOString(), reason: "test" } : null),
+        getAdded: () => { const a = added; return a; },
+        sleep: async (ms) => { naps.push(ms); if (++napped === 1) added = [7]; await sleep(1); },
+        runOne: async (n) => { ran.push(n); stop = true; return MERGED; } });
+      if (name.startsWith("no")) added = [7];
+      await Promise.race([p, sleep(1500)]);
+      stop = true; await Promise.race([p, sleep(500)]);
+      assert.deepEqual(ran, [7]);
+      assert.ok(naps.every((ms) => ms <= 50), `every nap is poll-capped: ${naps}`);
+    });
+  }
+  it("an add is read within one pollMs while the only pending issue waits on a long notBefore timer", async () => {
+    const ran = [], naps = [];
+    let added = [], napped = 0, stop = false;
+    const store = memStore();
+    store.save({ v: 1, order: [2], results: {}, running: {}, pending: [2], notBefore: { 2: Date.now() + 3600_000 } });
+    const p = orchestrate({ issues: [2], parallel: 1, pollMs: 50, store, getAdded: () => added,
+      sleep: async (ms) => { if (stop) throw new Error("test over"); naps.push(ms); if (++napped === 1) added = [7]; await sleep(1); },
+      runOne: async (n) => { ran.push(n); stop = true; return MERGED; } });
+    await Promise.race([p.catch(() => {}), sleep(1500)]);
+    stop = true; await Promise.race([p.catch(() => {}), sleep(500)]);
+    assert.deepEqual(ran, [7]);
+    assert.ok(naps.every((ms) => ms <= 50), `every nap is poll-capped: ${naps}`);
+  });
+});

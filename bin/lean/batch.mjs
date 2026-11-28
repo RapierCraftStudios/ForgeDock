@@ -409,6 +409,14 @@ export function openBatch(root, id) {
     clearCancel: () => rmSync(f("cancel"), { force: true }),
     /** Added issues the batch never took into its `order` (a finished or unhosted batch with pending adds). */
     unrunAdds: () => { const order = new Set(readJsonCached(f("state.json"))?.order ?? []); return readAdded(f("add")).filter((n) => !order.has(n)); },
+    /** #6197: age (ms) of the oldest unconsumed add/requeue entry (the add/requeue file's mtime while `unrunAdds()`/`unrunRequeues()` is non-empty), else null. */
+    unrunInputAgeMs: (now = Date.now()) => {
+      let oldest = null;
+      for (const [name, open] of [["add", () => self.unrunAdds().length], ["requeue", () => self.unrunRequeues().length]]) {
+        try { if (!open()) continue; const m = statSync(f(name)).mtimeMs; if (oldest === null || m < oldest) oldest = m; } catch { /* absent */ }
+      }
+      return oldest === null ? null : Math.max(0, now - oldest);
+    },
     /** #5531: a `report.json` or `cancel` file exists (two stats, no parse): the batch needs no scanning. */
     isTerminal: () => existsSync(f("report.json")) || existsSync(f("cancel")),
     /** #4775: epoch ms of the batch's last progress (newest mtime of `state.json` / `log.jsonl`), or null when neither exists. */
