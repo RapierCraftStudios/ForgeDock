@@ -54,7 +54,7 @@ export function recordFailure(ledger, { signature, hash = null, spend = 0, run =
   return { ...rest, ...(pin ? { hostPin: true } : {}), ...(escalated && !changed ? { escalated } : {}), attempts: l.attempts + 1, signatures: [...l.signatures, { sig: String(signature ?? ""), ...(hash ? { hash } : {}), ...(run ? { run } : {}), ...(blocker ? { blocker } : {}) }], lastInputHash: hash ?? l.lastInputHash, spend: Math.round((l.spend + (Number(spend) || 0)) * 1e6) / 1e6 };
 }
 
-/** The breach of the lifetime budget, or null: attempts reached the cap, or one signature exceeded `maxIdentical` failures. */
+/** The breach of the lifetime budget, or null: attempts reached the cap, or one signature reached `maxIdentical` failures. */
 export function breach(ledger, cfg) {
   const l = normalizeLedger(ledger), { maxAttempts, maxIdentical } = budgets(cfg);
   const counts = new Map();
