@@ -110,6 +110,8 @@ const ciSeamOf = (ctx) => ctx.io.ciGreen ?? (ctx.ciSeam ??= realCiSeam(ctx));
 
 /** Per-head bookkeeping: checks already rerun, the first failure of each (test name, signature) and the flakes already filed. */
 const headRec = (state, head) => ((state.ciGreen ??= { heads: {}, flakes: [] }).heads[head] ??= { reran: [], firstFail: {}, filed: [] });
+/** Polls a rerun may still show its old failed run (GitHub lags the rerun by seconds) before that failure counts as the rerun's own result. */
+const RERUN_STALE_POLLS = 3;
 
 /**
  * Wait until every required check of `pr`'s head is green. @returns
@@ -141,6 +143,20 @@ async function waitGreen(ctx, pr, seam) {
       await seam.sleep(CI_GREEN_POLL_MS);
       continue;
     }
+    // A rerun just requested may not show yet: its old failed run is stale, not a second failure. Wait until the run's attempt moves on (or the grace polls pass).
+    const stale = [];
+    for (const [name, w] of Object.entries(rec.waiting ?? {})) {
+      if (!st.failing.includes(name)) { delete rec.waiting[name]; continue; }
+      const attempt = await seam.runAttempt(w.id);
+      if (attempt != null && w.attempt != null && attempt > w.attempt) { delete rec.waiting[name]; continue; }
+      if (++w.polls > RERUN_STALE_POLLS) { delete rec.waiting[name]; continue; }
+      stale.push(name);
+    }
+    if (stale.length) {
+      if (seam.now() >= deadline) return { blocked: true, reason: `rerun of ${stale.join(", ")} on #${pr} not picked up after ${ctx.config?.ciGreen?.maxWaitMin ?? CI_GREEN_MAX_WAIT_MIN} min; re-run the release once CI finishes` };
+      await seam.sleep(CI_GREEN_POLL_MS);
+      continue;
+    }
     const fresh = st.failing.filter((n) => !rec.reran.includes(n));
     if (!fresh.length) return { red: true, head, failing: st.failing };
     // First failure of these checks: one rerun of each failed run, never past the attempt cap. A status context has no run: it stays red.
@@ -159,8 +175,10 @@ async function waitGreen(ctx, pr, seam) {
     ctx.save?.();
     let reran = 0;
     for (const id of ids.keys()) {
-      if (!attemptGuard({ attempt: await seam.runAttempt(id) }).allow) continue;
+      const attempt = await seam.runAttempt(id);
+      if (!attemptGuard({ attempt }).allow) continue;
       await seam.rerunFailed(id);
+      (rec.waiting ??= {})[ids.get(id)] = { id, attempt, polls: 0 };
       reran++;
     }
     if (!reran) return { red: true, head, failing: st.failing };
