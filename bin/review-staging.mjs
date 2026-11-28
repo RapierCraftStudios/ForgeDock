@@ -152,7 +152,7 @@ export function readConfig(io) {
   try { cfg = parseForgeYaml(io.readFile(path)) ?? {}; } catch { /* absent config: owner/repo check below fails */ }
   const owner = cfg.project?.owner, repo = cfg.project?.repo;
   if (!owner || !repo) throw new Stop(1, [`review-staging: project.owner/project.repo not set in ${path}`]);
-  return { blockSeverity: String(cfg.release?.block_severity ?? "").trim().toUpperCase() || "HIGH", ghRepo: `${owner}/${repo}`, defaultBranch: cfg.branches?.default || "main", stagingBranch: cfg.branches?.staging || "staging", featurePattern: typeof cfg.branches?.feature_pattern === "string" && cfg.branches.feature_pattern.includes("{slug}") ? cfg.branches.feature_pattern : null, configPath: path, extraRequiredChecks: Array.isArray(cfg.gate?.required_checks) ? cfg.gate.required_checks.map((x) => String(x).trim()).filter(Boolean) : [], sandboxRepo: SANDBOX_RE.test(String(cfg.selftest?.sandbox_repo ?? "").trim()) ? String(cfg.selftest.sandbox_repo).trim() : "", sandboxRaw: String(cfg.selftest?.sandbox_repo ?? "").trim() };
+  return { blockSeverity: ["CRITICAL", "HIGH", "MEDIUM"].includes(String(cfg.release?.block_severity ?? "").trim().toUpperCase()) ? String(cfg.release.block_severity).trim().toUpperCase() : "HIGH", ghRepo: `${owner}/${repo}`, defaultBranch: cfg.branches?.default || "main", stagingBranch: cfg.branches?.staging || "staging", featurePattern: typeof cfg.branches?.feature_pattern === "string" && cfg.branches.feature_pattern.includes("{slug}") ? cfg.branches.feature_pattern : null, configPath: path, extraRequiredChecks: Array.isArray(cfg.gate?.required_checks) ? cfg.gate.required_checks.map((x) => String(x).trim()).filter(Boolean) : [], sandboxRepo: SANDBOX_RE.test(String(cfg.selftest?.sandbox_repo ?? "").trim()) ? String(cfg.selftest.sandbox_repo).trim() : "", sandboxRaw: String(cfg.selftest?.sandbox_repo ?? "").trim() };
 }
 
 /** Same derivation as commands/review-pr-staging.md Phase -1 (and scripts/lib/fence-bootstrap.sh). */
@@ -723,7 +723,7 @@ async function summary(a, io) {
     "| Domain | Result | Notes |",
     "|--------|--------|-------|",
     `| CI | ${ciFailing > 0 ? "FAIL" : "PASS"} | ${ciFailing} failing required check(s), forgedock/verify, forge/deploy-gate and the gate-marker check excluded${warnings.length ? `; ${warnings.length} non-required check(s) red, non-blocking warning: ${warnings.join(", ")}` : ""} |`,
-    `| Findings | ${st.confirmedCritical} CRITICAL / ${st.confirmedHigh} HIGH (CONFIRMED) | per-domain verdicts are in the FORGE:REVIEW-AGENT comments |`,
+    `| Findings | ${st.confirmedCritical} CRITICAL / ${st.confirmedHigh} HIGH / ${st.confirmedMedium ?? 0} MEDIUM (CONFIRMED) | blocks at ${c.blockSeverity ?? "HIGH"} and above; per-domain verdicts are in the FORGE:REVIEW-AGENT comments |`,
     `| **Test Gate** | \`${tg.verdict}\` | \`${tg.reason || "Phase 6.5 not run"}\` |`,
     ...(acceptanceBlocked ? [`| **Feature acceptance** | \`BLOCK\` | ${acceptanceBlocked.replace(/\|/g, "/")} |`] : []),
     "",

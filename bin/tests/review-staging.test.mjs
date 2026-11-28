@@ -526,7 +526,7 @@ describe("review-staging --summary", () => {
     assert.equal(await reviewStagingFromCli(["--summary"], w.io), 0, w.err.join("\n"));
     const b = posted(w)[0];
     assert.ok(b.startsWith("<!-- FORGE:GATE_PASS -->\n"));
-    assert.match(b, /\| Findings \| 0 CRITICAL \/ 0 HIGH/);
+    assert.match(b, /\| Findings \| 0 CRITICAL \/ 0 HIGH \/ 0 MEDIUM \(CONFIRMED\) \| blocks at HIGH and above/);
     assert.match(b, /resolved \(excluded from the verdict\): HIGH INFRA-1 DCO exemption only on staging \(closed #4564\)/);
   });
 
@@ -808,6 +808,16 @@ describe("review-staging --post-reviewer and delivery repair (#5317)", () => {
     assert.throws(() => parseArgs(["--post-reviewer", "Bad Name", "--body-file", "f"]));
     assert.throws(() => parseArgs(["--post-reviewer", "security"]));
     assert.throws(() => parseArgs(["--body-file", "f"]));
+  });
+});
+
+describe("readConfig release.block_severity (#6174)", () => {
+  const cfgIo = (rel) => ({ env: {}, cwd: "/w", readFile: () => `project:\n  owner: o\n  repo: r\n${rel}` });
+  it("parses block_severity, defaults and normalises unknown to HIGH", () => {
+    assert.equal(readConfig(cfgIo("release:\n  block_severity: medium\n")).blockSeverity, "MEDIUM");
+    assert.equal(readConfig(cfgIo("release:\n  block_severity: critical\n")).blockSeverity, "CRITICAL");
+    assert.equal(readConfig(cfgIo("")).blockSeverity, "HIGH");
+    assert.equal(readConfig(cfgIo("release:\n  block_severity: bogus\n")).blockSeverity, "HIGH");
   });
 });
 
