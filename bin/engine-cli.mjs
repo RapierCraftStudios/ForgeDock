@@ -1444,14 +1444,17 @@ async function statusBatch({ id, root, io, print = (l) => console.log(l) }) {
   const kept = b.keptSandboxes(!b.readReport() && b.lastProgressMs() !== null && Date.now() - b.lastProgressMs() <= 10 * 60000); // #6008: a batch with no progress for 10 min has no dispatcher
   const showKept = () => { if (kept.length) print(`kept sandboxes (${kept.length}): ${kept.map((k) => `#${k.issue} age ${Math.round((k.ageMs ?? 0) / 60000)}m phase ${k.phase ?? "?"}`).join(", ")}`); };
   showKept();
+  const { laneStageLines, quietMinOf } = await import("./lean/stage.mjs");
+  const stageLines = () => { for (const l of laneStageLines(st, { quietMin: quietMinOf() })) print(`  ${l}`); }; // #6245: per running lane `#N <sub-phase> for Xm (last activity Ys ago)`
   const select = flag(plan.argv ?? [], "--select");
-  if (!select) { print(`batch ${id}: no selector (a fixed list); ${(st.pending ?? []).length} pending, ${Object.keys(st.running ?? {}).length} running`); return { ok: true, batch: id, unscheduled: [] }; }
+  if (!select) { print(`batch ${id}: no selector (a fixed list); ${(st.pending ?? []).length} pending, ${Object.keys(st.running ?? {}).length} running`); stageLines(); return { ok: true, batch: id, unscheduled: [] }; }
   const open = parseSelected(await io.gh(selectArgs(plan.repo, select)));
   if (!open) throw new Error(`cannot read the issues matching '${select}'`);
   const c = batchMod.coverage({ state: st, open });
   const n = (k) => c[k].length;
   print(`batch ${id} selector '${select}': ${open.length} matching open = ${n("running")} running + ${n("queued")} queued + ${n("backingOff")} backing-off + ${n("waitingDeps")} waiting on deps + ${n("humanBlocked")} human-blocked + ${n("unscheduled")} unscheduled`);
   if (c.humanBlocked.length) print(`human-blocked: ${c.humanBlocked.map((x) => `#${x}`).join(", ")}`);
+  stageLines();
   print(c.unscheduled.length ? `UNSCHEDULED (${c.unscheduled.length}): ${c.unscheduled.map((x) => `#${x}`).join(", ")}` : "unscheduled: 0 (healthy)");
   return { ok: true, batch: id, coverage: c, unscheduled: c.unscheduled, kept };
 }
@@ -2853,6 +2856,7 @@ export async function scheddFromCli(argv, deps = {}) {
       const ln = b.lanes ? `, running ${b.lanes.running}/${b.lanes.k} (local ${b.lanes.local}, remote ${b.lanes.remote})` : "";
       const alive = b.lanesAliveAgeSec == null ? "" : `, lanes alive ${b.lanesAliveAgeSec}s ago`;
       console.log(`  ${b.id}${b.running ? "" : " (not hosted)"}: ${age}${ln}${alive}${pend}`);
+      for (const l of b.stages ?? []) console.log(`    ${l}`); // #6245
     }
     for (const l of schedd.sharedPendingLines(st.batches)) console.log(l); // #5471
     if (st.host) { const h = formatOverload(st.host) ?? formatHostLoad(st.host); if (h) console.log(`schedd: ${st.host.overloaded ? h : `host ${h}`}`); } // #5174

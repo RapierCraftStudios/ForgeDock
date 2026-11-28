@@ -63,6 +63,7 @@ import { batchRoot, listBatches, openBatch, SECRET_ENV } from "./batch.mjs";
 import { killTrackedChildren } from "./effects.mjs";
 import { applySetExecution } from "./live-execution.mjs";
 import { liveOverload } from "./hostload.mjs";
+import { laneStageLines, quietMinOf } from "./stage.mjs"; // #6245
 
 /** #5938: epoch ms of the newest lane log of a running issue (a lane heartbeat), or null. */
 /** #6197: an add/requeue unconsumed this long (ms) re-hosts or flags its batch. */
@@ -346,14 +347,15 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     for (const id of [...ids].sort()) {
       await yieldLoop();
       const isHosted = hosted.has(id) || starting.has(id);
-      let last = null, pending = [], pend = [], split = null, alive = null;
+      let last = null, pending = [], pend = [], split = null, alive = null, stages = [];
       try {
         const b = openBatch(root, id); last = b.lastProgressMs(); pending = b.unrunAdds(); pend = b.pendingIssues();
         const st = b.store.peek(); split = runningSplit(st, b.readParallel());
         alive = lanesAlive(b, st); // #5938: lane output is a heartbeat
+        stages = laneStageLines(st, { now, quietMin: quietMinOf() }); // #6245
       } catch { /* a half-written batch */ }
       if (!isHosted && !pending.length) continue;
-      out.push({ id, running: isHosted, lastProgressAt: last === null ? null : new Date(last).toISOString(), lastProgressAgeSec: last === null ? null : Math.max(0, Math.round((now - last) / 1000)), ...(split ? { lanes: { running: split.running, k: split.k, local: split.local, remote: split.remote } } : {}), lanesAliveAgeSec: alive === null ? null : Math.max(0, Math.round((now - alive) / 1000)), pendingAdds: pending, pending: pend });
+      out.push({ id, running: isHosted, lastProgressAt: last === null ? null : new Date(last).toISOString(), lastProgressAgeSec: last === null ? null : Math.max(0, Math.round((now - last) / 1000)), ...(split ? { lanes: { running: split.running, k: split.k, local: split.local, remote: split.remote } } : {}), lanesAliveAgeSec: alive === null ? null : Math.max(0, Math.round((now - alive) / 1000)), pendingAdds: pending, pending: pend, ...(stages.length ? { stages } : {}) });
     }
     return out;
   };

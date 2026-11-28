@@ -28,6 +28,7 @@ import { areaOf, acquireHotArea } from "./hotarea.mjs"; // #5751
 import { isEnvValidateFailure, outputTail, contractRuleCounts, onlyTestPlanProblems, isTestPath, applyValidateRecipes, rewriteProjectDirCommand, deferChecklessPostDeploy, autoPostDeployE2e, applyRequirementDecisions, dedupeAddRequirements, loneE2eRows, reproEnvMiss, resolveForgedockPaths, resolvingIo, portableForgedockPaths, FORGEDOCK_CHECKS_VAR, FORGEDOCK_ENTRY_VAR, describesUnrunnableCommand, removedPathsOf, TRACKED, normalizeKindModes, blockingFailures, splitAdvisory, unverifiedRequirements, mutationTargets, mutationFailures, runMutationCheck, MUTATION_SURVIVED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, snapQuotes, cliUsageError, normalizeRunnerCommand, applyAmendments, precheck, alreadyFixedOnBase, READONLY_PROD_RE, EXTERNAL_NEED_RE, intakeHostWork, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, reaskable, criterionLines, closePlan, followupItems, renderPendingFollowups, bucketTally, pendingTracking, unnamedEdges, structureNote, convertDelivered } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, quotaCores, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment, prodFailureSignal } from "./prefilter.mjs";
+import { createStageReporter, fixReason } from "./stage.mjs";
 import { writeStatus, postUpsert, postKeyed, isKeyedPost, isStatusPost, isUpsertPost, hasSection, clearPipelineLabels, IN_PLACE_MARKERS, commentId, contractKey } from "./statuscomment.mjs";
 import { decidePost } from "./commentstate.mjs"; // #5979
 import { repeatSignature, countIdentical, shouldPark, summaryComment } from "./failure-stop.mjs"; // #5979
@@ -410,13 +411,14 @@ export async function runCore(o) {
   let branch = `feat/issue-${issue}-lean`; // #5469: an adopted PR's own head branch replaces it
   const wt = join(o.worktreeRoot ?? join(cwd, ".claude", "worktrees"), `lean-${issue}`);
   const t0 = now();
-  const phaseLedger = createLedger(now, "sandbox_start", t0); // #4908: where the lane wall time goes
+  let stageRep = null; // #6245: created once post() exists (below); each ledger transition updates the FORGE:STAGE line (<= 1 edit/min) and appends LANE_STAGE
+  const phaseLedger = createLedger(now, "sandbox_start", t0, (p) => stageRep?.enter(p)); // #4908: where the lane wall time goes
   const usage = { cost_usd: 0, input: 0, output: 0, cache: 0 };
   const sessionCosts = new Map(); // #4407: session id -> last reported cumulative cost
   let sessionId = null;
 
   let ciVerifies = 0, ciMergeFixRounds = 0; // #6203: counted off the run-log events for the MERGE_LEDGER record
-  const ev = (e) => { if (e?.event === "CI_VERIFY") ciVerifies++; else if (e?.event === "CI_FIX_ROUND") { if (e.trigger === "merge") ciMergeFixRounds++; } return appendEvent(dir, issue, e, { repo }); }; // #4432: the run log is keyed by repo + issue
+  const ev = (e) => { if (e?.event !== "LANE_STAGE") stageRep?.touch(); if (e?.event === "CI_VERIFY") ciVerifies++; else if (e?.event === "CI_FIX_ROUND") { if (e.trigger === "merge") ciMergeFixRounds++; } return appendEvent(dir, issue, e, { repo }); }; // #4432: the run log is keyed by repo + issue
   /** #5435: time one sandbox_start step (SANDBOX_STEP event + ledger sub-timing); the result and errors pass through. */
   const step = async (name, fn) => {
     const s0 = now();
@@ -481,14 +483,15 @@ export async function runCore(o) {
   let iss; // the issue as read at intake; declared early so the comment helpers below can see it
   const localPosts = []; // #5979: comments this lane created, so a second post in the same run sees them
   const allComments = () => [...(iss?.comments ?? []), ...localPosts];
+  let statusQ = Promise.resolve(); // #6245: status writes run one at a time, so a stage edit never overwrites a section a concurrent post just wrote
   let statusCache = null; // #5592: {id, sections} of this issue's one FORGE:STATUS comment, edited in place
   let postContractHash = null; // #5931: the frozen contract hash once known; in-place comments are keyed to it
   const post = async (marker, body, on = issue) => {
     if (on === issue && isStatusPost(marker)) { // machine-state markers: a section of the one status comment, not a comment of their own
       try {
-        const r = await writeStatus({ known: statusCache, comments: iss?.comments, trusted: isTrustedIssueComment, markers: Array.isArray(marker) ? marker : [marker], text: body, cap: capComment,
+        const r = await (statusQ = statusQ.catch(() => {}).then(() => writeStatus({ known: statusCache, comments: iss?.comments, trusted: isTrustedIssueComment, markers: Array.isArray(marker) ? marker : [marker], text: body, cap: capComment,
           create: async (b) => /https?:\/\/\S+/.exec(String(await ghw(["issue", "comment", String(on), "-R", repo, "--body", b])))?.[0] ?? null,
-          patch: (id, b) => ghw(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${id}`, "-f", `body=${b}`]) });
+          patch: (id, b) => ghw(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${id}`, "-f", `body=${b}`]) })));
         statusCache = { id: r.id, sections: r.sections };
         return r.url;
       } catch (e) { if (e?.deferCode) throw e; /* a failed status edit falls back to a plain comment below */ }
@@ -516,6 +519,7 @@ export async function runCore(o) {
     if (on === issue) localPosts.push({ body: full, url, __mine: true });
     return url;
   };
+  stageRep = createStageReporter({ now, write: (text) => post("FORGE:STAGE", text), emit: (e) => ev(e) }); // #6245
   /** Best effort; `true` when the transition succeeded (#4337: the decomposed close needs to know). */
   const label = async (state) => { try { await retrying(() => io.transitionLabel(issue, state), { transient: GH_TRANSIENT_RE, attempts: 4, sleep: sleepFn, random }); return true; } catch { /* labels are best effort */ return false; } };
   const postRun = makePostRun({ ev, sleep: sleepFn, now }); // #5437: bookkeeping after RUN_TERMINAL, idempotent and retried
@@ -755,6 +759,7 @@ export async function runCore(o) {
     return finishing;
   }
   async function finishOnce(reason, detail = "", extra = {}, codeOverride = null) {
+    stageRep?.close(); // #6245
     await flushInflight(); // #5334: a signal mid-attempt: the session's usage so far is recorded before RUN_TERMINAL
     try { io.host?.recordPeakRss?.(Math.ceil(process.resourceUsage().maxRSS / 1024)); } catch { /* fail-open (#5845): the learned lane footprint is best effort */ }
     try { seqLease?.release(); } catch { /* fail-open */ }
@@ -2498,7 +2503,7 @@ export async function runCore(o) {
      * #4363: one fix round. Mechanical failures (and a conformance/review FAIL citing file:line) run in a fresh session on
      * the fix model with a narrow prompt; one resume of the build session follows when it made no commit. Else: a resume.
      */
-    function fixRound(...a) { return phaseLedger.during("fix", () => fixRoundRaw(...a)); } // #5649: fix rounds are their own ledger phase
+    function fixRound(...a) { stageRep?.note(fixReason(a[3], a[2])); return phaseLedger.during("fix", () => fixRoundRaw(...a)); } // #5649: fix rounds are their own ledger phase
     // #5728: a context-ceiling restart of a fix resume carries the failure list (no diff), not the full build prompt
     const fixResumeRestart = (task) => () => fixSessionPrompt({ task, stat: "", base, contract: frozen, title: iss?.title ?? "", summary: issueSummary(iss?.body) });
     async function fixRoundRaw(kind, task, failures, trigger, failureText = "", narrow = null) { // #5348: `narrow` {files} = the minimal profile (no diff, no lane text)
