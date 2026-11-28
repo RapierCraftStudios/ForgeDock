@@ -11,6 +11,7 @@ import { spawnSync } from "node:child_process";
 import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT } from "../engine/outcome-codes.mjs";
 import { noComments } from "./context.mjs";
 import { isDriftFailure } from "./validate-catalog.mjs";
+import { toolGapFailures } from "./envgap.mjs";
 import { seqNumber } from "./sequence.mjs";
 import { activationFailures } from "./activation.mjs";
 import * as nodeFs from "node:fs";
@@ -1061,6 +1062,8 @@ export function interfaceDecisionFailures(contract, result, changedFiles) {
 }
 
 const tagText = (q) => String(q ?? "").replace(/`[^`\n]*`/g, (span, at, all) => (/[^\s.,;:)]/.test(all.slice(at + span.length).replace(/`[^`\n]*\[type:[^`\n]*`/g, "")) ? "" : span));
+/** #6115: a base run that failed with a real (non-timeout, non-missing-runner, non-env) signature. */
+const baseRunRed = (b) => !!b && Number.isInteger(b.rc) && b.rc !== 0 && b.rc !== 124 && b.rc !== 127 && !toolGapFailures([b]).length && !/ModuleNotFoundError|ImportError/.test(String(b.output ?? ""));
 const wantsE2e = (r) => /\[type:(?:e2e|manual)\]/i.test(tagText(r?.quote));
 /**
  * Deterministic checks before any reviewer tokens are spent: unauthorized files, failed or missing validation,
@@ -1077,8 +1080,8 @@ const wantsE2e = (r) => /\[type:(?:e2e|manual)\]/i.test(tagText(r?.quote));
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, repro = null, validateRuns = null, repoHas = () => false, frozen = null, baselineFailures = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, pageFailures = null, docsPaths = null, prodParityFailures = null, seamFailures = null, newOffKeys = null, removedPaths = [], uiBrowser = null, outcomeEvidenceFailures = null }) {
-  const failures = [], superseded = [], ciCovered = [];
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, repro = null, validateRuns = null, repoHas = () => false, frozen = null, baselineFailures = null, guardFailures = null, coupledFailures = null, relaxationFailures = null, routeFailures = null, pageFailures = null, docsPaths = null, prodParityFailures = null, seamFailures = null, newOffKeys = null, removedPaths = [], uiBrowser = null, outcomeEvidenceFailures = null, baseRuns = null }) {
+  const failures = [], superseded = [], ciCovered = [], baseRed = [];
   // #5754: a deliver [type:e2e]/[type:manual] row whose observable exists only in production (live stack, deploy, prod window) cannot be produced by the placement: fail fast with a typed code instead of spending builder resumes
   for (const r of contract.requirements ?? []) {
     if (r.disposition === "deliver" && wantsE2e(r) && !isOutOfBand(r) && r.verify !== "in_lane" && prodOnlyE2e(r.quote)) failures.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, kind: "e2e_placement", detail: `${r.id} is a [type:e2e]/[type:manual] criterion observable only in production or on the live stack, which this lane cannot produce; mark ${r.id} post-deploy so it is transferred to the epic's acceptance instead of spending builder resumes (#5754)` });
@@ -1114,6 +1117,8 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       const miss = rerun ? missingTool(rerun, { repoHas, command: v.command }) : null;
       // #5447: CI may not run this test, so a missing tool on the rerun is never covered by a CI-verified head
       if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)${outputTail(rerun.output)}` });
+      else if (v.regression && rerun && toolGapFailures([rerun]).length) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: "module", detail: `validate ${v.id} (\`${v.command}\`) could not run: a module or command is missing (environment, not the change)${outputTail(rerun.output)}` }); // #6115
+      else if (v.regression && baseRunRed(baseRuns?.[v.id])) baseRed.push({ id: v.id, command: v.command }); // #6115: also red on the unchanged base: recorded, not blocking
       else if (amendedOnly && isScopeCheck(v.command)) superseded.push({ id: v.id, files: amendedOnly });
       else if (rerun && isDriftFailure(rerun.output)) failures.push({ code: C.BASE_CONFLICT, kind: "validate_drift", detail: `validate ${v.id} (\`${v.command}\`) failed on a stale generated artifact (base drift, not the change): base-sync, regenerate the artifact (forge.yaml validate.regenerate) and rerun${outputTail(rerun.output)}` }); // #5653: a mechanical base-sync recovery, not unimplemented work
       else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", output: rawTail(rerun?.output), detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${engineRun ? rerun.rc : r.exit}${engineRun ? ", run by the engine: no recorded result" : ""})${outputTail(rerun?.output)}` });
@@ -1148,7 +1153,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   failures.push(...(prodParityFailures ?? [])); // #5284: topology.prod_parity
   failures.push(...interfaceDecisionFailures(contract, result, changedFiles)); // #5338
   failures.push(...(seamFailures ?? [])); // #5338: a declared interface's provider and consumer no longer agree
-  return { ok: failures.length === 0, failures, superseded, ciCovered, equivalent: [] };
+  return { ok: failures.length === 0, failures, superseded, ciCovered, ...(baseRed.length ? { baseRed } : {}), equivalent: [] };
 }
 
 /**

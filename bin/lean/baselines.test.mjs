@@ -31,3 +31,24 @@ describe("baselines (#5448)", () => {
     assert.deepEqual(foldRegression(c).validate.map((v) => v.id), ["V1", "G1"]);
   });
 });
+
+describe("failing-run classification (#6115)", async () => {
+  const { classifyFailingRuns, baselineEnvFailures } = await import("./baselines.mjs");
+  const run = { when: "shared/**", run: "pytest tests" };
+  it("fails on base and head: base-red, not a blocking row", () => {
+    const c = classifyFailingRuns({ failed: [{ ...run, rc: 1, output: "FAILED tests/a.py::t" }], baseRuns: [{ command: "pytest tests", rc: 1, output: "FAILED tests/a.py::t" }] });
+    assert.equal(c.baseRed.length, 1); assert.equal(c.laneOwn.length, 0);
+    assert.equal(baselineFailures(c.laneOwn).length, 0);
+  });
+  it("ModuleNotFoundError is env and yields env.tool_missing", () => {
+    const f = { ...run, rc: 1, output: "ModuleNotFoundError: No module named 'yaml'" };
+    const c = classifyFailingRuns({ failed: [f], baseRuns: [{ command: "pytest tests", rc: 1, output: "x" }] });
+    assert.equal(c.env.length, 1); assert.equal(c.laneOwn.length, 0);
+    assert.equal(baselineEnvFailures(c.env)[0].code, "env.tool_missing");
+  });
+  it("passes on base, fails on head: stays a blocking baseline_failed row", () => {
+    const f = { ...run, rc: 1, output: "FAILED tests/a.py::t" };
+    const c = classifyFailingRuns({ failed: [f], baseRuns: [{ command: "pytest tests", rc: 0, output: "" }] });
+    assert.deepEqual(baselineFailures(c.laneOwn).map((r) => r.kind), ["baseline_failed"]);
+  });
+});
