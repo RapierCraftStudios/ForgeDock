@@ -75,6 +75,12 @@ export function duplicateExportsPrompt(findings, mode = "local") {
   return `This change exports names that another module of the same app or package already exports:\n${rows}\n\nRename the new export or reuse the existing one, and update every reference and any registry, map or test keyed by the name (same-named entries collide or leave one unprobed). ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
+/** #6239: files at mode 100644 that must be executable (shebang, directly invoked *.sh) or lost +x. */
+export function execBitsPrompt(findings, mode = "local") {
+  const rows = findings.slice(0, 30).map((f) => `- ${f.path}: ${f.why}`).join("\n");
+  return `These files have the wrong git mode (the repo's executable-bit check rejects them):\n${rows}\n\nRun \`git update-index --chmod=+x -- <path>\` and \`chmod +x <path>\` for each (unless the file is meant to be non-executable), then verify with \`git ls-files -s <path>\` (100755). ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
 /** #4596: new keys the lane copied from the source-locale catalog into another locale's catalog. */
 export function i18nCopiesPrompt(findings, mode = "local") {
   const rows = findings.slice(0, 30).map((d) => `- ${d.path}: ${d.key} = ${JSON.stringify(d.value)} (same as ${d.source})`).join("\n");
