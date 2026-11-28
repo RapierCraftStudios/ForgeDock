@@ -685,6 +685,14 @@ describe("review-staging --summary", () => {
     assert.equal(stagingVerdict({ ...base, testGateInvalid: true }).verdict, "BLOCK DEPLOY");
     assert.equal(stagingVerdict({ ...base, confirmedHigh: 2 }).verdict, "NEEDS FIXES FIRST");
   });
+
+  it("stagingVerdict honours release.block_severity (#6174): medium blocks, critical lets HIGH through", () => {
+    const base = { ciFailing: 0, testGateInvalid: false, confirmedCritical: 0, confirmedHigh: 0, confirmedMedium: 0 };
+    assert.equal(stagingVerdict({ ...base, confirmedMedium: 1 }).verdict, "APPROVE FOR DEPLOY");
+    assert.equal(stagingVerdict({ ...base, confirmedMedium: 1, blockSeverity: "MEDIUM" }).verdict, "NEEDS FIXES FIRST");
+    assert.equal(stagingVerdict({ ...base, confirmedHigh: 1, blockSeverity: "CRITICAL" }).verdict, "APPROVE FOR DEPLOY");
+    assert.equal(stagingVerdict({ ...base, confirmedCritical: 1, blockSeverity: "CRITICAL" }).verdict, "BLOCK DEPLOY");
+  });
 });
 
 describe("review-staging --delta (#4360)", () => {
