@@ -6,13 +6,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { hostMemFree } from "../pool/health.mjs";
+import { hostMemFree, guestReclaimableKb } from "../pool/health.mjs";
 import { createAgent, safeName } from "../pool/agent.mjs";
 import { createRouter } from "../pool/router.mjs";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { poolFromCli } from "../engine-cli.mjs";
 import { httpTransport } from "../lean/sandbox-remote.mjs";
 import { tmpDir } from "./_tmp.mjs";
+import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 
 const WSL = () => "5.15.167.4-microsoft-standard-WSL2\n";
 const NATIVE = () => "6.8.0-45-generic\n";
@@ -20,12 +21,12 @@ const PS = JSON.stringify({ free_kb: 3355443, vmmem: [{ name: "vmmemWSL", bytes:
 
 test("hostMemFree parses FreePhysicalMemory (KB) and vmmem working sets (#5967)", () => {
   const calls = [];
-  const r = hostMemFree({ osrelease: WSL, run: (cmd, args) => { calls.push([cmd, ...args].join(" ")); return PS; }, env: {} });
-  assert.deepEqual(r, { free_gb: 3.2, vmmem: [{ name: "vmmemWSL", gb: 8 }, { name: "vmmem", gb: 2.5 }] });
+  const r = hostMemFree({ osrelease: WSL, run: (cmd, args) => { calls.push([cmd, ...args].join(" ")); return PS; }, env: {}, meminfo: () => "" });
+  assert.deepEqual(r, { free_gb: 3.2, win_free_gb: 3.2, guest_reclaimable_gb: 0, vmmem: [{ name: "vmmemWSL", gb: 8 }, { name: "vmmem", gb: 2.5 }] });
   assert.match(calls[0], /powershell\.exe .*FreePhysicalMemory.*vmmem/);
   // PowerShell collapses a one-element array to an object; no vmmem at all is an empty list.
-  assert.deepEqual(hostMemFree({ osrelease: WSL, run: () => JSON.stringify({ free_kb: 1048576, vmmem: { name: "vmmem", bytes: 1073741824 } }), env: {} }), { free_gb: 1, vmmem: [{ name: "vmmem", gb: 1 }] });
-  assert.deepEqual(hostMemFree({ osrelease: WSL, run: () => JSON.stringify({ free_kb: 1048576, vmmem: null }), env: {} }), { free_gb: 1, vmmem: [] });
+  assert.deepEqual(hostMemFree({ osrelease: WSL, run: () => JSON.stringify({ free_kb: 1048576, vmmem: { name: "vmmem", bytes: 1073741824 } }), env: {}, meminfo: () => "" }), { free_gb: 1, win_free_gb: 1, guest_reclaimable_gb: 0, vmmem: [{ name: "vmmem", gb: 1 }] });
+  assert.deepEqual(hostMemFree({ osrelease: WSL, run: () => JSON.stringify({ free_kb: 1048576, vmmem: null }), env: {}, meminfo: () => "" }), { free_gb: 1, win_free_gb: 1, guest_reclaimable_gb: 0, vmmem: [] });
 });
 
 test("hostMemFree is null off WSL and on any error (#5967)", () => {
@@ -55,7 +56,7 @@ function agentFixture(hostMem, opts = {}) {
   const docker = fakeDocker();
   const dir = tmpDir("cs-mem-");
   const clock = { t: 1_000_000 };
-  const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: dir, allow_cpus: 16, allow_mem_gb: 32, lease_ttl_s: 600, token: "t", ...opts }, { docker, now: () => clock.t, log: quiet, live: () => ({ ok: true }), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }), hostDisk: () => null, hostMem });
+  const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: dir, allow_cpus: 16, allow_mem_gb: 32, lease_ttl_s: 600, token: "t", fstrim: false, ...opts }, { docker, now: () => clock.t, log: quiet, live: () => ({ ok: true }), vm: () => ({ cpus: 64, mem_gb: 256, swap_gb: 0 }), hostDisk: () => null, hostMem });
   return { agent, docker, dir, clock };
 }
 
@@ -194,4 +195,62 @@ test("pool status prints host_mem_free_gb, the other VMs and the warning, even w
   assert.match(out, /a1: host_mem_free_gb 2\.5, other VMs: vmmemWSL 8 GB, vmmem 2\.5 GB WARNING: host memory below the floor/);
   assert.match(out, /a2: host_mem_free_gb 20$/m);
   assert.doesNotMatch(out, /a3/);
+});
+
+// #6270: WSL page cache holds Windows RAM; the guest's reclaimable memory counts as free for admission, the pause controller and the heavy gate.
+const MEMINFO = "MemTotal:       16000000 kB\nMemFree:          300000 kB\nMemAvailable:   15700000 kB\nCached:         15000000 kB\n";
+const lowWin = (free_kb = 1048576) => JSON.stringify({ free_kb, vmmem: [] }); // 1 GB Windows free
+
+test("guest reclaimable memory is MemAvailable - MemFree; unreadable or inconsistent is 0 (#6270)", () => {
+  assert.equal(guestReclaimableKb(MEMINFO), 15400000);
+  assert.equal(guestReclaimableKb(""), 0);
+  assert.equal(guestReclaimableKb("MemFree: 5 kB\nMemAvailable: 3 kB\n"), 0);
+  const r = hostMemFree({ osrelease: WSL, run: () => lowWin(), env: {}, meminfo: () => MEMINFO });
+  assert.equal(r.win_free_gb, 1);
+  assert.ok(r.free_gb > 15 && r.guest_reclaimable_gb > 14);
+  assert.equal(hostMemFree({ osrelease: WSL, run: () => lowWin(), env: {}, meminfo: () => { throw new Error("x"); } }).free_gb, 1);
+});
+
+test("1 GB Windows free with 15 GB guest available neither pauses nor refuses (#6270)", async () => {
+  const probe = () => hostMemFree({ osrelease: WSL, run: () => lowWin(), env: {}, meminfo: () => MEMINFO });
+  const { agent, docker, clock } = agentFixture(probe);
+  assert.equal((await agent.launch({ spec: spec("w1"), cpus: 1, mem_gb: 1 })).status, 201);
+  clock.t += 31_000; await agent.reap();
+  assert.deepEqual(docker.paused, []);
+  assert.equal(agent.capacity().host_mem_low, false);
+});
+
+test("a sandbox memory-paused past the max pause is stopped with sandbox.mem_pressure, worktree kept (#6270)", async () => {
+  let free = 20;
+  const { agent, docker, clock } = agentFixture(() => ({ free_gb: free, vmmem: [] }), { host_mem_max_pause_s: 600 });
+  await agent.launch({ spec: spec("x1"), cpus: 1, mem_gb: 1 });
+  free = 1; clock.t += 31_000; await agent.reap();
+  const rec = () => agent.store.data.sandboxes.x1;
+  assert.equal(rec().memPaused, true);
+  clock.t += 300_000; await agent.reap();
+  assert.equal(rec().memPaused, true, "still inside the max pause");
+  clock.t += 301_000; await agent.reap();
+  assert.equal(rec().state, "exited");
+  assert.equal(rec().memPressure, true);
+  assert.equal(rec().memPaused, false);
+  assert.equal(OUTCOME_CODES.SANDBOX_MEM_PRESSURE, "sandbox.mem_pressure");
+  const again = await agent.launch({ spec: spec("x1"), cpus: 1, mem_gb: 1 }); // requeue after memory recovers resumes
+  free = 20; clock.t += 31_000;
+  assert.ok([201, 503].includes(again.status));
+  assert.equal(docker.runs.length >= 1, true);
+});
+
+test("a memory-paused host refuses new admissions, even with the reading gone (#6270)", async () => {
+  let hm = { free_gb: 1, vmmem: [] };
+  const { agent, clock } = agentFixture(() => hm);
+  await agent.launch({ spec: spec("y1"), cpus: 1, mem_gb: 1 }).catch(() => {});
+  hm = { free_gb: 20, vmmem: [] }; clock.t += 31_000;
+  assert.equal((await agent.launch({ spec: spec("y1"), cpus: 1, mem_gb: 1 })).status, 201);
+  hm = { free_gb: 1, vmmem: [] }; clock.t += 31_000; await agent.reap();
+  assert.equal(agent.store.data.sandboxes.y1.memPaused, true);
+  hm = { free_gb: 6, vmmem: [] }; clock.t += 31_000; // above the floor but inside the resume margin
+  const r = await agent.launch({ spec: spec("y2"), cpus: 1, mem_gb: 1 });
+  assert.equal(r.status, 503); assert.equal(r.body.code, "pool.host_mem");
+  hm = null; clock.t += 31_000;
+  assert.equal((await agent.launch({ spec: spec("y3"), cpus: 1, mem_gb: 1 })).status, 503);
 });

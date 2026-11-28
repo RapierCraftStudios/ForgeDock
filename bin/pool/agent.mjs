@@ -159,7 +159,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     return u?.samples ? { reserved: { cpus: r.cpus, mem_gb: r.mem_gb }, cpu_avg: f(u.cpu_sum / u.samples), cpu_peak: f(u.cpu_peak), mem_avg_gb: f(u.mem_sum / u.samples), mem_peak_gb: f(u.mem_peak), samples: u.samples } : null;
   };
   let pendingResize = null;
-  const view = (r) => ({ id: r.id, state: r.state, issue: r.issue, cpus: r.cpus, mem_gb: r.mem_gb, started_at: new Date(r.startedAt).toISOString(), ...(r.error ? { error: r.error } : {}), ...(r.diskPaused ? { status_detail: "paused (disk)" } : {}), ...(r.memPaused ? { status_detail: "paused (host memory)" } : {}), ...(r.diskPressure ? { code: "sandbox.disk_pressure", status_detail: "stopped (disk pressure): worktree kept for resume" } : {}) });
+  const view = (r) => ({ id: r.id, state: r.state, issue: r.issue, cpus: r.cpus, mem_gb: r.mem_gb, started_at: new Date(r.startedAt).toISOString(), ...(r.error ? { error: r.error } : {}), ...(r.diskPaused ? { status_detail: "paused (disk)" } : {}), ...(r.memPaused ? { status_detail: "paused (host memory)" } : {}), ...(r.diskPressure ? { code: "sandbox.disk_pressure", status_detail: "stopped (disk pressure): worktree kept for resume" } : {}), ...(r.memPressure ? { code: "sandbox.mem_pressure", status_detail: "stopped (host memory pressure): worktree kept for resume" } : {}) });
   let warm; // assigned below once launch/destroy exist
   const activeRecs = () => Object.values(sb()).filter((s) => s.state !== "exited");
   // Sandbox ids come from requests: read own keys only, so "__proto__" or "constructor" never resolves to an inherited member (#4566).
@@ -303,8 +303,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const memPausedRecs = () => activeRecs().filter((r) => r.memPaused);
   function hostMemView() {
     let hm = null; try { hm = readHostMem(); } catch { hm = null; }
-    if (!hm || !Number.isFinite(hm.free_gb)) return {};
-    return { host_mem_free_gb: hm.free_gb, host_mem_low: hm.free_gb < memFloorGb() || memPausedRecs().length > 0, host_mem_floor_gb: memFloorGb(), ...(Array.isArray(hm.vmmem) && hm.vmmem.length ? { vmmem: hm.vmmem } : {}), ...(memPausedRecs().length ? { mem_paused: memPausedRecs().length } : {}) };
+    if (!hm || !Number.isFinite(hm.free_gb)) return memPausedRecs().length ? { host_mem_low: true, host_mem_floor_gb: memFloorGb(), mem_paused: memPausedRecs().length } : {}; // #6270: a paused sandbox refuses admission even when the reading is gone
+    return { host_mem_free_gb: hm.free_gb, host_mem_low: hm.free_gb < memFloorGb() || memPausedRecs().length > 0, host_mem_floor_gb: memFloorGb(), ...(Number.isFinite(hm.win_free_gb) ? { host_mem_win_free_gb: hm.win_free_gb, host_mem_guest_reclaimable_gb: hm.guest_reclaimable_gb } : {}), ...(Array.isArray(hm.vmmem) && hm.vmmem.length ? { vmmem: hm.vmmem } : {}), ...(memPausedRecs().length ? { mem_paused: memPausedRecs().length } : {}) };
   }
   let netCache = { at: -Infinity, v: null };
   const readNet = () => { if (now() - netCache.at > 60000) netCache = { at: now(), v: net() }; return netCache.v; };
@@ -384,6 +384,10 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const ttl = Math.round(heavyTtlMs() / 1000);
     if (mine) { mine[1].refs = (mine[1].refs ?? 1) + 1; mine[1].expires = now() + heavyTtlMs(); store.save(); return { status: 200, body: { granted: true, token: mine[0], ttl_s: ttl } }; }
     const hm = hostMemView(); // #5967/#6235: below the floor no NEW lease is granted (a lane already holding one keeps it above), so heavy work stops before the host OOMs
+    if (hm.host_mem_low) {
+      const since = (r.heavyMemSince ??= now()), maxMs = (cfg.heavy_mem_max_wait_s ?? 600) * 1000; // #6270: bounded wait, then a loud env-class denial instead of an idle builder
+      if (now() - since >= maxMs) return { status: 200, body: { granted: false, denied: true, reason: `host memory below the floor for ${Math.round((now() - since) / 1000)}s (free ${hm.host_mem_free_gb ?? "?"} GB, floor ${hm.host_mem_floor_gb} GB): env`, host_mem_free_gb: hm.host_mem_free_gb, floor_gb: hm.host_mem_floor_gb } };
+    } else delete r.heavyMemSince;
     if (hm.host_mem_low) return { status: 200, body: { granted: false, retry_after_s: cfg.host_mem_retry_after_s ?? 30, reason: "host_mem", host_mem_free_gb: hm.host_mem_free_gb, floor_gb: hm.host_mem_floor_gb, held: held.n } };
     const est = estimateFor(r.repo ?? null, { cpus: r.cpus, mem: r.mem_gb }), d = heavyDefault();
     const w = { cpus: Math.max(d.cpus, est.cpus - r.cpus), mem: Math.max(d.mem, est.mem - r.mem_gb) };
@@ -590,7 +594,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id) || !Array.isArray(spec.command) || !spec.command.length) throw Object.assign(new Error("spec.id ([A-Za-z0-9._-], max 128) and spec.command are required"), { status: 400 });
     let existing = own(spec.id);
     if (existing?.drained && existing.state === "exited") { await destroy(existing.id, "drained: relaunch"); existing = null; } // #5856: the router/dispatcher rescheduled a drained lane under the same id
-    if (existing?.diskPressure && existing.state === "exited") { await destroy(existing.id, "disk pressure: resume", { keepWork: true }); existing = null; } // #5891: the worktree stays, the lane adopts it
+    if ((existing?.diskPressure || existing?.memPressure) && existing.state === "exited") { await destroy(existing.id, "host pressure: resume", { keepWork: true }); existing = null; } // #5891: the worktree stays, the lane adopts it
     if (existing) { existing.lease = now(); store.save(); return { status: 200, body: view(existing) }; }
     if (now() - lastLaunchSweep > 60000) { lastLaunchSweep = now(); await cacheSweep(now()).catch(() => {}); } // #5901: trim the depcache to its cap before this lane can write a new entry (throttled; the periodic sweep also runs)
     if (Number.isInteger(spec.warm)) warm.configure({ spec, cpus, mem_gb, limit, n: spec.warm }); // #4912: the lane's execution.warm_sandboxes sizes the repo's pool
@@ -955,20 +959,29 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   // #5967: runtime host-memory control, once per reap. Below floor/2 pause the newest running sandbox (lease kept); at floor + margin resume.
   async function hostMemPressure(t) {
     hostMemCache.at = -Infinity;
+    // #6270: a sandbox paused past host_mem_max_pause_s (default 10 min) is stopped with sandbox.mem_pressure (worktree kept) so its lane requeues.
+    const maxPauseMs = (cfg.host_mem_max_pause_s ?? 600) * 1000;
+    for (const r of memPausedRecs()) {
+      if (t - (r.memPausedAt ?? (r.memPausedAt = t)) < maxPauseMs) continue;
+      for (const n of cntNames(r)) { try { await docker.unpause?.(n); } catch { /* not paused */ } }
+      for (const n of cntNames(r)) { try { await docker.kill(n, "KILL"); } catch { /* gone */ } }
+      r.memPaused = false; r.diskPaused = false; r.state = "exited"; r.finishedAt = t; r.memPressure = true;
+      log.error?.(`stopped ${r.id} (sandbox.mem_pressure): paused ${Math.round((t - r.memPausedAt) / 1000)} s on host memory`);
+    }
     let hm = null; try { hm = readHostMem(); } catch { hm = null; }
     if (!hm || !Number.isFinite(hm.free_gb)) return;
     const free = hm.free_gb, floor = memFloorGb();
     for (const r of memPausedRecs()) r.lease = t; // a paused lane stays leased: it is not lost
     if (free >= floor + (cfg.host_mem_resume_margin_gb ?? 1)) {
       for (const r of memPausedRecs()) {
-        try { for (const n of cntNames(r)) await docker.unpause?.(n); r.memPaused = false; r.state = r.diskPaused ? "paused" : "running"; log.info?.(`resumed ${r.id}: host memory ${free} GB`); } catch (e) { log.warn?.(`unpause ${r.id}: ${String(e.stderr || e.message).slice(0, 200)}`); }
+        try { for (const n of cntNames(r)) await docker.unpause?.(n); r.memPaused = false; delete r.memPausedAt; r.state = r.diskPaused ? "paused" : "running"; log.info?.(`resumed ${r.id}: host memory ${free} GB`); } catch (e) { log.warn?.(`unpause ${r.id}: ${String(e.stderr || e.message).slice(0, 200)}`); }
       }
       return;
     }
     if (free >= floor / 2 || memPausedRecs().length) return; // one paused sandbox at a time; resumes only above floor + margin
     const victim = activeRecs().filter((r) => r.state === "running").sort((a, b) => b.startedAt - a.startedAt)[0];
     if (!victim) return;
-    try { for (const n of cntNames(victim)) await docker.pause?.(n); victim.memPaused = true; victim.state = "paused"; victim.lease = t; log.warn?.(`paused ${victim.id} (memory): host free ${free} GB < ${floor / 2} GB`); } catch (e) { log.warn?.(`pause ${victim.id}: ${String(e.stderr || e.message).slice(0, 200)}`); }
+    try { for (const n of cntNames(victim)) await docker.pause?.(n); victim.memPaused = true; victim.memPausedAt = t; victim.state = "paused"; victim.lease = t; log.warn?.(`paused ${victim.id} (memory): host free ${free} GB < ${floor / 2} GB`); } catch (e) { log.warn?.(`pause ${victim.id}: ${String(e.stderr || e.message).slice(0, 200)}`); }
   }
   /** #5884: at the prune threshold of lane_disk_cap_gb prune this agent's own leftovers and sweep caches; fstrim on an interval and after a prune. Log lines only. */
   let lastFstrim = -Infinity;
@@ -1014,7 +1027,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     for (const id of [...graveyard.keys()]) grave(id); // #6117: expired grace entries go
     for (const r of Object.values(sb())) {
       try { await refresh(r); } catch { /* docker hiccup: judge by lease only */ }
-      const why = t - r.lease > leaseTtlMs && !r.diskPaused && !r.memPaused ? "lease expired" : t - r.startedAt > maxLifeMs ? "max lifetime" : r.state === "exited" && r.finishedAt && t - r.finishedAt > (r.diskPressure ? keepPressureMs : keepExitedMs) ? "exited retention" : null;
+      const why = t - r.lease > leaseTtlMs && !r.diskPaused && !r.memPaused ? "lease expired" : t - r.startedAt > maxLifeMs ? "max lifetime" : r.state === "exited" && r.finishedAt && t - r.finishedAt > ((r.diskPressure || r.memPressure) ? keepPressureMs : keepExitedMs) ? "exited retention" : null;
       if (why) await destroy(r.id, why);
     }
     await hostDiskPressure(t); // #5891
@@ -1223,7 +1236,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     [route("GET", "/sandboxes/:id"), async ({ id }) => { const r = own(id); if (!r) return { status: 404, body: { state: "gone" } }; await refresh(r); store.save(); return { status: 200, body: view(r) }; }],
     [route("GET", "/sandboxes/:id/logs"), async ({ id }, _b, url) => { const r = own(id), g = !r && grave(id); return r ? { status: 200, body: readLog(r, url.searchParams.get("cursor")) } : g ? { status: 200, body: graveLog(g, url.searchParams.get("cursor")) } : { status: 404, body: { text: "", cursor: 0 } }; }],
     [route("GET", "/sandboxes/:id/runlog"), async ({ id }) => { const e = await evidence(id); return e ? { status: 200, body: e } : { status: 404, body: { error: "no run log" } }; }], // #6117
-    [route("GET", "/sandboxes/:id/result"), async ({ id }) => { const r = own(id); const x = r ? readResult(r) : grave(id)?.result; if (!x && r?.drained) return { status: 200, body: { drained: true, reason: r.drained } }; if (!x && r?.diskPressure) return { status: 200, body: { disk_pressure: true, code: "sandbox.disk_pressure", reason: "host drive below the hard floor" } }; /* #5891 */ return x ? { status: 200, body: x } : { status: 404, body: { error: "no result" } }; }], // #5856: a drained lane without its own result is reported so the dispatcher reschedules it
+    [route("GET", "/sandboxes/:id/result"), async ({ id }) => { const r = own(id); const x = r ? readResult(r) : grave(id)?.result; if (!x && r?.drained) return { status: 200, body: { drained: true, reason: r.drained } }; if (!x && r?.diskPressure) return { status: 200, body: { disk_pressure: true, code: "sandbox.disk_pressure", reason: "host drive below the hard floor" } }; /* #5891 */ if (!x && r?.memPressure) return { status: 200, body: { mem_pressure: true, code: "sandbox.mem_pressure", reason: "host memory stayed below the floor past the max pause" } }; /* #6270 */ return x ? { status: 200, body: x } : { status: 404, body: { error: "no result" } }; }], // #5856: a drained lane without its own result is reported so the dispatcher reschedules it
     [route("GET", "/sandboxes/:id/usage"), async ({ id }) => { const r = own(id); return r ? { status: 200, body: { minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10 } } : { status: 404, body: {} }; }],
     [route("POST", "/sandboxes/:id/lease"), async ({ id }) => { const r = own(id); if (!r) return { status: 404, body: { state: "gone" } }; r.lease = now(); store.save(); return { status: 200, body: { ok: true } }; }],
     // #5274: SIGTERM the lane (PID 1) so its teardown checkpoints and reports deferred run.interrupted; the sandbox is kept, never destroyed.
