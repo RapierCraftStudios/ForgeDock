@@ -32,6 +32,7 @@ export const HEAVY_DEFAULTS = Object.freeze({ enabled: true, max: null, step_mem
 export const HEAVY_POLL_MS = 2000;
 export const HEAVY_ERROR_BUDGET_MS = 120000; // #6235: how long an erroring or unreachable agent is retried before the step is deferred
 export const HEAVY_DEFER_CODE = 75; // EX_TEMPFAIL: the step did not run because no heavy token could be leased
+export const HEAVY_DEFER_MARKER = "forgedock heavy:"; // stderr prefix of a denial line (`<marker> <name> deferred, ...`); effects.mjs keys on it with exit 75
 const LOCK_WAIT_MS = 2000, EMPTY_LOCK_STALE_MS = 5000;
 
 const PMS = new Set(["npm", "pnpm", "yarn", "bun"]);
@@ -441,7 +442,7 @@ export async function runWrapped(argv, { env: env0 = process.env, open = openHea
   const g = useRemote ? await remote({ base: env.CS_HEAVY_BASE, credToken: env.CS_CRED_TOKEN ?? "", maxWaitMs: c.max_wait_s * 1000 })
     : await acquireHeavy(open(env.FORGEDOCK_SCHED_DIR || schedDir(env), { env, host: hostP }), { issue: Number(env.FORGE_LANE_ISSUE) || null, phase, priority, mb: c.step_mem_mb });
   if (g.denied && env.FORGE_HEAVY_FAIL_OPEN !== "1") { // #6235: never run a heavy step ungated under elastic accounting; the caller retries or defers
-    process.stderr.write(`forgedock heavy: ${name} deferred, ${g.reason ?? "no heavy token"} (exit ${HEAVY_DEFER_CODE}; FORGE_HEAVY_FAIL_OPEN=1 runs it ungated)\n`);
+    process.stderr.write(`${HEAVY_DEFER_MARKER} ${name} deferred, ${g.reason ?? "no heavy token"} (exit ${HEAVY_DEFER_CODE}; FORGE_HEAVY_FAIL_OPEN=1 runs it ungated)\n`);
     return { code: HEAVY_DEFER_CODE, signal: null };
   }
   if (env.FORGE_HEAVY_WAITS) { try { appendFileSync(env.FORGE_HEAVY_WAITS, JSON.stringify({ phase, name, waitMs: g.waitMs, queued: g.queued }) + "\n"); } catch { /* metrics are best effort */ } }
