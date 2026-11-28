@@ -504,9 +504,30 @@ describe("remote token backend (#6047)", () => {
     const calls = [], g = await acquireRemote(opts(calls, [resp(200, { granted: false, retry_after_s: 1 }), resp(200, { granted: false }), resp(200, { granted: true, token: "t2" })]));
     assert.equal(g.token, "t2"); assert.equal(calls.filter((c) => c === "acquire").length, 3);
   });
-  it("fails open when the agent is unreachable or errors", async () => {
-    assert.equal((await acquireRemote(opts([], [new Error("ECONNREFUSED")]))).failOpen, true);
-    assert.equal((await acquireRemote(opts([], [resp(500, {})]))).failOpen, true);
+  it("fails closed (#6235): an unreachable or erroring agent is retried with backoff, then denies", async () => {
+    let t = 0; const clock = { now: () => t, sleep: async (ms) => { t += ms; } };
+    const calls = [], g = await acquireRemote({ ...opts(calls, [new Error("ECONNREFUSED")]), ...clock, errorBudgetMs: 20000, fetchFn: async (u) => { calls.push(u); throw new Error("ECONNREFUSED"); } });
+    assert.equal(g.denied, true); assert.ok(!g.failOpen); assert.match(g.reason, /ECONNREFUSED/); assert.ok(calls.length > 2, "retried before giving up");
+    const h = await acquireRemote({ ...opts([], [resp(500, {})]), ...clock, errorBudgetMs: 1000, fetchFn: async () => resp(500, {}) });
+    assert.equal(h.denied, true);
+  });
+  it("a transient agent error recovers into a grant", async () => {
+    const calls = [], g = await acquireRemote(opts(calls, [new Error("reset"), resp(502, {}), resp(200, { granted: true, token: "t3" })]));
+    assert.equal(g.token, "t3"); assert.ok(!g.denied);
+  });
+  it("a wait past maxWaitMs denies instead of running the step", async () => {
+    let t = 0;
+    const g = await acquireRemote({ ...opts([], []), now: () => t, sleep: async (ms) => { t += ms; }, maxWaitMs: 3000, fetchFn: async () => resp(200, { granted: false, retry_after_s: 1 }) });
+    assert.equal(g.denied, true); assert.equal(g.timedOut, true);
+  });
+  it("runWrapped defers (exit 75) a denied step and never runs it; FORGE_HEAVY_FAIL_OPEN=1 is the explicit escape", async () => {
+    const ran = [], run = async (cmd, args, env) => { ran.push(env); return { code: 0, signal: null }; };
+    const remote = async () => ({ waitMs: 0, holders: 1, denied: true, reason: "heavy gate unavailable: x", release() {} });
+    const host = { memAvailableMb: () => 12000, cores: () => 4 }, dir = tmpDir("heavy-rw-");
+    const r = await runWrapped(["run", "--name", "pnpm", "--", "pnpm", "install"], { env: { CS_HEAVY_BASE: "http://h/x", FORGEDOCK_SCHED_DIR: dir }, run, remote, host, read: () => { throw new Error("none"); } });
+    assert.equal(r.code, 75); assert.equal(ran.length, 0);
+    const o = await runWrapped(["run", "--name", "pnpm", "--", "pnpm", "install"], { env: { CS_HEAVY_BASE: "http://h/x", FORGEDOCK_SCHED_DIR: dir, FORGE_HEAVY_FAIL_OPEN: "1" }, run, remote, host, read: () => { throw new Error("none"); } });
+    assert.equal(o.code, 0); assert.equal(ran.length, 1);
   });
   it("runWrapped uses the remote backend only when CS_HEAVY_BASE is set; otherwise the local file semaphore", async () => {
     const ran = [], run = async (cmd, args, env) => { ran.push(env); return { code: 0, signal: null }; };
