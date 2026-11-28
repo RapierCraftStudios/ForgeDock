@@ -501,7 +501,7 @@ export function realReleaseIo({ env = process.env, exec = execFileSync, print = 
     runningLanes: (repo) => unfinished(repo).flatMap((b) => Object.entries(b.store.load()?.lanes ?? {})
       .filter(([n, rec]) => rec?.pid && isLaneAlive(rec.pid, b.resultFile(n)) && !existsSync(b.resultFile(n)))
       .map(([n]) => ({ batch: b.id, issue: n }))),
-    batches: (repo) => unfinished(repo).map((b) => ({ id: b.id, k: b.readParallel() ?? 1 })),
+    batches: (repo) => unfinished(repo).map((b) => ({ id: b.id, k: b.readParallel() ?? 1, paused: !!b.readPause(), cancelled: !!b.readCancel() })),
     setParallel: async (id, k) => {
       const { orchestrateFromCli } = await import("../engine-cli.mjs");
       await orchestrateFromCli(["--set-parallel", id, String(k)]);

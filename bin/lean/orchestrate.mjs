@@ -472,7 +472,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     // #5652: with host fallback off (execution.host_fallback / host.role: orchestrator) the host is orchestrator-only: no re-placement here
     // #5931: a credentials block pinned the issue to the host (ledger hostPin): applied on readmit whatever host fallback says
     if (ledgers.get(n)?.hostPin) return { where: "local", reason: "host pin: ops_credentials block" };
-    if (hostFallbackOn() && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_ENGINE_SKEW].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
+    if (hostFallbackOn() && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_CAPABILITY_DOCKER, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_ENGINE_SKEW].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
     // #5371: a mechanical recovery never repeats the placement of the run that failed (a remote sandbox env defect recurs there), and a remote validate failure is rerun on the host
     if (recovering.get(n)?.code === ENV_VALIDATE_PLACEMENT || (MECHANICAL_CODES.includes(recovering.get(n)?.code) && recovering.get(n)?.where === "remote")) {
       if (hostFallbackOn()) return { where: "local", reason: `different placement: recovering ${rec.code} off the remote run` };
@@ -507,7 +507,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const recoveryMax = Number.isInteger(recovery?.maxAttempts) && recovery.maxAttempts > 0 ? recovery.maxAttempts : 0;
   // #4725: mechanical/env codes recover on their own budget (>= the conformance one); 0 maxAttempts still turns recovery off.
   const mechMax = recoveryMax && Number.isInteger(recovery?.mechanicalMaxAttempts) && recovery.mechanicalMaxAttempts > 0 ? Math.max(recovery.mechanicalMaxAttempts, recoveryMax) : recoveryMax;
-  const REPEAT_ENV_CODES = [OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, OUTCOME_CODES.ENV_TOOL_MISSING]; // #5232: deterministic for a frozen command (a timeout is load, not listed)
+  const REPEAT_ENV_CODES = [OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_CAPABILITY_DOCKER]; // #6196: a docker-less host repeats identically // #5232: deterministic for a frozen command (a timeout is load, not listed)
   const sigOf = (d) => String(d ?? "").replace(/\s+/g, " ").trim();
   // #5592: env.tool_missing repeats are the same defect when the same tools are missing, whatever else the detail says (probe lines, ids, paths vary per run)
   const toolsOf = (d) => { const m = /(?:host|sandbox) is missing ([^\n]+?), so validate command/i.exec(String(d ?? "")); return m ? m[1].split(/\s*,\s*/).sort().join(",") : null; };
@@ -1368,7 +1368,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       const sameHostReplay = !repeatEnv && !prior && row.code === OUTCOME_CODES.ENV_TOOL_MISSING && row.placement?.where !== "remote" && toolsOf(row.detail) !== null;
       // #5805: an env defect the host still has is held until the engine, the batch env or the host changes, not ended or re-run.
       // A tool-missing recovery that would run on the host (not the #5423 remote retry) is not launched while the probe still misses the tool.
-      const envNoHost = !hostFallbackOn() && row.placement?.where === "remote" && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(row.code);
+      const envNoHost = !hostFallbackOn() && row.placement?.where === "remote" && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_CAPABILITY_DOCKER, OUTCOME_CODES.ENV_TOOL_MISSING].includes(row.code);
       const lacking = row.code === OUTCOME_CODES.ENV_TOOL_MISSING ? toolsOf(row.detail) : null;
       if (ehOn && !envNoHost && !row.securityEscalated) {
         let stillLacks = false;
@@ -1390,8 +1390,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         decided({ issue: n, what: `no further recovery for ${row.code}: the same failure repeated`, why: firstLine(row.detail), alternative: "requeue another recovery lane that rebuilds against the same frozen command" });
       }
       // #5652: a remote lane's tool/capability end is not recovered on the host when host fallback is off; the lane message names the fix
-      const noHostRecovery = !hostFallbackOn() && row.placement?.where === "remote" && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(row.code);
-      if (noHostRecovery) decided({ issue: n, what: `no host re-placement for ${row.code}: host fallback is off (execution.host_fallback / host.role: orchestrator)`, why: firstLine(row.detail), alternative: "re-place the lane on the host" });
+      const noHostRecovery = !hostFallbackOn() && row.placement?.where === "remote" && [OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_CAPABILITY_DOCKER, OUTCOME_CODES.ENV_TOOL_MISSING].includes(row.code);
+      if (noHostRecovery) decided({ issue: n, what: `no host re-placement for ${row.code}: host fallback is off (execution.host_fallback / host.role: orchestrator)${row.code === OUTCOME_CODES.ENV_CAPABILITY_DOCKER ? "; the Docker-dependent validate is deferred to CI" : ""}`, why: firstLine(row.detail), alternative: "re-place the lane on the host" }); // #6196
       // #5749: an env.validate_timeout is host load, so its recovery lane is not started while the host is overloaded (it would time out again)
       if (overload && row.code === ENV_VALIDATE_TIMEOUT && classifyNeedsHuman(facts) === "recoverable" && used < max) {
         const isOver = () => { try { return overload()?.overloaded === true; } catch { return false; } };
@@ -2364,6 +2364,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if ((getParallel || getHeld) && pending.length) wake = Math.min(wake ?? pollMs, pollMs);
       if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
       if (pending.some((n) => remoteCapped.has(n))) wake = Math.min(wake ?? pollMs, pollMs); // #5138: a live --set-max-remote raise
+      if ((getAdded || getRequeued) && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #6197: an --add/--requeue is read within one poll even when every pending issue is held or waits on a long timer
       if ((getAdded || getRequeued || (getChildren && addsEpicChildren(autoChildren?.mode))) && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408/#4550: an add or requeue while only lanes run
       if (getRequeued && pending.some((n) => quota.has(n) || notBefore.has(n))) wake = Math.min(wake ?? pollMs, pollMs); // #5203: a --requeue releasing a quota pause
       if ((pfAll || pfRemote || baseRedHold) && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #4866

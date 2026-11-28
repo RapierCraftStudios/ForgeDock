@@ -27,6 +27,29 @@ function seam(snaps, o = {}) {
 const ctx = (s, extra = {}) => ({ io: { ciGreen: s, print() {} }, repo: "o/r", def: "main", config: {}, state: { steps: { "release-pr": { done: true, result: { pr: 7 } } } }, save() {}, ...extra });
 const row = (bucket, id = 1) => ({ name: "build", bucket, link: link(id) });
 
+describe("ci-green rerun lag and pagination (#6177)", () => {
+  it("waits for the rerun attempt to register instead of reading the stale failure as red", async () => {
+    const s = seam([]); let att = 1, polls = 0;
+    s.runAttempt = async () => { if (s.log.includes("rerun:5") && ++polls > 3) att = 2; return att; };
+    s.checks = async () => [row(att >= 2 ? "pass" : "fail", 5)];
+    const r = await ciGreenStep(ctx(s));
+    assert.equal(r.green, true); assert.equal(s.log.filter((x) => x === "rerun:5").length, 1);
+  });
+  it("stays bounded when the attempt never advances", async () => {
+    const s = seam([[row("fail", 5)]]);
+    const c = ctx(s, { io: { ciGreen: s, print() {}, review: {} } });
+    const r = await ciGreenWait(c, 7, { noFix: true });
+    assert.equal(r.red, true); assert.ok(s.log.filter((x) => x === "sleep").length <= 12);
+  });
+  it("reads every page of check runs", async () => {
+    const { realCiSeam } = await import("./release-cigreen.mjs");
+    const calls = [];
+    const gh = async (a) => { calls.push(a); const all = a.includes("--paginate"); return a.join(" ").includes("/status") ? "" : Array.from({ length: all ? 150 : 100 }, (_, i) => JSON.stringify({ name: `c${i}`, status: "completed", conclusion: "success" })).join("\n"); };
+    const out = await realCiSeam({ io: { gh }, repo: "o/r" }).checks({ head: H });
+    assert.equal(out.length, 150); assert.ok(calls.every((a) => a[0] !== "api" || a.includes("--paginate")));
+  });
+});
+
 describe("ci-green step (#6164)", () => {
   it("is a default release step between release-pr and review", () => {
     const i = RELEASE_STEPS.indexOf("ci-green");
@@ -65,10 +88,10 @@ describe("ci-green step (#6164)", () => {
   });
   it("a stale failed run right after the rerun is not a second failure: waits for the new attempt, green without a fix round (#6173)", async () => {
     let attempt = 1;
-    const s = seam([[row("fail", 5)], [row("fail", 5)], [row("fail", 5)], [row("pass", 5)]]);
+    const s = seam([[row("fail", 5)], [row("pass", 5)]]);
     s.runAttempt = async () => attempt;
-    const base = s.checks; let n = 0;
-    s.checks = async () => { if (++n === 4) attempt = 2; return base(); };
+    const sleep = s.sleep; let n = 0;
+    s.sleep = async (ms) => { if (++n === 3) attempt = 2; return sleep(ms); };
     const c = ctx(s);
     c.fixRoundStub = () => assert.fail("no fix round for a stale read");
     const r = await ciGreenWait(c, 7);

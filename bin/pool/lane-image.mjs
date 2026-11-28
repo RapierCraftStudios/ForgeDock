@@ -3,6 +3,7 @@
 // #6166: a pool host gets the lane image by PULLING the one publish.yml built (ghcr.io), and builds locally only when the pull fails.
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve4 } from "node:dns/promises";
+import { DNS_FAIL_RE } from "./docker-dns.mjs";
 
 export const LANE_REGISTRY_IMAGE = "ghcr.io/rapiercraftstudios/forgedock-lane";
 /** Label the Dockerfile stamps with the recipe hash (versionOf().image); checked after a pull. */
@@ -41,9 +42,17 @@ export async function withIpv4Pins(fn, { hosts = REGISTRY_HOSTS, file = "/etc/ho
   }
 }
 
-/** Run `op`; on an IPv6 dial error retry it once under temporary IPv4 pins. A host that cannot pin reports the original error. */
+/** Run `op`; on a docker DNS failure repair the daemon DNS and retry once (#6195); on an IPv6 dial error retry it once under temporary IPv4 pins. A host that cannot pin reports the original error. */
 export async function withIpv4Fallback(op, pinOpts = {}) {
   try { return await op(); } catch (e) {
+    if (DNS_FAIL_RE.test(errText(e)) && pinOpts.ensureDns) {
+      // #6195: dockerd's resolver is broken; set daemon DNS and retry once when docker was restarted.
+      pinOpts.log?.warn?.(`docker DNS error; repairing daemon DNS: ${errText(e).slice(-300)}`);
+      let fixed = null;
+      try { fixed = await pinOpts.ensureDns(); } catch { /* report the original error */ }
+      if (!fixed?.restarted) throw e;
+      return withIpv4Fallback(op, { ...pinOpts, ensureDns: null });
+    }
     if (!IPV6_DIAL_RE.test(errText(e))) throw e;
     pinOpts.log?.warn?.(`IPv6 dial error; retrying with IPv4 pins: ${errText(e).slice(-300)}`);
     try { return await withIpv4Pins(op, pinOpts); } catch (e2) { if (e2 === e || IPV6_DIAL_RE.test(errText(e2))) throw e2; throw e; }

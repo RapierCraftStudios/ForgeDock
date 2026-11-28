@@ -20,6 +20,10 @@ export const CI_GREEN_POLL_MS = 30_000;
 export const CI_GREEN_MAX_WAIT_MIN = 40;
 const SEVERITY_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
 const json = (s) => JSON.parse(String(s || "null"));
+/** `gh api --paginate --jq '.x[] | {..}'` prints one JSON object per line, across all pages. */
+const ndjson = (s) => String(s || "").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
+/** Polls (CI_GREEN_POLL_MS apart) to wait for a rerun's attempt number to advance before the checks are read again. */
+const RERUN_SETTLE_POLLS = 10;
 
 /** forge.yaml `release.ci_green.max_wait_min` and `release.block_severity` (lowest blocking severity; default high) -> `{ciGreen, blockSeverity}`; only set keys are returned. */
 export function ciGreenKeys(r) {
@@ -76,9 +80,9 @@ export function realCiSeam(ctx) {
     isDraft: async (pr) => Boolean(json(await gh(["pr", "view", String(pr), "--repo", repo, "--json", "isDraft"]))?.isDraft),
     headOf: async (pr) => String(await gh(["pr", "view", String(pr), "--repo", repo, "--json", "headRefOid", "--jq", ".headRefOid"])).trim(),
     checks: async ({ head }) => {
-      const runs = json(await gh(["api", `repos/${repo}/commits/${head}/check-runs?per_page=100`, "--jq", "[.check_runs[] | {name, status, conclusion, link: .details_url}]"])) ?? [];
+      const runs = ndjson(await gh(["api", "--paginate", `repos/${repo}/commits/${head}/check-runs?per_page=100`, "--jq", ".check_runs[] | {name, status, conclusion, link: .details_url}"]));
       let statuses = [];
-      try { statuses = json(await gh(["api", `repos/${repo}/commits/${head}/status`, "--jq", "[.statuses[] | {name: .context, state, link: .target_url}]"])) ?? []; } catch { /* check runs alone */ }
+      try { statuses = ndjson(await gh(["api", "--paginate", `repos/${repo}/commits/${head}/status?per_page=100`, "--jq", ".statuses[] | {name: .context, state, link: .target_url}"])); } catch { /* check runs alone */ }
       return [
         ...runs.map((k) => ({ name: k.name, bucket: bucketOf(k.status, k.conclusion), link: k.link })),
         ...statuses.map((k) => ({ name: k.name, bucket: k.state === "success" ? "pass" : k.state === "pending" ? "pending" : "fail", link: k.link })),
@@ -110,8 +114,6 @@ const ciSeamOf = (ctx) => ctx.io.ciGreen ?? (ctx.ciSeam ??= realCiSeam(ctx));
 
 /** Per-head bookkeeping: checks already rerun, the first failure of each (test name, signature) and the flakes already filed. */
 const headRec = (state, head) => ((state.ciGreen ??= { heads: {}, flakes: [] }).heads[head] ??= { reran: [], firstFail: {}, filed: [] });
-/** Polls a rerun may still show its old failed run (GitHub lags the rerun by seconds) before that failure counts as the rerun's own result. */
-const RERUN_STALE_POLLS = 3;
 
 /**
  * Wait until every required check of `pr`'s head is green. @returns
@@ -143,20 +145,6 @@ async function waitGreen(ctx, pr, seam) {
       await seam.sleep(CI_GREEN_POLL_MS);
       continue;
     }
-    // A rerun just requested may not show yet: its old failed run is stale, not a second failure. Wait until the run's attempt moves on (or the grace polls pass).
-    const stale = [];
-    for (const [name, w] of Object.entries(rec.waiting ?? {})) {
-      if (!st.failing.includes(name)) { delete rec.waiting[name]; continue; }
-      const attempt = await seam.runAttempt(w.id);
-      if (attempt != null && w.attempt != null && attempt > w.attempt) { delete rec.waiting[name]; continue; }
-      if (++w.polls > RERUN_STALE_POLLS) { delete rec.waiting[name]; continue; }
-      stale.push(name);
-    }
-    if (stale.length) {
-      if (seam.now() >= deadline) return { blocked: true, reason: `rerun of ${stale.join(", ")} on #${pr} not picked up after ${ctx.config?.ciGreen?.maxWaitMin ?? CI_GREEN_MAX_WAIT_MIN} min; re-run the release once CI finishes` };
-      await seam.sleep(CI_GREEN_POLL_MS);
-      continue;
-    }
     const fresh = st.failing.filter((n) => !rec.reran.includes(n));
     if (!fresh.length) return { red: true, head, failing: st.failing };
     // First failure of these checks: one rerun of each failed run, never past the attempt cap. A status context has no run: it stays red.
@@ -174,16 +162,24 @@ async function waitGreen(ctx, pr, seam) {
     }
     ctx.save?.();
     let reran = 0;
+    const before = new Map();
     for (const id of ids.keys()) {
       const attempt = await seam.runAttempt(id);
       if (!attemptGuard({ attempt }).allow) continue;
       await seam.rerunFailed(id);
-      (rec.waiting ??= {})[ids.get(id)] = { id, attempt, polls: 0 };
+      before.set(id, attempt);
       reran++;
     }
     if (!reran) return { red: true, head, failing: st.failing };
     ctx.io.print?.(`release: ci-green: rerunning ${[...ids.values()].join(", ")} once`);
-    await seam.sleep(CI_GREEN_POLL_MS);
+    // The old failure stays visible until GitHub registers the new attempt: wait for the attempt number to advance (bounded), not a fixed sleep.
+    for (let n = 0; n < RERUN_SETTLE_POLLS; n++) {
+      await seam.sleep(CI_GREEN_POLL_MS);
+      if (seam.now() >= deadline) break;
+      let settled = true;
+      for (const [id, was] of before) { const now = await seam.runAttempt(id); if (was == null || now == null || now <= was) settled = false; }
+      if (settled) break;
+    }
   }
 }
 
