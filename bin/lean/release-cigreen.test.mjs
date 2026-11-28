@@ -74,6 +74,17 @@ describe("ci-green step (#6164)", () => {
     const r = await ciGreenWait(c, 7);
     assert.equal(r.ok, true); assert.deepEqual(s.log.filter((x) => x.startsWith("rerun")), ["rerun:5"]);
   });
+  it("the attempt advanced and the check still fails: that is the rerun's own result, red with a single rerun (#6173)", async () => {
+    let attempt = 1;
+    const s = seam([[row("fail", 5)]]);
+    s.runAttempt = async () => attempt;
+    const base = s.checks; let n = 0;
+    s.checks = async () => { if (++n === 2) attempt = 2; return base(); };
+    const c = ctx(s, { io: { ciGreen: s, print() {}, review: {} } });
+    const r = await ciGreenWait(c, 7, { noFix: true });
+    assert.equal(r.red, true); assert.deepEqual(r.failing, ["build"]);
+    assert.deepEqual(s.log.filter((x) => x.startsWith("rerun")), ["rerun:5"]);
+  });
   it("red after the fix round is spent blocks instead of fixing again", async () => {
     const s = seam([[row("fail", 5)]]);
     const c = ctx(s); c.state.fixloop = { heads: { [H]: { rounds: 1 } } };
