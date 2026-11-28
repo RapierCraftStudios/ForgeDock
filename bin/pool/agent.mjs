@@ -186,8 +186,9 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const OWN = [LABEL, AGENT];
   // #6195/#6234: a dockerd DNS failure triggers a daemon.json dns repair. Admission is held across the idle check and the restart; the restart runs only with no sandbox and no container at all (co-tenants included) on the daemon. Lane containers use per-container --dns (netArgs).
   let dnsHold = 0;
+  let launching = 0; // #6244: launches between admission and their record in sb(); the DNS repair must not restart dockerd under them
   const noOtherContainers = async () => { if (typeof docker.listRunning !== "function") return false; try { return (await docker.listRunning()).length === 0; } catch { return false; } };
-  const pinOpts = { ensureDns: () => ensureDaemonDns({ hold: () => { dnsHold++; return () => { dnsHold--; }; }, idle: async () => activeRecs().length === 0 && await noOtherContainers() && activeRecs().length === 0, restart: () => run("systemctl", ["restart", "docker"], { timeout: 120000 }), log }) };
+  const pinOpts = { ensureDns: () => ensureDaemonDns({ hold: () => { dnsHold++; return () => { dnsHold--; }; }, idle: async () => launching === 0 && activeRecs().length === 0 && await noOtherContainers() && activeRecs().length === 0, restart: () => run("systemctl", ["restart", "docker"], { timeout: 120000 }), log }) };
   /** Images a sandbox may need are pulled ahead of time, never inside a launch request (which has a short timeout). */
   async function prepullImages() {
     if (await docker.hasImage?.(dindImage)) { prepull.error = null; return; }
@@ -581,7 +582,11 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   } });
   const seedFail = (e) => { if (e.status) throw Object.assign(new Error(e.message), { status: e.status, body: { error: e.message, ...(e.extra ?? {}) } }); throw e; };
 
-  async function launch({ spec, cpus, mem_gb, limit = null, max_lanes = null }) {
+  async function launch(req) {
+    launching++;
+    try { return await launchOne(req); } finally { launching--; }
+  }
+  async function launchOne({ spec, cpus, mem_gb, limit = null, max_lanes = null }) {
     if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id) || !Array.isArray(spec.command) || !spec.command.length) throw Object.assign(new Error("spec.id ([A-Za-z0-9._-], max 128) and spec.command are required"), { status: 400 });
     let existing = own(spec.id);
     if (existing?.drained && existing.state === "exited") { await destroy(existing.id, "drained: relaunch"); existing = null; } // #5856: the router/dispatcher rescheduled a drained lane under the same id

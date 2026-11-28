@@ -153,3 +153,18 @@ test("#6204: elastic is the default and a lane is charged its measured base, not
   const off = fixture({ cfg: { allow_mem_gb: 5, elastic_lanes: false }, history });
   assert.equal((await admitted(off.agent, 3, { cpus: 2, mem_gb: 3 })).ok, 1, "elastic_lanes:false keeps worst-case accounting");
 });
+
+// #6244: a launch awaiting its image-label lookup has no sandbox record yet; the docker-dns repair must treat it as busy.
+test("#6244: the docker-dns idle probe is not reached while a launch is in flight", async () => {
+  let release, listed = 0;
+  const gate = new Promise((r) => { release = r; });
+  const docker = { ...fakeDocker(), async imageLabel() { await gate; return "1.72.0"; }, async hasImage() { return false; }, async pull() { throw new Error("lookup registry-1.docker.io on 127.0.0.53:53: server misbehaving"); },
+    async listRunning() { listed++; return ["other-container"]; } }; // never idle: the repair cannot restart the host's docker
+  const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: tmpDir("cs-dns-"), allow_cpus: 16, allow_mem_gb: 28, lease_ttl_s: 600, token: "t" }, { docker, now: () => 1_000_000, log: { info() {}, warn() {}, error() {} } });
+  const launching = agent.launch({ spec: spec("l0"), cpus: 1, mem_gb: 0.4 });
+  await new Promise((r) => setImmediate(r));
+  await agent.prepullImages().catch(() => {}); // the pull fails on DNS and asks for the daemon repair
+  assert.equal(listed, 0, "the repair saw a launch in flight and did not even probe the daemon");
+  release();
+  await launching;
+});
