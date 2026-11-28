@@ -1,0 +1,9 @@
+bin/lean/effects.mjs
+bin/lean/execbit.mjs
+bin/lean/execbit.test.mjs
+bin/lean/lean.mjs
+bin/lean/lean.test.mjs
+bin/lean/prompts.mjs
+bin/lean/verify.mjs
+bin/lean/verify.test.mjs
+devdocs/modules/lean.md

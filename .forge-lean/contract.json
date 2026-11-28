@@ -1,0 +1,183 @@
+{
+ "requirements": [
+  {
+   "id": "R1",
+   "quote": "Seen 2026-11-27 on an external repo: lanes added *.sh scripts without +x.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R2",
+   "quote": "Fix (generic, in the lane's own pre-PR check, so it does not depend on repo CI):",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R3",
+   "quote": "For files the lane adds or modifies, a file with a shebang, or a *.sh that a workflow, script or package.json invokes directly (`./path.sh` or `path.sh`, not `bash path.sh`), must be mode 100755 in the index (`git ls-files -s`).",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R4",
+   "quote": "The builder fixes it with `git update-index --chmod=+x` / `chmod +x`.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R5",
+   "quote": "A mode regression (+x removed) is also caught.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R6",
+   "quote": "Relation: with PR CI off for staging (#6150), lane-side checks of what repo CI would catch matter more.",
+   "disposition": "guidance",
+   "why": "follow: context only; the gate runs lane-side without repo CI"
+  }
+ ],
+ "deliverables": [
+  {
+   "id": "D1",
+   "path": "bin/lean/execbit.mjs",
+   "change": "New pure detector execBitFindings({git, base, readFile, listFiles}): for files changed base..HEAD (git diff --raw --no-renames, mode column) report {path, kind:'missing-x'|'regression', why} when mode is 100644 and (file starts with #! shebang, or is *.sh referenced directly as ./path.sh or path.sh, not preceded by bash/sh/source, in .github/workflows, scripts, package.json, Makefile) or when base mode was 100755 and head is 100644. Skips deleted files, symlinks (120000), and test fixtures. Also exports applyExecBits({git, findings}) running `git update-index --chmod=+x` (and the chmod on disk) for missing-x and regression findings.",
+   "requirements": [
+    "R1",
+    "R2",
+    "R3",
+    "R4",
+    "R5"
+   ]
+  },
+  {
+   "id": "D2",
+   "path": "bin/lean/execbit.test.mjs",
+   "change": "node:test cases: added shebang file at 100644 flagged; *.sh invoked ./x.sh in a workflow flagged; `bash x.sh` caller not flagged; 100755 -> 100644 regression flagged; already-100755 and non-script clean; applyExecBits issues update-index --chmod=+x.",
+   "requirements": [
+    "R3",
+    "R4",
+    "R5"
+   ]
+  },
+  {
+   "id": "D3",
+   "path": "bin/lean/effects.mjs",
+   "change": "Add io.execBits({cwd, base}) and io.execBitsFix({cwd, findings}) wrapping execbit.mjs with the lane git runner, next to io.duplicateExports (effects.mjs:749).",
+   "requirements": [
+    "R2",
+    "R4"
+   ]
+  },
+  {
+   "id": "D4",
+   "path": "bin/lean/lean.mjs",
+   "change": "Add execBitGate(trigger) beside duplicateGate (lean.mjs:3307-3330), called at hand-off before the PR: findings -> mechanical fix via io.execBitsFix, commit, re-detect; leftovers -> one builder fixRound with execBitsPrompt, then an anomaly (never blocks). Honors vcfg.execBits !== false and isSplit. Emit EXEC_BIT_FINDINGS event and T.decisions line.",
+   "requirements": [
+    "R2",
+    "R3",
+    "R4",
+    "R5"
+   ]
+  },
+  {
+   "id": "D5",
+   "path": "bin/lean/prompts.mjs",
+   "change": "Add execBitsPrompt(findings, mode) next to duplicateExportsPrompt (prompts.mjs:73): lists paths, tells the builder to run git update-index --chmod=+x / chmod +x and commit.",
+   "requirements": [
+    "R4"
+   ]
+  },
+  {
+   "id": "D6",
+   "path": "bin/lean/verify.mjs",
+   "change": "Parse verify.exec_bits (false only for literal `false`, like duplicate_exports at verify.mjs:88) into vcfg.execBits.",
+   "requirements": [
+    "R2"
+   ]
+  },
+  {
+   "id": "D7",
+   "path": "bin/lean/verify.test.mjs",
+   "change": "Assert verify.exec_bits default on and false turns it off.",
+   "requirements": [
+    "R2"
+   ]
+  },
+  {
+   "id": "D8",
+   "path": "bin/lean/lean.test.mjs",
+   "change": "Gate case: a lane adding a 100644 shebang script gets it fixed mechanically and committed with no builder round; unfixable leaves an anomaly; vcfg.execBits false skips.",
+   "requirements": [
+    "R1",
+    "R4"
+   ]
+  },
+  {
+   "id": "D9",
+   "path": "devdocs/modules/lean.md",
+   "change": "Add entry documenting the exec-bit gate (#6239), its opt-out verify.exec_bits, and what it flags.",
+   "requirements": [
+    "R2"
+   ]
+  }
+ ],
+ "preserve": [
+  {
+   "id": "P1",
+   "what": "duplicateGate behaviour and verify.duplicate_exports parsing in bin/lean/lean.mjs and bin/lean/verify.mjs are unchanged"
+  },
+  {
+   "id": "P2",
+   "what": "Pre-PR check round (learned.test_commands + derived CI jobs) in bin/lean/lean.mjs:3005-3140 and bin/lean/precheck.mjs unchanged"
+  },
+  {
+   "id": "P3",
+   "what": "The gate never blocks or parks a lane: unfixable findings only add an anomaly, so existing outcome codes in bin/lean/lean.mjs are unchanged"
+  }
+ ],
+ "validate": [
+  {
+   "id": "V1",
+   "command": "node --test bin/lean/execbit.test.mjs"
+  },
+  {
+   "id": "V2",
+   "command": "node --test bin/lean/verify.test.mjs"
+  },
+  {
+   "id": "V3",
+   "command": "node --test --test-name-pattern='exec.?bit' bin/lean/lean.test.mjs"
+  },
+  {
+   "id": "V4",
+   "command": "node --test bin/lean/postmerge.test.mjs bin/lean/precheck.test.mjs"
+  },
+  {
+   "id": "G1",
+   "command": "node --test --test-name-pattern='duplicate' bin/lean/lean.test.mjs",
+   "regression": true
+  }
+ ],
+ "regression": [
+  {
+   "id": "G1",
+   "command": "node --test --test-name-pattern='duplicate' bin/lean/lean.test.mjs",
+   "covers": "duplicateGate beside which the new gate is wired"
+  }
+ ],
+ "decisions": [
+  {
+   "id": "K1",
+   "choice": "Fix mechanically in the engine with git update-index --chmod=+x instead of a builder LLM round first",
+   "justification": "Deterministic first (NORTHSTAR non-negotiable 1); same shape as the #5348 mechanical duplicate rename at lean.mjs:3307",
+   "source": "precedent"
+  },
+  {
+   "id": "K2",
+   "choice": "Gate is on by default with opt-out verify.exec_bits: false, anomaly-only on failure",
+   "justification": "Mirrors verify.duplicate_exports (verify.mjs:88); no activation row needed since it ships on",
+   "source": "precedent"
+  }
+ ]
+}
