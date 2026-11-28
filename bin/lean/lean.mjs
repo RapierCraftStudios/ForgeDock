@@ -31,7 +31,7 @@ import { namedPaths, isTrustedIssueComment, prodFailureSignal } from "./prefilte
 import { writeStatus, postUpsert, postKeyed, isKeyedPost, isStatusPost, isUpsertPost, hasSection, clearPipelineLabels, IN_PLACE_MARKERS, commentId, contractKey } from "./statuscomment.mjs";
 import { decidePost } from "./commentstate.mjs"; // #5979
 import { repeatSignature, countIdentical, shouldPark, summaryComment } from "./failure-stop.mjs"; // #5979
-import { baseHealth, fetchBaseChecks, baseRedComment, hasAdmitComment, classifyDryRun, renderStamp, stampable, isNonStoppable, inputOf, fingerprintStop, stopReason, admitEvent } from "./admit.mjs"; // #6206
+import { baseHealth, fetchBaseChecks, baseRedComment, hasAdmitComment, classifyDryRun, renderStamp, stampable, repeatCounted, inputOf, fingerprintStop, stopReason, admitEvent } from "./admit.mjs"; // #6206
 import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs";
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
@@ -899,7 +899,7 @@ export async function runCore(o) {
       }
       // #5979: the second identical failure (same code and normalised detail as an earlier NEEDS_HUMAN/PARKED of this issue) parks with one summary, no recovery
       const sig = repeatSignature(code, why);
-      const stoppable = !isNonStoppable(code); // #6231: the one non-stoppable list (admit.mjs)
+      const stoppable = repeatCounted(code); // #6231/#6243: non-stoppable codes do not count, except the deterministic REPEAT_COUNTED_CODES (admit.mjs)
       const identical = stoppable ? countIdentical(allComments(), sig, (c) => c?.__mine === true || isTrustedIssueComment(c)) + 1 : 1;
       if (shouldPark(identical)) {
         try { await post("FORGE:PARKED", summaryComment({ attempts: identical, code, detail: why, sig: `${sig}${await admitStamp(code)}` })); } catch (e) { labelFailed("comment", e); }

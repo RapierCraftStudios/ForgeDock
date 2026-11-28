@@ -3,6 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { repeatSignature, countIdentical, isResetDecision, shouldPark, summaryComment } from "./failure-stop.mjs";
+import { repeatCounted } from "./admit.mjs";
 import { OUTCOME_CODES, RECOVERABLE_CODES, classifyNeedsHuman, parkedLabel } from "../engine/outcome-codes.mjs";
 
 const D1 = "R3 unimplemented at 1e0c3e45 (cost $1.2345, 12 turns) 2026-11-25T10:00:00Z";
@@ -54,5 +55,17 @@ describe("identical-failure stop (#5979)", () => {
     assert.equal(classifyNeedsHuman(row), "terminal");
     assert.equal(classifyNeedsHuman(row, { parked: true }), "parked");
     assert.equal(parkedLabel(OUTCOME_CODES.FAILURE_REPEATED), "parked:failure.repeated");
+  });
+  it("#6243 a repeated identical engine error or timeout parks (the lean.mjs gate); a repeated quota or rate limit does not", () => {
+    for (const code of [OUTCOME_CODES.ENGINE_ERROR, OUTCOME_CODES.CLI_TIMEOUT, OUTCOME_CODES.CLI_IDLE, OUTCOME_CODES.BACKEND_CLI_FAILED, OUTCOME_CODES.RUN_INTERRUPTED]) {
+      const sig = repeatSignature(code, "boom");
+      const identical = repeatCounted(code) ? countIdentical([nh(sig)], sig) + 1 : 1;
+      assert.equal(shouldPark(identical), true, code);
+    }
+    for (const code of [OUTCOME_CODES.QUOTA_EXHAUSTED, OUTCOME_CODES.RATE_LIMITED, OUTCOME_CODES.NET_TRANSIENT]) {
+      const sig = repeatSignature(code, "boom");
+      const identical = repeatCounted(code) ? countIdentical([nh(sig)], sig) + 1 : 1;
+      assert.equal(shouldPark(identical), false, code);
+    }
   });
 });
