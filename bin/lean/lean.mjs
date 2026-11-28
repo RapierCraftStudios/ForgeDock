@@ -71,7 +71,7 @@ export function contractSelfCorrectable(problems) {
 export function missingToolBlock(summary) { return MISSING_TOOL_RE.test(String(summary ?? "")); }
 import { reserveForBuild, revalidate } from "./seqreserve.mjs";
 import { patchEcho, mutationsOf, runReproMutations, classifyRepro } from "./reproquality.mjs";
-import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, pagePlanNote, contextPackNote, buildOpeningNote, sequenceBuildRule, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, routeDigestPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
+import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, pagePlanNote, contextPackNote, buildOpeningNote, sequenceBuildRule, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, routeDigestPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, execBitsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
 import { reportParityGaps, classifyBaseRed, diffTouchesGuard, attribute as attributeBaseRed, runOnBase, reportBaseRed, recordBaseVerdict, bypassesGuard } from "./basered.mjs"; // #5239
 import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
@@ -3328,6 +3328,29 @@ export async function runCore(o) {
       return mech;
     }
     await duplicateGate("hand-off");
+    /** #6239: 100644 shebang / directly-invoked *.sh files and dropped +x: the engine's `git update-index --chmod=+x` first, then one builder round, then an anomaly. Never blocks. */
+    async function execBitGate(trigger) {
+      if (!io.execBits || isSplit || vcfg.execBits === false) return;
+      const found = async () => (await io.execBits({ cwd: wt, base }).catch(() => null)) ?? [];
+      let bad = await found();
+      if (!bad.length) return;
+      ev({ event: "EXEC_BIT_FINDINGS", trigger, count: bad.length });
+      T.decisions.push(`Exec-bit finding(s) (${trigger}): ${bad.slice(0, 5).map((f) => f.path).join(", ")}`);
+      const fixed = (await io.execBitsFix?.({ cwd: wt, findings: bad }).catch(() => null)) ?? [];
+      if (fixed.length) {
+        try { await git(["commit", "--no-verify", "-m", "fix(forge): executable bit set by the engine, no model session (#6239)"]); } catch { /* the detector re-run decides */ }
+        files = await changedFiles();
+        bad = await found();
+      }
+      if (bad.length && sessionId) {
+        await fixRound("exec_bits", execBitsPrompt(bad, vcfg.mode), [], "exec_bits", bad.map((f) => `${f.path}: ${f.why}`).join("\n"), { files: bad.map((f) => f.path) });
+        result = (await readResult()) ?? result;
+        files = await changedFiles();
+        bad = await found();
+      }
+      if (bad.length) T.anomalies.push(`Exec-bit problem(s) remain (${trigger}): ${bad.slice(0, 5).map((f) => `${f.path} (${f.why})`).join("; ")}`);
+    }
+    await execBitGate("hand-off");
     /** #4591: lane-added migrations the repo's generator did not produce: one builder round (stage "sequence"), then an anomaly. */
     async function migrationGate(trigger) {
       if (!io.migrationGenerator || isSplit) return;

@@ -7877,6 +7877,31 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
     assert.equal(w.dupArgs.cwd, WT);
   });
 
+  const XB = [{ path: "bin/run.sh", kind: "missing-x", why: "has a shebang but mode is 100644" }];
+  it("#6239 exec-bit: a 100644 shebang script is fixed mechanically and committed with no builder round", async () => {
+    const w = hworld(); const f = [XB, []]; w.xfix = null;
+    w.io.execBits = async () => (f.length > 1 ? f.shift() : f[0]);
+    w.io.execBitsFix = async (x) => { w.xfix = x; return x.findings.map((y) => y.path); };
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(w.xfix.findings[0].path, "bin/run.sh");
+    assert.equal(builders(w).length, 2, "plan and build only");
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "commit" && /executable bit set by the engine/.test(c.join(" "))));
+  });
+  it("#6239 exec-bit: an unfixable finding leaves an anomaly and never blocks", async () => {
+    const w = hworld();
+    w.io.execBits = async () => XB;
+    w.io.execBitsFix = async () => [];
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(builders(w).length >= 3, "one builder round");
+  });
+  it("#6239 exec-bit: verify.exec_bits false skips the gate", async () => {
+    const w = hworld(); let n = 0;
+    w.io.execBits = async () => { n++; return XB; };
+    await run(w, { verify: { execBits: false } });
+    assert.equal(n, 0);
+  });
+
   it("#5348 an enumerating-test omission and a duplicate export the detectors name are fixed without a model session", async () => {
     const w = hworld({ missing: [MISS, []] }); const d = [DUP, []]; w.mech = [];
     w.io.duplicateExports = async () => (d.length > 1 ? d.shift() : d[0]);
