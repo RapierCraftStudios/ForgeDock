@@ -575,6 +575,44 @@ describe("core work-on", () => {
     assert.equal((await run(before)).code, "failure.repeated", "a decision older than the park does not clear it");
   });
 
+  it("#6206 a park carries a base/input/code stamp; the same base head and input is not re-admitted (no builder session), a moved base is", async () => {
+    const bot = (body) => ({ author: { login: "rapiercraft-forgedock" }, body });
+    const first = world({ changed: [], result: { status: "fixed", summary: "x", evidence: [], tests: [] } });
+    await run(first);
+    const nh = first.comments.find((c) => c.includes("<!-- FORGE:NEEDS_HUMAN -->"));
+    assert.ok(nh && /sig=[0-9a-f]{12} base=\S{1,12} in=[0-9a-f]{16} code=\S+/.test(nh), nh);
+    const prior = first.comments.map(bot), same = world({ changed: [], viewComments: prior });
+    const r = await run(same);
+    assert.equal(r.code, "failure.repeated");
+    assert.equal(same.calls.filter((c) => c[0] === "runner").length, 0, "no builder session on an unchanged base and input");
+    assert.ok(same.telemetry.some((e) => e.event === "ADMIT_PROBE" && e.outcome === "fingerprint_stop" && e.builder_spend_usd === 0), JSON.stringify(same.telemetry));
+    const moved = world({ changed: [], baseHeads: ["ffffffffffff1111"], viewComments: prior });
+    await run(moved);
+    assert.ok(!moved.telemetry.some((e) => e.event === "ADMIT_PROBE" && e.outcome === "fingerprint_stop"), "a moved base head admits again");
+    const off = world({ changed: [], viewComments: prior });
+    await run(off, { admitProbe: false });
+    assert.ok(!off.telemetry.some((e) => e.event === "ADMIT_PROBE"));
+  });
+
+  it("#6206 a base red on a required check the issue does not touch defers base.red with the check links before any builder session; a red the issue names admits", async () => {
+    const red = (name) => JSON.stringify({ name, conclusion: "failure", url: `https://github.com/o/r/runs/${name}`, completed_at: "2026-11-28T10:00:00Z", summary: "" });
+    const mk = (title) => {
+      const w = world({ title });
+      const gh = w.io.gh;
+      w.io.baseRequiredChecks = async () => ["e2e"];
+      w.io.gh = async (a, opts) => (a[0] === "api" && a.some((x) => /\/check-runs$/.test(x)) ? `${red("e2e")}\n` : gh(a, opts));
+      return w;
+    };
+    const w = mk("foo breaks");
+    const r = await run(w);
+    assert.equal(r.code, "base.red");
+    assert.equal(w.calls.filter((c) => c[0] === "runner").length, 0);
+    assert.ok(w.comments.some((c) => c.includes("Admit probe: base is red") && /(^|[\s(<])https:\/\/github\.com\/o\/r\/runs\/e2e([\s)>]|$)/m.test(c)));
+    assert.ok(w.telemetry.some((e) => e.event === "ADMIT_PROBE" && e.outcome === "base_red" && e.builder_spend_usd === 0));
+    const named = mk("fix the red e2e check");
+    assert.notEqual((await run(named)).code, "base.red");
+  });
+
   it("#6076 an unhappy terminal posts one FORGE:LANE_AUDIT; a failing audit post leaves the terminal reason unchanged", async () => {
     const block = { status: "blocked", summary: "need creds", block: { kind: "human", why: "credentials" } };
     const w = world({ changed: [], result: block });

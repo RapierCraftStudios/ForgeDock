@@ -1,0 +1,7 @@
+# 6204: admit-or-don't-start, elastic lanes by default
+
+- Elastic lanes (#6047) are on by default (`elastic_lanes: false` restores worst-case accounting). A lane is charged `min(requested, elastic_base)`; `elastic_base` is 0.4 core / 0.3 GB, raised to the mean live usage of running lanes with 3+ samples. The agent publishes it in capacity; the router's placement fit uses it. Heavy tokens still lease burst capacity, and the host-mem (#5967), load and lane-target (#6061) gates still refuse.
+- A `sandbox.capacity` refusal that the capacity sample gates (free slots or a named load/memory condition) no longer writes a `deferred` row. The issue stays pending, one `capacity.wait` event per wait, and the next pool sample (pollMs) wakes it, including when nothing runs. queue_wait stays attributed to `capacity` by `queuecause` (the clock keys on `capReasons`).
+- Breaker scope: a transport (link) engine-error with a known agent is counted per (transport, agent) like host-bound signatures (#5988): that agent is quarantined, the batch breaker does not see it. Without an agent id it still counts batch-wide.
+- Controller recovery: load between 1.0 and 1.5/core (never a halving cause) now grows K after 3 holds of quiet, paced one step per hold/3, so K no longer stays pinned low for hours. Green load still grows after one hold.
+- #6197 (idle wake) is on staging and untouched. The pre-launch admit probe is #6206 (lean.mjs), not duplicated here.

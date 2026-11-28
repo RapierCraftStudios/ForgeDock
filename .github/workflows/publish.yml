@@ -35,6 +35,7 @@ on:
       - 'docs/**'
       - 'scripts/**'
       - 'templates/**'
+      - 'pool/**'
       - 'package.json'
       - '.github/workflows/publish.yml'
   workflow_dispatch:  # Manual retrigger for bot-token merges
@@ -86,7 +87,7 @@ jobs:
             echo "SKIP_PUBLISH=false" >> $GITHUB_ENV
           else
             CHANGED=$(git diff --name-only "$LAST_TAG"..HEAD -- \
-              commands/ bin/ .claude-plugin/ docs/ scripts/ templates/ package.json 2>/dev/null || echo "")
+              commands/ bin/ .claude-plugin/ docs/ scripts/ templates/ pool/ package.json 2>/dev/null || echo "")
             if [ -z "$CHANGED" ]; then
               echo "No publish-relevant files changed since $LAST_TAG — skipping spurious dispatch"
               echo "SKIP_PUBLISH=true" >> $GITHUB_ENV
@@ -98,7 +99,7 @@ jobs:
           fi
 
       - name: Use Node.js 24
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
@@ -234,12 +235,12 @@ jobs:
       - name: Set up Docker Buildx
         if: env.SKIP_PUBLISH != 'true' && steps.npm_ready.outcome == 'success'
         continue-on-error: true
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Log in to ghcr.io
         if: env.SKIP_PUBLISH != 'true' && steps.npm_ready.outcome == 'success'
         continue-on-error: true
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -249,7 +250,7 @@ jobs:
         id: lane_push
         if: env.SKIP_PUBLISH != 'true' && steps.npm_ready.outcome == 'success'
         continue-on-error: true
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: pool/image
           platforms: linux/amd64
@@ -264,6 +265,29 @@ jobs:
             ghcr.io/rapiercraftstudios/forgedock-lane:r-${{ steps.lane.outputs.recipe }}
           cache-from: type=gha,scope=lane-image
           cache-to: type=gha,mode=max,scope=lane-image
+
+      - name: Record the lane image digest (lane-image.json release asset)
+        id: lane_digest
+        if: env.SKIP_PUBLISH != 'true' && steps.lane_push.outcome == 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIGEST: ${{ steps.lane_push.outputs.digest }}
+          RECIPE: ${{ steps.lane.outputs.recipe }}
+        run: |
+          # #6185: agents pull the lane image by this digest, not by the mutable version tag.
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::lane_push produced no sha256 digest"; exit 1; }
+          printf '{"version":"%s","recipe":"%s","digest":"%s"}\n' "$VERSION" "$RECIPE" "$DIGEST" > lane-image.json
+          cat lane-image.json
+          TAG="lane-image-v${VERSION}"
+          gh release create "$TAG" lane-image.json --repo "$GITHUB_REPOSITORY" --title "Lane image ${VERSION}" --notes "ghcr.io/rapiercraftstudios/forgedock-lane@${DIGEST}" \
+            || gh release upload "$TAG" lane-image.json --repo "$GITHUB_REPOSITORY" --clobber
+          echo "### Lane image ${VERSION}: ${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build and push lane_tools variants
+        if: env.SKIP_PUBLISH != 'true' && steps.lane_push.outcome == 'success'
+        continue-on-error: true
+        run: node scripts/lane-variants.mjs "${VERSION}" --build
 
       - name: Check the lane image is publicly pullable
         if: env.SKIP_PUBLISH != 'true' && steps.lane_push.outcome == 'success'

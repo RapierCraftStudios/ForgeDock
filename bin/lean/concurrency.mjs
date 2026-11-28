@@ -12,6 +12,7 @@ export const LOAD_HALVE = 1.5;
 export const LOAD_GREEN = 1.0;
 export const MEM_FLOOR_GB = 4;
 export const MEM_HEADROOM_GB = 2;
+export const RECOVER_HOLDS = 3;
 
 const fin = (v) => typeof v === "number" && Number.isFinite(v);
 /** `host_load` from a refusal reason/code (`pool.host_load` or `host_load`); "" when it is not a pool reason. */
@@ -35,7 +36,7 @@ export function makeController({ ceiling, heavyCap = null, now = Date.now, memFl
   let top = Math.max(1, Number.isInteger(ceiling) ? ceiling : 1);
   let k = Math.min(top, Math.max(1, Number.isInteger(start) ? start : top)); // no signal yet: run at the ceiling, as before
   let factor = "ceiling";
-  let lastRefusal = -Infinity;
+  let lastRefusal = -Infinity, lastGrow = -Infinity;
   const held = new Map(); // issue -> { at, reason }
   const hcap = () => Math.max(1, Math.min(top, Number.isInteger(heavyCap) ? heavyCap : Math.ceil(top / 3)));
   const ev = (change, inputs) => ({ event: "concurrency", change, k, ceiling: top, factor, inputs });
@@ -65,7 +66,11 @@ export function makeController({ ceiling, heavyCap = null, now = Date.now, memFl
     observe(cap) {
       if (!cap || !fin(cap.load_per_core) || !fin(cap.mem_available_gb)) return null; // unknown pool: K applies unchanged
       if (k >= top) { factor = "ceiling"; return null; }
-      if (cap.mem_available_gb > memFloorGb + MEM_HEADROOM_GB && cap.load_per_core < LOAD_GREEN && now() - lastRefusal >= holdMs) {
+      // #6204: recover to the ceiling after pressure clears: green load grows after holdMs; a load between green and the halve line (never
+      // a halving cause) grows after RECOVER_HOLDS holds of quiet, so a host that sits at 1.0-1.5/core no longer pins K at its low point for hours.
+      const quiet = now() - lastRefusal, calm = cap.load_per_core < LOAD_GREEN ? quiet >= holdMs : cap.load_per_core < LOAD_HALVE && quiet >= holdMs * RECOVER_HOLDS;
+      if (cap.mem_available_gb > memFloorGb + MEM_HEADROOM_GB && calm && (cap.load_per_core < LOAD_GREEN || now() - lastGrow >= holdMs / RECOVER_HOLDS)) {
+        lastGrow = now();
         const before = k; k += 1;
         if (k >= top) factor = "ceiling";
         return ev("increase", { from: before, load_per_core: cap.load_per_core, mem_available_gb: cap.mem_available_gb });

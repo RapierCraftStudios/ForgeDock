@@ -26,7 +26,7 @@ function fixture({ vm = { cpus: 16, mem_gb: 11.7, swap_gb: 0 }, cfg = {}, histor
   if (history.length) { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, "usage-history.jsonl"), history.map((r) => JSON.stringify(r)).join("\n") + "\n"); }
   const warns = [], docker = fakeDocker(others);
   const log = { info() {}, warn: (m) => warns.push(m), error() {} };
-  const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: dir, allow_cpus: 16, allow_mem_gb: 28, lease_ttl_s: 600, token: "t", ...cfg }, { docker, now: () => 1_000_000, log, live: () => ({ ok: true }), vm: () => vm });
+  const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: dir, allow_cpus: 16, allow_mem_gb: 28, lease_ttl_s: 600, token: "t", elastic_lanes: false, ...cfg }, { docker, now: () => 1_000_000, log, live: () => ({ ok: true }), vm: () => vm });
   return { agent, docker, warns };
 }
 async function admitted(agent, n, slice = { cpus: 1, mem_gb: 0.4 }) {
@@ -141,4 +141,15 @@ test("elastic_lanes admits where the worst-case projection refuses, and refuses 
   const r = await el.agent.launch({ spec: spec("l9"), cpus: 1, mem_gb: 0.4 });
   assert.equal(r.status, 503);
   assert.equal(r.body.code, "pool.projected_peak");
+});
+
+// #6204: elastic lanes are the default; admission charges the measured baseline (0.4 core / 0.3 GB), not the requested slice or the peak.
+test("#6204: elastic is the default and a lane is charged its measured base, not its request", async () => {
+  const history = Array.from({ length: 5 }, (_, i) => ({ id: `h${i}`, repo: "o/r", cpu_avg: 0.5, cpu_peak: 1, mem_peak_gb: 4 }));
+  const el = fixture({ cfg: { allow_mem_gb: 5, elastic_lanes: undefined }, history });
+  assert.equal((await admitted(el.agent, 3, { cpus: 2, mem_gb: 3 })).ok, 3, "3 lanes that asked for 2 cpu / 3 GB each fit in 5 GB on their 0.3 GB base");
+  const c = el.agent.capacity ? await el.agent.capacity() : null;
+  if (c) { assert.equal(c.elastic_lanes, true); assert.deepEqual(c.elastic_base, { cpus: 0.4, mem_gb: 0.3 }); }
+  const off = fixture({ cfg: { allow_mem_gb: 5, elastic_lanes: false }, history });
+  assert.equal((await admitted(off.agent, 3, { cpus: 2, mem_gb: 3 })).ok, 1, "elastic_lanes:false keeps worst-case accounting");
 });

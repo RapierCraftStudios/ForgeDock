@@ -1251,6 +1251,23 @@ describe("#4540: remote admissions are capped to the provider's free capacity", 
   });
 });
 
+describe("#6204: a capacity-gated refusal is a wait, not a deferral row", () => {
+  it("a sandbox.capacity bounce while the pool reports slots writes no deferred row and the issue still runs", async () => {
+    const c = { t: 1_000_000 };
+    const sleep = async (ms) => { await new Promise((r) => setImmediate(r)); c.t += ms; };
+    const updates = [], events = [];
+    let tries = 0, at = 0;
+    const rows = await orchestrate({ issues: [1], parallel: 1, now: () => c.t, sleep, pollMs: 1, readBody: async () => "", onUpdate: (r) => updates.push(r),
+      store: { log: (e) => events.push(e), save() {}, load: () => null },
+      remote: { max: 1, isRemote: () => true, capacity: () => ({ free: 1, online: 1, at: ++at }) },
+      runOne: async (n) => (++tries === 1 ? { terminalReason: "deferred", code: "sandbox.capacity", retryInSeconds: 60, detail: "sandbox launch: HTTP 503" } : { terminalReason: "merged", pr: 100 + n }) });
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged"]);
+    assert.equal(updates.filter((r) => r.outcome === "deferred").length, 0, "no deferred row");
+    assert.equal(events.filter((e) => e.event === "capacity.wait").length, 1, "one wait event");
+    assert.equal(tries, 2);
+  });
+});
+
 describe("#4547: opt-in local fallback in mode remote when no pool agent is online", () => {
   const run = async (remoteExtra, online) => {
     const c = { t: 1_000_000 };

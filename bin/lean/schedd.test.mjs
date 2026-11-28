@@ -640,6 +640,44 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await d.close(); }
   });
 
+  // #6197: an add that no resume consumed is retried by the watchdog once it is older than unrunStaleMs.
+  const staleAddRun = async ({ tag, staleMs, ageMs, cancel = false, waitMs }) => {
+    const dir = tmpDir(`schedd-stale-${tag}-`), root = join(dir, "batches"), id = `b20261031-000000-619${tag}`;
+    const calls = [];
+    const runBatch = async ({ argv, sink }) => {
+      calls.push(argv);
+      const b = openBatch(root, id);
+      if (argv[0] !== "--resume") {
+        b.writePlan({ daemon: true, repo: "o/r", created: new Date().toISOString() });
+        b.store.save({ v: 1, order: [1], results: { 1: { terminalReason: "merged" } }, running: {}, pending: [] });
+        b.writeReport({ done: true });
+        writeFileSync(join(b.dir, "add"), "[2]\n");
+        const old = new Date(Date.now() - ageMs);
+        utimesSync(join(b.dir, "add"), old, old);
+        if (cancel) b.requestCancel({ reason: "operator" });
+      }
+      sink.batch({ id, dir: b.dir });
+      return {};
+    };
+    const d = await startDaemon({ dir, root, runBatch, log: () => {}, resumeOnStart: false, stallCheckMs: 50, unrunStaleMs: staleMs });
+    try {
+      await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: ["1"], cwd: dir, env: {} });
+      await new Promise((r) => setTimeout(r, waitMs));
+      return calls.length;
+    } finally { await d.close(); }
+  };
+  it("#6197: a reported batch whose add stayed unconsumed past the stale window is re-hosted again after the one-shot re-host", async () => {
+    const n = await staleAddRun({ tag: "1", staleMs: 300, ageMs: 10_000, waitMs: 1500 });
+    assert.ok(n >= 3, `initial + one-shot re-host + stale re-host; got ${n}`);
+    assert.ok(n <= 10, `rate limited, not a loop; got ${n}`);
+  });
+  it("#6197: an add younger than the stale window gets only the one-shot re-host", async () => {
+    assert.equal(await staleAddRun({ tag: "2", staleMs: 60_000, ageMs: 0, waitMs: 1000 }), 2);
+  });
+  it("#6197: a cancelled batch is never re-hosted for a stale add", async () => {
+    assert.equal(await staleAddRun({ tag: "3", staleMs: 300, ageMs: 10_000, cancel: true, waitMs: 1000 }), 1);
+  });
+
   it("#4917: a batch whose breaker tripped (not transport) is not re-hosted by the timer", async () => {
     const dir = tmpDir("schedd-rehost-brk-"), root = join(dir, "batches"), id = "b20261031-000000-4919";
     const calls = [];

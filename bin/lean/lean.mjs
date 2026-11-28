@@ -31,6 +31,7 @@ import { namedPaths, isTrustedIssueComment, prodFailureSignal } from "./prefilte
 import { writeStatus, postUpsert, postKeyed, isKeyedPost, isStatusPost, isUpsertPost, hasSection, clearPipelineLabels, IN_PLACE_MARKERS, commentId, contractKey } from "./statuscomment.mjs";
 import { decidePost } from "./commentstate.mjs"; // #5979
 import { repeatSignature, countIdentical, shouldPark, summaryComment } from "./failure-stop.mjs"; // #5979
+import { baseHealth, fetchBaseChecks, baseRedComment, hasAdmitComment, classifyDryRun, renderStamp, stampable, inputOf, fingerprintStop, stopReason, admitEvent } from "./admit.mjs"; // #6206
 import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs";
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
@@ -58,7 +59,7 @@ import { computeTrigger, riskPathHits, TRIGGER_MODES, pathDomains, parseEnforceD
 import { hostCapabilityBlock, contractHostNeeds } from "./execution.mjs";
 import { baseMergeOnlyBlock, envGapBlockCode, toolGapFailures, packageDirsMissingDeps, failureOutsideDiff } from "./envgap.mjs"; // #6106
 
-const MISSING_TOOL_RE = /command not found|not found in PATH|no such file or directory.*\b(?:docker|promtool)\b|\b(?:docker|promtool)\b[^\n]{0,80}(?:not (?:installed|found|available)|no such file|cannot connect|daemon)|cannot connect to the docker daemon|no docker daemon|no module named|ModuleNotFoundError|\bENOENT\b[^\n]{0,60}spawn/i;
+const MISSING_TOOL_RE = /command not found|not found in PATH|no such file or directory.*\b(?:docker|promtool)\b|\b(?:docker|promtool)\b[^\n]{0,80}(?:not (?:installed|found|available)|no such file|cannot connect|daemon)|cannot connect to the docker daemon|no docker daemon|image[^\n]{0,30}present locally|unable to find image|valid docker environment|no module named|ModuleNotFoundError|\bENOENT\b[^\n]{0,60}spawn/i;
 /** #4685: true when a builder's block summary names a missing tool or module (environment), not a credential. */
 /** #5623: a contract problem the builder can fix in its own session (shape, typed fields, test-plan rules, check ids), as
  * opposed to one that needs the issue changed (quote not verbatim) or a person. */
@@ -85,6 +86,7 @@ import { parseCoupled, coupledFailures } from "./coupled.mjs";
 import { analyzeRelaxations, relaxationFailures } from "./relaxation.mjs";
 import { startSpeculative } from "./overlap.mjs";
 import { loadGuards, selectGuards, runGuards, supersededIds, supersessionComment, weakGuardNotes } from "./guardgate.mjs";
+import { buildMergeLedger } from "../stats/quality-ledger.mjs";
 import { freshFix, issueSummary, firstPassOf, sessionCostDelta, mergeNarrowTasks } from "./fixround.mjs";
 import { floorRoute, parseBuilderRouting, provisionalRoute, routeBuilder, shouldEscalate } from "./routing.mjs";
 import { makeTurnBudget, TURN_BUDGET_DEFAULTS, scaledExtra, laneSize, recoverySize, wrapupGrant, budgetDigest } from "./budget.mjs";
@@ -150,6 +152,7 @@ export const RECOVER_HOW = Object.freeze({
   [OUTCOME_CODES.ENV_TOOL_MISSING]: "a validate command could not run because the host lacks the tool or module named in the earlier run's detail; the change may already be correct. Do not edit the deliverables for it and never install anything globally: run the same check through the repo's own toolchain (its virtualenv, lockfile-pinned runner or package scripts), record that exit under the same validate id and name the command you used in your summary",
   [ENV_VALIDATE_PLACEMENT]: "an earlier run in a remote sandbox saw a frozen validate command fail; this host is a different environment (Docker, browsers, network, repo-local services). Rerun the frozen command unchanged here and record its real exit under the same validate id; change the deliverables only if it fails here too, and never substitute or narrow it for an environment gap",
   [ENV_VALIDATE_TIMEOUT]: "a validate command timed out (exit 124) on the engine's rerun, even after one longer retry: host load, not a failed check; the change may already be correct. Do not edit the deliverables for it: run the same command narrowed to the changed files (or through the repo's own cached toolchain) with a longer timeout, record that exit under the same validate id and name the command in your summary",
+  [OUTCOME_CODES.ENV_CAPABILITY_DOCKER]: "the earlier run's validate command needed a Docker daemon or image the sandbox lacked; this placement has Docker (or the validate is deferred to CI by a FORGE:DECISION). Re-run the checks here and fix only real failures; never stub out the container the test needs",
   [OUTCOME_CODES.ENV_CAPABILITY_REMOTE]: "the earlier run ran in a remote sandbox that lacks a host-only capability (SOPS/age key, ops credentials, read-only prod monitor SSH); this host has it. Do the work that needed it now, with the host's own tools and credentials, and never print or commit a secret in the clear",
   [OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED]: "an earlier run's conformance check found a requirement or validate command not done after one builder resume; the branch holds its work. For each named gap deliver the requirement against the frozen contract, adding any file it needs as an `add-deliverable` amendment, and re-run the validate commands",
   [OUTCOME_CODES.CONFORMANCE_OMISSION]: "an earlier run's review found a requirement the change left out or narrowed after one builder resume; the branch holds its work. For each named gap either deliver the requirement (adding any needed file as an `add-deliverable` amendment) or, when the clause is optional, unquantified or outside the issue's acceptance criteria, record an `add-requirement` / `defer` amendment with a why so the engine files a tracked follow-up instead of stopping",
@@ -409,7 +412,8 @@ export async function runCore(o) {
   const sessionCosts = new Map(); // #4407: session id -> last reported cumulative cost
   let sessionId = null;
 
-  const ev = (e) => appendEvent(dir, issue, e, { repo }); // #4432: the run log is keyed by repo + issue
+  let ciVerifies = 0, ciMergeFixRounds = 0; // #6203: counted off the run-log events for the MERGE_LEDGER record
+  const ev = (e) => { if (e?.event === "CI_VERIFY") ciVerifies++; else if (e?.event === "CI_FIX_ROUND") { if (e.trigger === "merge") ciMergeFixRounds++; } return appendEvent(dir, issue, e, { repo }); }; // #4432: the run log is keyed by repo + issue
   /** #5435: time one sandbox_start step (SANDBOX_STEP event + ledger sub-timing); the result and errors pass through. */
   const step = async (name, fn) => {
     const s0 = now();
@@ -788,6 +792,12 @@ export async function runCore(o) {
     const phases = phaseLedger.snapshot(); // #4908: run log gets the nested ledger, FORGE:TELEMETRY the flattened scalars
     ev({ ...term, phases });
     await emit({ ...term, ...flattenPhases(phases) });
+    if (reason === "merged") { // #6203: one MERGE_LEDGER record per merge (first_pass, human touches, test delta, CI attempts, deduped cost, wall per phase)
+      try {
+        await emit(buildMergeLedger({ firstPass: firstPassOf(builderTriggers), recovered: Boolean(recover), attempt: recover?.attempt ?? o.attempt ?? 1, ciVerifies: ciVerifies + ciMergeFixRounds, ciFixRounds: builderTriggers.filter((x) => x.trigger === "ci_red" || x.trigger === "merge_ci").length,
+          files: String(await git(["diff", "--name-only", `${base}...HEAD`]).catch(() => "")).split("\n"), comments: allComments(), sinceMs: Date.now() - (now() - t0), costUsd: usage.cost_usd, phases, wallMs: now() - t0, engineVersion: ENGINE_VERSION, tier: route?.tier, model: route?.model, pr: extra.pr }));
+      } catch { /* the ledger is best effort */ }
+    }
     // #4297: only a final failure the runner never requeues puts needs-human back (needsHuman() relabels on its own path). invalid,
     // decomposed and dependency-* are legitimate non-failure endings; deferred/engine-error may be requeued, so the batch runner
     // (orchestrate settle, relabelNeedsHuman) relabels those once they are final. #4302: a non-final attempt never relabels; the runner
@@ -864,6 +874,15 @@ export async function runCore(o) {
     const error = String(e?.message ?? e).slice(0, 200);
     T.anomalies.push(`needs-human ${step} failed: ${error}`); ev({ event: "NEEDS_HUMAN_LABEL_FAILED", step, error });
   };
+  /** #6206: ` base=<12> in=<16> code=<code>` appended to a park's sig line: the fingerprint stop admits again only when the base head or the input changed. Never throws. */
+  async function admitStamp(code) {
+    if (!stampable(code)) return "";
+    try {
+      const sha = String(await git(["rev-parse", base])).trim();
+      const s = renderStamp({ base: sha, input: inputOf({ iss, comments: allComments(), trusted: (c) => c?.__mine === true || isTrustedIssueComment(c), engineVersion: ENGINE_VERSION }), code });
+      return s ? ` ${s}` : "";
+    } catch { return ""; }
+  }
   async function needsHuman(why, code = OUTCOME_CODES.ENGINE_ERROR, { ask: askText, note: askNote = "", ...extra } = {}) {
     // #4725: a recorded premise (`Premise: <kind>:<arg>`) that already holds is no blocker: no label, the lane runs again.
     const predicate = parsePredicate(why);
@@ -883,13 +902,13 @@ export async function runCore(o) {
       const stoppable = code !== OUTCOME_CODES.BUILDER_BLOCKED && code !== OUTCOME_CODES.FAILURE_REPEATED && !ENV_ENGINE_OWNED_CODES.includes(code);
       const identical = stoppable ? countIdentical(allComments(), sig, (c) => c?.__mine === true || isTrustedIssueComment(c)) + 1 : 1;
       if (shouldPark(identical)) {
-        try { await post("FORGE:PARKED", summaryComment({ attempts: identical, code, detail: why, sig })); } catch (e) { labelFailed("comment", e); }
+        try { await post("FORGE:PARKED", summaryComment({ attempts: identical, code, detail: why, sig: `${sig}${await admitStamp(code)}` })); } catch (e) { labelFailed("comment", e); }
         try { await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human", "--add-label", parkedLabel(OUTCOME_CODES.FAILURE_REPEATED)]); } catch (e) { labelFailed("label", e); }
         T.decisions.push(`Identical failure ${code} (${sig}) seen ${identical}x: parked as ${OUTCOME_CODES.FAILURE_REPEATED}, not relaunched`);
         return finish("needs-human", why, { code: OUTCOME_CODES.FAILURE_REPEATED, ...extra, ...(recover ? { recovery: true } : {}) }, OUTCOME_CODES.FAILURE_REPEATED);
       }
       const notes = [premiseAnnotation(predicate), closedEdgeNote(closedDeps), link, askNote].filter(Boolean).join("\n");
-      try { await post("FORGE:NEEDS_HUMAN", `## Needs human\n${why}${notes ? `\n\n${notes}` : ""}${recoverUnlabelled ? `\n\n${laneRecoveryEvidence("needs-human", code, "")}` : ""}\n\nsig=${sig}\n\n_${usageLine()}_`); }
+      try { await post("FORGE:NEEDS_HUMAN", `## Needs human\n${why}${notes ? `\n\n${notes}` : ""}${recoverUnlabelled ? `\n\n${laneRecoveryEvidence("needs-human", code, "")}` : ""}\n\nsig=${sig}${await admitStamp(code)}\n\n_${usageLine()}_`); } // #6206: the stamp (base head, input hash, code) lets the next admit see that nothing changed
       catch (e) { labelFailed("comment", e); }
       // #5423/#5755: an environment gap is the engine's to recover or hold on an env issue, so a first lane leaves the issue visible; a final recovery lane (no seam) still labels
       if (!(!recover && ENV_ENGINE_OWNED_CODES.includes(code))) {
@@ -2320,6 +2339,67 @@ export async function runCore(o) {
       return found;
     }
 
+    /**
+     * #6206: cheap deterministic checks before the first builder/plan session. Returns a finished lane result when the lane is doomed (the issue, the
+     * base or the environment cannot succeed as things stand), else null. Every outcome is one ADMIT_PROBE telemetry event with builder_spend_usd 0.
+     * `o.admitProbe: false` turns it off. Seams that are absent (no required-check read, no login probe, no run seam) skip their step.
+     */
+    async function admitProbe(frozenNow) {
+      if (o.admitProbe === false) return null;
+      const t0a = now(), trustedC = (c) => c?.__mine === true || isTrustedIssueComment(c);
+      const rec = async (r) => { const e = admitEvent({ ...r, ms: now() - t0a }); ev(e); try { await emit(e); } catch { /* telemetry is best effort */ } };
+      let head = ""; try { head = String(await git(["rev-parse", base])).trim(); } catch { /* unreadable base: the base steps fail open */ }
+      if (!recover) { // 4. failure fingerprint: parked before on this base head and this input
+        const input = inputOf({ iss, comments: allComments(), trusted: trustedC, engineVersion: ENGINE_VERSION });
+        const hit = fingerprintStop({ comments: allComments(), base: head, input, trusted: trustedC });
+        if (hit) {
+          await rec({ outcome: "fingerprint_stop", code: OUTCOME_CODES.FAILURE_REPEATED, detail: `${hit.code} ${hit.sig}` });
+          T.decisions.push(`Admit probe: ${stopReason(hit)}`);
+          return await needsHuman(`Admit probe (#6206): ${stopReason(hit)}.`, OUTCOME_CODES.FAILURE_REPEATED);
+        }
+      }
+      if (head && lane && base === `origin/${lane}` && repo && io.baseRequiredChecks) { // 1. base health
+        let required = [], rows = null;
+        try { required = (await io.baseRequiredChecks(lane)) ?? []; } catch { /* unreadable: no evidence */ }
+        if (required.length) { try { rows = await fetchBaseChecks({ gh: ghc, repo, sha: head }); } catch { rows = null; } }
+        if (rows) {
+          const h = baseHealth({ checks: rows, required, issueText: `${iss?.title ?? ""}\n${iss?.body ?? ""}` });
+          if (h.red) {
+            const key = `base.red ${base}@${head.slice(0, 12)}`;
+            if (!hasAdmitComment(allComments(), key)) { try { await post("FORGE:ADMIT_PROBE", baseRedComment({ base, sha: head, failing: h.failing })); } catch (e) { T.anomalies.push(`Admit probe comment not posted: ${String(e?.message ?? e).slice(0, 160)}`); } }
+            const detail = `base ${base} is red on required check(s) ${h.failing.map((f) => `${f.name}${f.url ? ` (${f.url})` : ""}`).join(", ")}, which this issue does not touch; deferred before any builder session`;
+            await rec({ outcome: "base_red", code: OUTCOME_CODES.BASE_RED, detail, checks: h.failing.map((f) => ({ name: f.name, url: f.url })) });
+            T.decisions.push(`Admit probe: ${detail}`);
+            return await finish("deferred", detail, { code: OUTCOME_CODES.BASE_RED, retryInSeconds: 900 }, OUTCOME_CODES.BASE_RED);
+          }
+        }
+      }
+      if (io.claudeAuthProbe && !smartRotator && !sandboxCred) { // 2. environment: the claude login answers (`claude auth status`, no model call)
+        let a = null; try { a = await io.claudeAuthProbe({}); } catch { /* no verdict */ }
+        if (a && a.ok === false) {
+          const detail = "claude CLI login does not answer (expired or invalid); deferred before any builder session until the login is fixed";
+          await rec({ outcome: "env_auth", code: OUTCOME_CODES.BACKEND_AUTH, detail });
+          return await finish("deferred", detail, { code: OUTCOME_CODES.BACKEND_AUTH, retryInSeconds: AUTH_RETRY_SECONDS }, OUTCOME_CODES.BACKEND_AUTH);
+        }
+      }
+      if (frozenNow && o.placement?.where !== "remote" && (io.probeCommand || io.preflightRun)) { // 3. contract dry-run of the reused frozen contract (a fresh lane has none yet; a remote one runs its own preflight below)
+        const w = Math.max(0, Number(contextWaitSeconds) || 0) * 1000;
+        let misses = await preflightValidates(frozenNow).catch(() => []);
+        if (misses.length && !depsDone) { await within(depsP, w); misses = await preflightValidates(frozenNow).catch(() => []); } // dependencies may provide the tool
+        const dep = await depOwnerOf(), dr = classifyDryRun({ misses, owned: (t) => t === "forgedock" || dep.owner(t) !== null || hasRecipe(t) });
+        if (dr.docker.length) {
+          T.decisions.push(`FORGE:DECISION: validate ${dr.docker.join(", ")} needs Docker, which this placement lacks; it is deferred to CI instead of parking the lane later (admit probe)`);
+          await rec({ outcome: "contract_docker_deferred", code: OUTCOME_CODES.ENV_CAPABILITY_DOCKER, detail: `validate ${dr.docker.join(", ")} deferred to CI`, checks: dr.docker.map((id) => ({ name: id })) });
+        }
+        if (dr.tools.length) {
+          const detail = `the frozen contract's validate ${dr.ids.join(", ")} needs ${dr.tools.join(", ")}, which this placement lacks (probed on the base tree); the lane ends before any builder session and is re-placed or recovered`;
+          await rec({ outcome: "contract_tool_missing", code: OUTCOME_CODES.ENV_TOOL_MISSING, detail, checks: dr.tools.map((t) => ({ name: t })) });
+          return await needsHuman(`Admit probe (#6206): ${detail}.`, OUTCOME_CODES.ENV_TOOL_MISSING);
+        }
+      }
+      await rec({ outcome: "admitted" });
+      return null;
+    }
     const isSplit = (iss.labels ?? []).some((l) => (l?.name ?? l) === SPLIT_LABEL);
     /**
      * #4211: the refactor:split step. One tool-less grouping call over the symbol index (none for a chained plan), the
@@ -2526,6 +2606,10 @@ export async function runCore(o) {
         const rec = { event: "BUILDER_PREROUTE", mode: preRoute.mode, class: preRoute.class, tier: preRoute.tier, model: preRoute.model ?? "default", reason: preRoute.reason, risk: preRoute.risk };
         ev(rec); await emit(rec);
         T.decisions.push(`Pre-contract sessions provisionally routed to the ${preRoute.tier} tier (${preRoute.class}: ${preRoute.reason})`);
+      }
+      { // #6206: the admit probe: base health, login, contract dry-run and the failure fingerprint, before any builder or plan session (zero builder spend, no LLM)
+        const stop = await admitProbe(frozen);
+        if (stop) return stop;
       }
       if (!planOnly) await label("building"); // #5831
       // #4450: the light lane (lean.light mode on, eligible, fresh lane): one builder session, derived contract, or an upgrade
@@ -3933,6 +4017,11 @@ export async function runCore(o) {
       if (failures.every((f) => f.code === OUTCOME_CODES.CONTRACT_INVALID_COMMAND)) {
         T.anomalies.push("Contract defect: a frozen validate command is a runner CLI usage error");
         return await needsHuman(`Contract defect (not a conformance failure): a frozen validate command is rejected by its runner's CLI, so no builder resume was spent and nothing merged:\n${failures.map((f) => `- ${f.code}: ${f.detail}`).join("\n")}\n\nRecovery re-plans the command (vitest: --reporter=dot, not -q).`, OUTCOME_CODES.CONTRACT_INVALID_COMMAND);
+      }
+      if (failures.every((f) => /^docker(?: daemon)?$/i.test(f.tool ?? ""))) { // #6196: no Docker daemon/image where the validate ran; re-placed on the host, else deferred to CI
+        T.anomalies.push("Environment error: a validate command needs Docker (no daemon or image in this sandbox)");
+        T.decisions.push("FORGE:DECISION: the Docker-dependent validate is an environment gap of this sandbox; it is re-placed on the host, else deferred to CI");
+        return await needsHuman(`Environment error (not a conformance failure): a validate command needs a Docker daemon or image this sandbox lacks, so it could not run; no builder resume was spent and nothing merged:\n${failures.map((f) => `- ${f.code}: ${f.detail}`).join("\n")}\n\nRecovery re-places the lane on a host with Docker; where that is off, the validate is deferred to CI (FORGE:DECISION).`, OUTCOME_CODES.ENV_CAPABILITY_DOCKER);
       }
       const tools = [...new Set(failures.filter((f) => f.tool).map((f) => f.tool))].join(", ");
       T.anomalies.push(`Environment error: validate command(s) could not run, the host is missing ${tools}`);

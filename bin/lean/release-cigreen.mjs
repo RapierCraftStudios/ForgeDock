@@ -20,6 +20,10 @@ export const CI_GREEN_POLL_MS = 30_000;
 export const CI_GREEN_MAX_WAIT_MIN = 40;
 const SEVERITY_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
 const json = (s) => JSON.parse(String(s || "null"));
+/** `gh api --paginate --jq '.x[] | {..}'` prints one JSON object per line, across all pages. */
+const ndjson = (s) => String(s || "").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
+/** Polls (CI_GREEN_POLL_MS apart) to wait for a rerun's attempt number to advance before the checks are read again. */
+const RERUN_SETTLE_POLLS = 10;
 
 /** forge.yaml `release.ci_green.max_wait_min` and `release.block_severity` (lowest blocking severity; default high) -> `{ciGreen, blockSeverity}`; only set keys are returned. */
 export function ciGreenKeys(r) {
@@ -76,9 +80,9 @@ export function realCiSeam(ctx) {
     isDraft: async (pr) => Boolean(json(await gh(["pr", "view", String(pr), "--repo", repo, "--json", "isDraft"]))?.isDraft),
     headOf: async (pr) => String(await gh(["pr", "view", String(pr), "--repo", repo, "--json", "headRefOid", "--jq", ".headRefOid"])).trim(),
     checks: async ({ head }) => {
-      const runs = json(await gh(["api", `repos/${repo}/commits/${head}/check-runs?per_page=100`, "--jq", "[.check_runs[] | {name, status, conclusion, link: .details_url}]"])) ?? [];
+      const runs = ndjson(await gh(["api", "--paginate", `repos/${repo}/commits/${head}/check-runs?per_page=100`, "--jq", ".check_runs[] | {name, status, conclusion, link: .details_url}"]));
       let statuses = [];
-      try { statuses = json(await gh(["api", `repos/${repo}/commits/${head}/status`, "--jq", "[.statuses[] | {name: .context, state, link: .target_url}]"])) ?? []; } catch { /* check runs alone */ }
+      try { statuses = ndjson(await gh(["api", "--paginate", `repos/${repo}/commits/${head}/status?per_page=100`, "--jq", ".statuses[] | {name: .context, state, link: .target_url}"])); } catch { /* check runs alone */ }
       return [
         ...runs.map((k) => ({ name: k.name, bucket: bucketOf(k.status, k.conclusion), link: k.link })),
         ...statuses.map((k) => ({ name: k.name, bucket: k.state === "success" ? "pass" : k.state === "pending" ? "pending" : "fail", link: k.link })),
@@ -158,14 +162,24 @@ async function waitGreen(ctx, pr, seam) {
     }
     ctx.save?.();
     let reran = 0;
+    const before = new Map();
     for (const id of ids.keys()) {
-      if (!attemptGuard({ attempt: await seam.runAttempt(id) }).allow) continue;
+      const attempt = await seam.runAttempt(id);
+      if (!attemptGuard({ attempt }).allow) continue;
       await seam.rerunFailed(id);
+      before.set(id, attempt);
       reran++;
     }
     if (!reran) return { red: true, head, failing: st.failing };
     ctx.io.print?.(`release: ci-green: rerunning ${[...ids.values()].join(", ")} once`);
-    await seam.sleep(CI_GREEN_POLL_MS);
+    // The old failure stays visible until GitHub registers the new attempt: wait for the attempt number to advance (bounded), not a fixed sleep.
+    for (let n = 0; n < RERUN_SETTLE_POLLS; n++) {
+      await seam.sleep(CI_GREEN_POLL_MS);
+      if (seam.now() >= deadline) break;
+      let settled = true;
+      for (const [id, was] of before) { const now = await seam.runAttempt(id); if (was == null || now == null || now <= was) settled = false; }
+      if (settled) break;
+    }
   }
 }
 

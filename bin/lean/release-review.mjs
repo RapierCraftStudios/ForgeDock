@@ -337,7 +337,7 @@ export async function fixStep(ctx) {
     if (s.err) return blocked(s.err);
     res = s.r;
   }
-  if (res.marker === "FORGE:GATE_PASS") return { verdict: res.verdict, head: res.head };
+  if (res.marker === "FORGE:GATE_PASS" && !res.blocking?.length && !res.guards?.length) return { verdict: res.verdict, head: res.head };
   if (res.blocking?.length || res.guards?.length) {
     const names = res.blocking?.length ? res.blocking.map((n) => `#${n}`).join(" ") : (res.guards ?? []).map((g) => g.name).join(", ");
     const queued = res.blocking?.length ? await seam.queueBlockers?.({ pr: res.pr, blockers: res.blocking }) : null;
@@ -347,8 +347,16 @@ export async function fixStep(ctx) {
     ctx.save();
     return { blocked: true, held: true, reason };
   }
-  if (res.ciFailing > 0) return blocked(`required checks of #${res.pr} are not green at ${String(res.head).slice(0, 7)} (${res.ciPendingOnly ? "pending" : "red"}); re-run the release: ci-green waits and fixes CI once, then one review pass`);
-  return blocked(`${res.verdict} (${res.marker}) on #${res.pr} at ${String(res.head).slice(0, 7)} with no blocking finding and no red CI: the gate summary names the blocker; read it and re-run the release`);
+  if (res.ciFailing > 0) return blockedForRerun(ctx, `required checks of #${res.pr} are not green at ${String(res.head).slice(0, 7)} (${res.ciPendingOnly ? "pending" : "red"}); re-run the release: ci-green waits and fixes CI once, then one review pass`);
+  return blockedForRerun(ctx, `${res.verdict} (${res.marker}) on #${res.pr} at ${String(res.head).slice(0, 7)} with no blocking finding and no red CI: the gate summary names the blocker; read it and re-run the release`);
+}
+
+/** #6175: a block that tells the operator to re-run must leave ci-green and review undone, else the resume re-reads the same stale review result. */
+function blockedForRerun(ctx, reason) {
+  delete ctx.state.steps["ci-green"];
+  delete ctx.state.steps.review;
+  ctx.save();
+  return blocked(reason);
 }
 
 /**
@@ -375,11 +383,11 @@ async function legacyFixStep(ctx) {
       if (s.err) return blocked(s.err);
       r = s.r;
       if (r.marker === "FORGE:GATE_PASS") break;
-      if (r.ciCancelOnly) return blocked(`required checks of #${r.pr} still cancelled after a rerun, with no failure to fix`);
+      if (r.ciCancelOnly) return blockedForRerun(ctx, `required checks of #${r.pr} still cancelled after a rerun, with no failure to fix`);
       continue;
     }
     // Required checks that are only still pending (#5519) have not failed: no CI issue or lane, the release re-runs once CI finishes.
-    if (!r.blocking?.length && r.ciFailing > 0 && r.ciPendingOnly) return blocked(`required checks of #${r.pr} still pending, with no failure to fix; re-run the release once CI finishes`);
+    if (!r.blocking?.length && r.ciFailing > 0 && r.ciPendingOnly) return blockedForRerun(ctx, `required checks of #${r.pr} still pending, with no failure to fix; re-run the release once CI finishes`);
     if (roundsAt(ctx.state, r.head) >= cfg.maxRounds) {
       const s = await secondRound(ctx, seam, r, cfg);
       if (s.blocked) return s;
@@ -477,15 +485,21 @@ export function realSeam({ repo, def, env = process.env, laneStrip = [], cwd = p
     queueBlockers: async ({ blockers }) => {
       try {
         const batches = (await io?.batches?.(repo)) ?? [];
-        if (!batches.length) return { batch: null };
-        const add = io?.addToBatch ?? (async (id, nums) => { const { orchestrateFromCli } = await import("../engine-cli.mjs"); await orchestrateFromCli(["--add", id, ...nums.map(String)]); });
-        await add(batches[0].id, blockers);
-        return { batch: batches[0].id };
+        const open = batches.find((b) => !b.paused && !b.cancelled); // #6178: a paused or cancelled batch admits nothing
+        if (!open) return { batch: null, ...(batches.length ? { error: "every batch is paused or cancelled" } : {}) };
+        const add = io?.addToBatch ?? (async (id, nums) => { const { orchestrateFromCli } = await import("../engine-cli.mjs"); return orchestrateFromCli(["--add", id, ...nums.map(String)]); });
+        const res = await add(open.id, blockers);
+        // #6178: queued only when the add scheduled something; skipped ones (owned elsewhere, closed, unreadable) are not queued
+        if (res && !(res.added?.length || res.requeued?.length)) return { batch: null, error: `batch ${open.id} took none of ${blockers.map((n) => `#${n}`).join(" ")}: ${(res.skipped ?? []).map((x) => `#${x.issue} ${x.reason}`).join(", ") || "nothing added"}` };
+        return { batch: open.id };
       } catch (e) { return { batch: null, error: String(e?.message ?? e).split("\n")[0] }; }
     },
     holdReleasePr: async ({ pr, blockers, guards, queued, verdict }) => {
       const what = blockers.length ? `confirmed CRITICAL/HIGH finding(s) ${blockers.map((n) => `#${n}`).join(" ")}` : `failed guard(s) ${guards.map((g) => g.name).join(", ")}`;
-      const body = `Release stopped: ${verdict ?? "BLOCK DEPLOY"}. ${what} block this release. ${queued?.batch ? `They are queued in orchestrate batch ${queued.batch}.` : "No orchestrate batch is open: start one with `forgedock orchestrate " + blockers.join(" ") + "`."} Nothing found by the review is fixed inside the release PR; the next release starts fresh after they merge (the open-finding gate enforces it).`;
+      // #6178: with nothing queued the PR stays open with a status; closing it would drop the blockers
+      const queuedLine = queued?.batch ? `They are queued in orchestrate batch ${queued.batch}.` : `No open orchestrate batch took them${queued?.error ? ` (${queued.error})` : ""}: start one with \`forgedock orchestrate ${blockers.join(" ")}\`. This release PR stays open.`;
+      const body = `Release stopped: ${verdict ?? "BLOCK DEPLOY"}. ${what} block this release. ${queuedLine} Nothing found by the review is fixed inside the release PR; the next release starts fresh after they merge (the open-finding gate enforces it).`;
+      if (!queued?.batch && blockers.length) { try { gh(["pr", "comment", String(pr), "-R", repo, "--body", body]); } catch { /* the blocked result still stops the job */ } return { closed: false }; }
       try { gh(["pr", "close", String(pr), "-R", repo, "--comment", body]); return { closed: true }; } catch { try { gh(["pr", "comment", String(pr), "-R", repo, "--body", body]); } catch { /* the blocked result still stops the job */ } return { closed: false }; }
     },
     async fileDeferred({ pr, items }) {

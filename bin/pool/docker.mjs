@@ -11,10 +11,11 @@ export const cpuQuotaEnv = (cpus) => (Number.isFinite(cpus) && cpus > 0 ? { CS_C
 export const SWEEP_TIMEOUT_MS = 10 * 60000;
 const SWEEP_SRC = new URL("./cache-sweep.mjs", import.meta.url);
 
-function docker(args, { timeoutMs = 120000 } = {}) {
+/** #6189: `keepTail` keeps the END of stderr (a build error's useful part), not the head. */
+function docker(args, { timeoutMs = 120000, keepTail = false } = {}) {
   return new Promise((resolve, reject) => {
     execFile("docker", args, { timeout: timeoutMs, maxBuffer: 16 << 20 }, (err, stdout, stderr) => {
-      if (err) { err.stderr = String(stderr ?? "").slice(0, 2000); reject(err); } else resolve(String(stdout).trim());
+      if (err) { const t = String(stderr ?? ""); err.stderr = keepTail ? t.slice(-4000) : t.slice(0, 2000); reject(err); } else resolve(String(stdout).trim());
     });
   });
 }
@@ -84,6 +85,7 @@ export const dockerCli = {
   /** #6166: retags a local image (the pulled ghcr.io image becomes forgedock-lane:<version>). */
   async tag(src, dst) { return docker(["tag", src, dst], { timeoutMs: 30000 }); },
   /** #6166: one label of a local image ("" when unset or the image is missing). */
+  async imageRepoDigests(ref) { try { const j = JSON.parse(await docker(["image", "inspect", "--format", "{{json .RepoDigests}}", ref], { timeoutMs: 20000 })); return Array.isArray(j) ? j : []; } catch { return []; } },
   async imageLabel(ref, label) { try { return await docker(["image", "inspect", "--format", `{{index .Config.Labels "${label}"}}`, ref], { timeoutMs: 20000 }); } catch { return ""; } },
   async load(file) { return docker(["load", "-q", "-i", file], { timeoutMs: 30 * 60000 }); },
   async hasImage(ref) { try { await docker(["image", "inspect", ref], { timeoutMs: 20000 }); return true; } catch { return false; } },
@@ -101,7 +103,7 @@ export const dockerCli = {
     }
     return res;
   },
-  async build(dir, tag, buildArgs = {}) { return docker(["build", "-q", "-t", tag, ...Object.entries(buildArgs).flatMap(([k, v]) => ["--build-arg", `${k}=${v}`]), dir], { timeoutMs: 45 * 60000 }); },
+  async build(dir, tag, buildArgs = {}) { return docker(["build", "--progress=plain", "-t", tag, ...Object.entries(buildArgs).flatMap(([k, v]) => ["--build-arg", `${k}=${v}`]), dir], { timeoutMs: 45 * 60000, keepTail: true }); },
   /** #5696: removes one lane worktree (/cache/work/<id>) from a cache volume. */
   async removeWorkDir(volume, image, workDir) { await docker(["run", "--rm", "--network", "none", "-v", `${volume}:/cache`, "--entrypoint", "sh", image, "-c", 'rm -rf -- "$1"', "sh", workDir], { timeoutMs: SWEEP_TIMEOUT_MS }); },
   /** #5696: removes every /cache/work/* dir of a cache volume except the kept ones (full paths). */

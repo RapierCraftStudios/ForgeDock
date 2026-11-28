@@ -663,6 +663,12 @@ describe("default flow (v1.0 contract, dcfb86bf): one review pass, nothing found
     assert.equal((await fixStep(c)).verdict, "APPROVE FOR DEPLOY");
     assert.equal(s.log.filter((e) => e[0] === "lane" || e[0] === "fix-issue").length, 0);
   });
+  it("a blocker is never passed on GATE_PASS (#6174: block_severity medium)", async () => {
+    const s = fakeSeam();
+    const c = def(s, { review: { done: true, result: { pr: 7, head: H1, verdict: "APPROVE FOR DEPLOY", marker: "FORGE:GATE_PASS", blocking: [101], filed: [101], ciFailing: 0 } } });
+    const r = await fixStep(c);
+    assert.equal(r.blocked, true); assert.equal(r.held, true);
+  });
   it("a confirmed blocker stops the release: no fix lane, blockers queued into the open batch, release PR closed, status names the blockers", async () => {
     const s = fakeSeam({ fins: [blockFin], summary: bad });
     const calls = [];
@@ -682,10 +688,69 @@ describe("default flow (v1.0 contract, dcfb86bf): one review pass, nothing found
     const c = def(s); c.state.steps.review = { done: true, result: await reviewStep(c) };
     assert.match((await fixStep(c)).reason, /^review blockers #100; release PR #7 held/);
   });
+  describe("#6178 queueBlockers picks an open batch and checks the add", () => {
+    const mk = (batches, add, calls = []) => realSeam({ repo: "o/r", def: "main", env: {}, cwd: "/tmp", gh: (a) => { calls.push(a); return ""; }, io: { batches: async () => batches, addToBatch: add } });
+    it("skips paused and cancelled batches", async () => {
+      const added = [];
+      const r = await mk([{ id: "p", paused: true }, { id: "c", cancelled: true }, { id: "ok" }], async (id) => { added.push(id); return { added: [100], skipped: [] }; }).queueBlockers({ blockers: [100] });
+      assert.deepEqual(added, ["ok"]); assert.equal(r.batch, "ok");
+    });
+    it("no open batch: nothing is added", async () => {
+      let called = false;
+      const r = await mk([{ id: "p", paused: true }], async () => { called = true; return {}; }).queueBlockers({ blockers: [100] });
+      assert.equal(r.batch, null); assert.equal(called, false);
+    });
+    it("a skipped-only add is not reported as queued", async () => {
+      const r = await mk([{ id: "b" }], async () => ({ added: [], requeued: [], skipped: [{ issue: 100, reason: "owned by x" }] })).queueBlockers({ blockers: [100] });
+      assert.equal(r.batch, null); assert.match(r.error, /#100 owned by x/);
+    });
+    it("holdReleasePr leaves the PR open with a status when nothing was queued", async () => {
+      const calls = [];
+      const r = await mk([], async () => ({}), calls).holdReleasePr({ pr: 7, blockers: [100], guards: [], queued: { batch: null } });
+      assert.equal(r.closed, false); assert.equal(calls[0][1], "comment"); assert.match(calls[0].join(" "), /stays open/);
+    });
+    it("a guard-only hold (no blockers) still closes the PR", async () => {
+      const calls = [];
+      const r = await mk([], async () => ({}), calls).holdReleasePr({ pr: 7, blockers: [], guards: [{ name: "g" }], queued: { batch: null } });
+      assert.equal(r.closed, true); assert.equal(calls[0][1], "close");
+    });
+  });
   it("MEDIUM, LOW and unconfirmed findings never block: GATE_PASS stays a pass", async () => {
     const s = fakeSeam({ fins: [fin({ toFile: [{ id: "u", title: "maybe", severity: "HIGH" }, { id: "m", title: "med", severity: "MEDIUM" }], confirmedIds: ["m"] })] });
     const r = await reviewStep(def(s));
     assert.deepEqual(r.blocking, []);
+  });
+  it("#6175: a red or pending CI block clears ci-green and review, so a resume re-runs both instead of re-reading the stale result", async () => {
+    for (const pend of [false, true]) {
+      const s = fakeSeam({ heads: [H1] });
+      s.summary = async () => ({ code: 0, data: { verdict: "BLOCK DEPLOY", marker: "FORGE:GATE_FAILURE", ciFailing: 2, ciPendingOnly: pend }, lines: [] });
+      const c = def(s, { "ci-green": { done: true }, review: { done: true, result: { pr: 7, head: H1, verdict: "BLOCK DEPLOY", marker: "FORGE:GATE_FAILURE", blocking: [], guards: [], ciFailing: 2, ciPendingOnly: pend } } });
+      let saved = 0; c.save = () => { saved++; };
+      const r = await fixStep(c);
+      assert.equal(r.blocked, true);
+      assert.equal(c.state.steps["ci-green"], undefined, "ci-green is re-run on resume");
+      assert.equal(c.state.steps.review, undefined, "review is re-run on resume");
+      assert.ok(saved > 0, "the cleared ledger is saved");
+    }
+  });
+  it("#6175: a review blocker keeps ci-green and review done (the stop is sticky)", async () => {
+    const s = fakeSeam({ fins: [blockFin], summary: bad });
+    s.queueBlockers = async () => ({ batch: "b-1" }); s.holdReleasePr = async () => ({ closed: true });
+    const c = def(s, { "ci-green": { done: true } }); c.state.steps.review = { done: true, result: await reviewStep(c) };
+    await fixStep(c);
+    assert.ok(c.state.steps["ci-green"].done && c.state.steps.review.done);
+  });
+  it("#6175: the legacy pending-only block clears ci-green and review so a resume re-runs them", async () => {
+    const s = fakeSeam({ heads: [H1] });
+    const res = { pr: 7, head: H1, verdict: "BLOCK DEPLOY", marker: "FORGE:GATE_FAILURE", blocking: [], guards: [], ciFailing: 1, ciPendingOnly: true };
+    const c = ctx(s, { "ci-green": { done: true }, review: { done: true, result: res } });
+    s.summary = async () => ({ code: 0, data: res, lines: [] });
+    let saved = 0; c.save = () => { saved++; };
+    const r = await fixStep(c);
+    assert.equal(r.blocked, true);
+    assert.equal(c.state.steps["ci-green"], undefined);
+    assert.equal(c.state.steps.review, undefined);
+    assert.ok(saved > 0);
   });
   it("coStartCi is not run in the default flow", async () => {
     const s = fakeSeam(); const c = def(s); c.config.fix = { coStart: true };
