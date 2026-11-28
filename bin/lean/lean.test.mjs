@@ -7095,7 +7095,7 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
   });
 
   it("#5448 a declared baseline runs when a shared path changes and a failing one blocks the merge", async () => {
-    const mk = (rc) => { const w = world({ changed: ["shared/content/a.js", "src/foo.js", "test/foo.test.js"] }); w.ran = []; const f = w.io.runCommand; w.io.runCommand = async (a) => { w.ran.push(a.command); return a.command === "make stealth-baseline" ? { rc, output: "stealth drift" } : f ? f(a) : { rc: 0, output: "" }; }; return w; };
+    const mk = (rc) => { const w = world({ changed: ["shared/content/a.js", "src/foo.js", "test/foo.test.js"] }); w.ran = []; const f = w.io.runCommand; w.io.runCommand = async (a) => { w.ran.push(a.command); return a.command === "make stealth-baseline" ? { rc: /basered-/.test(String(a.cwd)) ? 0 : rc, output: "stealth drift" } : f ? f(a) : { rc: 0, output: "" }; }; return w; };
     const b = [{ when: "shared/content/**", run: "make stealth-baseline" }];
     const ok = mk(0); await run(ok, { verify: { baselines: b } });
     assert.ok(ok.ran.includes("make stealth-baseline"), "baseline ran for the shared change");
@@ -7875,6 +7875,31 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
     assert.ok(w.seq.indexOf("pr") > w.seq.lastIndexOf("builder-resume"), "fixed before the PR");
     assert.equal(w.dupCalls, 2);
     assert.equal(w.dupArgs.cwd, WT);
+  });
+
+  const XB = [{ path: "bin/run.sh", kind: "missing-x", why: "has a shebang but mode is 100644" }];
+  it("#6239 exec-bit: a 100644 shebang script is fixed mechanically and committed with no builder round", async () => {
+    const w = hworld(); const f = [XB, []]; w.xfix = null;
+    w.io.execBits = async () => (f.length > 1 ? f.shift() : f[0]);
+    w.io.execBitsFix = async (x) => { w.xfix = x; return x.findings.map((y) => y.path); };
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(w.xfix.findings[0].path, "bin/run.sh");
+    assert.equal(builders(w).length, 2, "plan and build only");
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "commit" && /executable bit set by the engine/.test(c.join(" "))));
+  });
+  it("#6239 exec-bit: an unfixable finding leaves an anomaly and never blocks", async () => {
+    const w = hworld();
+    w.io.execBits = async () => XB;
+    w.io.execBitsFix = async () => [];
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(builders(w).length >= 3, "one builder round");
+  });
+  it("#6239 exec-bit: verify.exec_bits false skips the gate", async () => {
+    const w = hworld(); let n = 0;
+    w.io.execBits = async () => { n++; return XB; };
+    await run(w, { verify: { execBits: false } });
+    assert.equal(n, 0);
   });
 
   it("#5348 an enumerating-test omission and a duplicate export the detectors name are fixed without a model session", async () => {

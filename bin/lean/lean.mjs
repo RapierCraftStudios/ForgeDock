@@ -33,7 +33,7 @@ import { decidePost } from "./commentstate.mjs"; // #5979
 import { repeatSignature, countIdentical, shouldPark, summaryComment } from "./failure-stop.mjs"; // #5979
 import { baseHealth, fetchBaseChecks, baseRedComment, hasAdmitComment, classifyDryRun, renderStamp, stampable, repeatCounted, inputOf, fingerprintStop, stopReason, admitEvent } from "./admit.mjs"; // #6206
 import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs";
-import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
+import { matchBaselines, baselineFailures, foldRegression, classifyFailingRuns, baselineEnvFailures } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
 import { toolMisses } from "./toolplace.mjs";
 import { loadImageManifest, manifestProvides } from "../pool/image-manifest.mjs";
@@ -71,7 +71,7 @@ export function contractSelfCorrectable(problems) {
 export function missingToolBlock(summary) { return MISSING_TOOL_RE.test(String(summary ?? "")); }
 import { reserveForBuild, revalidate } from "./seqreserve.mjs";
 import { patchEcho, mutationsOf, runReproMutations, classifyRepro } from "./reproquality.mjs";
-import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, pagePlanNote, contextPackNote, buildOpeningNote, sequenceBuildRule, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, routeDigestPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
+import { CHECKS_CLI, FORGEDOCK_CLI, REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, investigationVerdict, decisionNote, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, unrunnableValidateNote, pagePlanNote, contextPackNote, buildOpeningNote, sequenceBuildRule, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, routeDigestPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, sequenceSyncPrompt, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, execBitsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt, narrowFixPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
 import { reportParityGaps, classifyBaseRed, diffTouchesGuard, attribute as attributeBaseRed, runOnBase, reportBaseRed, recordBaseVerdict, bypassesGuard } from "./basered.mjs"; // #5239
 import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
@@ -547,7 +547,7 @@ export async function runCore(o) {
   }
 
   // Pipeline trajectory (posted once at the end): phase rows, decisions, anomalies.
-  let depResults = [], gateProvisioned = false; // #5447
+  let depResults = [], gateProvisioned = false, gatePyTried = new Set(); // #5447
   const T = { issue, validate: null, plan: null, implement: null, review: null, pr: null, merge: null, close: null, decisions: [], anomalies: [] };
   const failureClasses = new Set(); // forge#4275: conformance failure codes seen this run (gate failures, shadow would-fail)
   const ctxBase = parseContextPackConfig(o.contextPack ?? {});
@@ -3328,6 +3328,29 @@ export async function runCore(o) {
       return mech;
     }
     await duplicateGate("hand-off");
+    /** #6239: 100644 shebang / directly-invoked *.sh files and dropped +x: the engine's `git update-index --chmod=+x` first, then one builder round, then an anomaly. Never blocks. */
+    async function execBitGate(trigger) {
+      if (!io.execBits || isSplit || vcfg.execBits === false) return;
+      const found = async () => (await io.execBits({ cwd: wt, base }).catch(() => null)) ?? [];
+      let bad = await found();
+      if (!bad.length) return;
+      ev({ event: "EXEC_BIT_FINDINGS", trigger, count: bad.length });
+      T.decisions.push(`Exec-bit finding(s) (${trigger}): ${bad.slice(0, 5).map((f) => f.path).join(", ")}`);
+      const fixed = (await io.execBitsFix?.({ cwd: wt, findings: bad }).catch(() => null)) ?? [];
+      if (fixed.length) {
+        try { await git(["commit", "--no-verify", "-m", "fix(forge): executable bit set by the engine, no model session (#6239)"]); } catch { /* the detector re-run decides */ }
+        files = await changedFiles();
+        bad = await found();
+      }
+      if (bad.length && sessionId) {
+        await fixRound("exec_bits", execBitsPrompt(bad, vcfg.mode), [], "exec_bits", bad.map((f) => `${f.path}: ${f.why}`).join("\n"), { files: bad.map((f) => f.path) });
+        result = (await readResult()) ?? result;
+        files = await changedFiles();
+        bad = await found();
+      }
+      if (bad.length) T.anomalies.push(`Exec-bit problem(s) remain (${trigger}): ${bad.slice(0, 5).map((f) => `${f.path} (${f.why})`).join("; ")}`);
+    }
+    await execBitGate("hand-off");
     /** #4591: lane-added migrations the repo's generator did not produce: one builder round (stage "sequence"), then an anomaly. */
     async function migrationGate(trigger) {
       if (!io.migrationGenerator || isSplit) return;
@@ -3822,6 +3845,26 @@ export async function runCore(o) {
       // #4693: guards run beside the validate rerun
       const validatePhase = phaseLedger.during("validate", async () => ({ runs: await rerunFailedValidatesRaw(effective, { ciVerified }) })).finally(() => { validateMs = now() - gateT0; });
       const [{ runs: validateRuns }, guardFailures] = await Promise.all([validatePhase, guardGate(files)]);
+      const regRows = (effective.validate ?? []).filter((v) => v?.regression && validateRuns?.[v.id] && validateRuns[v.id].rc !== 0);
+      const regBase = {};
+      if (regRows.length && io.runCommand) { // #6115: a regression row failing on a missing module gets the generic install and one rerun; the rest are compared with the base
+        const installFor = async (outputs) => {
+          const mods = missingPythonModules(outputs.join("\n")).filter((m) => !gatePyTried.has(m)), root = process.getuid?.() === 0;
+          for (const m of mods) { gatePyTried.add(m); for (const command of genericInstallCommands({ kind: "python-module", tool: m }, { root })) await io.runCommand({ command, cwd: wt, timeoutMs: 600000, env: laneEnv() }).catch(() => null); }
+          return mods;
+        };
+        const rerunRow = async (v) => { try { const x = await io.runCommand({ command: v.command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }); const r = x?.r ?? x; validateRuns[v.id] = { ...validateRuns[v.id], rc: Number.isInteger(r?.rc) ? r.rc : 1, output: String(r?.output ?? "") }; } catch { /* keep the first run */ } };
+        const gapRows = regRows.filter((v) => toolGapFailures([validateRuns[v.id]]).length);
+        if (gapRows.length) {
+          const mods = await installFor(gapRows.map((v) => validateRuns[v.id].output));
+          if (mods.length) { ev({ event: "REGRESSION_MODULE_INSTALL", modules: mods }); for (const v of gapRows) await rerunRow(v); }
+        }
+        const need = regRows.filter((v) => validateRuns[v.id].rc !== 0 && !toolGapFailures([validateRuns[v.id]]).length);
+        if (need.length && !isSplit) {
+          const br = await heavyStep("precheck", () => runOnBase({ commands: need.map((v) => v.command), git, runCommand: io.runCommand, mergeBase: base, cwd: wt, env: laneEnv(), timeoutMs: vcfg.precheckTimeoutSeconds * 1000 }));
+          for (const v of need) { const b = br.find((x) => x.command === v.command); if (b) regBase[v.id] = b; }
+        }
+      }
       // #5087: forge.yaml topology.route_reachability gates the route handlers this diff adds; unset = no check
       const routeFailures = routeReachability && io.runCommand ? await routeReachabilityFailures({ command: routeReachability, paths: routePathsFromFiles(String(await git(["diff", "--name-only", "--diff-filter=A", `${base}...HEAD`]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)), run: async ({ command }) => (await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }).then((x) => x?.r ?? x)) ?? { rc: 127 } }) : [];
       // #5419: forge.yaml docs: user-facing surfaces need docs, and added /docs links must resolve; unset = no check
@@ -3860,7 +3903,26 @@ export async function runCore(o) {
         baselineRuns.push({ ...b, rc: Number.isInteger(x?.rc) ? x.rc : 1, output: String(x?.output ?? "") });
       }
       if (baselineRuns.length) ev({ event: "BASELINES_RUN", runs: baselineRuns.map((b) => ({ run: b.run, rc: b.rc })) });
-      const pc = precheck({ baselineFailures: baselineFailures(baselineRuns), contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, repro: (adequacyIn.repro = repro), validateRuns, repoHas, frozen, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, outcomeEvidenceFailures: outcomeFail, pageFailures: [...pageFail, ...designFail], seamFailures: seamFail, prodParityFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), removedPaths });
+      let baselineRows = [];
+      { // #6115: a failing baseline suite is classified: tool gap (install, rerun once, else env.tool_missing), also red on base (recorded), or lane-own (blocking)
+        let bad = baselineRuns.filter((b) => b.rc !== 0);
+        if (bad.length && io.runCommand) {
+          const gapB = bad.filter((b) => toolGapFailures([b]).length);
+          const mods = missingPythonModules(gapB.map((b) => b.output).join("\n")).filter((m) => !gatePyTried.has(m)), root = process.getuid?.() === 0;
+          for (const m of mods) { gatePyTried.add(m); for (const command of genericInstallCommands({ kind: "python-module", tool: m }, { root })) await io.runCommand({ command, cwd: wt, timeoutMs: 600000, env: laneEnv() }).catch(() => null); }
+          if (mods.length) {
+            ev({ event: "BASELINE_MODULE_INSTALL", modules: mods });
+            for (const b of gapB) { try { const x = await io.runCommand({ command: b.run, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() }); const r = x?.r ?? x; b.rc = Number.isInteger(r?.rc) ? r.rc : 1; b.output = String(r?.output ?? ""); } catch { /* keep */ } }
+            bad = baselineRuns.filter((b) => b.rc !== 0);
+          }
+          const nonGap = bad.filter((b) => !toolGapFailures([b]).length);
+          const br = nonGap.length && !isSplit ? await heavyStep("precheck", () => runOnBase({ commands: nonGap.map((b) => b.run), git, runCommand: io.runCommand, mergeBase: base, cwd: wt, env: laneEnv(), timeoutMs: vcfg.precheckTimeoutSeconds * 1000 })) : [];
+          const cls = classifyFailingRuns({ failed: bad, baseRuns: br });
+          for (const b of cls.baseRed) { const note = `Baseline suite \`${b.run}\` also fails on ${base}: base-red, recorded, not blocking (#6115)`; if (!T.decisions.includes(note)) T.decisions.push(note); ev({ event: "BASELINE_BASE_RED", run: b.run }); }
+          baselineRows = [...baselineFailures(cls.laneOwn), ...baselineEnvFailures(cls.env)];
+        } else baselineRows = baselineFailures(baselineRuns);
+      }
+      const pc = precheck({ baselineFailures: baselineRows, baseRuns: regBase, contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, repro: (adequacyIn.repro = repro), validateRuns, repoHas, frozen, guardFailures, coupledFailures: await coupledOf(files), relaxationFailures: relaxationFailures(rx), routeFailures, outcomeEvidenceFailures: outcomeFail, pageFailures: [...pageFail, ...designFail], seamFailures: seamFail, prodParityFailures, newOffKeys: await newOffKeysOf(), uiBrowser: uiBrowserOf(files), removedPaths });
       // #5447: an install failure for a package the changed files import blocks (env.tool_missing); unrelated ones are logged
       const depFail = depInstallFailures({ results: depResults, changedFiles: files });
       for (const l of depFail.logged) if (!T.decisions.includes(l)) T.decisions.push(l);

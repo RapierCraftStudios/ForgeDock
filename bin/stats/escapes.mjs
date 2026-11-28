@@ -8,7 +8,7 @@
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { defaultGh, isValidRepo } from "./github-source.mjs";
+import { defaultGh, isValidRepo, parsePages } from "./github-source.mjs";
 import { resolveRepo } from "./index.mjs";
 import { forgeHome } from "./weekly.mjs";
 
@@ -83,7 +83,7 @@ export async function gatherEscapes({ repo, days = WINDOW_DAYS, gh = defaultGh, 
       const n = issues[i++]; if (n === undefined) return;
       const pr = lanePrs.find((p) => laneIssueOf(p) === n), t0 = Date.parse(pr.mergedAt);
       try {
-        const ev = JSON.parse(await gh(["api", `repos/${repo}/issues/${n}/events`, "--paginate", "--jq", "[.[] | select(.event==\"reopened\") | .created_at]"]).then((s) => `[${String(s).replace(/\]\s*\[/g, ",").replace(/^\[|\]$/g, "")}]`) || "[]");
+        const ev = parsePages(await gh(["api", `repos/${repo}/issues/${n}/events`, "--paginate"])).filter((e) => e.event === "reopened").map((e) => e.created_at);
         reopens.set(n, ev.filter((t) => Date.parse(t) > t0 && Date.parse(t) <= t0 + windowDays * DAY).length);
       } catch { /* a missing events read is not a reopen */ }
     }

@@ -209,6 +209,18 @@ describe("precheck (deterministic, no reviewer)", () => {
     const ci = precheck({ contract: CG, result: rs, changedFiles: files, ciVerified: true });
     assert.deepEqual(ci.ciCovered, ["G1"]);
   });
+  it("#6115 a regression row also red on base is not validate_failed; a missing module is env; pass on base stays blocking", () => {
+    const CG = { ...C, validate: [{ id: "V1", command: "node --test a.test.mjs" }, { id: "G1", command: "node --test b.test.mjs", regression: true }] };
+    const rs = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
+    const run = (validateRuns, baseRuns) => precheck({ contract: CG, result: rs, changedFiles: files, validateRuns, baseRuns });
+    const red = { G1: { rc: 1, output: "AssertionError: boom" } };
+    const both = run(red, { G1: { rc: 1, output: "AssertionError: boom" } });
+    assert.deepEqual(both.failures.map((f) => f.kind), []); assert.equal(both.baseRed.length, 1);
+    assert.deepEqual(run(red, { G1: { rc: 0, output: "" } }).failures.map((f) => f.kind), ["validate_failed"]);
+    assert.deepEqual(run(red, {}).failures.map((f) => f.kind), ["validate_failed"]);
+    const env = run({ G1: { rc: 1, output: "ModuleNotFoundError: No module named 'yaml'" } }, { G1: { rc: 1, output: "x" } }).failures;
+    assert.deepEqual(env.map((f) => [f.kind, f.code]), [["validate_env", "env.tool_missing"]]);
+  });
   it("#4527 a CI-verified head lists the validate ids it accepted without a local result; a ran-and-failed validate still fails", () => {
     const C2 = { ...C, validate: [{ id: "V1", command: "node --test a.test.mjs" }, { id: "V2", command: "tsc" }, { id: "V3", command: "lint" }] };
     const pc = precheck({ contract: C2, result: { ...res, validation: [{ id: "V2", ci: true }, { id: "V3", exit: 0 }] }, changedFiles: files, ciVerified: true });

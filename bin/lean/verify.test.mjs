@@ -49,6 +49,11 @@ describe("verify-by-CI config (#4167)", () => {
     assert.equal(parseVerify({ post_merge: " " }).postMerge, null);
     assert.equal(parseVerify({ duplicate_exports: "no" }).duplicateExports, true);
   });
+  it("#6239 exec_bits is on by default and off only for the literal false", () => {
+    assert.notEqual(parseVerify({}).execBits, false);
+    assert.equal(parseVerify({ exec_bits: "false" }).execBits, false);
+    assert.notEqual(parseVerify({ exec_bits: "no" }).execBits, false);
+  });
   it("globs: a pattern without / matches the basename anywhere; ** spans directories", () => {
     assert.ok(matchesGlob("README.md", "*.md")); assert.ok(matchesGlob("pkg/a/CHANGELOG.md", "*.md"));
     assert.ok(matchesGlob("docs/guide/x.png", "docs/**")); assert.ok(!matchesGlob("src/docs/x.ts", "docs/**"));

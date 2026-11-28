@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /** Core work-on: the real effects behind runCore's injected `io`. Argv only, no shell. */
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { readFileSync, appendFileSync, mkdirSync, mkdtempSync, statSync, existsSync, rmSync, writeFileSync, renameSync, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { readFileSync, chmodSync, appendFileSync, mkdirSync, mkdtempSync, statSync, existsSync, rmSync, writeFileSync, renameSync, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir, hostname, freemem, loadavg, cpus, tmpdir } from "node:os";
 import { promises as fsp } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
@@ -15,7 +15,7 @@ import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { makeProjector } from "../engine/projector.mjs";
 import { makeLedger, countLiveLanes, ledgerRoot } from "./ledger.mjs";
 import { makeDepCache } from "./depcache.mjs";
-import { makeHeavyIo } from "./heavy.mjs";
+import { makeHeavyIo, HEAVY_DEFER_CODE, HEAVY_DEFER_MARKER } from "./heavy.mjs";
 import { diskLow, ADMISSION_DEFAULTS } from "./admission.mjs";
 import { writeAtomic } from "./batch.mjs";
 import { schedDir } from "./sched.mjs";
@@ -25,6 +25,7 @@ import { enumeratingTests, missingEntries } from "./enumerating.mjs";
 import { resolveBaseConflicts } from "./conflictres.mjs";
 import { seqNumber, sequenceCollisions, snapshotLane, verifyRenumber, renumberLane, resolveSequenceConflicts, generatorProblems, journalOrderProblems } from "./sequence.mjs";
 import { duplicateExports } from "./postmerge.mjs";
+import { execBitFindings, applyExecBits } from "./execbit.mjs";
 import { englishCopies } from "./i18n.mjs";
 import { scopedChecks } from "./checks.mjs";
 import { makeSequenceLeaseIo } from "./seqlease.mjs";
@@ -495,6 +496,7 @@ export function runCheckCommand({ command, cwd, timeoutMs = 300000, env = null, 
     child.on("close", (code) => {
       clearTimeout(timer);
       const tail = out.slice(-CHECK_OUTPUT_CAP);
+      if (!timedOut && code === HEAVY_DEFER_CODE && tail.includes(HEAVY_DEFER_MARKER) && / deferred, /.test(tail)) { finish({ rc: 124, output: `${tail}\n(heavy gate unavailable: infra, not a code failure)` }); return; } // #6242
       finish(timedOut ? { rc: 124, output: `${tail}\n(timed out after ${Math.round(timeoutMs / 1000)}s)` } : { rc: Number.isInteger(code) ? code : 1, output: tail });
     });
   });
@@ -747,6 +749,9 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
     /** #4406: the lane's scoped checks after a base merge (bin/lean/checks.mjs; [] on failure), and same-app duplicate exports (bin/lean/postmerge.mjs). */
     postMergeChecks: async ({ cwd, base }) => { try { return scopedChecks({ repo: cwd, base }); } catch { return []; } },
     duplicateExports: ({ cwd, base }) => duplicateExports({ git: (a) => run("git")(a, { cwd }), cwd, base }),
+    /** #6239: files the lane adds or modifies at 100644 that need +x (bin/lean/execbit.mjs), and the mechanical fix; [] on failure. */
+    execBits: ({ cwd, base }) => execBitFindings({ git: (a) => run("git")(a, { cwd }), base, readFile: async (p) => readFileSync(join(cwd, p), "utf8"), listFiles: async () => String(await run("git")(["ls-files"], { cwd })).split("\n").filter(Boolean) }).catch(() => []),
+    execBitsFix: ({ cwd, findings }) => applyExecBits({ git: (a) => run("git")(a, { cwd }), findings, chmod: async (p) => chmodSync(join(cwd, p), 0o755) }),
     /** #4596: keys added to a non-en locale catalog as English copies (bin/lean/i18n.mjs). */
     englishCopies: ({ cwd, base }) => englishCopies({ git: (a) => run("git")(a, { cwd }), base }),
     /**
