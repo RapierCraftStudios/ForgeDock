@@ -78,13 +78,35 @@ describe("ci-green step (#6164)", () => {
     assert.equal(c.state.ciGreen.flakes.length, 1);
   });
   it("a check still red after its one rerun is real: one fix round, then wait again; green afterwards continues", async () => {
-    const s = seam([[row("fail", 5)], [row("fail", 5)], [row("pass", 6)]]);
+    const s = seam([[row("fail", 5)]]); // the attempt never moves on: the stale grace passes, then the failure is real
     const c = ctx(s, { io: { ciGreen: s, print() {}, review: {} } });
     let fixed = 0;
     c.fixRoundStub = () => { fixed++; c.state.fixloop = { heads: { [H]: { rounds: 1 } } }; return { head: "d".repeat(40) }; };
     const r = await ciGreenWait(c, 7, { noFix: true });
     assert.equal(r.red, true); assert.deepEqual(r.failing, ["build"]); assert.equal(fixed, 0, "noFix never starts a fix");
     assert.deepEqual(s.log.filter((x) => x.startsWith("rerun")), ["rerun:5"], "rerun exactly once");
+  });
+  it("a stale failed run right after the rerun is not a second failure: waits for the new attempt, green without a fix round (#6173)", async () => {
+    let attempt = 1;
+    const s = seam([[row("fail", 5)], [row("pass", 5)]]);
+    s.runAttempt = async () => attempt;
+    const sleep = s.sleep; let n = 0;
+    s.sleep = async (ms) => { if (++n === 3) attempt = 2; return sleep(ms); };
+    const c = ctx(s);
+    c.fixRoundStub = () => assert.fail("no fix round for a stale read");
+    const r = await ciGreenWait(c, 7);
+    assert.equal(r.ok, true); assert.deepEqual(s.log.filter((x) => x.startsWith("rerun")), ["rerun:5"]);
+  });
+  it("the attempt advanced and the check still fails: that is the rerun's own result, red with a single rerun (#6173)", async () => {
+    let attempt = 1;
+    const s = seam([[row("fail", 5)]]);
+    s.runAttempt = async () => attempt;
+    const base = s.checks; let n = 0;
+    s.checks = async () => { if (++n === 2) attempt = 2; return base(); };
+    const c = ctx(s, { io: { ciGreen: s, print() {}, review: {} } });
+    const r = await ciGreenWait(c, 7, { noFix: true });
+    assert.equal(r.red, true); assert.deepEqual(r.failing, ["build"]);
+    assert.deepEqual(s.log.filter((x) => x.startsWith("rerun")), ["rerun:5"]);
   });
   it("red after the fix round is spent blocks instead of fixing again", async () => {
     const s = seam([[row("fail", 5)]]);
