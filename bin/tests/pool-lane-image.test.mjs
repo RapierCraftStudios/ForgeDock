@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { createAgent } from "../pool/agent.mjs";
 import { versionOf, repoRoot, laneImageTag, laneBuildArgs } from "../pool/version.mjs";
 import { provideLaneImage, withIpv4Fallback, withIpv4Pins, sweepIpv4Pins, remoteLaneImage, RECIPE_LABEL, IPV6_DIAL_RE } from "../pool/lane-image.mjs";
+import { ensureDaemonDns, DNS_FAIL_RE } from "../pool/docker-dns.mjs";
 import { tmpDir } from "./_tmp.mjs";
 
 const quiet = { info() {}, warn() {}, error() {} };
@@ -117,4 +118,48 @@ test("sweepIpv4Pins leaves a pin-free file byte-identical and skips while a pin 
     assert.equal(readFileSync(file, "utf8"), live);
   }, { file, resolve: async () => ["192.0.2.7"] });
   assert.equal(readFileSync(file, "utf8"), "127.0.0.1 localhost\n");
+});
+
+// #6195: dockerd's resolver fails (WSL proxy) -> daemon.json dns, restart only when idle, retry once.
+const dnsErr = Object.assign(new Error("pull failed"), { stderr: "Get https://ghcr.io/v2/: dial tcp: lookup ghcr.io on 10.255.255.254:53: no such host" });
+const dnsOpts = (file, { idle = true, restarts = [] } = {}) => ({ ensureDns: () => ensureDaemonDns({ file, idle: () => idle, restart: async () => { restarts.push(1); } }) });
+
+test("a docker DNS error writes daemon.json dns, restarts docker once when idle and retries the pull", async () => {
+  const file = join(tmpDir("dd-"), "daemon.json");
+  writeFileSync(file, JSON.stringify({ "log-driver": "json-file" }));
+  const restarts = [];
+  const d = fake({ pull: async (n) => { if (n === 1) throw dnsErr; } });
+  const how = await provideLaneImage({ docker: d, image: local, version, recipe, build: async () => { throw new Error("must not build"); }, pinOpts: dnsOpts(file, { restarts }) });
+  assert.equal(how, "pulled");
+  assert.equal(d.pulls.length, 2);
+  assert.equal(restarts.length, 1);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { "log-driver": "json-file", dns: ["1.1.1.1", "8.8.8.8"] });
+});
+
+test("a docker DNS error while sandboxes run writes dns but does not restart; the original error surfaces", async () => {
+  const file = join(tmpDir("dd-"), "daemon.json");
+  const restarts = [];
+  await assert.rejects(withIpv4Fallback(async () => { throw dnsErr; }, dnsOpts(file, { idle: false, restarts })), /pull failed/);
+  assert.equal(restarts.length, 0);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).dns, ["1.1.1.1", "8.8.8.8"]);
+});
+
+test("an existing daemon.json dns is left alone and other keys are kept", async () => {
+  const file = join(tmpDir("dd-"), "daemon.json");
+  const before = JSON.stringify({ dns: ["9.9.9.9"], x: 1 });
+  writeFileSync(file, before);
+  const restarts = [];
+  assert.deepEqual(await ensureDaemonDns({ file, idle: () => true, restart: async () => { restarts.push(1); } }), { changed: false, restarted: false });
+  assert.equal(readFileSync(file, "utf8"), before);
+  assert.equal(restarts.length, 0);
+});
+
+test("a non-DNS error is not intercepted by the DNS repair", async () => {
+  const file = join(tmpDir("dd-"), "daemon.json");
+  let n = 0;
+  await assert.rejects(withIpv4Fallback(async () => { n++; throw new Error("denied: not found"); }, dnsOpts(file)), /denied/);
+  assert.equal(n, 1);
+  assert.throws(() => readFileSync(file), /ENOENT/);
+  assert.doesNotMatch("lookup of the thing failed: no such host", DNS_FAIL_RE);
+  assert.match("lookup ghcr.io on 10.255.255.254:53: server misbehaving", DNS_FAIL_RE);
 });
