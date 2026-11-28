@@ -58,7 +58,7 @@ import { computeTrigger, riskPathHits, TRIGGER_MODES, pathDomains, parseEnforceD
 import { hostCapabilityBlock, contractHostNeeds } from "./execution.mjs";
 import { baseMergeOnlyBlock, envGapBlockCode, toolGapFailures, packageDirsMissingDeps, failureOutsideDiff } from "./envgap.mjs"; // #6106
 
-const MISSING_TOOL_RE = /command not found|not found in PATH|no such file or directory.*\b(?:docker|promtool)\b|\b(?:docker|promtool)\b[^\n]{0,80}(?:not (?:installed|found|available)|no such file|cannot connect|daemon)|cannot connect to the docker daemon|no docker daemon|no module named|ModuleNotFoundError|\bENOENT\b[^\n]{0,60}spawn/i;
+const MISSING_TOOL_RE = /command not found|not found in PATH|no such file or directory.*\b(?:docker|promtool)\b|\b(?:docker|promtool)\b[^\n]{0,80}(?:not (?:installed|found|available)|no such file|cannot connect|daemon)|cannot connect to the docker daemon|no docker daemon|image[^\n]{0,30}present locally|unable to find image|valid docker environment|no module named|ModuleNotFoundError|\bENOENT\b[^\n]{0,60}spawn/i;
 /** #4685: true when a builder's block summary names a missing tool or module (environment), not a credential. */
 /** #5623: a contract problem the builder can fix in its own session (shape, typed fields, test-plan rules, check ids), as
  * opposed to one that needs the issue changed (quote not verbatim) or a person. */
@@ -3933,6 +3933,11 @@ export async function runCore(o) {
       if (failures.every((f) => f.code === OUTCOME_CODES.CONTRACT_INVALID_COMMAND)) {
         T.anomalies.push("Contract defect: a frozen validate command is a runner CLI usage error");
         return await needsHuman(`Contract defect (not a conformance failure): a frozen validate command is rejected by its runner's CLI, so no builder resume was spent and nothing merged:\n${failures.map((f) => `- ${f.code}: ${f.detail}`).join("\n")}\n\nRecovery re-plans the command (vitest: --reporter=dot, not -q).`, OUTCOME_CODES.CONTRACT_INVALID_COMMAND);
+      }
+      if (failures.every((f) => /^docker(?: daemon)?$/i.test(f.tool ?? ""))) { // #6196: no Docker daemon/image where the validate ran; re-placed on the host, else deferred to CI
+        T.anomalies.push("Environment error: a validate command needs Docker (no daemon or image in this sandbox)");
+        T.decisions.push("FORGE:DECISION: the Docker-dependent validate is an environment gap of this sandbox; it is re-placed on the host, else deferred to CI");
+        return await needsHuman(`Environment error (not a conformance failure): a validate command needs a Docker daemon or image this sandbox lacks, so it could not run; no builder resume was spent and nothing merged:\n${failures.map((f) => `- ${f.code}: ${f.detail}`).join("\n")}\n\nRecovery re-places the lane on a host with Docker; where that is off, the validate is deferred to CI (FORGE:DECISION).`, OUTCOME_CODES.ENV_CAPABILITY_DOCKER);
       }
       const tools = [...new Set(failures.filter((f) => f.tool).map((f) => f.tool))].join(", ");
       T.anomalies.push(`Environment error: validate command(s) could not run, the host is missing ${tools}`);

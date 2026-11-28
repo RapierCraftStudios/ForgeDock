@@ -25,7 +25,7 @@ export const PARK_BUCKETS = Object.freeze([
   ["scope_creep", /scope_creep|outside the contract's deliverables/],
   ["validate_failed", /validate [A-Z]?\d+ .*failed|frozen command runs and fails|Declared check command\(s\) failing/],
   ["ci_red", /Required check\(s\) failed|ci\.red|CI verification failed/],
-  ["env_setup", /Environment error|env\.(setup_failed|tool_missing|validate_timeout|validate_placement|repro_unrunnable|capability_remote)/],
+  ["env_setup", /Environment error|env\.(setup_failed|tool_missing|validate_timeout|validate_placement|repro_unrunnable|capability_remote|capability_docker)/],
   ["builder_blocked", /Builder is blocked|builder\.(blocked|no_commit)|Builder made no commit/],
   ["review_incomplete", /review\.(incomplete|failed|unparseable)|Review FAIL/],
   ["e2e_unverified", /e2e_unverified|e2e_placement/],
