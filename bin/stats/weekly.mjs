@@ -9,6 +9,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { runLogKey } from "../engine/runlog.mjs";
 import { percentile } from "./aggregate.mjs";
 
 const isNum = (x) => typeof x === "number" && Number.isFinite(x);
@@ -41,7 +42,7 @@ export function readBatches({ home = forgeHome(), repo = null } = {}) {
   return out;
 }
 
-/** MERGE_LEDGER records from the run logs: Map "repo-ish#issue" -> last record. */
+/** MERGE_LEDGER records from the run logs: Map runLogKey(issue, repo) ("<owner>__<repo>__<issue>", legacy "<issue>") -> last record (#6230). */
 export function readMergeLedgers({ home = forgeHome(), env = process.env } = {}) {
   const dir = env.FORGE_RUNS_DIR || join(home, "runs"), out = new Map();
   if (!existsSync(dir)) return out;
@@ -49,8 +50,8 @@ export function readMergeLedgers({ home = forgeHome(), env = process.env } = {})
     if (!f.endsWith(".jsonl")) continue;
     let text; try { text = readFileSync(join(dir, f), "utf8"); } catch { continue; }
     if (!text.includes("MERGE_LEDGER")) continue;
-    const issue = Number(/(\d+)\.jsonl$/.exec(f)?.[1]);
-    for (const l of text.split("\n")) { if (!l.includes("MERGE_LEDGER")) continue; try { const e = JSON.parse(l); if (e.event === "MERGE_LEDGER") out.set(issue, { ...e, ts: Date.parse(e.ts ?? "") }); } catch { /* skip */ } }
+    const key = f.slice(0, -".jsonl".length); if (!/(^|__)\d+$/.test(key)) continue;
+    for (const l of text.split("\n")) { if (!l.includes("MERGE_LEDGER")) continue; try { const e = JSON.parse(l); if (e.event === "MERGE_LEDGER") out.set(key, { ...e, ts: Date.parse(e.ts ?? "") }); } catch { /* skip */ } }
   }
   return out;
 }
@@ -156,7 +157,7 @@ export function mergeRecords(batches, ledgers = new Map()) {
       const ready = Math.min(added.get(issue) ?? Infinity, b.created ?? Infinity, ...rows.map((r) => r.t - (isNum(r.wall_ms) ? r.wall_ms : 0)));
       const q = merged ? queueByCause(rows, merged, ready, { ...spans, hold: holdSpan.get(issue) ?? [] }) : null;
       const mq = merged?.phases?.queue_wait?.causes;
-      const led = merged ? ledgers.get(issue) : null;
+      const led = merged ? (ledgers.get(runLogKey(issue, b.repo)) ?? (b.repo ? null : ledgers.get(String(issue)))) : null;
       const rec = { key, batch: b.id, issue, repo: b.repo, version: led?.engine_version ?? merged?.engineVersion ?? versionAt(b.rows, b.engineVersion, (merged ?? rows[rows.length - 1]).t) ?? "unknown", spend, spendUsd: spend.reduce((s, x) => s + x.usd, 0), humanTouches: touches + (isNum(led?.human_touch) ? led.human_touch : 0), merged: Boolean(merged) };
       if (merged) {
         const firstPass = typeof led?.first_pass === "boolean" ? led.first_pass : typeof merged.first_pass === "boolean" ? merged.first_pass : null;
