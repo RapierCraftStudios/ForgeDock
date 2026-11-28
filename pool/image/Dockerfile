@@ -21,7 +21,7 @@ ARG FORGEDOCK_RECIPE=
 LABEL org.opencontainers.image.version=$FORGEDOCK_VERSION forgedock.recipe=$FORGEDOCK_RECIPE
 RUN test -n "$FORGEDOCK_VERSION" || { echo "FORGEDOCK_VERSION build arg is required" >&2; exit 1; }
 
-ENV IS_SANDBOX=1 DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 PLAYWRIGHT_BROWSERS_PATH=/opt/playwright UV_PYTHON_INSTALL_DIR=/opt/uv-python PATH=/opt/cs/bin:/opt/node/bin:/root/.local/bin:$PATH
+ENV NODE_OPTIONS=--dns-result-order=ipv4first IS_SANDBOX=1 DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 PLAYWRIGHT_BROWSERS_PATH=/opt/playwright UV_PYTHON_INSTALL_DIR=/opt/uv-python PATH=/opt/cs/bin:/opt/node/bin:/root/.local/bin:$PATH
 
 # IPv4 for apt: hosts whose Docker networking dials IPv6 first with no IPv6 route (WSL mirrored) fail apt fetches in
 # lane_tools variant builds FROM this image (#6187).

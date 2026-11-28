@@ -11,7 +11,7 @@ import { tmpDir } from "../tests/_tmp.mjs";
 const quiet = { info() {}, warn() {}, error() {} };
 const json = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { "content-type": "application/json" } });
 const spec = (id, extra = {}) => ({ id, issue: 1, batch: "b", repo: { slug: "o/x", url: "https://github.com/o/x.git" }, command: ["x"], ...extra });
-const TARGET = "1.67.0"; // the router's own target: this repo's package.json version (asserted below)
+const TARGET = JSON.parse((await import("node:fs")).readFileSync("package.json", "utf8")).version; // the router's own target: this repo's package.json version (asserted below)
 
 // `old` has more free cpus, so capacity order alone would pick it.
 function fixture({ oldFree = true, newFree = true } = {}) {
@@ -87,7 +87,7 @@ test("cmpVersion is numeric, agents without a version never lag", () => {
 test("upgradeAgentsAfterUpdate names agents left behind and keeps its string result", async () => {
   const warned = [], dir = tmpDir("cs-eng-cfg-"), cfgPath = `${dir}/router.json`;
   (await import("node:fs")).writeFileSync(cfgPath, "{}");
-  const r = await upgradeAgentsAfterUpdate({ configPath: cfgPath, runPoolCli: async () => {}, warn: (m) => warned.push(m),
+  const r = await upgradeAgentsAfterUpdate({ configPath: cfgPath, runPoolCli: async () => {}, ensureRouterFresh: async () => ({ ok: true }), warn: (m) => warned.push(m),
     leftBehind: async () => ({ target: "1.67.0", rows: [{ name: "old", version: "1.66.0" }] }) });
   assert.equal(r, "upgraded");
   assert.match(warned[0], /left behind.*old 1\.66\.0/);

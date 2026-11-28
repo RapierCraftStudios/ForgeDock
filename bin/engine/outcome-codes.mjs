@@ -60,6 +60,7 @@ export const OUTCOME_CODES = Object.freeze({
   ENV_TOOL_MISSING: "env.tool_missing", // forge#4323: a validate command could not run because a host tool or module is missing; an environment error, not a conformance failure
   ENV_REPRO_UNRUNNABLE: "env.repro_unrunnable", // forge#4334: the repro harness could not run the repro test on head; an environment error, not a conformance failure
   ENV_LANE_LIMIT: "env.lane_limit", // forge#4690: the lane hit its own scope limit (TasksMax or MemoryMax) and was stopped; an environment error, never an engine-error, so the breaker ignores it
+  ENV_CAPABILITY_DOCKER: "env.capability_docker", // forge#6196: a validate command needs a Docker daemon or image the sandbox lacks (no daemon, no local image, no docker binary); the host has one, so the lane is re-placed there or the validate is deferred to CI
   ENV_CAPABILITY_REMOTE: "env.capability_remote", // forge#4542: a remote sandbox lane blocked only on a host-only capability (SOPS key, ops credentials, prod monitor SSH) the dispatching host has; recovered locally
   ENV_ENGINE_SKEW: "env.engine_skew", // forge#5931: the sandbox ran a different engine version than the host; an environment error (gates fixed in the host version still fire), never conformance
   SANDBOX_START_FAILED: "sandbox.start_failed", // forge#4254: a lane sandbox could not start (a non-auth 4xx/config error or a non-HTTP start failure); needs-human, not relaunched
@@ -220,13 +221,13 @@ export const ENV_VALIDATE_PLACEMENT = "env.validate_placement";
  * Batch recovery classes of a lane result (forge#4267). The batch runner recovers `recoverable` rows once
  * (`orchestration.recovery.max_attempts`) and re-queues them; only `human` rows are escalations.
  */
-export const RECOVERABLE_CODES = Object.freeze([OUTCOME_CODES.CI_RED, OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.BUILDER_BLOCK_UNTYPED, OUTCOME_CODES.CONTRACT_INVALID, OUTCOME_CODES.CONTRACT_INVALID_COMMAND, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, ENV_VALIDATE_TIMEOUT, ENV_VALIDATE_PLACEMENT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.BUDGET_EXCEEDED, OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, OUTCOME_CODES.CONFORMANCE_OMISSION, OUTCOME_CODES.CONFORMANCE_UNJUSTIFIED_DEFERRAL, OUTCOME_CODES.CONFORMANCE_REGRESSION, OUTCOME_CODES.CONFORMANCE_SCOPE_CREEP]); // #5644: regression and scope creep are builder-fixable
+export const RECOVERABLE_CODES = Object.freeze([OUTCOME_CODES.CI_RED, OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.BUILDER_BLOCK_UNTYPED, OUTCOME_CODES.CONTRACT_INVALID, OUTCOME_CODES.CONTRACT_INVALID_COMMAND, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, ENV_VALIDATE_TIMEOUT, ENV_VALIDATE_PLACEMENT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_CAPABILITY_DOCKER, OUTCOME_CODES.BUDGET_EXCEEDED, OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, OUTCOME_CODES.CONFORMANCE_OMISSION, OUTCOME_CODES.CONFORMANCE_UNJUSTIFIED_DEFERRAL, OUTCOME_CODES.CONFORMANCE_REGRESSION, OUTCOME_CODES.CONFORMANCE_SCOPE_CREEP]); // #5644: regression and scope creep are builder-fixable
 /** `builder.blocked` is only reached by a typed human block: credentials, spend, promotion, customer, product-decision. */
 export const HUMAN_CODES = Object.freeze([OUTCOME_CODES.BUILDER_BLOCKED]);
 
 /**
  * `recoverable` | `human` | `terminal` for a lane result row ({outcome|terminalReason, code, issueEdited?, conflicting?}).
- * Recoverable: needs-human `ci.red`, `base.conflict`, `builder.block_untyped`, `env.tool_missing`, `env.repro_unrunnable`, `env.validate_timeout`, `env.capability_remote`, `budget.exceeded`, `conformance.unimplemented` / `conformance.omission` / `conformance.unjustified_deferral` (#5035), `conformance.regression` / `conformance.scope_creep` (#5644; guard_broken and e2e_unverified stay terminal), `contract.invalid` after a mid-run issue
+ * Recoverable: needs-human `ci.red`, `base.conflict`, `builder.block_untyped`, `env.tool_missing`, `env.repro_unrunnable`, `env.validate_timeout`, `env.capability_remote`, `env.capability_docker` (#6196), `budget.exceeded`, `conformance.unimplemented` / `conformance.omission` / `conformance.unjustified_deferral` (#5035), `conformance.regression` / `conformance.scope_creep` (#5644; guard_broken and e2e_unverified stay terminal), `contract.invalid` after a mid-run issue
  * edit (`issueEdited`) or when every problem was an unmatched quote (`quoteMismatch`), `ci-pending` on a conflicting PR (`conflicting`), and the non-human `budget-exceeded` turn-overrun end (forge#4505). Human: `builder.blocked`. Anything else
  * (another code, or not a needs-human/ci-pending row) is terminal. Pure, never throws.
  */
@@ -252,10 +253,10 @@ function classifyNeedsHumanBase(row) {
 }
 
 /** forge#4725: mechanical/environment codes recover on their own budget (`recovery.mechanicalMaxAttempts`), apart from conformance failures. */
-export const MECHANICAL_CODES = Object.freeze([OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.CONTRACT_INVALID_COMMAND, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, ENV_VALIDATE_TIMEOUT, ENV_VALIDATE_PLACEMENT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE]);
+export const MECHANICAL_CODES = Object.freeze([OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.CONTRACT_INVALID_COMMAND, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, ENV_VALIDATE_TIMEOUT, ENV_VALIDATE_PLACEMENT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_CAPABILITY_DOCKER]);
 
 /** #5423: environment gaps the engine recovers itself: a first lane ending on one never labels the issue needs-human. */
-export const ENV_ENGINE_OWNED_CODES = Object.freeze([OUTCOME_CODES.ENV_TOOL_MISSING, ENV_VALIDATE_PLACEMENT, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE]);
+export const ENV_ENGINE_OWNED_CODES = Object.freeze([OUTCOME_CODES.ENV_TOOL_MISSING, ENV_VALIDATE_PLACEMENT, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, OUTCOME_CODES.ENV_CAPABILITY_DOCKER]);
 
 /** `mechanical` | `conformance`: the recovery budget class of a lane result row (a conflicting `ci-pending` is a base conflict). */
 export function recoveryClassOf(row) {

@@ -65,6 +65,8 @@ import { applySetExecution } from "./live-execution.mjs";
 import { liveOverload } from "./hostload.mjs";
 
 /** #5938: epoch ms of the newest lane log of a running issue (a lane heartbeat), or null. */
+/** #6197: an add/requeue unconsumed this long (ms) re-hosts or flags its batch. */
+export const UNRUN_STALE_MS = 60_000;
 export function lanesAlive(b, state) {
   let best = null;
   for (const n of Object.keys(state?.running ?? {})) { try { const m = statSync(b.logFile(n)).mtimeMs; if (best === null || m > best) best = m; } catch { /* no lane log yet */ } }
@@ -224,7 +226,7 @@ function takeLock(lock, pid, alive) {
  */
 export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(process.env.FORGEDOCK_SCHEDD_IDLE_MS) || IDLE_MS,
   root = batchRoot(), log = (m) => console.log(m), pid = process.pid, alive = pidAlive, resumeOnStart = true, stopMs = STOP_MS,
-  lockCheckMs = LOCK_CHECK_MS, admitMs = Number(process.env.FORGEDOCK_SCHEDD_ADMIT_MS) || ADMIT_MS, lagMs = LAG_MS, stallCheckMs = Number(process.env.FORGEDOCK_SCHEDD_STALL_CHECK_MS) || 60_000, stallMin = Number(process.env.FORGEDOCK_SCHEDD_STALL_MIN) || DEFAULT_STALL_MIN, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS, preflight = null,
+  lockCheckMs = LOCK_CHECK_MS, admitMs = Number(process.env.FORGEDOCK_SCHEDD_ADMIT_MS) || ADMIT_MS, lagMs = LAG_MS, stallCheckMs = Number(process.env.FORGEDOCK_SCHEDD_STALL_CHECK_MS) || 60_000, stallMin = Number(process.env.FORGEDOCK_SCHEDD_STALL_MIN) || DEFAULT_STALL_MIN, unrunStaleMs = UNRUN_STALE_MS, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS, preflight = null,
   abandonMs = (Number(process.env.FORGEDOCK_SCHEDD_ABANDON_DAYS) > 0 ? Number(process.env.FORGEDOCK_SCHEDD_ABANDON_DAYS) * 24 * 3600 * 1000 : ABANDON_AGE_MS), killChildren = killTrackedChildren,
   hostLoad = liveOverload(), installedVersion = readInstalledVersion, respawn = undefined, probeEnv = (env) => probeBatchEnv(env), restartForStall = undefined,
   exit = null, hardExitMs = HARD_EXIT_MS, unit = unitState, probe = undefined, successorMs = SUCCESSOR_MS, successorPollMs = 200, rehost = undefined, sloGh = undefined, introspect = undefined } = {}) {
@@ -308,6 +310,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   // dispatched by re-hosting the batch once the run has ended. Once per distinct set of unrun entries, so an add that cannot
   // drain (a cancel, a tripped breaker) never loops.
   const rehostedUnrun = new Map();
+  const unrunRehostAt = new Map(); // #6197: last stale-input re-host per batch (rate limit)
   function rehostUnrun(id) {
     if (closing || hosted.has(id) || starting.has(id)) return;
     let sig;
@@ -657,6 +660,26 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
         if (b.isTerminal() && (!Number.isFinite(created) || now - created >= 24 * 3600_000)) continue; // nothing left to report or re-host
         const reported = !!b.readReport(), cancelled = !!b.readCancel(), state = b.store.peek(), isHosted = hosted.has(id) || starting.has(id);
         await efficiencyTick(b, plan, state, { now, reported, cancelled }); // #5987: advisory; never throws, never changes dispatch
+        // #6197: an add/requeue left unconsumed past UNRUN_STALE_MS is a stall of its own: re-host an unhosted batch (reported ones too,
+        // even when rehostUnrun's one-shot signature already fired; at most once per window), alert on a hosted one that is not draining.
+        const unrunAge = !cancelled ? b.unrunInputAgeMs(now) : null;
+        if (unrunAge !== null && unrunAge > unrunStaleMs) {
+          const st = b.store.load();
+          if (!(st?.breaker && !st.breaker.transport && !st.breaker.environmental)) {
+            const adds = b.unrunAdds(), reqs = b.unrunRequeues().map((e) => e.issue ?? e), what = [...adds, ...reqs].map((n) => `#${n}`).join(", ");
+            if (!isHosted) {
+              if (now - (unrunRehostAt.get(id) ?? 0) >= unrunStaleMs) {
+                unrunRehostAt.set(id, now);
+                log(`schedd: re-hosting batch ${id} (unconsumed add/requeue ${what} for ${Math.round(unrunAge / 1000)}s)`);
+                const started = host({ argv: ["--resume", id], cwd: process.cwd(), env: {}, keepBreaker: true });
+                starting.set(id, started);
+                started.catch((e) => log(`schedd: re-host ${id} failed: ${e?.message ?? e}`)).finally(() => starting.delete(id));
+              }
+              continue;
+            }
+            if (recordStallAlert(b, { ready: [...adds, ...reqs], code: "unconsumed-input", detail: `add/requeue ${what} unconsumed for ${Math.round(unrunAge / 1000)}s` })) log(`schedd: batch ${id} needs you: unconsumed add/requeue ${what}`);
+          }
+        }
         const stallOpts = { held: b.readHeld(), paused: b.readPause?.() ?? null, parallel: b.readParallel(), hosted: isHosted, lastProgressMs: b.lastDispatchClockMs(), now, windowMin: stallMin, cancelled, reported, lanesAliveMs: lanesAlive(b, state) };
         let stall = evaluateDispatchStall(state, stallOpts);
         if (stall && preflight) { // #5745: name the preflight gate holding admission (advisory; dispatch decisions are unchanged)

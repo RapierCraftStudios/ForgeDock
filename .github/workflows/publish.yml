@@ -284,6 +284,11 @@ jobs:
             || gh release upload "$TAG" lane-image.json --repo "$GITHUB_REPOSITORY" --clobber
           echo "### Lane image ${VERSION}: ${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Build and push lane_tools variants
+        if: env.SKIP_PUBLISH != 'true' && steps.lane_push.outcome == 'success'
+        continue-on-error: true
+        run: node scripts/lane-variants.mjs "${VERSION}" --build
+
       - name: Check the lane image is publicly pullable
         if: env.SKIP_PUBLISH != 'true' && steps.lane_push.outcome == 'success'
         continue-on-error: true
