@@ -600,6 +600,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const c = capacity();
     const h = live(cfg);
     const heavyRemote = elastic() ? await laneHasRemoteHeavy(spec.image ?? image) : false; // #6235
+    if (dnsHold > 0 && !c.paused) return { status: 503, body: { error: "paused: docker DNS repair in progress", code: "pool.paused", capacity: capacity() }, retryAfter: 60 }; // #6244: a hold taken during the await above must stop this launch too
     const adm = admit({ prio, cpus: charge(cpus, mem_gb, undefined, heavyRemote).cpus, mem_gb: charge(cpus, mem_gb, undefined, heavyRemote).mem, reservation, h }); // #6204
     if (c.draining && !c.paused) return { status: 503, body: { error: `draining: ${c.draining_reason}`, code: "pool.draining", capacity: c }, retryAfter: 60 }; // #6061: finish running lanes, accept none
     if (laneTargetOn() && !c.paused && c.active >= laneNow()) return { status: 503, body: { error: `lane target ${laneNow()} reached (${c.active} running)`, code: "pool.lane_target", lane_target: laneNow(), capacity: c }, retryAfter: 60 };

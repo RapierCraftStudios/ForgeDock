@@ -3,7 +3,7 @@
 // #5858: pool agent admission is clamped to the VM, sized from measured usage, and counts co-tenant containers.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createAgent } from "../pool/agent.mjs";
 import { tmpDir } from "./_tmp.mjs";
@@ -155,7 +155,8 @@ test("#6204: elastic is the default and a lane is charged its measured base, not
 });
 
 // #6244: a launch awaiting its image-label lookup has no sandbox record yet; the docker-dns repair must treat it as busy.
-test("#6244: the docker-dns idle probe is not reached while a launch is in flight", async () => {
+const daemonDnsSet = () => { try { const c = JSON.parse(readFileSync("/etc/docker/daemon.json", "utf8") || "{}"); return Array.isArray(c.dns) && c.dns.length > 0; } catch { return false; } };
+test("#6244: the docker-dns idle probe is not reached while a launch is in flight", { skip: daemonDnsSet() && "daemon.json already pins dns: the repair returns before the idle probe" }, async () => {
   let release, listed = 0;
   const gate = new Promise((r) => { release = r; });
   const docker = { ...fakeDocker(), async imageLabel() { await gate; return "1.72.0"; }, async hasImage() { return false; }, async pull() { throw new Error("lookup registry-1.docker.io on 127.0.0.53:53: server misbehaving"); },
