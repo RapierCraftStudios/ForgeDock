@@ -135,12 +135,12 @@ test("router answers 503 with retry-after when no host fits", async () => {
   assert.ok(r.retryAfter > 0);
 });
 
-test("router passes an agent 503 (lane image building) back with its Retry-After, not a generic no-capacity 60s", async () => {
+test("router passes an agent 503 (lane image building) as lane_tools.building with a short retry when every host is building (#6265)", async () => {
   const { router } = routerFixture({ legion: { cpus_free: 8, mem_free_gb: 16, building: true } });
   const r = await router.launch(spec("p10"));
   assert.equal(r.status, 503);
   assert.equal(r.body.code, "lane_tools.building");
-  assert.equal(String(r.retryAfter), "300");
+  assert.equal(String(r.retryAfter), "30"); // #6265: every host building -> short retry, not the agent 300 s hint
 });
 
 test("router renews leases while polled and destroys abandoned sandboxes", async () => {

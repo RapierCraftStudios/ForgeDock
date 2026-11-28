@@ -1114,7 +1114,7 @@ describe("core work-on", () => {
     it("#5764 a pip3 miss maps to the python recipe: installed in the sandbox and re-probed, no needs-human", async () => {
       const w = world({ contract: withTool("pip3") }); let ok = false; const cmds = [];
       const base = w.io.runCommand;
-      w.io.runCommand = async (a) => { if (/apt-get install/.test(a.command) && /python3 python3-venv/.test(a.command)) { cmds.push(a.command); ok = true; return { rc: 0 }; } return base(a); };
+      w.io.runCommand = async (a) => { if (/apt-get .*install/.test(a.command) && /python3 python3-venv/.test(a.command)) { cmds.push(a.command); ok = true; return { rc: 0 }; } return base(a); };
       probing(w, "pip3", () => ok);
       const r = await run(w, { dir: tmpDir("lean-5764a-"), ...remote });
       assert.equal(cmds.length, 1);
