@@ -62,18 +62,35 @@ export async function withIpv4Fallback(op, pinOpts = {}) {
   }
 }
 
+/** Release holding the lane-image.json asset ({version, recipe, digest}) that publish.yml/lane-image.yml write after the push (#6185). */
+export const laneDigestUrl = (version) => `https://github.com/rapiercraftstudios/forgedock/releases/download/lane-image-v${version}/lane-image.json`;
+const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+
+/** Read the publisher-recorded digest of the lane image for `version`: {digest, recipe} or null on any failure (no asset, network, bad JSON). */
+export async function fetchLaneDigest(version, { fetch: doFetch = globalThis.fetch, timeoutMs = 15000 } = {}) {
+  try {
+    const res = await doFetch(laneDigestUrl(version), { signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) return null;
+    const j = await res.json();
+    if (!DIGEST_RE.test(j?.digest ?? "") || (j.version != null && j.version !== version)) return null;
+    return { digest: j.digest, recipe: typeof j.recipe === "string" ? j.recipe : "" };
+  } catch { return null; }
+}
+
 /**
- * Pull the published lane image, retag it as `image` and verify its recipe label equals `recipe`. Resolves true on success;
- * a mismatched image is removed again (it must never serve lanes) and rejects.
+ * Pull the published lane image BY DIGEST (the one publish recorded), confirm the pulled image's RepoDigests contain it, retag it as
+ * `image`, and check its recipe label equals `recipe` as a secondary consistency check. A mismatching image is removed again (it must
+ * never serve lanes) and rejects. Resolves true on success.
  */
-export async function pullLaneImage({ docker, image, version, recipe, log = null, pinOpts = {} }) {
-  const remote = remoteLaneImage(version);
+export async function pullLaneImage({ docker, image, version, recipe, digest, log = null, pinOpts = {} }) {
+  if (!DIGEST_RE.test(digest ?? "")) throw new Error(`no trusted digest for ${remoteLaneImage(version)}`);
+  const remote = `${LANE_REGISTRY_IMAGE}@${digest}`;
+  const drop = async () => { try { await docker.removeImage?.(remote); } catch { /* best effort */ } };
   await withIpv4Fallback(() => docker.pull(remote), { ...pinOpts, log });
+  const digests = (await docker.imageRepoDigests?.(remote)) ?? [];
+  if (!digests.some((d) => d === remote || d.endsWith(`@${digest}`))) { await drop(); throw new Error(`pulled ${remote} reports digests [${digests.join(", ")}], want ${digest}`); }
   const got = await docker.imageLabel(remote, RECIPE_LABEL);
-  if (got !== recipe) {
-    try { await docker.removeImage?.(remote); } catch { /* best effort */ }
-    throw new Error(`pulled ${remote} has recipe ${got || "(none)"}, want ${recipe}`);
-  }
+  if (got !== recipe) { await drop(); throw new Error(`pulled ${remote} has recipe ${got || "(none)"}, want ${recipe}`); }
   await docker.tag(remote, image);
   // #6184: the ghcr tag is invisible to pruneLaneImages and would pin the image's layers forever; untagging it frees nothing yet keeps `image`.
   try { await docker.removeImage?.(remote); } catch (e) { log?.warn?.(`could not drop ${remote} tag: ${errText(e).slice(-200)}`); }
@@ -81,17 +98,18 @@ export async function pullLaneImage({ docker, image, version, recipe, log = null
 }
 
 /**
- * Make `image` exist locally: already present, else pulled (only the default `forgedock-lane:<version>` tag has a published
+ * Make `image` exist locally: already present, else pulled by recorded digest (only the default `forgedock-lane:<version>` tag has a published
  * counterpart), else built by `build()`. Resolves "present" | "pulled" | "built". `build` is wrapped in the IPv4 fallback too.
  */
-export async function provideLaneImage({ docker, image, version, recipe, publishable = true, build, log = null, pinOpts = {} }) {
+export async function provideLaneImage({ docker, image, version, recipe, digest = null, publishable = true, build, log = null, pinOpts = {} }) {
   if (await docker.hasImage?.(image)) return "present";
-  if (publishable && recipe && docker.pull && docker.tag && docker.imageLabel) {
+  // #6185: no known digest -> no pull (the recipe label is self-declared by the image); build locally.
+  if (publishable && recipe && digest && docker.pull && docker.tag && docker.imageLabel) {
     try {
-      await pullLaneImage({ docker, image, version, recipe, log, pinOpts });
-      log?.info?.(`${image} pulled from ${remoteLaneImage(version)}; no build`);
+      await pullLaneImage({ docker, image, version, recipe, digest, log, pinOpts });
+      log?.info?.(`${image} pulled from ${LANE_REGISTRY_IMAGE}@${digest}; no build`);
       return "pulled";
-    } catch (e) { log?.warn?.(`pull of ${remoteLaneImage(version)} failed, building locally: ${errText(e).slice(-300)}`); }
+    } catch (e) { log?.warn?.(`pull of ${LANE_REGISTRY_IMAGE}@${digest} failed, building locally: ${errText(e).slice(-300)}`); }
   }
   await withIpv4Fallback(build, { ...pinOpts, log });
   return "built";

@@ -11,7 +11,7 @@ import { basename, dirname, join } from "node:path";
 import { cpus, hostname } from "node:os";
 import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
 import { repoRoot, versionOf, laneImageTag, laneBuildArgs } from "./version.mjs";
-import { provideLaneImage, pullVariantImage, withIpv4Fallback } from "./lane-image.mjs";
+import { provideLaneImage, pullVariantImage, withIpv4Fallback, fetchLaneDigest } from "./lane-image.mjs";
 import { ensureDaemonDns } from "./docker-dns.mjs";
 import { jsonStore } from "./store.mjs";
 import { makeWarm } from "./warm.mjs";
@@ -150,7 +150,7 @@ export function readLaneFile(path) {
   if (fd === null) return "";
   try { return readFileSync(fd, "utf8"); } catch { return ""; } finally { try { closeSync(fd); } catch { /* closed */ } }
 }
-export function createAgent(cfg, { docker, now = () => Date.now(), log = console, live = liveHeadroom, hostDisk = null, hostMem = null, net = netState, vm = vmSize, trim = runFstrim, mirrorRunner = null } = {}) {
+export function createAgent(cfg, { docker, now = () => Date.now(), log = console, live = liveHeadroom, hostDisk = null, hostMem = null, net = netState, vm = vmSize, trim = runFstrim, mirrorRunner = null, fetchDigest = fetchLaneDigest } = {}) {
   const stateDir = cfg.state_dir;
   const store = jsonStore(join(stateDir, "state.json"), { sandboxes: {} });
   const sb = () => store.data.sandboxes;
@@ -1069,7 +1069,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
         const nextImage = cfg.image && cfg.image !== "computeshare-lane:1" ? cfg.image : laneImageTag(want.version);
         log.info?.(`rebuilding ${nextImage} (${running.version}/${running.image} -> ${want.version}/${want.image})`);
         // #6166: present (pre-seeded) -> pull the published image -> local build only as the fallback
-        const how = await provideLaneImage({ docker, image: nextImage, version: want.version, recipe: want.image, publishable: nextImage === laneImageTag(want.version), log, pinOpts,
+        const pub = nextImage === laneImageTag(want.version) ? await fetchDigest(want.version) : null; // #6185: pull by the publisher-recorded digest
+        const how = await provideLaneImage({ docker, image: nextImage, version: want.version, recipe: want.image, digest: pub?.digest, publishable: nextImage === laneImageTag(want.version), log, pinOpts,
           build: () => buildWithRetry(() => docker.build(join(next, "pool", "image"), nextImage, laneBuildArgs(want.version, want.image)), { log }) }); // #5919
         log.info?.(`${nextImage}: ${how}`);
       }
@@ -1240,7 +1241,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
 
   /** Build the lane image for the running ForgeDock version when this host does not have it yet. */
   async function ensureImage() {
-    await provideLaneImage({ docker, image, version: running.version, recipe: running.image, publishable: image === laneImageTag(running.version), log, pinOpts,
+    const pub = image === laneImageTag(running.version) && !(await docker.hasImage?.(image)) ? await fetchDigest(running.version) : null; // #6185
+    await provideLaneImage({ docker, image, version: running.version, recipe: running.image, digest: pub?.digest, publishable: image === laneImageTag(running.version), log, pinOpts,
       build: () => docker.build(join(cfg.code_root ?? repoRoot, "pool", "image"), image, laneBuildArgs(running.version, running.image)) });
     await pruneLaneImages();
   }
