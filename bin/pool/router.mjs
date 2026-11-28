@@ -360,7 +360,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     const elastic = c.elastic_lanes === true && Number.isFinite(c.cpus_free_elastic) && Number.isFinite(c.mem_free_gb_elastic); // #6047: base reservations plus held heavy tokens
     const cpusFree = prio === "normal" && Number.isFinite(c.cpus_free_unreserved) ? c.cpus_free_unreserved : elastic ? c.cpus_free_elastic : c.cpus_free;
     const memFree = prio === "normal" && Number.isFinite(c.mem_free_unreserved_gb) ? c.mem_free_unreserved_gb : elastic ? c.mem_free_gb_elastic : c.mem_free_gb;
-    return cpusFree >= size.cpus && memFree >= size.mem_gb;
+    const eb = elastic && c.elastic_base && Number.isFinite(c.elastic_base.cpus) && Number.isFinite(c.elastic_base.mem_gb) ? c.elastic_base : null; // #6204: elastic hosts charge a lane its measured footprint
+    return cpusFree >= (eb ? Math.min(size.cpus, eb.cpus) : size.cpus) && memFree >= (eb ? Math.min(size.mem_gb, eb.mem_gb) : size.mem_gb);
   };
   const headroom = (c, spec) => (spec?.priority === "borrow" && Number.isFinite(c.cpus_free_unreserved) ? c.cpus_free_unreserved : 0);
   // #5949: the dispatcher seeds a repo mirror before launch. The agent that will own the sandbox is picked here (the placing agent
