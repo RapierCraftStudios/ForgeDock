@@ -278,7 +278,7 @@ describe("env oci recipe", () => {
     assert.equal(r.ref, `ghcr.io/acme/shop-env:${desc.key}`);
     const lines = r.dockerfile.split("\n");
     assert.equal(lines[1], "FROM ghcr.io/acme/ci-base:1");
-    assert.ok(lines.some((l) => /apt-get install .*xvfb/.test(l)));
+    assert.ok(lines.some((l) => /apt-get .*install .*xvfb/.test(l)));
     assert.ok(lines.includes(`WORKDIR ${ENV_PREFIX}`));
     assert.ok(lines.includes('COPY [".nvmrc","./"]'));
     assert.ok(lines.includes('COPY ["package-lock.json","package.json","./"]'));

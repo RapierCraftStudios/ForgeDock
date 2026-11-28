@@ -49,18 +49,18 @@ describe("advisory gates (unclog)", () => {
 
 describe("generic sandbox install (unclog)", () => {
   it("installs by miss kind, mapping import names to packages", () => {
-    assert.match(genericInstallCommands({ kind: "python-module", tool: "yaml" })[0], /pip install --quiet --break-system-packages PyYAML/);
-    assert.match(genericInstallCommands({ kind: "python-module", tool: "requests" })[0], /pip install --quiet --break-system-packages requests/);
+    assert.match(genericInstallCommands({ kind: "python-module", tool: "yaml" })[0], /pip install --quiet --retries 5 --timeout 30 --break-system-packages PyYAML/);
+    assert.match(genericInstallCommands({ kind: "python-module", tool: "requests" })[0], /pip install --quiet --retries 5 --timeout 30 --break-system-packages requests/);
     const y = genericInstallCommands({ kind: "python-module", tool: "yaml" })[0];
-    assert.match(y, /\|\| \(apt-get update -qq && apt-get install -y --no-install-recommends python3-yaml && rm -rf \/var\/lib\/apt\/lists\/\*\)$/, "apt fallback grouped so it runs only when pip fails");
-    assert.match(genericInstallCommands({ kind: "node-module", tool: "@adobe/css-tools" })[0], /^npm install --no-save .* @adobe\/css-tools$/);
-    assert.match(genericInstallCommands({ kind: "command", tool: "ripgrep" })[0], /apt-get install -y --no-install-recommends ripgrep/);
+    assert.match(y, /\|\| \(apt-get [^&]*update -qq && apt-get [^&]*install -y --no-install-recommends python3-yaml && rm -rf \/var\/lib\/apt\/lists\/\*\)$/, "apt fallback grouped so it runs only when pip fails");
+    assert.match(genericInstallCommands({ kind: "node-module", tool: "@adobe/css-tools" })[0], /^NODE_OPTIONS=--dns-result-order=ipv4first npm install --no-save .* @adobe\/css-tools$/);
+    assert.match(genericInstallCommands({ kind: "command", tool: "ripgrep" })[0], /apt-get [^&]*install -y --no-install-recommends ripgrep/);
     assert.match(genericInstallCommands({ kind: "command", tool: "ripgrep" }, { root: false })[0], /^sudo sh -c /);
   });
   it("#6138 python modules install system-wide, never --user, with the apt fallback kept; non-root goes through sudo", () => {
     const root = genericInstallCommands({ kind: "python-module", tool: "yaml" })[0];
     assert.doesNotMatch(root, /--user/);
-    assert.match(root, /^python3 -m pip install --quiet --break-system-packages PyYAML \|\| python3 -m pip install --quiet PyYAML \|\| \(apt-get/);
+    assert.match(root, /^python3 -m pip install --quiet --retries 5 --timeout 30 --break-system-packages PyYAML \|\| python3 -m pip install --quiet --retries 5 --timeout 30 PyYAML \|\| \(apt-get/);
     const nr = genericInstallCommands({ kind: "python-module", tool: "PIL" }, { root: false })[0];
     assert.doesNotMatch(nr, /--user/);
     assert.match(nr, /^sudo sh -c .*Pillow.*\|\| \(sudo sh -c .*python3-pil/);

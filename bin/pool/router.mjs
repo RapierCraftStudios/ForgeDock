@@ -347,6 +347,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   }
 
   /** #5053: an agent's 401 reaches the dispatcher through this router; tag it so it is not mistaken for a router auth failure. */
+  const imageMarks = new Map(); // #6265: agent|image|tools -> {until, code}: a host whose lane_tools image is building or failed
   const agentBody = (r, name) => (r.status === 401 ? { ...(r.data && typeof r.data === "object" ? r.data : {}), error: "unauthorized", hop: "agent", agent: name, reason: typeof r.data?.reason === "string" ? r.data.reason : "agent auth: router token rejected by agent" } : r.data ?? {});
   // #5856: placement by priority. Agents that report no reservations/borrowable fields are flat (cpus_free), as before.
   // reserved: a host holding that reservation with room left (the agent reclaims from borrowed lanes itself);
@@ -416,21 +417,34 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     const memLow = sized.filter((c) => c.host_mem_low === true && c.host_disk_low !== true && c.disk_capped !== true).map((c) => c.name); // #5967: host memory under the floor
     const fits = sized.filter((c) => c.host_disk_low !== true && c.disk_capped !== true && c.host_mem_low !== true).sort((a, b) => byEngine(tv)(a, b) || headroom(b, spec) - headroom(a, spec) || b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
     const laneId = isLane(spec.id), laneCapped = []; // #5735: agents skipped because their lane ceiling is reached
+    // #6265: a host whose lane image for this spec is building or failed is skipped while another eligible host is ready; with none ready, all are tried (re-probes the build).
+    const imgKey = (name) => `${name}|${spec.image ?? ""}|${[...(spec.lane_tools ?? [])].sort().join(",")}`;
+    const imgMarked = (c) => spec.lane_tools?.length > 0 && (imageMarks.get(imgKey(c.name))?.until ?? 0) > now();
+    const readyHosts = fits.filter((c) => !imgMarked(c));
+    const tryHosts = readyHosts.length ? readyHosts : fits;
+    let buildFailed = null;
     let busy = null; // the last agent 503 (e.g. lane_tools image building): its body and Retry-After are passed back
     const seeded = seedPick.get(spec.id)?.agent; // #5949: the agent holding this lane's seeded mirror goes first
     if (seeded) fits.sort((a, b) => (b.name === seeded) - (a.name === seeded));
-    for (const c of fits) {
+    for (const c of tryHosts) {
       if (laneId && atCeiling(c.name)) { laneCapped.push({ name: c.name, ...laneView(c.name) }); continue; }
       if (laneId) reserve(c.name, spec.id);
       try {
         const r = await agentCall(own(agents(), c.name), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...size, ...(ceilingOf(c.name) !== null ? { max_lanes: ceilingOf(c.name) } : {}) }, 120000);
+        const code = r.data?.code;
+        if (spec.lane_tools?.length && (code === "lane_tools.building" || code === "lane_tools.build_failed")) {
+          imageMarks.set(imgKey(c.name), { until: now() + (code === "lane_tools.building" ? (cfg.lane_build_mark_s ?? 60) : (cfg.lane_build_failed_mark_s ?? 300)) * 1000, code });
+          if (code === "lane_tools.build_failed") { buildFailed = { r, name: c.name }; continue; }
+        } else if (r.ok) imageMarks.delete(imgKey(c.name));
         if (r.status === 503) { busy = { r, name: c.name }; continue; } // raced with another launch, or still building; try the next host
         if (r.ok) { sbx()[spec.id] = { agent: c.name, issue: spec.issue ?? null, batch: spec.batch ?? null, createdAt: now(), touched: now() }; store.save(); }
         return { status: r.status, body: { ...agentBody(r, c.name), agent: c.name, ...(engineOf(c) ? { engine_version: engineOf(c) } : {}) } };
       } finally { if (laneId) release(c.name, spec.id); }
     }
     if (laneCapped.length && !busy) return { status: 503, body: { error: "pool.host_lane_ceiling", code: "pool.host_lane_ceiling", agents: laneCapped }, retryAfter: cfg.retry_after_s ?? 60 };
-    if (busy) return { status: 503, body: { ...agentBody(busy.r, busy.name), agent: busy.name }, retryAfter: busy.r.retryAfter ?? cfg.retry_after_s ?? 60 };
+    // #6265: a lane waiting only on an image build retries soon (another host or the finished build), not after the agent's 300 s capacity hint
+    if (busy) return { status: 503, body: { ...agentBody(busy.r, busy.name), agent: busy.name }, retryAfter: busy.r.data?.code === "lane_tools.building" ? (cfg.lane_build_retry_after_s ?? 30) : busy.r.retryAfter ?? cfg.retry_after_s ?? 60 };
+    if (buildFailed) return { status: buildFailed.r.status, body: { ...agentBody(buildFailed.r, buildFailed.name), agent: buildFailed.name } };
     if (tooOld.length && !sized.length) return engineOld(spec, tooOld); // a deferral: the lane waits for an upgraded host
     if (diskLow.length) return { status: 503, body: { error: "no host has free disk", code: "pool.disk_low", agents: diskLow }, retryAfter: cfg.disk_low_retry_after_s ?? 300 }; // a capacity deferral, not a failure
     if (capped.length) return { status: 503, body: { error: "no host has lane disk below its cap", code: "pool.disk_cap", agents: capped }, retryAfter: cfg.disk_low_retry_after_s ?? 300 };

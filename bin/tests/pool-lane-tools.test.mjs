@@ -37,7 +37,7 @@ describe("lane_tools validation", () => {
 
 describe("recipes and tag", () => {
   it("xvfb recipe apt-installs xvfb and xauth and takes no version", () => {
-    assert.match(laneToolsDockerfile("b:1", ["xvfb"]), /apt-get install -y --no-install-recommends xvfb xauth/);
+    assert.match(laneToolsDockerfile("b:1", ["xvfb"]), /apt-get [^&]*install -y --no-install-recommends xvfb xauth/);
     assert.throws(() => checkRecipes(["xvfb@1"]), /takes no version/);
     assert.doesNotThrow(() => checkRecipes(["xvfb", "python@3.12", "promtool@2.53.3", "postgresql-client"]));
   });
