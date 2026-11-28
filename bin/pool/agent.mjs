@@ -11,7 +11,7 @@ import { basename, dirname, join } from "node:path";
 import { cpus, hostname } from "node:os";
 import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
 import { repoRoot, versionOf, laneImageTag, laneBuildArgs } from "./version.mjs";
-import { provideLaneImage, withIpv4Fallback } from "./lane-image.mjs";
+import { provideLaneImage, withIpv4Fallback, sweepIpv4Pins } from "./lane-image.mjs";
 import { ensureDaemonDns } from "./docker-dns.mjs";
 import { jsonStore } from "./store.mjs";
 import { makeWarm } from "./warm.mjs";
@@ -1306,6 +1306,7 @@ export function startAgent(cfg, deps) {
   server.listen(cfg.listen.port, cfg.listen.host);
   const timer = setInterval(() => agent.reap().catch((e) => console.error("reap failed", e)), (cfg.reap_interval_s ?? 30) * 1000);
   agent.reap().catch((e) => console.error("startup reap failed", e));
+  sweepIpv4Pins({ log: console });
   agent.ensureImage().catch((e) => console.error("lane image build failed", e));
   wslNetworkFixup({ idle: () => agent.capacity().active === 0 })
     .catch((e) => console.error("wsl network fixup failed", e))
