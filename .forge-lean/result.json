@@ -1,0 +1,103 @@
+{
+ "status": "fixed",
+ "summary": "Baseline and regression-row failures are classified against base and tool gaps; base-red does not block, tool gaps become env.tool_missing",
+ "requirements": [
+  {
+   "id": "R1",
+   "status": "implemented",
+   "evidence": "bin/lean/baselines.mjs:classifyFailingRuns"
+  },
+  {
+   "id": "R2",
+   "status": "implemented",
+   "evidence": "bin/lean/lean.mjs gate install+rerun"
+  },
+  {
+   "id": "R3",
+   "status": "implemented",
+   "evidence": "bin/lean/baselines.test.mjs"
+  },
+  {
+   "id": "R4",
+   "status": "implemented",
+   "evidence": "bin/lean/conformance.test.mjs"
+  },
+  {
+   "id": "R5",
+   "status": "implemented",
+   "evidence": "bin/lean/conformance.test.mjs"
+  },
+  {
+   "id": "R6",
+   "status": "implemented",
+   "evidence": "bin/lean/lean.mjs"
+  },
+  {
+   "id": "R7",
+   "status": "implemented",
+   "evidence": "bin/lean/conformance.mjs"
+  }
+ ],
+ "validation": [
+  {
+   "id": "V1",
+   "command": "node --test bin/lean/baselines.test.mjs bin/lean/basered.test.mjs bin/lean/envgap.test.mjs",
+   "exit": 0
+  },
+  {
+   "id": "V2",
+   "command": "node --test --test-name-pattern='regression|validate|baseline|env' bin/lean/conformance.test.mjs",
+   "exit": 0
+  },
+  {
+   "id": "V3",
+   "command": "node --test --test-name-pattern='baseline|regression|tool_missing|ToolMissing' bin/lean/lean.test.mjs",
+   "exit": 0
+  },
+  {
+   "id": "G1",
+   "command": "node --test bin/lean/basered.test.mjs bin/lean/envgap.test.mjs",
+   "exit": 0
+  },
+  {
+   "id": "G2",
+   "command": "node --test --test-name-pattern='validate|missingTool|drift' bin/lean/conformance.test.mjs",
+   "exit": 0
+  }
+ ],
+ "tests": [
+  {
+   "command": "node --test bin/lean/baselines.test.mjs",
+   "result": "pass",
+   "fails_without_fix": true
+  }
+ ],
+ "self_review": [
+  {
+   "question": "1",
+   "answer": "yes",
+   "evidence": "R1-R7 mapped in implementation.md"
+  },
+  {
+   "question": "2",
+   "answer": "yes",
+   "evidence": "targeted suites pass; one existing lean test adjusted to fail only on lane tree"
+  },
+  {
+   "question": "3",
+   "answer": "yes",
+   "evidence": "forgedock check PASS"
+  },
+  {
+   "question": "4",
+   "answer": "yes",
+   "evidence": "only bin/lean deliverables and tests changed"
+  }
+ ],
+ "amendments": [
+  {
+   "type": "env_tool_missing",
+   "why": "CI-local failure is scripts/symbol-move.test.sh 'libcst required (SYMBOL_MOVE_REQUIRE_LIBCST=1) but not available': the sandbox python lacks libcst and has no pip. All other 20+ suites in the command pass. This PR only changes bin/lean/*; symbol-move is untouched, so this is an environment gap, not a regression."
+  }
+ ]
+}
