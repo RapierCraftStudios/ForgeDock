@@ -35,11 +35,24 @@ describe("controller (#5985)", () => {
     assert.equal(ctl.operating(), 4);
     assert.equal(ctl.limiting(), "host_load");
   });
-  it("a red pool (low memory or load >= 1) does not increase", () => {
+  it("a red pool (low memory or load >= 1.5) does not increase", () => {
     const { c, ctl } = mk();
-    ctl.refused({ code: "pool.host_load" }); c.t += REFUSAL_HOLD_MS;
-    assert.equal(ctl.observe({ load_per_core: 1.2, mem_available_gb: 12 }), null);
+    ctl.refused({ code: "pool.host_load" }); c.t += REFUSAL_HOLD_MS * 4;
+    assert.equal(ctl.observe({ load_per_core: 1.8, mem_available_gb: 12 }), null);
     assert.equal(ctl.observe({ load_per_core: 0.3, mem_available_gb: 5 }), null);
+  });
+  it("#6204: a host sitting at 1.0-1.5/core recovers toward the ceiling slowly after quiet, and never within the first hold", () => {
+    const { c, ctl } = mk();
+    ctl.refused({ code: "pool.host_load" }); // 8 -> 4
+    const mid = { load_per_core: 1.2, mem_available_gb: 12 };
+    c.t += REFUSAL_HOLD_MS;
+    assert.equal(ctl.observe(mid), null, "one hold of quiet is not enough at moderate load");
+    c.t += REFUSAL_HOLD_MS * 2;
+    assert.equal(ctl.observe(mid).change, "increase");
+    assert.equal(ctl.observe(mid), null, "grows are paced");
+    for (let i = 0; i < 4; i++) { c.t += REFUSAL_HOLD_MS; ctl.observe(mid); }
+    assert.equal(ctl.operating(), 8);
+    assert.equal(ctl.limiting(), "ceiling");
   });
   it("classifies heavy repos from usage-history cpu_avg > 1.5 and caps heavy lanes below light", () => {
     const rows = [{ repo: "a/h", cpu_avg: 3 }, { repo: "a/h", cpu_avg: 2 }, { repo: "a/l", cpu_avg: 0.4 }];

@@ -377,6 +377,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const deferrals = toMap(saved?.deferrals);
   const capReasons = toMap(saved?.capReasons); // #5938: issue -> the pool's last `sandbox.capacity` / host-disk reason (read by the batch health stall verdict)
   const capDefers = toMap(saved?.capDeferrals); // #5112: issue -> `sandbox.capacity` deferrals (uncapped, so not in `deferrals`)
+  const capQuiet = new Set(); // #6204: issues whose current capacity wait was already logged once
   const capFellBack = new Set(); // #5112: issues already reported as a capacity fallback (one decision each)
   const engineErrors = toMap(saved?.engineErrors);
   const transients = toMap(saved?.transientRetries); // #5161: issue -> transient engine-error retries taken
@@ -1169,7 +1170,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       update({ ...row, detail: `stopped by cancel: ${r?.code ?? row.outcome}${r?.detail ? ` ${r.detail}` : ""}` });
       return;
     }
-    if (!(row.outcome === "deferred" && r?.code === "sandbox.capacity")) capDefers.delete(n); // #5746: a lane the pool accepted resets the capacity count
+    if (!(row.outcome === "deferred" && r?.code === "sandbox.capacity")) { capDefers.delete(n); capQuiet.delete(n); } // #5746: a lane the pool accepted resets the capacity count
     if (row.outcome === "deferred" && (r?.code === "stack.replan" || r?.code === "stack.restart") && !cancelled) {
       // #5833: the stacked dependent's PR and branch were dropped. replan: it builds as a normal lane on the lane base (today's held/skipped
       // rules decide while its dependency is unsatisfied); restart: it may stack again on the dependency's new head, from the frozen contract.
@@ -1243,6 +1244,12 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           return;
         }
         requeue(n, capGated ? 0 : delayMs); done(); save();
+        // #6204: admit-or-don't-start: a pool refusal the capacity sample gates is a wait, not a deferral row: the issue stays pending and
+        // the sample (polled every pollMs) wakes it. The first refusal of a wait is one batch event; queue_wait is attributed to `capacity` by the clock.
+        if (capGated && r?.code === "sandbox.capacity") {
+          if (!capQuiet.has(n)) { capQuiet.add(n); try { store?.log?.({ event: "capacity.wait", issue: n, batch: batchId ?? null, reason: r.reason ?? null }); } catch { /* best effort */ } }
+          return;
+        }
         update({ ...row, detail: `requeued in ${Math.round(pol.delayMs / 1000)}s: ${r?.code ?? "deferred"}${r?.detail ? ` ${r.detail}` : ""}` });
         return;
       }
@@ -1275,7 +1282,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       lostSeen.set(la, [...win, lostNow]);
     }
     if (row.outcome === "engine-error") {
-      const ag = r?.agent ?? r?.sandbox?.agent ?? null, hs = ag && breaker ? hostSignature(r, row.detail) : null;
+      const ag = r?.agent ?? r?.sandbox?.agent ?? null, hs = ag && breaker ? hostSignature(r, row.detail) ?? (isTransientEngineError(row.detail) ? "transport" : null) : null; // #6204: a host's link failures pause that host, not the batch
       const sc = hs ? await scopedEngineError(ag, hs) : null;
       const qn = sc?.quarantined ? (quarantineRequeues.get(n) ?? 0) + 1 : 0; // a lane waits out the quarantine a bounded number of times, then counts as an ordinary engine-error (batch breaker included)
       if (sc?.quarantined && qn <= QUARANTINE_REQUEUES) { quarantineRequeues.set(n, qn); // #5988: an agent in quarantine: its lane waits and is requeued without a relaunch or breaker count; unaffected agents keep admitting
@@ -1488,7 +1495,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     heads.delete(n); enqueued.delete(n); busyNoted.delete(n);
     const rec = { startedAt: now(), ...(plan ? { plan: true } : {}), ...(stackedOn ? { stackedOn } : {}), ...(queueMs != null ? { queueMs } : {}), ...(qc ? { queueCauses: qc.causes, queueTotalMs: qc.total_ms } : {}), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}), ...(pl ? { placement: pl } : {}) };
     if (!firstAdmit.has(n)) firstAdmit.set(n, rec.startedAt); // #5834: chain wall time starts at the first admission, plan lane included
-    runRecs.set(n, rec); keptBoxes.delete(n); notBefore.delete(n); capReasons.delete(n); save();
+    runRecs.set(n, rec); keptBoxes.delete(n); notBefore.delete(n); capReasons.delete(n); capQuiet.delete(n); save();
     track(n, (async () => {
       // Pre-filter once per issue (a requeued issue is not re-checked); fail-open: an error means a normal lane.
       if (prefilter && !checked.has(n)) { let pf = null; try { pf = await prefilter(n, lane); } catch { pf = null; } checked.set(n, pf); save(); }
@@ -2373,6 +2380,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       let wake = waits.length ? Math.max(0, Math.min(...waits) - t) : null;
       if (holdUntil && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #4446: a cleared hold (forgedock limits clear) admits on the next poll
       if (getPause && pending.length && (opPause || running.size)) wake = Math.min(wake ?? pollMs, pollMs); // #5975: an --unpause or expiry
+      if (pending.some((n) => capQuiet.has(n) && !(notBefore.get(n) > t))) wake = Math.min(wake ?? pollMs, pollMs); // #6204: a capacity-gated issue is woken by the next pool sample, not a per-issue timer
       if ((getParallel || getHeld) && pending.length) wake = Math.min(wake ?? pollMs, pollMs);
       if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
       if (pending.some((n) => remoteCapped.has(n))) wake = Math.min(wake ?? pollMs, pollMs); // #5138: a live --set-max-remote raise
@@ -2406,6 +2414,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       else if (pending.length && opHeldHit.size && !pending.some((n) => !opHeldHit.has(n) && isReady(n)) && holdExpiring([...opHeldHit]) && !cancelled) await nap(wake ?? pollMs); // #5469: a hold with an expiry keeps the batch open until it expires (re-admit or alert), not finalised silently
       else if (pending.length && opHeldHit.size && !pending.some((n) => !opHeldHit.has(n) && isReady(n))) { if (await drainAdds()) continue; break; } // #4592: held by the operator: pending for a --resume
       else if (pending.length && (driftHeld.size || integHeld.size)) { if (await drainAdds()) continue; break; } // held by a drift flag (block_dispatch) or a red integration streak (#4667): pending for a later batch
+      else if (pending.some((n) => capQuiet.has(n))) await nap(Math.min(wake ?? pollMs, pollMs)); // #6204: waiting for a pool slot with nothing running: the next capacity sample wakes it
       else if (pending.some((n) => remoteCapped.has(n))) await nap(wake ?? pollMs); // #5138: live max_remote 0: wait for a raise or another placement
       else if (pending.length) { // nothing runnable, nothing running, nothing waiting on time: a dependency cycle
         // #5162: only real cycles are labelled so; the rest name the cycle member (or failed root) that blocks them

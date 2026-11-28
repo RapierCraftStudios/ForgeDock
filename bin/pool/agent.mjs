@@ -326,10 +326,10 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const reservations = () => (Array.isArray(cfg.reservations) ? cfg.reservations.filter((r) => r && typeof r.name === "string" && r.cpus > 0 && r.mem_gb > 0) : []);
   const prioOf = (r) => r.priority ?? "normal";
   const peakUse = () => activeRecs().reduce((a, r) => { const e = estimateFor(r.repo ?? null, { cpus: r.cpus, mem: r.mem_gb }); return { cpus: a.cpus + Math.max(r.cpus, e.cpus), mem: a.mem + Math.max(r.mem_gb, e.mem) }; }, { cpus: 0, mem: 0 });
-  // #6047: heavy tokens (cfg.elastic_lanes, default off). A lane is admitted on its base reservation; each heavy step leases a token
+  // #6047: heavy tokens (cfg.elastic_lanes, default on since #6204). A lane is admitted on its base reservation; each heavy step leases a token
   // (weight = max(default, p90 history - base)) from this host's pool. Tokens live in store.data.heavy and expire with their lease,
   // when the sandbox exits or when it is destroyed.
-  const elastic = () => cfg.elastic_lanes === true;
+  const elastic = () => cfg.elastic_lanes !== false; // #6204: on by default; `elastic_lanes: false` restores worst-case accounting
   const heavyTtlMs = () => (cfg.heavy_ttl_s ?? 300) * 1000;
   const heavyDefault = () => ({ cpus: cfg.heavy_weight?.cpus ?? 1, mem: cfg.heavy_weight?.mem_gb ?? 2 });
   const heavyTokens = () => (store.data.heavy ??= {});
@@ -339,7 +339,16 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     if (dropped) store.save();
     return Object.values(heavyTokens()).reduce((a, t) => ({ cpus: a.cpus + t.cpus, mem: a.mem + t.mem, n: a.n + 1 }), { cpus: 0, mem: 0, n: 0 });
   }
-  const baseUse = () => activeRecs().reduce((a, r) => ({ cpus: a.cpus + r.cpus, mem: a.mem + r.mem_gb }), { cpus: 0, mem: 0 });
+  /** #6204: elastic admission charges a lane its measured footprint (cfg.elastic_base floor, raised to the mean live usage of the running lanes), never above what it asked for. */
+  function elasticBase() {
+    const fl = { cpus: cfg.elastic_base?.cpus ?? 0.4, mem: cfg.elastic_base?.mem_gb ?? 0.3 };
+    const us = activeRecs().map((r) => r.usage).filter((u) => u?.samples >= 3);
+    if (!us.length) return fl;
+    const mean = (k) => us.reduce((a, u) => a + u[k] / u.samples, 0) / us.length;
+    return { cpus: Math.max(fl.cpus, mean("cpu_sum")), mem: Math.max(fl.mem, mean("mem_sum")) };
+  }
+  const charge = (cpus, mem, base = elastic() ? elasticBase() : null) => (base ? { cpus: Math.min(cpus, base.cpus), mem: Math.min(mem, base.mem) } : { cpus, mem });
+  const baseUse = () => { const b = elastic() ? elasticBase() : null; return activeRecs().reduce((a, r) => { const c = charge(r.cpus, r.mem_gb, b); return { cpus: a.cpus + c.cpus, mem: a.mem + c.mem }; }, { cpus: 0, mem: 0 }); };
   /** Elastic: base reservations plus held tokens; flat: each lane's projected peak (#5858). */
   const projectedUse = () => { if (!elastic()) return peakUse(); const b = baseUse(), h = heavyHeld(); return { cpus: b.cpus + h.cpus, mem: b.mem + h.mem }; };
   /** Lane ceiling derived from the token pool when elastic: a multiple of the default-weight heavy steps the host holds. */
@@ -372,9 +381,9 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   function heavyView() {
     if (!elastic()) return {};
     const h = heavyHeld(), e = effectiveCapacity(), b = baseUse();
-    return { elastic_lanes: true, heavy_tokens: h.n, heavy_held: { cpus: r2(h.cpus), mem_gb: r2(h.mem) }, cpus_free_elastic: r2(e.cpus - b.cpus - h.cpus - coTenant.cpus), mem_free_gb_elastic: r2(e.mem - b.mem - h.mem - coTenant.mem_gb), lanes_ceiling_derived: derivedCeiling() };
+    return { elastic_lanes: true, elastic_base: { cpus: r2(elasticBase().cpus), mem_gb: r2(elasticBase().mem) }, heavy_tokens: h.n, heavy_held: { cpus: r2(h.cpus), mem_gb: r2(h.mem) }, cpus_free_elastic: r2(e.cpus - b.cpus - h.cpus - coTenant.cpus), mem_free_gb_elastic: r2(e.mem - b.mem - h.mem - coTenant.mem_gb), lanes_ceiling_derived: derivedCeiling() };
   }
-  const sumRecs = (rs) => rs.reduce((a, s) => ({ cpus: a.cpus + s.cpus, mem: a.mem + s.mem_gb }), { cpus: 0, mem: 0 });
+  const sumRecs = (rs) => { const b = elastic() ? elasticBase() : null; return rs.reduce((a, s) => { const c = charge(s.cpus, s.mem_gb, b); return { cpus: a.cpus + c.cpus, mem: a.mem + c.mem }; }, { cpus: 0, mem: 0 }); }; // #6204: elastic lanes are charged their measured base
   const weighted = () => reservations().length > 0 || Boolean(cfg.idle_only);
   const SHARES = () => ({ reserved: 4096, normal: 1024, borrow: 128, throttled: 2, ...(cfg.cpu_shares ?? {}) });
   /** Admission headroom per class: free = physical, unreserved_free = space outside every reservation, borrowable = what `borrow` may take. */
@@ -561,7 +570,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const reservation = prio === "reserved" ? (spec.reservation ?? (reservations().length === 1 ? reservations()[0].name : null)) : null;
     const c = capacity();
     const h = live(cfg);
-    const adm = admit({ prio, cpus, mem_gb, reservation, h });
+    const adm = admit({ prio, cpus: charge(cpus, mem_gb).cpus, mem_gb: charge(cpus, mem_gb).mem, reservation, h }); // #6204
     if (c.draining && !c.paused) return { status: 503, body: { error: `draining: ${c.draining_reason}`, code: "pool.draining", capacity: c }, retryAfter: 60 }; // #6061: finish running lanes, accept none
     if (laneTargetOn() && !c.paused && c.active >= laneNow()) return { status: 503, body: { error: `lane target ${laneNow()} reached (${c.active} running)`, code: "pool.lane_target", lane_target: laneNow(), capacity: c }, retryAfter: 60 };
     if (c.paused || adm.refuse) {
@@ -572,7 +581,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     // Burst model: reservations are small, so also refuse when the VM is genuinely short of memory or overloaded right now.
     // A reserved launch skips the load gate: it must never be refused because lanes are busy (they are throttled/drained below).
     if (prio !== "reserved") { // #5858: ramp-aware: the admitted lanes' projected peaks plus this one must fit, however low the load is right now
-      const e = effectiveCapacity(), pu = projectedUse(), est = elastic() ? { cpus, mem: mem_gb } : estimateFor(slugOf(spec), { cpus, mem: mem_gb }), nm = Math.max(mem_gb, est.mem), nc = Math.max(cpus, est.cpus);
+      const e = effectiveCapacity(), pu = projectedUse(), est = elastic() ? { cpus, mem: mem_gb } : estimateFor(slugOf(spec), { cpus, mem: mem_gb }), ch = charge(cpus, mem_gb), nm = elastic() ? ch.mem : Math.max(mem_gb, est.mem), nc = elastic() ? ch.cpus : Math.max(cpus, est.cpus);
       const availMem = e.mem - coTenant.mem_gb, availCpus = e.cpus - coTenant.cpus;
       if (pu.mem + nm > availMem + 1e-9 || pu.cpus + nc > availCpus + 1e-9) return { status: 503, body: { error: `projected peak ${r1(pu.mem + nm)} GB / ${r1(pu.cpus + nc)} cpus exceeds capacity ${r1(availMem)} GB / ${r1(availCpus)} cpus`, code: "pool.projected_peak", capacity: c }, retryAfter: 60 };
     }
