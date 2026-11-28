@@ -167,12 +167,36 @@ test("a docker DNS error writes daemon.json dns, restarts docker once when idle 
   assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { "log-driver": "json-file", dns: ["1.1.1.1", "8.8.8.8"] });
 });
 
-test("a docker DNS error while sandboxes run writes dns but does not restart; the original error surfaces", async () => {
+test("a docker DNS error while sandboxes run leaves daemon.json untouched and does not restart (#6234)", async () => {
   const file = join(tmpDir("dd-"), "daemon.json");
+  writeFileSync(file, JSON.stringify({ x: 1 }));
   const restarts = [];
   await assert.rejects(withIpv4Fallback(async () => { throw dnsErr; }, dnsOpts(file, { idle: false, restarts })), /pull failed/);
   assert.equal(restarts.length, 0);
-  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).dns, ["1.1.1.1", "8.8.8.8"]);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { x: 1 });
+});
+
+test("the DNS repair holds admission across the idle check and the restart, then releases it (#6234)", async () => {
+  const file = join(tmpDir("dd-"), "daemon.json");
+  const log = [];
+  const r = await ensureDaemonDns({ file, hold: () => { log.push("hold"); return () => log.push("release"); }, idle: async () => { log.push("idle"); return true; }, restart: async () => { log.push("restart"); } });
+  assert.equal(r.restarted, true);
+  assert.deepEqual(log, ["hold", "idle", "restart", "release"]);
+  const busy = [];
+  const r2 = await ensureDaemonDns({ file: join(tmpDir("dd-"), "d.json"), hold: () => { busy.push("hold"); return () => busy.push("release"); }, idle: async () => false, restart: async () => { busy.push("restart"); } });
+  assert.deepEqual([r2.restarted, busy], [false, ["hold", "release"]]);
+});
+
+test("a co-tenant container on the daemon blocks the restart; a failed restart restores daemon.json (#6234)", async () => {
+  const file = join(tmpDir("dd-"), "daemon.json");
+  const before = JSON.stringify({ "log-driver": "json-file" });
+  writeFileSync(file, before);
+  let restarts = 0;
+  const listRunning = async () => ["someone-elses-db"];
+  const r = await ensureDaemonDns({ file, idle: async () => (await listRunning()).length === 0, restart: async () => { restarts++; } });
+  assert.deepEqual([r.restarted, restarts, readFileSync(file, "utf8")], [false, 0, before]);
+  const f = await ensureDaemonDns({ file, idle: () => true, restart: async () => { throw new Error("systemctl failed"); } });
+  assert.deepEqual([f.restarted, f.changed, readFileSync(file, "utf8")], [false, false, before]);
 });
 
 test("an existing daemon.json dns is left alone and other keys are kept", async () => {
@@ -180,7 +204,7 @@ test("an existing daemon.json dns is left alone and other keys are kept", async 
   const before = JSON.stringify({ dns: ["9.9.9.9"], x: 1 });
   writeFileSync(file, before);
   const restarts = [];
-  assert.deepEqual(await ensureDaemonDns({ file, idle: () => true, restart: async () => { restarts.push(1); } }), { changed: false, restarted: false });
+  assert.deepEqual(await ensureDaemonDns({ file, idle: () => true, restart: async () => { restarts.push(1); } }), { changed: false, restarted: false, reason: "dns-set" });
   assert.equal(readFileSync(file, "utf8"), before);
   assert.equal(restarts.length, 0);
 });
