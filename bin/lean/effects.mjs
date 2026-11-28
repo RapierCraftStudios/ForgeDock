@@ -526,6 +526,15 @@ export function makeGhCache({ root = null, tmp = tmpdir() } = {}) {
   };
 }
 
+/** #6233: classify a `claude auth status` result. Only the documented logged-out signal is `ok:false`; everything else that is not success is unknown. */
+export function classifyAuthStatus({ error = null, status = null, out = "" } = {}) {
+  if (error || status === null) return { ok: null, warning: `claude auth status did not run (${String(error?.code ?? error?.message ?? "timeout or signal").slice(0, 80)})` };
+  const text = String(out ?? "");
+  if (/"loggedIn"\s*:\s*false/i.test(text) || (status === 1 && /\bnot logged in\b/i.test(text))) return { ok: false };
+  if (status === 0) return { ok: true };
+  return { ok: null, warning: `claude auth status exited ${status} without the logged-out signal; treated as unknown, not as a login failure: ${text.trim().split("\n")[0].slice(0, 120)}` };
+}
+
 export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
   const base = makeIo();
   const seqLeaseIo = makeSequenceLeaseIo(); // #5340: one instance: sequence leases, surface leases and declarations
@@ -543,11 +552,16 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
     gh: run("gh"), git: run("git"), docker: run("docker"), killGroup: async (pid, marker) => killLedgerPid(pid, marker), ledger: (opts) => makeLedger(opts), runTmp: makeRunTmp(), host: makeHostProbe(), heavy: guardHeavyDisk(makeHeavyIo({ host: makeHostProbe() }), { host: makeHostProbe(), minFreeGb: async () => (await import("../gc.mjs")).readHygiene(process.cwd()).min_free_gb, gc: async () => { const g = await import("../gc.mjs"); return g.runOwnedGc({ probes: g.makeGcProbes({ cwd: process.cwd() }), hygiene: g.readHygiene(process.cwd()), budgetMs: 60000 }); } }), projector: makeProjector({ gh: base.gh }, { repo }), runner: makeLeanRunner({ subagentModel }), waitCiGreen: base.waitCiGreen,
     /** Shared dependency cache (#4220): the repo's own package manager, argv only, bounded by the cache's timeout. */
     deps: makeDepCache({ exec: async (cmd, args, { cwd, env, timeoutMs } = {}) => String((await pexec(cmd, args, { cwd, env: { ...process.env, ...(env ?? {}) }, timeout: timeoutMs ?? 0, maxBuffer: 100 * 1024 * 1024 })).stdout) }),
-    /** #6206: the cheap login probe (`claude auth status`, no model call) the admit probe runs before any builder session; `ok` false only when claude ran and said no. */
-    async claudeAuthProbe() {
+    /**
+     * #6206/#6233: the cheap login probe (`claude auth status`, no model call) the admit probe runs before any builder session. It runs with the
+     * lane's own env (`env`: CLAUDE_CONFIG_DIR, API-key vars), so a pinned-profile or API-key lane is probed as itself. `ok` false only for the
+     * documented logged-out signal (exit 1 with "Not logged in" or loggedIn:false); any other non-zero exit, a missing binary or a timeout is unknown
+     * (`ok` null, `warning` set): the caller fails open and records the warning.
+     */
+    async claudeAuthProbe({ env = null } = {}) {
       const { spawnSync } = await import("node:child_process");
-      const r = spawnSync("claude", ["auth", "status"], { timeout: 15000, stdio: "ignore" });
-      return r.error || r.status === null ? { ok: null } : { ok: r.status === 0 }; // a missing binary or a timeout is no evidence
+      const r = spawnSync("claude", ["auth", "status"], { timeout: 15000, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...(env ?? {}) } });
+      return classifyAuthStatus({ error: r.error, status: r.status, out: `${r.stdout ?? ""}\n${r.stderr ?? ""}` });
     },
     /** #6206: the admit probe's own read of the required checks (a separate seam, so the precheck's and the merge policy's reads are unchanged). */
     async baseRequiredChecks(lane) { return requiredChecksFor({ gh: run("gh"), repo, lane }); },

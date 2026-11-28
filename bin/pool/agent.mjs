@@ -10,7 +10,7 @@ import { appendFileSync, closeSync, constants as fsConstants, existsSync, fstatS
 import { basename, dirname, join } from "node:path";
 import { cpus, hostname } from "node:os";
 import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
-import { repoRoot, versionOf, laneImageTag, laneBuildArgs } from "./version.mjs";
+import { repoRoot, versionOf, laneImageTag, laneBuildArgs, cmpVersion } from "./version.mjs";
 import { provideLaneImage, pullVariantImage, withIpv4Fallback, fetchLaneDigest } from "./lane-image.mjs";
 import { ensureDaemonDns } from "./docker-dns.mjs";
 import { jsonStore } from "./store.mjs";
@@ -184,8 +184,10 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const agentId = String(cfg.agent_id ?? cfg.name ?? hostname()).toLowerCase().replace(/[^a-z0-9_.-]/g, "-").slice(0, 60);
   const AGENT = agentLabel(agentId);
   const OWN = [LABEL, AGENT];
-  // #6195: a dockerd DNS failure triggers a daemon.json dns repair; docker restarts only while no sandbox is active.
-  const pinOpts = { ensureDns: () => ensureDaemonDns({ idle: () => activeRecs().length === 0, restart: () => run("systemctl", ["restart", "docker"], { timeout: 120000 }), log }) };
+  // #6195/#6234: a dockerd DNS failure triggers a daemon.json dns repair. Admission is held across the idle check and the restart; the restart runs only with no sandbox and no container at all (co-tenants included) on the daemon. Lane containers use per-container --dns (netArgs).
+  let dnsHold = 0;
+  const noOtherContainers = async () => { if (typeof docker.listRunning !== "function") return false; try { return (await docker.listRunning()).length === 0; } catch { return false; } };
+  const pinOpts = { ensureDns: () => ensureDaemonDns({ hold: () => { dnsHold++; return () => { dnsHold--; }; }, idle: async () => activeRecs().length === 0 && await noOtherContainers() && activeRecs().length === 0, restart: () => run("systemctl", ["restart", "docker"], { timeout: 120000 }), log }) };
   /** Images a sandbox may need are pulled ahead of time, never inside a launch request (which has a short timeout). */
   async function prepullImages() {
     if (await docker.hasImage?.(dindImage)) { prepull.error = null; return; }
@@ -347,8 +349,28 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const mean = (k) => us.reduce((a, u) => a + u[k] / u.samples, 0) / us.length;
     return { cpus: Math.max(fl.cpus, mean("cpu_sum")), mem: Math.max(fl.mem, mean("mem_sum")) };
   }
-  const charge = (cpus, mem, base = elastic() ? elasticBase() : null) => (base ? { cpus: Math.min(cpus, base.cpus), mem: Math.min(mem, base.mem) } : { cpus, mem });
-  const baseUse = () => { const b = elastic() ? elasticBase() : null; return activeRecs().reduce((a, r) => { const c = charge(r.cpus, r.mem_gb, b); return { cpus: a.cpus + c.cpus, mem: a.mem + c.mem }; }, { cpus: 0, mem: 0 }); };
+  // #6235: only a lane whose image carries the remote heavy backend (`remote`) is charged the elastic base: its heavy steps lease tokens.
+  // Any other lane (a pre-1.72 image, an unlabelled image, a record from before this field) gates nothing, so it is charged what it asked for.
+  const charge = (cpus, mem, base = elastic() ? elasticBase() : null, remote = false) => (base && remote ? { cpus: Math.min(cpus, base.cpus), mem: Math.min(mem, base.mem) } : { cpus, mem });
+  const HEAVY_REMOTE_MIN = "1.72.0"; // first engine version whose bin/lean/heavy.mjs speaks the pool agent's /heavy route (#6047, default #6204)
+  /** #6235: does this lane image carry the remote heavy backend? Read its version label (derived tools/project images inherit it); unknown fails closed. */
+  const heavyCapCache = new Map(); // image -> {at, v}: launches are frequent, the label is not
+  async function laneHasRemoteHeavy(img) {
+    const hit = heavyCapCache.get(img);
+    if (hit && now() - hit.at < 60000) return hit.v;
+    const v = await laneHasRemoteHeavyNow(img);
+    heavyCapCache.set(img, { at: now(), v });
+    return v;
+  }
+  async function laneHasRemoteHeavyNow(img) {
+    try {
+      const v = String((await docker.imageLabel?.(img, "org.opencontainers.image.version")) ?? "").trim();
+      const c = cmpVersion(v, HEAVY_REMOTE_MIN);
+      if (c === null) { log.warn?.(`lane image ${img} has no engine version label; charging its lanes worst-case`); return false; }
+      return c >= 0;
+    } catch { return false; }
+  }
+  const baseUse = () => { const b = elastic() ? elasticBase() : null; return activeRecs().reduce((a, r) => { const c = charge(r.cpus, r.mem_gb, b, r.heavyRemote === true); return { cpus: a.cpus + c.cpus, mem: a.mem + c.mem }; }, { cpus: 0, mem: 0 }); };
   /** Elastic: base reservations plus held tokens; flat: each lane's projected peak (#5858). */
   const projectedUse = () => { if (!elastic()) return peakUse(); const b = baseUse(), h = heavyHeld(); return { cpus: b.cpus + h.cpus, mem: b.mem + h.mem }; };
   /** Lane ceiling derived from the token pool when elastic: a multiple of the default-weight heavy steps the host holds. */
@@ -360,6 +382,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const held = heavyHeld(), mine = Object.entries(heavyTokens()).find(([, t]) => t.sandbox === r.id);
     const ttl = Math.round(heavyTtlMs() / 1000);
     if (mine) { mine[1].refs = (mine[1].refs ?? 1) + 1; mine[1].expires = now() + heavyTtlMs(); store.save(); return { status: 200, body: { granted: true, token: mine[0], ttl_s: ttl } }; }
+    const hm = hostMemView(); // #5967/#6235: below the floor no NEW lease is granted (a lane already holding one keeps it above), so heavy work stops before the host OOMs
+    if (hm.host_mem_low) return { status: 200, body: { granted: false, retry_after_s: cfg.host_mem_retry_after_s ?? 30, reason: "host_mem", host_mem_free_gb: hm.host_mem_free_gb, floor_gb: hm.host_mem_floor_gb, held: held.n } };
     const est = estimateFor(r.repo ?? null, { cpus: r.cpus, mem: r.mem_gb }), d = heavyDefault();
     const w = { cpus: Math.max(d.cpus, est.cpus - r.cpus), mem: Math.max(d.mem, est.mem - r.mem_gb) };
     const e = effectiveCapacity(), b = baseUse(), live_ = live(cfg), ram = Number.isFinite(live_?.mem_available_gb) ? live_.mem_available_gb : Infinity;
@@ -383,7 +407,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const h = heavyHeld(), e = effectiveCapacity(), b = baseUse();
     return { elastic_lanes: true, elastic_base: { cpus: r2(elasticBase().cpus), mem_gb: r2(elasticBase().mem) }, heavy_tokens: h.n, heavy_held: { cpus: r2(h.cpus), mem_gb: r2(h.mem) }, cpus_free_elastic: r2(e.cpus - b.cpus - h.cpus - coTenant.cpus), mem_free_gb_elastic: r2(e.mem - b.mem - h.mem - coTenant.mem_gb), lanes_ceiling_derived: derivedCeiling() };
   }
-  const sumRecs = (rs) => { const b = elastic() ? elasticBase() : null; return rs.reduce((a, s) => { const c = charge(s.cpus, s.mem_gb, b); return { cpus: a.cpus + c.cpus, mem: a.mem + c.mem }; }, { cpus: 0, mem: 0 }); }; // #6204: elastic lanes are charged their measured base
+  const sumRecs = (rs) => { const b = elastic() ? elasticBase() : null; return rs.reduce((a, s) => { const c = charge(s.cpus, s.mem_gb, b, s.heavyRemote === true); return { cpus: a.cpus + c.cpus, mem: a.mem + c.mem }; }, { cpus: 0, mem: 0 }); }; // #6204: elastic lanes are charged their measured base
   const weighted = () => reservations().length > 0 || Boolean(cfg.idle_only);
   const SHARES = () => ({ reserved: 4096, normal: 1024, borrow: 128, throttled: 2, ...(cfg.cpu_shares ?? {}) });
   /** Admission headroom per class: free = physical, unreserved_free = space outside every reservation, borrowable = what `borrow` may take. */
@@ -497,7 +521,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const active = Object.values(sb()).filter((s) => s.state !== "exited").length;
     const e = effectiveCapacity();
     const h = live(cfg);
-    return { host: cfg.name ?? hostname(), usage_summary: usageSummary(Object.values(sb()).filter((r) => r.state !== "exited").map(usageView)), ...running, vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.log && upgrade.state === "failed" ? { upgrade_log: upgrade.log } : {}), ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10, ...(i.depcache_bytes ? { depcache_gb: Object.fromEntries(Object.entries(i.depcache_bytes).map(([k, b]) => [k, Math.round(b / 107374182.4) / 10])) } : {}) }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...throttleView(h), ...diskView(), ...laneDiskView(), ...hostDiskView(active), ...hostMemView(), ...heavyView(), runners: Object.entries(runners()).map(([name, r]) => ({ name, label: r.label })), net: (() => { const rx = netRx(now()); const n = readNet(); return rx ? { ...(n ?? {}), ...rx } : n; })(), paused: Boolean(cfg.paused || ownerPaused || policyPaused), owner_paused: ownerPaused, ...laneTargetView(), ...(Number.isFinite(h?.load_per_core) ? { load_per_core: h.load_per_core } : {}), ...(Number.isFinite(h?.mem_available_gb) ? { mem_available_gb: h.mem_available_gb } : {}), live: h, usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
+    return { host: cfg.name ?? hostname(), usage_summary: usageSummary(Object.values(sb()).filter((r) => r.state !== "exited").map(usageView)), ...running, vm: e.vm, ...(pendingResize ? { pending_resize: { cpus: pendingResize.cpus, mem_gb: pendingResize.mem_gb } } : {}), upgrading: upgrade.state, ...(upgrade.log && upgrade.state === "failed" ? { upgrade_log: upgrade.log } : {}), ...(upgrade.error ? { upgrade_error: upgrade.error } : {}), ...(prepull.error ? { prepull_error: prepull.error } : {}), ...(cacheErr.size ? { cache_sweep_error: [...cacheErr.values()][0] } : {}), ...(cacheInfo.size ? { cache_volumes: Object.fromEntries([...cacheInfo].map(([v, i]) => [v, { size_gb: Math.round(i.size_bytes / 107374182.4) / 10, ...(i.depcache_bytes ? { depcache_gb: Object.fromEntries(Object.entries(i.depcache_bytes).map(([k, b]) => [k, Math.round(b / 107374182.4) / 10])) } : {}) }])) } : {}), cpus_total: e.cpus, mem_total_gb: e.mem, cpus_free: r2(e.cpus - u.cpus - coTenant.cpus), mem_free_gb: r2(e.mem - u.mem - coTenant.mem_gb), configured: { cpus: cfg.allow_cpus, mem_gb: cfg.allow_mem_gb }, clamped: e.clamped, ...(coTenant.cpus || coTenant.mem_gb ? { cotenant: { cpus: r2(coTenant.cpus), mem_gb: r2(coTenant.mem_gb) } } : {}), active, ...priorityView(), ...throttleView(h), ...diskView(), ...laneDiskView(), ...hostDiskView(active), ...hostMemView(), ...heavyView(), runners: Object.entries(runners()).map(([name, r]) => ({ name, label: r.label })), net: (() => { const rx = netRx(now()); const n = readNet(); return rx ? { ...(n ?? {}), ...rx } : n; })(), paused: Boolean(cfg.paused || ownerPaused || policyPaused || dnsHold > 0), owner_paused: ownerPaused, ...laneTargetView(), ...(Number.isFinite(h?.load_per_core) ? { load_per_core: h.load_per_core } : {}), ...(Number.isFinite(h?.mem_available_gb) ? { mem_available_gb: h.mem_available_gb } : {}), live: h, usage: Object.fromEntries(Object.values(sb()).filter((r) => r.usage?.samples).map((r) => [r.issue ?? r.id, { ...usageView(r), state: r.state }])) };
   }
 
   /** The image a spec's lanes run (the per-repo lane_tools tag when tools are listed), without building it. */
@@ -570,7 +594,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const reservation = prio === "reserved" ? (spec.reservation ?? (reservations().length === 1 ? reservations()[0].name : null)) : null;
     const c = capacity();
     const h = live(cfg);
-    const adm = admit({ prio, cpus: charge(cpus, mem_gb).cpus, mem_gb: charge(cpus, mem_gb).mem, reservation, h }); // #6204
+    const heavyRemote = elastic() ? await laneHasRemoteHeavy(spec.image ?? image) : false; // #6235
+    const adm = admit({ prio, cpus: charge(cpus, mem_gb, undefined, heavyRemote).cpus, mem_gb: charge(cpus, mem_gb, undefined, heavyRemote).mem, reservation, h }); // #6204
     if (c.draining && !c.paused) return { status: 503, body: { error: `draining: ${c.draining_reason}`, code: "pool.draining", capacity: c }, retryAfter: 60 }; // #6061: finish running lanes, accept none
     if (laneTargetOn() && !c.paused && c.active >= laneNow()) return { status: 503, body: { error: `lane target ${laneNow()} reached (${c.active} running)`, code: "pool.lane_target", lane_target: laneNow(), capacity: c }, retryAfter: 60 };
     if (c.paused || adm.refuse) {
@@ -581,7 +606,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     // Burst model: reservations are small, so also refuse when the VM is genuinely short of memory or overloaded right now.
     // A reserved launch skips the load gate: it must never be refused because lanes are busy (they are throttled/drained below).
     if (prio !== "reserved") { // #5858: ramp-aware: the admitted lanes' projected peaks plus this one must fit, however low the load is right now
-      const e = effectiveCapacity(), pu = projectedUse(), est = elastic() ? { cpus, mem: mem_gb } : estimateFor(slugOf(spec), { cpus, mem: mem_gb }), ch = charge(cpus, mem_gb), nm = elastic() ? ch.mem : Math.max(mem_gb, est.mem), nc = elastic() ? ch.cpus : Math.max(cpus, est.cpus);
+      const e = effectiveCapacity(), pu = projectedUse(), est = elastic() ? { cpus, mem: mem_gb } : estimateFor(slugOf(spec), { cpus, mem: mem_gb }), ch = charge(cpus, mem_gb, undefined, heavyRemote), nm = elastic() ? ch.mem : Math.max(mem_gb, est.mem), nc = elastic() ? ch.cpus : Math.max(cpus, est.cpus);
       const availMem = e.mem - coTenant.mem_gb, availCpus = e.cpus - coTenant.cpus;
       if (pu.mem + nm > availMem + 1e-9 || pu.cpus + nc > availCpus + 1e-9) return { status: 503, body: { error: `projected peak ${r1(pu.mem + nm)} GB / ${r1(pu.cpus + nc)} cpus exceeds capacity ${r1(availMem)} GB / ${r1(availCpus)} cpus`, code: "pool.projected_peak", capacity: c }, retryAfter: 60 };
     }
@@ -626,10 +651,10 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const envFile = join(dir, "env");
     const credToken = randomBytes(24).toString("hex");
     const withDocker = Boolean(spec.docker);
-    const env = { ...(spec.env ?? {}), ...(withDocker ? { DOCKER_HOST: "tcp://127.0.0.1:2375" } : {}), ...(elastic() ? { CS_HEAVY_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/heavy` } : {}), CS_CRED_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/creds`, CS_RELAY_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/relay`, CS_CRED_TOKEN: credToken, CS_SANDBOX_ID: spec.id, ...cpuQuotaEnv(limit?.lane_cpus ?? cpus), CS_REPO_SLUG: spec.repo?.slug ?? "", CS_REPO_URL: spec.repo?.url ?? "", CS_REPO_REF: spec.repo?.ref ?? "", CS_RESULT_FILE: spec.result_file ?? "", CS_WORK_DIR: workDirOf(name),
+    const env = { ...(spec.env ?? {}), ...(withDocker ? { DOCKER_HOST: "tcp://127.0.0.1:2375" } : {}), ...(elastic() && heavyRemote ? { CS_HEAVY_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/heavy` } : {}), CS_CRED_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/creds`, CS_RELAY_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/relay`, CS_CRED_TOKEN: credToken, CS_SANDBOX_ID: spec.id, ...cpuQuotaEnv(limit?.lane_cpus ?? cpus), CS_REPO_SLUG: spec.repo?.slug ?? "", CS_REPO_URL: spec.repo?.url ?? "", CS_REPO_REF: spec.repo?.ref ?? "", CS_RESULT_FILE: spec.result_file ?? "", CS_WORK_DIR: workDirOf(name),
       ...(spec.env_snapshots?.enabled ? { FORGE_ENV_IMAGE: envImageOf(spec) } : {}) }; // the image is part of the snapshot key
     writeFileSync(envFile, Object.entries(env).map(([k, v]) => envLine(k, v)).join("\n") + "\n", { mode: 0o600 });
-    const rec = { id: spec.id, name, dir, issue: spec.issue ?? null, slug: spec.repo?.slug ?? null, repo: slugOf(spec), batch: spec.batch ?? null, cpus, mem_gb, result_file: spec.result_file ?? null, state: "starting", startedAt: now(), finishedAt: null, lease: now(), credToken, docker: withDocker, ...(weighted() || spec.priority ? { priority: prio, ...(reservation ? { reservation } : {}) } : {}) };
+    const rec = { heavyRemote, id: spec.id, name, dir, issue: spec.issue ?? null, slug: spec.repo?.slug ?? null, repo: slugOf(spec), batch: spec.batch ?? null, cpus, mem_gb, result_file: spec.result_file ?? null, state: "starting", startedAt: now(), finishedAt: null, lease: now(), credToken, docker: withDocker, ...(weighted() || spec.priority ? { priority: prio, ...(reservation ? { reservation } : {}) } : {}) };
     sb()[spec.id] = rec;
     store.save();
     rec.cacheVolume = cacheVolumeOf(spec.cache?.key ?? spec.repo?.slug); // an explicit agent_id gives this agent its own volume: a shared one would let its work sweep delete a co-resident agent's worktrees

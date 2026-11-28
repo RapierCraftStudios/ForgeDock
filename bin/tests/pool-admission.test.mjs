@@ -10,7 +10,7 @@ import { tmpDir } from "./_tmp.mjs";
 
 function fakeDocker(others = {}) {
   return {
-    runs: [], others,
+    runs: [], others, async imageLabel() { return "1.72.0"; }, // #6235: a current lane image (remote heavy backend)
     async run(args) { this.runs.push(args); return "cid"; },
     async inspect() { return { running: true, exitCode: 0, startedAt: new Date().toISOString(), finishedAt: "" }; },
     async stats(label) { return Array.isArray(label) && label.length === 0 ? this.others : {}; },
