@@ -285,7 +285,8 @@ export async function acquireRemote({ base, credToken = "", fetchFn = (u, o) => 
       let released = false;
       return { ...open, waitMs: now() - t0, token, release: () => { if (released) return; released = true; clearTimer(timer); call("release", { token }).catch(() => {}); } };
     }
-    if (now() - t0 >= maxWaitMs) return { ...open, waitMs: now() - t0, denied: true, timedOut: true, reason: `no heavy token after ${Math.round((now() - t0) / 1000)}s` };
+    if (r?.denied === true) return { ...open, waitMs: now() - t0, denied: true, timedOut: true, env: true, reason: String(r.reason ?? "host memory below the floor: env").slice(0, 300) }; // #6270: the agent's bounded memory wait ran out
+    if (now() - t0 >= maxWaitMs) return { ...open, waitMs: now() - t0, denied: true, timedOut: true, env: true, reason: `no heavy token after ${Math.round((now() - t0) / 1000)}s (env: host capacity)` };
     await sleep(Math.min(pollMs, Math.max(1, Number(r?.retry_after_s) * 1000 || pollMs)));
   }
 }

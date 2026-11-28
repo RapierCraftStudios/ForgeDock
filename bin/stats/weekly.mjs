@@ -101,7 +101,7 @@ const overlap = (a0, a1, spans) => spans.reduce((s, [b0, b1]) => s + Math.max(0,
 const gapCause = (prev) => {
   if (!prev) return "other";
   const o = prev.outcome, c = prev.code ?? "";
-  if (c === "sandbox.capacity" || c === "host.busy" || c === "sandbox.disk_pressure" || o === "host-overloaded") return "capacity";
+  if (c === "sandbox.capacity" || c === "host.busy" || c === "sandbox.disk_pressure" || c === "sandbox.mem_pressure" || o === "host-overloaded") return "capacity";
   if (c === "sandbox.unreachable" || c === "sandbox.transient") return "host_offline";
   if (o === "held" || /^dependency-/.test(o) || c === "dependency.open") return "dependency";
   if (o === "needs-human" || o === "requeued" || o === "hold" || o === "hold-expired" || o === "readmitted") return "hold";

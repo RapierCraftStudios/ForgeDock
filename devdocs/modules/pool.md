@@ -188,3 +188,10 @@ The router ships agents only `AGENT_BUNDLE_PATHS` (`package.json`, `bin/pool`, `
 - `bin/pool/lane-image.mjs` `provideLaneImage` (self-update and `ensureImage`): present locally, else `docker pull` + retag to `forgedock-lane:<version>` after checking the `forgedock.recipe` label equals `versionOf().image`, else the local build (today's path). Mismatched pulls are removed.
 - Pull and build are retried once under temporary `/etc/hosts` IPv4 pins on an IPv6 dial error (`cannot assign requested address`, `network is unreachable`); pins are marked `# forgedock-ipv4-pin` and removed afterwards.
 - Seed a host by hand: `docker pull ghcr.io/rapiercraftstudios/forgedock-lane:<version> && docker tag ... forgedock-lane:<version>`. Decision: `devdocs/decisions/6166-prebuilt-lane-image.md`.
+
+## Entry 2026-11-28 — WSL-aware host memory, max pause, bounded heavy wait (#6270)
+
+- `hostMemFree` now reports effective free = Windows `FreePhysicalMemory` + the guest's reclaimable memory (`MemAvailable - MemFree` from `/proc/meminfo`, injectable as `meminfo`), because on WSL the guest page cache holds Windows RAM and the raw reading sat at 1-2 GB with 13+ GB available. `win_free_gb` and `guest_reclaimable_gb` are returned too. One reading feeds admission (`launch`, `/capacity`), `hostMemPressure` and the heavy gate (`heavyAcquire`).
+- A sandbox memory-paused longer than `host_mem_max_pause_s` (600) is stopped with `sandbox.mem_pressure` (`memPressure`, worktree and volume kept, retention `keep_disk_pressure_s`); `GET /sandboxes/:id/result` answers `mem_pressure: true` and the lane provider settles it as a deferred outcome, like `sandbox.disk_pressure`.
+- A memory-paused sandbox keeps the host `host_mem_low` for admission even when the probe returns nothing.
+- `heavyAcquire` refuses under the floor for at most `heavy_mem_max_wait_s` (600) per sandbox; then it replies `denied: true` (reason ends `env`), `acquireRemote` returns `{denied, env}` at once and `heavy.mjs run` exits 75 with the `forgedock heavy:` line (infra, not a code failure). Tests: `bin/tests/pool-host-mem-gate.test.mjs`, `pool-heavy-token.test.mjs`, `bin/lean/heavy.test.mjs`.

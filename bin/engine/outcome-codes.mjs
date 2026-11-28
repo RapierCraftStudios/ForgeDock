@@ -68,6 +68,7 @@ export const OUTCOME_CODES = Object.freeze({
   SANDBOX_CAPACITY: "sandbox.capacity", // forge#4254: the sandbox provider had no capacity; deferred with backoff
   SANDBOX_TRANSIENT: "sandbox.transient", // forge#5095: the sandbox provider answered a 5xx on launch (router/agent infrastructure) or the launch hit a status-less transport error (forge#5656: fetch failed, ECONNRESET, ETIMEDOUT); deferred with backoff, capped by max_deferrals, never needs-human
   SANDBOX_DISK_PRESSURE: "sandbox.disk_pressure", // forge#5891: the agent stopped the lane to save its host drive from filling; the worktree and volume are kept, the requeued lane adopts them
+  SANDBOX_MEM_PRESSURE: "sandbox.mem_pressure", // forge#6270: the agent stopped a lane paused past host_mem_max_pause_s; the worktree is kept, the requeued lane adopts it
   SANDBOX_AUTH: "sandbox.auth", // forge#4685: the sandbox provider refused or lacked the credential (HTTP 401/403, no token); deferred, never needs-human
   SANDBOX_UNREACHABLE: "sandbox.unreachable", // forge#4672: the sandbox provider stayed unreachable past execution.unreachable_window_min; deferred, the sandbox is kept for adopt
   SANDBOX_LOST: "sandbox.lost", // forge#5859: 3+ sandboxes on one pool agent ended without a result within 60s (agent/VM restart); deferred and requeued once, never counted by the breaker or the engine-error relaunch

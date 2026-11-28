@@ -520,6 +520,11 @@ describe("remote token backend (#6047)", () => {
     const g = await acquireRemote({ ...opts([], []), now: () => t, sleep: async (ms) => { t += ms; }, maxWaitMs: 3000, fetchFn: async () => resp(200, { granted: false, retry_after_s: 1 }) });
     assert.equal(g.denied, true); assert.equal(g.timedOut, true);
   });
+  it("#6270: an agent-side denied reply ends the wait at once as an env-class denial", async () => {
+    let t = 0;
+    const g = await acquireRemote({ ...opts([], []), now: () => t, sleep: async (ms) => { t += ms; }, maxWaitMs: 99999999, fetchFn: async () => resp(200, { granted: false, denied: true, reason: "host memory below the floor: env" }) });
+    assert.equal(g.denied, true); assert.equal(g.env, true); assert.match(g.reason, /env/); assert.ok(t < 1000);
+  });
   it("runWrapped defers (exit 75) a denied step and never runs it; FORGE_HEAVY_FAIL_OPEN=1 is the explicit escape", async () => {
     const ran = [], run = async (cmd, args, env) => { ran.push(env); return { code: 0, signal: null }; };
     const remote = async () => ({ waitMs: 0, holders: 1, denied: true, reason: "heavy gate unavailable: x", release() {} });

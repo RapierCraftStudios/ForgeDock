@@ -153,3 +153,14 @@ test("#6235: the first holder is also refused when host memory is under the floo
   assert.equal(a.body.granted, false); assert.equal(a.body.reason, "host_mem");
   f.close();
 });
+
+test("#6270: the heavy gate gives up after heavy_mem_max_wait_s with a denied env-class reply", async () => {
+  const f = await fixture({ cfg: { heavy_mem_max_wait_s: 120 }, mem: { v: { free_gb: 8 } } }); await f.lane("l1");
+  f.mem.v = { free_gb: 0.5 }; f.clock.t += 31000;
+  const a = await f.post("l1", "acquire");
+  assert.equal(a.body.granted, false); assert.ok(!a.body.denied);
+  f.clock.t += 125000;
+  const b = await f.post("l1", "acquire");
+  assert.equal(b.body.granted, false); assert.equal(b.body.denied, true); assert.match(b.body.reason, /env/);
+  f.close();
+});
