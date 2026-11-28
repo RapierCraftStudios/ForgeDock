@@ -1522,7 +1522,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
             if (rec.remote && remoteRun.has(n)) noteRemote(n, rec.handle);
             if (cancelled) stop(n, rec); // #4376: launched while the cancel arrived
             if (reg && slotted.has(n) && info?.pid) reg.setLanePid(keyOf(n), info.pid);
-          } });
+          }, onStage: (s) => { rec.stage = s; save(); } }); // #6245: the lane's current sub-phase, for status
         }
         catch (e) { r = { terminalReason: "engine-error", detail: e?.message ?? String(e) }; }
       }
@@ -1554,7 +1554,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (!adopt || !(rec?.pid || rec?.handle || rec?.remote)) return { n, rec, live: false, p: Promise.resolve(null) };
     let onLive;
     const isLive = new Promise((r) => { onLive = () => r(true); });
-    const p = Promise.resolve().then(() => adopt(n, rec, { onLive, ...(signal ? { signal } : {}) })).catch((e) => { adoptErrors.set(n, `adopt failed: ${firstLine(e?.message ?? e)}`); return null; });
+    const p = Promise.resolve().then(() => adopt(n, rec, { onLive, onStage: (s) => { rec.stage = s; save(); }, ...(signal ? { signal } : {}) })).catch((e) => { adoptErrors.set(n, `adopt failed: ${firstLine(e?.message ?? e)}`); return null; });
     return { n, rec, p, first: Promise.race([p.then(() => false), isLive]) };
   });
   for (const a of adopting) a.live = a.first ? await a.first : false;

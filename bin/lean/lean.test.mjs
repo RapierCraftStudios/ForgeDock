@@ -100,6 +100,7 @@ function statusLogical(w, body) {
   for (const [key, { markers, text }] of parseStatus(body)) {
     if (w.statusSections[key] === text) continue;
     w.statusSections[key] = text;
+    if (key === "FORGE:STAGE") continue; // #6245: the live stage line is telemetry, not part of the comment order these tests pin
     w.comments.push(`${markers.map((m) => `<!-- ${m} -->`).join("\n")}\n${text}`);
   }
 }
@@ -265,6 +266,7 @@ describe("core work-on", () => {
     assert.equal(r.terminalReason, "merged");
     assert.equal(r.pr, 77);
     assert.deepEqual(w.comments.map(markerOf), ["FORGE:STARTED", "FORGE:INVESTIGATION", "FORGE:CONTRACT", "FORGE:IMPLEMENTATION", "FORGE:REVIEW", "FORGE:FACTS", "FORGE:TRAJECTORY"]);
+    assert.match(w.statusSections["FORGE:STAGE"] ?? "", /^\*\*stage:\*\* \w+ - started \S+, last activity \S+$/, "#6245: the status comment carries the lane stage line");
     assert.match(w.comments[1], /<!-- FORGE:VALIDATE -->/, "VALIDATE stays as an alias marker");
     assert.match(w.comments[1], /^<!-- FORGE:INVESTIGATION -->\n<!-- FORGE:VALIDATE -->\n## Investigation Report\n\*\*Verdict\*\*: CONFIRMED/);
     assert.match(w.comments[2], /^<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n## Builder Contract \(frozen `[0-9a-f]{12}`\)/, "PLAN stays as an alias marker");

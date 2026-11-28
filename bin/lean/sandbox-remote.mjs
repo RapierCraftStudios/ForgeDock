@@ -20,6 +20,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { mergeRemoteLog } from "../engine/runlog.mjs";
+import { latestStage, mergeStage } from "./stage.mjs"; // #6245
 import { safeSegment } from "./ledger.mjs";
 import { scopedEnv } from "./execution.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
@@ -266,10 +267,28 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
     if (!transport.logs) return { ok: false, bytes: 0 };
     try {
       const { text, cursor } = (await transport.logs(h.id, h.logCursor ?? 0)) ?? {};
+      if (text) h.logAt = now(); // #6245: lane log output is activity
       if (text) { const f = batch.logFile(h.issue); mkdirSync(dirname(f), { recursive: true }); appendFileSync(f, redact(text, [...known])); }
       if (cursor !== undefined) h.logCursor = cursor;
       return { ok: true, bytes: text ? String(text).length : 0 };
     } catch { return { ok: false, bytes: 0 }; /* the next poll retries */ }
+  };
+  /**
+   * #6245: the lane's current sub-phase and last event time, from the sandbox run log (read at most every STAGE_POLL_MS). The handle
+   * carries `stage` ({stage, round, reason, since, lastEventAt}); a change is written to the lane log. Never throws.
+   */
+  const STAGE_POLL_MS = 30000;
+  const pullStage = async (h) => {
+    if (typeof transport.runlog !== "function" || now() - (h.stageAt ?? 0) < STAGE_POLL_MS) return;
+    h.stageAt = now();
+    try {
+      const e = await transport.runlog(h.id);
+      const next = mergeStage(h.stage, latestStage(e?.runLog), h.logAt ?? null);
+      if (!next) return;
+      const changed = next.stage !== h.stage?.stage || next.round !== h.stage?.round || next.reason !== h.stage?.reason;
+      h.stage = next;
+      if (changed && next.stage) { const f = batch.logFile(h.issue); mkdirSync(dirname(f), { recursive: true }); appendFileSync(f, redact(`[stage] ${next.stage}${next.round ? ` round ${next.round}` : ""}${next.reason ? ` (${next.reason})` : ""}\n`, [...known])); }
+    } catch { /* the next poll retries */ }
   };
   /** #6117: `<n>.runlog.jsonl` beside the lane log (`<n>.log`): the sandbox's own run log, so an env park stays triageable after teardown. */
   const runLogFile = (issue) => { const f = batch.logFile(issue); return /\.log$/.test(f) ? f.replace(/\.log$/, ".runlog.jsonl") : `${f}.runlog.jsonl`; };
@@ -352,6 +371,7 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
       // #4672: a transport error is not an exit; it propagates and providerLanes retries it for execution.unreachable_window_min.
       s = await transport.status(h.id);
       await pullLogs(h);
+      if (s === "running") await pullStage(h);
       if (s === "running") serviceRelay(h).catch(() => {}); // #4778: in the background; never changes the status
       return s === "running" ? "running" : s === "gone" ? "gone" : "exited";
     },
