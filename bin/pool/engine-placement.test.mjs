@@ -92,3 +92,66 @@ test("upgradeAgentsAfterUpdate names agents left behind and keeps its string res
   assert.equal(r, "upgraded");
   assert.match(warned[0], /left behind.*old 1\.66\.0/);
 });
+
+// #6265: a host whose lane_tools image is building or failed is skipped while another host is ready
+function imgFixture(behaviour) {
+  const posts = [];
+  const caps = { a: { version: TARGET, cpus_free: 8, mem_free_gb: 16 }, b: { version: TARGET, cpus_free: 2, mem_free_gb: 16 } };
+  let t = 5_000_000;
+  const fetchFn = async (url, init) => {
+    const u = new URL(url), h = u.hostname;
+    if (u.pathname === "/capacity") return json(caps[h]);
+    posts.push(h);
+    return behaviour[h]?.(init) ?? json({ id: JSON.parse(init.body).spec.id, state: "running" }, 201);
+  };
+  const router = createRouter({ state_dir: tmpDir("cs-img-"), lane: { cpus: 2, mem_gb: 3 }, enroll_token: "e", forgedock_token: "fd", repo_root: process.cwd() }, { fetchFn, now: () => t, log: quiet });
+  router.store.data.agents.a = { url: "http://a:7711", token: "t" };
+  router.store.data.agents.b = { url: "http://b:7711", token: "t" };
+  return { router, posts, tick: (ms) => { t += ms; } };
+}
+const building = () => new Response(JSON.stringify({ error: "lane image x building", code: "lane_tools.building" }), { status: 503, headers: { "content-type": "application/json", "retry-after": "300" } });
+const failed = () => json({ error: "build failed", code: "lane_tools.build_failed" }, 422);
+
+test("a building host is skipped on later launches while another host is ready", async () => {
+  const { router, posts } = imgFixture({ a: building });
+  const r1 = await router.launch(spec("i1", { lane_tools: ["python"] }));
+  assert.equal(r1.status, 201); assert.equal(r1.body.agent, "b"); // a tried first (more free), 503, then b
+  posts.length = 0;
+  const r2 = await router.launch(spec("i2", { lane_tools: ["python"] }));
+  assert.equal(r2.body.agent, "b");
+  assert.deepEqual(posts, ["b"], "the building host is not POSTed to again");
+});
+
+test("a failed-image host is skipped and its 422 does not end placement", async () => {
+  const { router, posts } = imgFixture({ a: failed });
+  const r = await router.launch(spec("i3", { lane_tools: ["python"] }));
+  assert.equal(r.status, 201); assert.equal(r.body.agent, "b");
+  posts.length = 0;
+  await router.launch(spec("i4", { lane_tools: ["python"] }));
+  assert.deepEqual(posts, ["b"]);
+});
+
+test("every host building: a short retry, not the agent's 300 s deferral", async () => {
+  const { router } = imgFixture({ a: building, b: building });
+  const r = await router.launch(spec("i5", { lane_tools: ["python"] }));
+  assert.equal(r.status, 503);
+  assert.equal(r.body.code, "lane_tools.building");
+  assert.equal(r.retryAfter, 30);
+});
+
+test("the mark expires, so a finished build is placed on again; other tool sets are unaffected", async () => {
+  const { router, posts, tick } = imgFixture({ a: building });
+  await router.launch(spec("i6", { lane_tools: ["python"] }));
+  posts.length = 0;
+  await router.launch(spec("i7", { lane_tools: ["xvfb"] }));
+  assert.equal(posts[0], "a", "a different tool set is not marked");
+  posts.length = 0; tick(61_000);
+  await router.launch(spec("i8", { lane_tools: ["python"] }));
+  assert.equal(posts[0], "a", "re-probed after the mark expired");
+});
+
+test("all hosts failed the image: the 422 build_failed is returned", async () => {
+  const { router } = imgFixture({ a: failed, b: failed });
+  const r = await router.launch(spec("i9", { lane_tools: ["python"] }));
+  assert.equal(r.status, 422); assert.equal(r.body.code, "lane_tools.build_failed");
+});

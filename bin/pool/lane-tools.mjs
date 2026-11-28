@@ -14,7 +14,14 @@ const IMAGE = loadImageManifest();
  * place tool names appear. To add a tool, add an entry: `versioned` (accepts `@version`) and `steps(version)`, the
  * Dockerfile instructions (Debian/Ubuntu base, building as root) that install it.
  */
-const apt = (...pkgs) => `RUN apt-get update && apt-get install -y --no-install-recommends ${pkgs.join(" ")} && rm -rf /var/lib/apt/lists/*`;
+/** #6265: network discipline for every generated download: IPv4 first (a host without an IPv6 route hangs on the AAAA address), a connect timeout, retries. */
+export const APT_NET = "-o Acquire::ForceIPv4=true -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=5";
+export const CURL_NET = "curl -fsSL -4 --retry 6 --retry-all-errors --connect-timeout 20 --max-time 900";
+export const PIP_NET = "--retries 5 --timeout 30";
+export const NPM_NET = "--fetch-retries=5 --fetch-timeout=60000 --fetch-retry-maxtimeout=60000";
+/** Node resolves IPv4 first (npm, npx). */
+export const NODE_IPV4 = "NODE_OPTIONS=--dns-result-order=ipv4first";
+const apt = (...pkgs) => `RUN apt-get ${APT_NET} update && apt-get ${APT_NET} install -y --no-install-recommends ${pkgs.join(" ")} && rm -rf /var/lib/apt/lists/*`;
 /** @deprecated Fallback only (#6017, #6037): pool/image/manifest.json is the source of truth for tools the image ships. */
 export const RECIPES = {
   "postgresql-client": { versioned: true, steps: (v) => [apt(v ? `postgresql-client-${v}` : "postgresql-client")] },
@@ -22,9 +29,9 @@ export const RECIPES = {
   xvfb: { versioned: false, steps: () => [apt("xvfb xauth")] }, // headless X for browser/GUI tests that call xvfb-run
   shellcheck: { versioned: false, steps: () => [apt("shellcheck")] }, // shell-script linter for validate commands
   yaml: { versioned: false, steps: () => [apt("python3-yaml")] }, // PyYAML for validate commands that `import yaml` (#5749)
-  playwright: { versioned: true, steps: (v) => [`RUN npx --yes playwright${v ? `@${v}` : ""} install --with-deps chromium`] },
+  playwright: { versioned: true, steps: (v) => [`RUN ${NODE_IPV4} npm_config_fetch_retries=5 npm_config_fetch_timeout=60000 npx --yes playwright${v ? `@${v}` : ""} install --with-deps chromium`] },
   // Example of a release-tarball tool; the version is required.
-  promtool: { versioned: true, steps: (v) => [`RUN curl -fsSL https://github.com/prometheus/prometheus/releases/download/v${v ?? "2.54.1"}/prometheus-${v ?? "2.54.1"}.linux-amd64.tar.gz | tar -xz --strip-components=1 -C /usr/local/bin --wildcards '*/promtool'`] },
+  promtool: { versioned: true, steps: (v) => [`RUN ${CURL_NET} https://github.com/prometheus/prometheus/releases/download/v${v ?? "2.54.1"}/prometheus-${v ?? "2.54.1"}.linux-amd64.tar.gz | tar -xz --strip-components=1 -C /usr/local/bin --wildcards '*/promtool'`] },
 };
 
 const ENTRY_RE = /^([a-z0-9][a-z0-9.+_-]*)(?:@([A-Za-z0-9][A-Za-z0-9.+_-]*))?$/;
@@ -105,12 +112,12 @@ export function genericInstallCommands(miss, { root = true } = {}) {
     // 2026-11-26: lane images may ship python3 without pip; the distro package (python3-<module>) is the fallback
     const deb = `python3-${(APT_PY[mod] ?? mod).toLowerCase().replace(/_/g, "-")}`;
     // #6138: install into the interpreter the validate runs, system-wide (no --user: `python3 -I` ignores user site-packages), then the distro package
-    const pip = `python3 -m pip install --quiet --break-system-packages ${pkg} || python3 -m pip install --quiet ${pkg}`;
-    const apt = `apt-get update -qq && apt-get install -y --no-install-recommends ${deb} && rm -rf /var/lib/apt/lists/*`;
+    const pip = `python3 -m pip install --quiet ${PIP_NET} --break-system-packages ${pkg} || python3 -m pip install --quiet ${PIP_NET} ${pkg}`;
+    const apt = `apt-get ${APT_NET} update -qq && apt-get ${APT_NET} install -y --no-install-recommends ${deb} && rm -rf /var/lib/apt/lists/*`;
     return [root ? `${pip} || (${apt})` : `${su(pip)} || (${su(apt)})`];
   }
-  if (miss.kind === "node-module") return [`npm install --no-save --no-audit --no-fund ${tool}`];
-  if (miss.kind === "command" && !tool.includes("/")) return [su(`apt-get update -qq && apt-get install -y --no-install-recommends ${tool} && rm -rf /var/lib/apt/lists/*`)];
+  if (miss.kind === "node-module") return [`${NODE_IPV4} npm install --no-save --no-audit --no-fund ${NPM_NET} ${tool}`];
+  if (miss.kind === "command" && !tool.includes("/")) return [su(`apt-get ${APT_NET} update -qq && apt-get ${APT_NET} install -y --no-install-recommends ${tool} && rm -rf /var/lib/apt/lists/*`)];
   return [];
 }
 
@@ -157,6 +164,9 @@ export function laneToolsDockerfile(baseImage, tools) {
   return [`FROM ${baseImage}`, "USER root", ...steps, ""].join("\n");
 }
 
+/** #6265: the longest one build attempt may run (a hung download must fail loudly, not hold the image "building" for ever). */
+export const LANE_BUILD_TIMEOUT_MS = 20 * 60000;
+
 /** One in-flight build per tag (shared by every launch and the warm pool), and the last failure per tag. */
 const BUILDS = new Map();
 const FAILED = new Map();
@@ -172,12 +182,12 @@ export const laneBuildBackoffMs = (count) => BACKOFF_MS[Math.min(Math.max(count,
  * (optional) wraps the build in the IPv4 fallback (#6187). `docker.hasImage` and `docker.build(dir, tag, args)` are injected. Throws typed lane_tools.unknown_recipe
  * (nothing built) or lane_tools.build_failed (build error or timeout, never a hang).
  */
-export async function resolveLaneImage({ tools = [], baseImage, docker, buildTimeoutMs = 45 * 60000, sleep }) {
+export async function resolveLaneImage({ tools = [], baseImage, docker, buildTimeoutMs = LANE_BUILD_TIMEOUT_MS, sleep, log = null }) {
   if (!tools.length) return baseImage;
   checkRecipes(tools);
   const tag = laneToolsTag(baseImage, tools);
   if (await docker.hasImage?.(tag)) return tag;
-  if (!BUILDS.has(tag)) BUILDS.set(tag, buildLaneImage({ tag, baseImage, tools, docker, buildTimeoutMs, ...(sleep ? { sleep, retryDelayMs: 0 } : {}) }).finally(() => BUILDS.delete(tag)));
+  if (!BUILDS.has(tag)) BUILDS.set(tag, buildLaneImage({ tag, baseImage, tools, docker, buildTimeoutMs, log, ...(sleep ? { sleep, retryDelayMs: 0 } : {}) }).finally(() => BUILDS.delete(tag)));
   return BUILDS.get(tag); // concurrent callers share one build of a tag
 }
 
@@ -186,7 +196,7 @@ export async function resolveLaneImage({ tools = [], baseImage, docker, buildTim
  * {building: true} after starting (or joining) a background build, {failed: message} for a build that failed in the last
  * window `laneBuildBackoffMs` of its consecutive failures. Throws typed lane_tools.unknown_recipe.
  */
-export async function laneImageNow({ tools = [], baseImage, docker, buildTimeoutMs = 45 * 60000, now = Date.now, sleep }) {
+export async function laneImageNow({ tools = [], baseImage, docker, buildTimeoutMs = LANE_BUILD_TIMEOUT_MS, now = Date.now, sleep, log = null }) {
   if (!tools.length) return { image: baseImage };
   checkRecipes(tools);
   const tag = laneToolsTag(baseImage, tools);
@@ -194,7 +204,7 @@ export async function laneImageNow({ tools = [], baseImage, docker, buildTimeout
   const f = FAILED.get(tag);
   if (f && now() - f.at < laneBuildBackoffMs(f.count)) return { failed: f.message };
   if (!BUILDS.has(tag)) {
-    const p = buildLaneImage({ tag, baseImage, tools, docker, buildTimeoutMs, ...(sleep ? { sleep, retryDelayMs: 0 } : {}) })
+    const p = buildLaneImage({ tag, baseImage, tools, docker, buildTimeoutMs, log, ...(sleep ? { sleep, retryDelayMs: 0 } : {}) })
       .then(() => { FAILED.delete(tag); }, (e) => { FAILED.set(tag, { at: now(), message: e.message, count: (f?.count ?? 0) + 1 }); }) // a failure is never permanent: it expires on a growing backoff
       .finally(() => BUILDS.delete(tag));
     BUILDS.set(tag, p);
@@ -208,17 +218,22 @@ export function buildErrorTail(e, max = 1500) {
   return t.length <= max ? t : `…${t.slice(t.length - max + 1)}`;
 }
 
-async function buildLaneImage({ tag, baseImage, tools, docker, buildTimeoutMs, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), retryDelayMs = 15000 }) {
+async function buildLaneImage({ tag, baseImage, tools, docker, buildTimeoutMs, log = null, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), retryDelayMs = 15000 }) {
   try { if (await docker.pullVariant?.(tag)) return tag; } catch { /* no published variant (or no route): build it */ }
   const dir = mkdtempSync(join(tmpdir(), "lane-tools-"));
   let timer;
   try {
     writeFileSync(join(dir, "Dockerfile"), laneToolsDockerfile(baseImage, tools));
-    const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`build timed out after ${buildTimeoutMs}ms`)), buildTimeoutMs); });
-    const build = () => docker.build(dir, tag, {});
+    const ctl = new AbortController();
+    const timeout = new Promise((_, rej) => { timer = setTimeout(() => { ctl.abort(); rej(new Error(`build timed out after ${buildTimeoutMs}ms`)); }, buildTimeoutMs); });
+    timeout.catch(() => {}); // the race may already be settled when it fires
+    const build = () => docker.build(dir, tag, {}, { signal: ctl.signal });
     const attempt = () => Promise.race([docker.withFallback ? docker.withFallback(build) : build(), timeout]);
-    try { await attempt(); } catch { await sleep(retryDelayMs); await attempt(); } // #6189: one retry, a failed build is often transient
+    // #6189: one retry, a failed build is often transient; a timeout is final (the shared budget is spent and the build was aborted)
+    try { await attempt(); } catch (e) { if (ctl.signal.aborted) throw e; log?.warn?.(`lane image ${tag} build failed, retrying once: ${buildErrorTail(e, 300)}`); await sleep(retryDelayMs); await attempt(); }
+    log?.info?.(`lane image ${tag} built`);
   } catch (e) {
+    log?.error?.(`lane image ${tag} FAILED: ${buildErrorTail(e)}`);
     throw typed("lane_tools.build_failed", `lane_tools image ${tag} build failed: ${buildErrorTail(e)}`);
   } finally { clearTimeout(timer); rmSync(dir, { recursive: true, force: true }); }
   return tag;

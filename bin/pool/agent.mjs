@@ -632,7 +632,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     }
     if (spec.lane_tools?.length) { // #5650 follow-up: never build inside the launch request (router timeout); 503 + retry while it builds
       let st;
-      try { st = await laneImageNow({ tools: spec.lane_tools, baseImage: spec.image ?? image, docker: variantDocker(spec.image ?? image) }); } catch (e) { return { status: 422, body: { error: e.message, code: e.code ?? "lane_tools.invalid" } }; }
+      try { st = await laneImageNow({ tools: spec.lane_tools, baseImage: spec.image ?? image, docker: variantDocker(spec.image ?? image), buildTimeoutMs: (cfg.lane_build_timeout_s ?? 1200) * 1000, log }); } catch (e) { return { status: 422, body: { error: e.message, code: e.code ?? "lane_tools.invalid" } }; }
       if (st.building) return { status: 503, body: { error: `lane image ${st.tag} building`, code: "lane_tools.building" }, retryAfter: LANE_BUILD_RETRY_AFTER_S };
       if (st.failed) return { status: 422, body: { error: st.failed, code: "lane_tools.build_failed" } };
     }
@@ -674,7 +674,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const cacheMount = ["-v", `${rec.cacheVolume}:/cache`];
     try {
       // #5650: a repo's lane_tools select a derived image (built once per tool list); none keeps spec.image ?? image.
-      const toolsImage = spec.lane_tools?.length ? await resolveLaneImage({ tools: spec.lane_tools, baseImage: spec.image ?? image, docker: variantDocker(spec.image ?? image) }) : (spec.image ?? image);
+      const toolsImage = spec.lane_tools?.length ? await resolveLaneImage({ tools: spec.lane_tools, baseImage: spec.image ?? image, docker: variantDocker(spec.image ?? image), buildTimeoutMs: (cfg.lane_build_timeout_s ?? 1200) * 1000, log }) : (spec.image ?? image);
       const laneImage = projectImage ?? toolsImage; // #6038: the project layer sits on the tools image, or is skipped (base) while building
       if (withDocker) {
         // Private Docker daemon per sandbox (never the host socket). The lane joins its network namespace, so ports the

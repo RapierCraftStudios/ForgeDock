@@ -1,6 +1,7 @@
 [
   ["playwright"],
   ["postgresql-client", "python"],
+  ["postgresql-client", "promtool@2.54.1", "python@3.12"],
   ["python"],
   ["xvfb"]
 ]
