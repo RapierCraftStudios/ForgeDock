@@ -71,7 +71,7 @@ describe("pool unit hardening (#4673)", () => {
 describe("per-repo lane image (#5650)", () => {
   it("agent resolves the image through lane-tools and keeps the base default", { skip: POSIX_ONLY }, () => {
     const src = read("bin/pool/agent.mjs");
-    assert.match(src, /resolveLaneImage\(\{ tools: spec\.lane_tools, baseImage: spec\.image \?\? image, docker \}\)/);
+    assert.match(src, /resolveLaneImage\(\{ tools: spec\.lane_tools, baseImage: spec\.image \?\? image, docker: variantDocker\(spec\.image \?\? image\) \}\)/);
     assert.match(src, /: \(spec\.image \?\? image\)/);
   });
 });

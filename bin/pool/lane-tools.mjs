@@ -160,12 +160,18 @@ export function laneToolsDockerfile(baseImage, tools) {
 /** One in-flight build per tag (shared by every launch and the warm pool), and the last failure per tag. */
 const BUILDS = new Map();
 const FAILED = new Map();
-/** How long a failed build is reported instead of retried. */
+/** Longest a failed build is reported instead of retried; the window grows 1, 2, 5, 10 min with consecutive failures of a tag. */
 export const LANE_BUILD_RETRY_MS = 10 * 60000;
+const BACKOFF_MS = [60000, 120000, 300000, LANE_BUILD_RETRY_MS];
+/** Reporting window after the `count`-th consecutive failure of a tag. */
+export const laneBuildBackoffMs = (count) => BACKOFF_MS[Math.min(Math.max(count, 1), BACKOFF_MS.length) - 1];
+/** Characters of build output kept in a failure message: the tail, where the failing command's output is. */
+const ERROR_TAIL = 1500;
 
 /**
  * The image a launch runs: `baseImage` when no tools; else the per-repo tag, reused when present, built from the base
- * otherwise. `docker.hasImage` and `docker.build(dir, tag, args)` are injected. Throws typed lane_tools.unknown_recipe
+ * otherwise. A published variant is pulled first when `docker.pullVariant(tag)` (optional) resolves true; `docker.withFallback(op)`
+ * (optional) wraps the build in the IPv4 fallback (#6187). `docker.hasImage` and `docker.build(dir, tag, args)` are injected. Throws typed lane_tools.unknown_recipe
  * (nothing built) or lane_tools.build_failed (build error or timeout, never a hang).
  */
 export async function resolveLaneImage({ tools = [], baseImage, docker, buildTimeoutMs = 45 * 60000 }) {
@@ -180,7 +186,7 @@ export async function resolveLaneImage({ tools = [], baseImage, docker, buildTim
 /**
  * Non-blocking form for a launch (the router waits ~120 s, a build can take many minutes): {image} when the tag exists,
  * {building: true} after starting (or joining) a background build, {failed: message} for a build that failed in the last
- * LANE_BUILD_RETRY_MS. Throws typed lane_tools.unknown_recipe.
+ * window `laneBuildBackoffMs` of its consecutive failures. Throws typed lane_tools.unknown_recipe.
  */
 export async function laneImageNow({ tools = [], baseImage, docker, buildTimeoutMs = 45 * 60000, now = Date.now }) {
   if (!tools.length) return { image: baseImage };
@@ -188,24 +194,27 @@ export async function laneImageNow({ tools = [], baseImage, docker, buildTimeout
   const tag = laneToolsTag(baseImage, tools);
   if (await docker.hasImage?.(tag)) return { image: tag };
   const f = FAILED.get(tag);
-  if (f && now() - f.at < LANE_BUILD_RETRY_MS) return { failed: f.message };
+  if (f && now() - f.at < laneBuildBackoffMs(f.count)) return { failed: f.message };
   if (!BUILDS.has(tag)) {
-    FAILED.delete(tag);
-    const p = buildLaneImage({ tag, baseImage, tools, docker, buildTimeoutMs }).catch((e) => { FAILED.set(tag, { at: now(), message: e.message }); }).finally(() => BUILDS.delete(tag));
+    const p = buildLaneImage({ tag, baseImage, tools, docker, buildTimeoutMs })
+      .then(() => { FAILED.delete(tag); }, (e) => { FAILED.set(tag, { at: now(), message: e.message, count: (f?.count ?? 0) + 1 }); }) // a failure is never permanent: it expires on a growing backoff
+      .finally(() => BUILDS.delete(tag));
     BUILDS.set(tag, p);
   }
   return { building: true, tag };
 }
 
 async function buildLaneImage({ tag, baseImage, tools, docker, buildTimeoutMs }) {
+  try { if (await docker.pullVariant?.(tag)) return tag; } catch { /* no published variant (or no route): build it */ }
   const dir = mkdtempSync(join(tmpdir(), "lane-tools-"));
   let timer;
   try {
     writeFileSync(join(dir, "Dockerfile"), laneToolsDockerfile(baseImage, tools));
     const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`build timed out after ${buildTimeoutMs}ms`)), buildTimeoutMs); });
-    await Promise.race([docker.build(dir, tag, {}), timeout]);
+    const build = () => docker.build(dir, tag, {});
+    await Promise.race([docker.withFallback ? docker.withFallback(build) : build(), timeout]);
   } catch (e) {
-    throw typed("lane_tools.build_failed", `lane_tools image ${tag} build failed: ${String(e.stderr || e.message).slice(0, 300)}`);
+    throw typed("lane_tools.build_failed", `lane_tools image ${tag} build failed: ${String(e.stderr || e.message).slice(-ERROR_TAIL)}`);
   } finally { clearTimeout(timer); rmSync(dir, { recursive: true, force: true }); }
   return tag;
 }

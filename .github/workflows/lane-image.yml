@@ -61,6 +61,9 @@ jobs:
             ghcr.io/rapiercraftstudios/forgedock-lane:r-${{ steps.lane.outputs.recipe }}
           cache-from: type=gha,scope=lane-image
           cache-to: type=gha,mode=max,scope=lane-image
+      - name: Build and push lane_tools variants
+        continue-on-error: true
+        run: node scripts/lane-variants.mjs "${VERSION}" --build
       - name: Check the lane image is publicly pullable
         run: |
           docker logout ghcr.io
