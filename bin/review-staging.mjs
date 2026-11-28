@@ -596,12 +596,13 @@ export function ciState(checks, required = []) {
   return { pending, failing: names((k) => k.bucket === "fail" || k.bucket === "cancel").filter((n) => !pending.includes(n)), green: !pending.length && !rows.length };
 }
 
-/** Pre-dispatch CI read: `null` when green (or the PR has no checks), else `{pending, failing}`. An unreadable read fails closed. */
-async function ciNotGreen(io, c, pr, env) {
+/** Pre-dispatch CI read: `null` when green (or no checks are required), else `{pending, failing}`. An unreadable read fails closed. */
+export async function ciNotGreen(io, c, pr, env) {
   const r = await io.run("gh", ["pr", "checks", String(pr), "-R", c.ghRepo, "--json", "name,bucket,link"], { env, cwd: io.cwd });
-  const checks = r.code === 0 || r.code === 8 ? parseChecks(r.stdout) : null;
+  let checks = r.code === 0 || r.code === 8 ? parseChecks(r.stdout) : null;
+  // Right after a push no checks are registered yet: that is "required checks pending", not green (ciState then compares against the required set).
+  if (!checks && /no checks reported/i.test(`${r.stderr ?? ""}${r.stdout ?? ""}`)) checks = [];
   if (!checks) {
-    if (/no checks reported/i.test(`${r.stderr ?? ""}${r.stdout ?? ""}`)) return null;
     return { pending: [], failing: ["checks unreadable"] };
   }
   const read = await requiredChecksRead({ gh: io.gh, repo: c.ghRepo, lane: c.defaultBranch });

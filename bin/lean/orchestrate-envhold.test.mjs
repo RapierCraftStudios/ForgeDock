@@ -383,3 +383,17 @@ describe("#5988: breaker scoped by signature and agent", () => {
     assert.ok(r.updates.some((u) => u.outcome === "breaker"), "bounded: the batch breaker trips");
   });
 });
+
+describe("#6196 env.capability_docker", () => {
+  const dock = (more = {}) => ({ terminalReason: "needs-human", code: "env.capability_docker", detail: "Environment error: a validate command needs a Docker daemon or image this sandbox lacks", placement: { where: "remote" }, ...more });
+  const rem = (hostFallback) => ({ max: 2, isRemote: () => true, place: () => ({ where: "remote", reason: "test" }), admit: () => ({ ok: true }), onBudget: "stop", costPerMinute: 0, ...(hostFallback === undefined ? {} : { hostFallback }) });
+  it("is recovered on the host when host fallback is on", async () => {
+    const r = await harness({ script: { 3: [dock(), MERGED] }, extra: { remote: rem() }, envHold: null });
+    assert.deepEqual(r.calls.map((c) => c.n), [3, 3]);
+    assert.equal(r.byIssue[3].outcome, "merged");
+  });
+  it("records the CI-defer decision and does not re-place on the host when host fallback is off", async () => {
+    const r = await harness({ script: { 3: [dock()] }, extra: { remote: rem(false) }, envHold: null });
+    assert.ok(r.decisions.some((d) => d.issue === 3 && /no host re-placement for env\.capability_docker.*deferred to CI/.test(d.what)));
+  });
+});

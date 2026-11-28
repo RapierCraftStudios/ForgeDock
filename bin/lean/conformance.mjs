@@ -832,6 +832,8 @@ const CMD_NOT_FOUND_RE = /([^\s:'"`]+): command not found/, SH_NOT_FOUND_RE = /(
 // no Playwright browser, no network for npm), never a failing assertion of the change
 const ENV_SIGNATURES = [
   [/Cannot connect to the Docker daemon|docker\.sock|error during connect|Is the docker daemon running/i, "Docker daemon"],
+  // #6196: no Docker where the step runs: a script's own "no ... image present locally", a failed pull, no docker binary, testcontainers without a daemon
+  [/\bno\b[^\n]{0,60}\bimage\b[^\n]{0,30}present locally|Unable to find image [^\n]*locally[\s\S]{0,300}?(?:pull access denied|failed to pull|error pulling|Error response from daemon|dial tcp|no such host)|\bdocker: (?:command )?not found|Could not find a valid Docker environment/i, "Docker daemon"],
   [/invalid mount config for type "bind"|bind source path does not exist|error while creating mount source path|mounts denied/i, "Docker bind-mount source"],
   [/Executable doesn't exist at|npx playwright install|browserType\.launch: Executable/i, "Playwright browser"],
   [/\bENOTFOUND\b|\bEAI_AGAIN\b|npm (?:ERR!|error) network|getaddrinfo (?:ENOTFOUND|EAI_AGAIN)/i, "network access for npm"],
