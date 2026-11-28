@@ -607,7 +607,7 @@ describe("core work-on", () => {
     const r = await run(w);
     assert.equal(r.code, "base.red");
     assert.equal(w.calls.filter((c) => c[0] === "runner").length, 0);
-    assert.ok(w.comments.some((c) => c.includes("Admit probe: base is red") && c.includes("https://github.com/o/r/runs/e2e")));
+    assert.ok(w.comments.some((c) => c.includes("Admit probe: base is red") && /(^|[\s(<])https:\/\/github\.com\/o\/r\/runs\/e2e([\s)>]|$)/m.test(c)));
     assert.ok(w.telemetry.some((e) => e.event === "ADMIT_PROBE" && e.outcome === "base_red" && e.builder_spend_usd === 0));
     const named = mk("fix the red e2e check");
     assert.notEqual((await run(named)).code, "base.red");
