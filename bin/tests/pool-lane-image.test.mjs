@@ -38,6 +38,15 @@ test("pull succeeds: the image is retagged locally and nothing is built", async 
   assert.equal(d.builds.length, 0);
 });
 
+test("#6184: after the retag the ghcr tag is dropped so the prune can free the image; a failing rmi does not fail the pull", async () => {
+  const d = fake();
+  await agentOf(d).ensureImage();
+  assert.deepEqual(d.removed, [remote]);
+  assert.equal(d.have.has(local), true);
+  const e = fake(); e.removeImage = async () => { throw new Error("rmi boom"); };
+  assert.equal(await provideLaneImage({ docker: e, image: local, version: "9.9.9", recipe, build: async () => {} }), "pulled");
+});
+
 test("pull fails: falls back to the local build, labelled with the recipe hash", async () => {
   const d = fake({ pull: async () => { throw new Error("denied: not found"); } });
   await agentOf(d).ensureImage();

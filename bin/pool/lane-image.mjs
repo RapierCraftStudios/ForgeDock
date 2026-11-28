@@ -63,6 +63,8 @@ export async function pullLaneImage({ docker, image, version, recipe, log = null
     throw new Error(`pulled ${remote} has recipe ${got || "(none)"}, want ${recipe}`);
   }
   await docker.tag(remote, image);
+  // #6184: the ghcr tag is invisible to pruneLaneImages and would pin the image's layers forever; untagging it frees nothing yet keeps `image`.
+  try { await docker.removeImage?.(remote); } catch (e) { log?.warn?.(`could not drop ${remote} tag: ${errText(e).slice(-200)}`); }
   return true;
 }
 
