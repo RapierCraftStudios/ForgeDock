@@ -80,7 +80,9 @@ export async function resolveOwnLogins(gh) {
   return { logins: [...out], resolved };
 }
 // #5734: the markers whose comments may record a post-deploy outcome, and the wording that says the fix failed in production
-const PROD_MARKER_RE = /FORGE:(?:DECISION|VERIFIED|PROBE)\b/;
+// #6297: only a real HTML-comment marker counts (the engine's own park notice quotes "FORGE:DECISION comment ..." in prose)
+const PROD_MARKER_RE = /<!--\s*FORGE:(?:DECISION|VERIFIED|PROBE)\b/;
+const ENGINE_NOTICE_RE = /<!--\s*FORGE:(?:PARKED|ATTEMPTS|RECOVERING|LANE_AUDIT)\b/;
 const PROD_RE = /\b(?:prod(?:uction)?|live|deployed|deploy)\b/i;
 const PROD_FAIL_RE = /\b(?:fail(?:s|ed|ing|ures?)?|broken|not\s+fixed|ineffective|regress(?:ed|ion)?|did(?:\s+not|n['’]t)\s+(?:hold|work|fix)|does(?:\s+not|n['’]t)\s+work|still\s+(?:fail\w*|broken|happen\w*|reproduc\w*|occur\w*))\b|(?:^|[^\d.])(?:~\s*)?0(?:\.0+)?\s?%/i;
 const PROD_OK_RE = /\b(?:no\s+longer\s+(?:fail\w*|broken|reproduc\w*)|not\s+failing|(?:fix|issue)\s+(?:holds|held))\b/i;
@@ -94,7 +96,7 @@ export function prodFailureSignal(comments, own = [bareLogin(APP_SLUG)]) {
   let hit = null;
   for (const c of comments ?? []) {
     const body = String(c?.body ?? "");
-    if (!PROD_MARKER_RE.test(body) || !(trusted(c) || mine.has(bareLogin(loginOf(c))))) continue;
+    if (!PROD_MARKER_RE.test(body) || ENGINE_NOTICE_RE.test(body) || !(trusted(c) || mine.has(bareLogin(loginOf(c))))) continue;
     const probe = probeResultOf(body);
     // #6292: the batch runner's own scheduling sections ("## Decision (batch ...)": requeue, relaunch, dependency edges)
     // never record a production outcome; and production + failure wording must share a line, not just the comment.
