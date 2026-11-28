@@ -663,6 +663,12 @@ describe("default flow (v1.0 contract, dcfb86bf): one review pass, nothing found
     assert.equal((await fixStep(c)).verdict, "APPROVE FOR DEPLOY");
     assert.equal(s.log.filter((e) => e[0] === "lane" || e[0] === "fix-issue").length, 0);
   });
+  it("a blocker is never passed on GATE_PASS (#6174: block_severity medium)", async () => {
+    const s = fakeSeam();
+    const c = def(s, { review: { done: true, result: { pr: 7, head: H1, verdict: "APPROVE FOR DEPLOY", marker: "FORGE:GATE_PASS", blocking: [101], filed: [101], ciFailing: 0 } } });
+    const r = await fixStep(c);
+    assert.equal(r.blocked, true); assert.equal(r.held, true);
+  });
   it("a confirmed blocker stops the release: no fix lane, blockers queued into the open batch, release PR closed, status names the blockers", async () => {
     const s = fakeSeam({ fins: [blockFin], summary: bad });
     const calls = [];

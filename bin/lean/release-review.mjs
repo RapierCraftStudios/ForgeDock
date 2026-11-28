@@ -337,7 +337,7 @@ export async function fixStep(ctx) {
     if (s.err) return blocked(s.err);
     res = s.r;
   }
-  if (res.marker === "FORGE:GATE_PASS") return { verdict: res.verdict, head: res.head };
+  if (res.marker === "FORGE:GATE_PASS" && !res.blocking?.length && !res.guards?.length) return { verdict: res.verdict, head: res.head };
   if (res.blocking?.length || res.guards?.length) {
     const names = res.blocking?.length ? res.blocking.map((n) => `#${n}`).join(" ") : (res.guards ?? []).map((g) => g.name).join(", ");
     const queued = res.blocking?.length ? await seam.queueBlockers?.({ pr: res.pr, blockers: res.blocking }) : null;
