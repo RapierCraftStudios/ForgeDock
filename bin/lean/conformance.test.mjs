@@ -1685,6 +1685,11 @@ describe("test plan frozen with the contract (#5445)", () => {
     assert.match(bug(K([row("R1", { repro: "" }), row("R2")])), /R1: test_plan repro must be a test id/);
     assert.match(bug(K([row("R1", { repro: "no-repro" }), row("R2")])), /R1: test_plan no-repro needs a reason/);
     assert.equal(bug(K([row("R1", { repro: "no-repro", reason: "spec-only change" }), row("R2")])), "");
+    // #6288: the reason is accepted from an alias field or inline, and the message names the field to set
+    assert.equal(bug(K([row("R1", { repro: "no-repro", repro_reason: "spec-only change" }), row("R2")])), "");
+    assert.equal(bug(K([row("R1", { repro: "no-repro: config-only, probed with bash -n and observed rc 0" }), row("R2")])), "");
+    assert.equal(bug(K([row("R1", { repro: "no-repro (docs-only change)" }), row("R2")])), "");
+    assert.match(bug(K([row("R1", { repro: "no-repro:" }), row("R2")])), /set "reason" on this test_plan row/);
   });
   it("a proof that echoes a deliverable is rejected; one about the 403 is accepted", () => {
     assert.match(bug(K([row("R1", { proof: "the listing .json URL is rewritten to old.reddit.com" }), row("R2")])), /R1: test_plan proof restates a deliverable: ≥70% of the proof's words repeat deliverable D1 \(\d+%\); phrase it as the wrong behaviour observed on base/);
