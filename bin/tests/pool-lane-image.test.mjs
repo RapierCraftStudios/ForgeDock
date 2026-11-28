@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createAgent } from "../pool/agent.mjs";
 import { versionOf, repoRoot, laneImageTag, laneBuildArgs } from "../pool/version.mjs";
-import { provideLaneImage, withIpv4Fallback, remoteLaneImage, RECIPE_LABEL, IPV6_DIAL_RE } from "../pool/lane-image.mjs";
+import { provideLaneImage, withIpv4Fallback, sweepIpv4Pins, remoteLaneImage, RECIPE_LABEL, IPV6_DIAL_RE } from "../pool/lane-image.mjs";
 import { tmpDir } from "./_tmp.mjs";
 
 const quiet = { info() {}, warn() {}, error() {} };
@@ -93,4 +93,12 @@ test("the IPv4 retry also wraps the build, and a non-IPv6 error is not retried",
 
 test("a host that cannot write /etc/hosts reports the original IPv6 error", async () => {
   await assert.rejects(withIpv4Fallback(async () => { throw v6; }, { file: "/nonexistent-dir/hosts", resolve: async () => ["192.0.2.7"] }), /pull failed/);
+});
+
+test("sweepIpv4Pins removes pins a crashed agent left behind and keeps other lines", () => {
+  const file = join(tmpDir("hosts"), "hosts");
+  writeFileSync(file, "127.0.0.1 localhost\n140.82.1.1 ghcr.io # forgedock-ipv4-pin\n1.2.3.4 auth.docker.io # forgedock-ipv4-pin\n10.0.0.5 mine\n");
+  sweepIpv4Pins({ file, log: quiet });
+  assert.equal(readFileSync(file, "utf8"), "127.0.0.1 localhost\n10.0.0.5 mine\n");
+  sweepIpv4Pins({ file: join(tmpDir("none"), "missing"), log: quiet }); // no hosts file: no throw
 });

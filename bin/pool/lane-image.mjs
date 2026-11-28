@@ -41,6 +41,17 @@ export async function withIpv4Pins(fn, { hosts = REGISTRY_HOSTS, file = "/etc/ho
   }
 }
 
+/** Startup sweep: drop pins a crashed or killed agent left in `file` (the `finally` above never ran). Never throws; no-op while a pin is live. */
+export function sweepIpv4Pins({ file = "/etc/hosts", log = null } = {}) {
+  if (pinDepth > 0) return;
+  try {
+    const cur = readFileSync(file, "utf8");
+    if (!cur.includes(PIN_MARK)) return;
+    writeFileSync(file, cur.split("\n").filter((l) => !l.includes(PIN_MARK)).join("\n").replace(/\n*$/, "\n"));
+    log?.info?.(`removed stale IPv4 pins from ${file}`);
+  } catch (e) { log?.warn?.(`could not sweep IPv4 pins from ${file}: ${errText(e)}`); }
+}
+
 /** Run `op`; on an IPv6 dial error retry it once under temporary IPv4 pins. A host that cannot pin reports the original error. */
 export async function withIpv4Fallback(op, pinOpts = {}) {
   try { return await op(); } catch (e) {
