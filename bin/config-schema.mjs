@@ -47,7 +47,7 @@ export const TYPES = {
   "orchestration.merge_train": { enum: ["off", "on"] }, // #5836: lanes end pr-ready and the batch merge train merges (default off)
   "orchestration.merge_train_batch": "posint", // #5837: up to N green PRs of one base validated together on a candidate ref (default 4)
   "orchestration.max_attempts_per_issue": "posint", // #5986: lifetime lanes per issue before one FORGE:ESCALATION (default 4)
-  "orchestration.max_identical_signature": "posint", // #5986: identical failure signatures tolerated per issue (default 2)
+  "orchestration.max_identical_signature": "posint", // #5986: identical failure signatures at which an issue breaches (default 2: the 2nd breaches)
   "env.snapshots.enabled": "bool",
   "env.snapshots.store": { enum: ["local", "oci"] },
   "env.snapshots.keep": "number",
