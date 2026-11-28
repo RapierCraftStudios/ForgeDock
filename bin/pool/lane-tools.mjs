@@ -168,12 +168,12 @@ export const LANE_BUILD_RETRY_MS = 10 * 60000;
  * otherwise. `docker.hasImage` and `docker.build(dir, tag, args)` are injected. Throws typed lane_tools.unknown_recipe
  * (nothing built) or lane_tools.build_failed (build error or timeout, never a hang).
  */
-export async function resolveLaneImage({ tools = [], baseImage, docker, buildTimeoutMs = 45 * 60000 }) {
+export async function resolveLaneImage({ tools = [], baseImage, docker, buildTimeoutMs = 45 * 60000, sleep }) {
   if (!tools.length) return baseImage;
   checkRecipes(tools);
   const tag = laneToolsTag(baseImage, tools);
   if (await docker.hasImage?.(tag)) return tag;
-  if (!BUILDS.has(tag)) BUILDS.set(tag, buildLaneImage({ tag, baseImage, tools, docker, buildTimeoutMs }).finally(() => BUILDS.delete(tag)));
+  if (!BUILDS.has(tag)) BUILDS.set(tag, buildLaneImage({ tag, baseImage, tools, docker, buildTimeoutMs, ...(sleep ? { sleep, retryDelayMs: 0 } : {}) }).finally(() => BUILDS.delete(tag)));
   return BUILDS.get(tag); // concurrent callers share one build of a tag
 }
 
@@ -182,7 +182,7 @@ export async function resolveLaneImage({ tools = [], baseImage, docker, buildTim
  * {building: true} after starting (or joining) a background build, {failed: message} for a build that failed in the last
  * LANE_BUILD_RETRY_MS. Throws typed lane_tools.unknown_recipe.
  */
-export async function laneImageNow({ tools = [], baseImage, docker, buildTimeoutMs = 45 * 60000, now = Date.now }) {
+export async function laneImageNow({ tools = [], baseImage, docker, buildTimeoutMs = 45 * 60000, now = Date.now, sleep }) {
   if (!tools.length) return { image: baseImage };
   checkRecipes(tools);
   const tag = laneToolsTag(baseImage, tools);
@@ -191,21 +191,28 @@ export async function laneImageNow({ tools = [], baseImage, docker, buildTimeout
   if (f && now() - f.at < LANE_BUILD_RETRY_MS) return { failed: f.message };
   if (!BUILDS.has(tag)) {
     FAILED.delete(tag);
-    const p = buildLaneImage({ tag, baseImage, tools, docker, buildTimeoutMs }).catch((e) => { FAILED.set(tag, { at: now(), message: e.message }); }).finally(() => BUILDS.delete(tag));
+    const p = buildLaneImage({ tag, baseImage, tools, docker, buildTimeoutMs, ...(sleep ? { sleep, retryDelayMs: 0 } : {}) }).catch((e) => { FAILED.set(tag, { at: now(), message: e.message }); }).finally(() => BUILDS.delete(tag));
     BUILDS.set(tag, p);
   }
   return { building: true, tag };
 }
 
-async function buildLaneImage({ tag, baseImage, tools, docker, buildTimeoutMs }) {
+/** #6189: the last ~20 lines of a build error (the failing step's own output), bounded to `max` chars. */
+export function buildErrorTail(e, max = 1500) {
+  const t = String(e?.stderr || e?.message || e || "").trim().split("\n").slice(-20).join("\n");
+  return t.length <= max ? t : `…${t.slice(t.length - max + 1)}`;
+}
+
+async function buildLaneImage({ tag, baseImage, tools, docker, buildTimeoutMs, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), retryDelayMs = 15000 }) {
   const dir = mkdtempSync(join(tmpdir(), "lane-tools-"));
   let timer;
   try {
     writeFileSync(join(dir, "Dockerfile"), laneToolsDockerfile(baseImage, tools));
     const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`build timed out after ${buildTimeoutMs}ms`)), buildTimeoutMs); });
-    await Promise.race([docker.build(dir, tag, {}), timeout]);
+    const attempt = () => Promise.race([docker.build(dir, tag, {}), timeout]);
+    try { await attempt(); } catch { await sleep(retryDelayMs); await attempt(); } // #6189: one retry, a failed build is often transient
   } catch (e) {
-    throw typed("lane_tools.build_failed", `lane_tools image ${tag} build failed: ${String(e.stderr || e.message).slice(0, 300)}`);
+    throw typed("lane_tools.build_failed", `lane_tools image ${tag} build failed: ${buildErrorTail(e)}`);
   } finally { clearTimeout(timer); rmSync(dir, { recursive: true, force: true }); }
   return tag;
 }

@@ -156,15 +156,15 @@ describe("laneImageNow (shared background build)", () => {
   });
   it("a failed build is reported, not retried, inside the retry window; retried after it", async () => {
     let t = 1000;
-    const now = () => t, docker = fakeDocker({ failBuild: true }), tools = ["playwright"], baseImage = "shared:3";
-    assert.ok((await laneImageNow({ tools, baseImage, docker, now })).building);
+    const sleep = async () => {}, now = () => t, docker = fakeDocker({ failBuild: true }), tools = ["playwright"], baseImage = "shared:3";
+    assert.ok((await laneImageNow({ tools, baseImage, docker, now, sleep })).building);
     await settle();
-    const f = await laneImageNow({ tools, baseImage, docker, now });
+    const f = await laneImageNow({ tools, baseImage, docker, now, sleep });
     assert.match(f.failed, /apt failed/);
-    assert.equal(docker.builds.length, 1, "no rebuild inside the window");
+    assert.equal(docker.builds.length, 2, "one build + its one retry, no rebuild inside the window");
     t += LANE_BUILD_RETRY_MS + 1;
-    assert.ok((await laneImageNow({ tools, baseImage, docker, now })).building, "retried after the window");
+    assert.ok((await laneImageNow({ tools, baseImage, docker, now, sleep })).building, "retried after the window");
     await settle();
-    assert.equal(docker.builds.length, 2);
+    assert.equal(docker.builds.length, 4);
   });
 });
