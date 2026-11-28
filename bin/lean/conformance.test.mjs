@@ -1192,7 +1192,7 @@ describe("implied docs-freshness deliverable", () => {
   const base = ["src/scrape.js"], after = [...base, "src/search.js", "docs/guide.md", "src/extra.js"];
 });
 
-import { normalizeKindModes, blockingFailures, unverifiedRequirements, KIND_MODES } from "./conformance.mjs";
+import { normalizeKindModes, blockingFailures, unverifiedRequirements, linkTestPlanDeliverables, KIND_MODES } from "./conformance.mjs";
 
 describe("per-kind modes and requirement evidence", () => {
   const f = (code) => ({ code });
@@ -1227,6 +1227,37 @@ describe("per-kind modes and requirement evidence", () => {
     assert.deepEqual(u({ runs: [{ id: "V1", exit: 1 }], reruns: { V1: { rc: 0 }, V2: { rc: 0 } } }), ["R3"]);
     assert.deepEqual(u({ runs: [], ciCovered: ["V1", "V2"] }), ["R3"]);
     assert.deepEqual(u({ runs: [{ id: "V1", exit: 0 }, { id: "V2", exit: 0 }], reruns: { V2: { rc: 1 } } }), ["R2", "R3"]);
+  });
+  it("#6266 a test_plan row links a requirement to a deliverable test (pytest id and node:test name), fail closed otherwise", () => {
+    const mk = (row, dels) => ({
+      requirements: [{ id: "R1", disposition: "deliver" }],
+      deliverables: dels,
+      test_plan: [{ requirement: "R1", level: "integration", command: row.command, repro: row.repro }],
+      validate: [{ id: "V1", command: row.command }],
+    });
+    const run = { runs: [{ id: "V1", exit: 0 }] };
+    const files = { "tests/test_promoter.py": "class PromoterTest:\n    def test_registry_stderr_noise(self): pass\n", "test/a.test.js": "test('registry stderr noise', () => {})" };
+    const readFile = (f) => files[f] ?? "";
+    const py = mk({ repro: "tests/test_promoter.py::PromoterTest::test_registry_stderr_noise", command: "pytest tests/test_promoter.py" }, [{ id: "D1", path: "src/p.py", requirements: ["R1"] }, { id: "D2", path: "tests/test_promoter.py", requirements: [] }]);
+    assert.deepEqual(unverifiedRequirements(py, run), []);
+    assert.deepEqual(linkTestPlanDeliverables(py), [{ requirement: "R1", path: "tests/test_promoter.py", added: false }]);
+    assert.deepEqual(py.deliverables[1].requirements, ["R1"]);
+    // name only: resolved by content, needs readFile
+    const nameOnly = mk({ repro: "PromoterTest.test_registry_stderr_noise", command: "pytest tests" }, [{ id: "D2", path: "tests/test_promoter.py", requirements: [] }]);
+    nameOnly.validate = [{ id: "V1", command: "pytest tests/test_promoter.py" }];
+    assert.equal(unverifiedRequirements(nameOnly, run).length, 1);
+    assert.deepEqual(unverifiedRequirements(nameOnly, { ...run, readFile }), []);
+    const node = mk({ repro: "test/a.test.js#registry stderr noise", command: "node --test test/a.test.js" }, [{ id: "D2", path: "test/a.test.js", requirements: [] }]);
+    assert.deepEqual(unverifiedRequirements(node, run), []);
+    // a row naming a test absent from every deliverable stays test_missing and is a contract defect
+    const absent = mk({ repro: "tests/test_other.py::test_x", command: "pytest tests/test_other.py" }, [{ id: "D2", path: "tests/test_promoter.py", requirements: [] }]);
+    assert.deepEqual(unverifiedRequirements(absent, { ...run, readFile }).map((x) => x.id), ["R1"]);
+    assert.deepEqual(linkTestPlanDeliverables(absent).map((l) => [l.path, l.added]), [["tests/test_other.py", true]]); // contract validation adds the file, so the lane is told to write it
+    assert.deepEqual(linkTestPlanDeliverables(absent), []);
+    const ghost = mk({ repro: "NoSuchTest.test_ghost", command: "pytest tests/test_promoter.py" }, [{ id: "D2", path: "tests/test_promoter.py", requirements: [] }]);
+    assert.deepEqual(unverifiedRequirements(ghost, { ...run, readFile }).map((x) => x.id), ["R1"]);
+    // the same test not green: still unverified
+    assert.deepEqual(unverifiedRequirements(py, { runs: [{ id: "V1", exit: 1 }] }).map((x) => x.id), ["R1"]);
   });
   it("formatShadowSummary adds per-kind shares only when rows carry kinds", () => {
     const rows = [{ conformance: { mode: "shadow", would: "nonconforming", kinds: ["a.b"] } }, { conformance: { mode: "shadow", would: "conforms", kinds: [] } }];
