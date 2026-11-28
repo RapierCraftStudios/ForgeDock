@@ -85,6 +85,7 @@ import { parseCoupled, coupledFailures } from "./coupled.mjs";
 import { analyzeRelaxations, relaxationFailures } from "./relaxation.mjs";
 import { startSpeculative } from "./overlap.mjs";
 import { loadGuards, selectGuards, runGuards, supersededIds, supersessionComment, weakGuardNotes } from "./guardgate.mjs";
+import { buildMergeLedger } from "../stats/quality-ledger.mjs";
 import { freshFix, issueSummary, firstPassOf, sessionCostDelta, mergeNarrowTasks } from "./fixround.mjs";
 import { floorRoute, parseBuilderRouting, provisionalRoute, routeBuilder, shouldEscalate } from "./routing.mjs";
 import { makeTurnBudget, TURN_BUDGET_DEFAULTS, scaledExtra, laneSize, recoverySize, wrapupGrant, budgetDigest } from "./budget.mjs";
@@ -409,7 +410,8 @@ export async function runCore(o) {
   const sessionCosts = new Map(); // #4407: session id -> last reported cumulative cost
   let sessionId = null;
 
-  const ev = (e) => appendEvent(dir, issue, e, { repo }); // #4432: the run log is keyed by repo + issue
+  let ciVerifies = 0, ciMergeFixRounds = 0; // #6203: counted off the run-log events for the MERGE_LEDGER record
+  const ev = (e) => { if (e?.event === "CI_VERIFY") ciVerifies++; else if (e?.event === "CI_FIX_ROUND") { if (e.trigger === "merge") ciMergeFixRounds++; } return appendEvent(dir, issue, e, { repo }); }; // #4432: the run log is keyed by repo + issue
   /** #5435: time one sandbox_start step (SANDBOX_STEP event + ledger sub-timing); the result and errors pass through. */
   const step = async (name, fn) => {
     const s0 = now();
@@ -788,6 +790,12 @@ export async function runCore(o) {
     const phases = phaseLedger.snapshot(); // #4908: run log gets the nested ledger, FORGE:TELEMETRY the flattened scalars
     ev({ ...term, phases });
     await emit({ ...term, ...flattenPhases(phases) });
+    if (reason === "merged") { // #6203: one MERGE_LEDGER record per merge (first_pass, human touches, test delta, CI attempts, deduped cost, wall per phase)
+      try {
+        await emit(buildMergeLedger({ firstPass: firstPassOf(builderTriggers), recovered: Boolean(recover), attempt: recover?.attempt ?? o.attempt ?? 1, ciVerifies: ciVerifies + ciMergeFixRounds, ciFixRounds: builderTriggers.filter((x) => x.trigger === "ci_red" || x.trigger === "merge_ci").length,
+          files: String(await git(["diff", "--name-only", `${base}...HEAD`]).catch(() => "")).split("\n"), comments: allComments(), sinceMs: Date.now() - (now() - t0), costUsd: usage.cost_usd, phases, wallMs: now() - t0, engineVersion: ENGINE_VERSION, tier: route?.tier, model: route?.model, pr: extra.pr }));
+      } catch { /* the ledger is best effort */ }
+    }
     // #4297: only a final failure the runner never requeues puts needs-human back (needsHuman() relabels on its own path). invalid,
     // decomposed and dependency-* are legitimate non-failure endings; deferred/engine-error may be requeued, so the batch runner
     // (orchestrate settle, relabelNeedsHuman) relabels those once they are final. #4302: a non-final attempt never relabels; the runner
