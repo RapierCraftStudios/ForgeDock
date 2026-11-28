@@ -72,7 +72,17 @@ export function hostDiskFree({ path = null, osrelease = readRelease, statfs = st
  * socket. `{ free_gb, vmmem: [{name, gb}] }` (1 decimal), or null off WSL or on any error (absent means unknown: no gate). All I/O injectable.
  */
 const PS_MEM = "$f=(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory; $v=@(Get-Process vmmem* -ErrorAction SilentlyContinue | ForEach-Object { @{ name=$_.ProcessName; bytes=$_.WorkingSet64 } }); @{ free_kb=$f; vmmem=$v } | ConvertTo-Json -Compress -Depth 3";
-export function hostMemFree({ osrelease = readRelease, run = winRun, env = process.env } = {}) {
+/**
+ * #6270: on WSL the guest's page cache holds Windows RAM, so Windows `FreePhysicalMemory` reads 1-2 GB while the guest has 13+ GB
+ * reclaimable. `guestReclaimableKb` = MemAvailable - MemFree from /proc/meminfo text (0 when unreadable or inconsistent).
+ */
+export function guestReclaimableKb(text) {
+  const kb = (k) => { const m = new RegExp(`^${k}:\\s+(\\d+)\\s*kB`, "m").exec(String(text ?? "")); return m ? Number(m[1]) : null; };
+  const avail = kb("MemAvailable"), free = kb("MemFree");
+  return avail !== null && free !== null && avail > free ? avail - free : 0;
+}
+const readMeminfo = () => { try { return readFileSync("/proc/meminfo", "utf8"); } catch { return ""; } };
+export function hostMemFree({ osrelease = readRelease, run = winRun, env = process.env, meminfo = readMeminfo } = {}) {
   try {
     if (!/microsoft/i.test(String(osrelease() ?? ""))) return null;
     const out = run("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", PS_MEM], env);
@@ -81,7 +91,9 @@ export function hostMemFree({ osrelease = readRelease, run = winRun, env = proce
     const kb = Number(j?.free_kb);
     if (!Number.isFinite(kb) || kb < 0) return null;
     const vm = j.vmmem == null ? [] : Array.isArray(j.vmmem) ? j.vmmem : [j.vmmem];
-    return { free_gb: Math.round(kb / 104857.6) / 10, vmmem: vm.filter((p) => Number.isFinite(Number(p?.bytes))).map((p) => ({ name: String(p.name ?? "vmmem"), gb: Math.round(Number(p.bytes) / 107374182.4) / 10 })) };
+    let reclaim = 0; try { reclaim = guestReclaimableKb(meminfo()); } catch { reclaim = 0; }
+    const win = Math.round(kb / 104857.6) / 10, guest = Math.round(reclaim / 104857.6) / 10; // #6270: effective free = Windows free + the guest's reclaimable cache
+    return { free_gb: Math.round((kb + reclaim) / 104857.6) / 10, win_free_gb: win, guest_reclaimable_gb: guest, vmmem: vm.filter((p) => Number.isFinite(Number(p?.bytes))).map((p) => ({ name: String(p.name ?? "vmmem"), gb: Math.round(Number(p.bytes) / 107374182.4) / 10 })) };
   } catch { return null; }
 }
 

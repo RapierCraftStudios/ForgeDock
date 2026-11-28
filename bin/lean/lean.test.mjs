@@ -735,6 +735,37 @@ describe("core work-on", () => {
     noNeedsHuman(w);
   });
 
+  describe("#6264 dependency read retries a transient gh failure", () => {
+    const flaky = (failures, message) => {
+      const w = depWorld({ changed: [], result: { status: "blocked", summary: "needs #3 first", block: { kind: "dependency", issues: [3] } } }, {});
+      const gh = w.io.gh; w.reads = 0;
+      w.io.gh = async (a) => {
+        if (a[0] === "issue" && a[1] === "view" && a[2] === "3") { w.reads++; if (w.reads <= failures) throw new Error(message); return JSON.stringify({ state: "OPEN", labels: [] }); }
+        return gh(a);
+      };
+      return w;
+    };
+    it("two graphql i/o timeouts then a good read: the lane ends dependency-open, not dependency-unreadable", async () => {
+      const w = flaky(2, 'Post "https://api.github.com/graphql": dial tcp: i/o timeout');
+      const r = await run(w);
+      assert.equal(r.terminalReason, "dependency-open");
+      assert.equal(w.reads, 3);
+    });
+    it("still unreadable from a network error after the retries: dependency-unreadable carrying the network text, for the runner to requeue", async () => {
+      const w = flaky(99, "error connecting to api.github.com");
+      const r = await run(w);
+      assert.equal(r.terminalReason, "dependency-unreadable");
+      assert.equal(w.reads, 4, "4 attempts with backoff");
+      assert.match(r.detail, /error connecting to api\.github\.com/);
+    });
+    it("a persistent non-network failure is not retried and stays dependency-unreadable", async () => {
+      const w = flaky(99, "GraphQL: Could not resolve to an issue with the number of 3. (repository.issue)");
+      const r = await run(w);
+      assert.equal(r.terminalReason, "dependency-unreadable");
+      assert.equal(w.reads, 1);
+    });
+  });
+
   it("#4124 an open dependency that is itself needs-human ends dependency-blocked; this issue is not labelled needs-human", async () => {
     const w = depWorld({ changed: [], result: { status: "blocked", summary: "upstream", block: { kind: "dependency", issues: [3] } } },
       { 3: { state: "OPEN", labels: [{ name: "needs-human" }] } });
@@ -1083,7 +1114,7 @@ describe("core work-on", () => {
     it("#5764 a pip3 miss maps to the python recipe: installed in the sandbox and re-probed, no needs-human", async () => {
       const w = world({ contract: withTool("pip3") }); let ok = false; const cmds = [];
       const base = w.io.runCommand;
-      w.io.runCommand = async (a) => { if (/apt-get install/.test(a.command) && /python3 python3-venv/.test(a.command)) { cmds.push(a.command); ok = true; return { rc: 0 }; } return base(a); };
+      w.io.runCommand = async (a) => { if (/apt-get .*install/.test(a.command) && /python3 python3-venv/.test(a.command)) { cmds.push(a.command); ok = true; return { rc: 0 }; } return base(a); };
       probing(w, "pip3", () => ok);
       const r = await run(w, { dir: tmpDir("lean-5764a-"), ...remote });
       assert.equal(cmds.length, 1);

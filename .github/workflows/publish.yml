@@ -285,6 +285,7 @@ jobs:
           echo "### Lane image ${VERSION}: ${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build and push lane_tools variants
+        timeout-minutes: 40
         if: env.SKIP_PUBLISH != 'true' && steps.lane_push.outcome == 'success'
         continue-on-error: true
         run: node scripts/lane-variants.mjs "${VERSION}" --build

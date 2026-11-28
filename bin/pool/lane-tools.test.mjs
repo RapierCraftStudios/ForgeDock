@@ -7,7 +7,7 @@ import { RECIPES, hasRecipe, recipeFor, installCommands, installLaneTools, laneT
 describe("#5652 in-sandbox lane tool install", () => {
   it("installCommands strips RUN, prefixes sudo when not root, and is empty without a recipe", () => {
     assert.ok(hasRecipe("promtool") && !hasRecipe("nope"));
-    assert.match(installCommands("yaml")[0], /^apt-get update/);
+    assert.match(installCommands("yaml")[0], /^apt-get .*update/);
     assert.match(installCommands("yaml", { root: false })[0], /^sudo sh -c /);
     assert.deepEqual(installCommands("nope"), []);
   });
@@ -25,12 +25,12 @@ describe("#5652 in-sandbox lane tool install", () => {
     assert.match(bad.stderrTail, /404$/);
   });
   it("the image Dockerfile still uses the RUN steps", () => {
-    assert.match(laneToolsDockerfile("base:1", ["postgresql-client"]), /\nRUN apt-get update/);
+    assert.match(laneToolsDockerfile("base:1", ["postgresql-client"]), /\nRUN apt-get .*update/);
   });
   it("#5763 shellcheck is an unversioned apt recipe in the derived image", () => {
     assert.ok(hasRecipe("shellcheck"));
-    assert.match(RECIPES.shellcheck.steps()[0], /^RUN apt-get update && apt-get install -y --no-install-recommends shellcheck /);
-    assert.match(laneToolsDockerfile("base:1", ["shellcheck"]), /\nRUN apt-get update && apt-get install -y --no-install-recommends shellcheck /);
+    assert.match(RECIPES.shellcheck.steps()[0], /^RUN apt-get [^&]*update && apt-get [^&]*install -y --no-install-recommends shellcheck /);
+    assert.match(laneToolsDockerfile("base:1", ["shellcheck"]), /\nRUN apt-get [^&]*update && apt-get [^&]*install -y --no-install-recommends shellcheck /);
   });
   it("#5764 a binary a recipe provides resolves to it; python3 installs the unversioned python recipe", () => {
     for (const [b, r] of [["python3", "python"], ["python3.12", "python"], ["pip3", "python"], ["psql", "postgresql-client"], ["xvfb-run", "xvfb"], ["python", "python"]]) assert.equal(recipeFor(b), r, b);
@@ -43,7 +43,7 @@ describe("#5652 in-sandbox lane tool install", () => {
 describe("#5749 yaml recipe", () => {
   it("#5749 yaml has a lane_tools recipe", () => {
     assert.ok(hasRecipe("yaml"));
-    assert.match(installCommands("yaml")[0], /apt-get install .*python3-yaml/);
+    assert.match(installCommands("yaml")[0], /apt-get .*install .*python3-yaml/);
     assert.ok(hasRecipe("shellcheck"));
     assert.ok(!hasRecipe("vite") && !hasRecipe("forgedock"), "#5749: manifest/owned deps get no recipe");
   });
@@ -55,7 +55,7 @@ describe("#6037 image manifest tools skip the fallback installers", () => {
     for (const t of ["shellcheck", "xvfb", "yq"]) assert.deepEqual(installCommands(t), [], t);
     for (const t of ["shellcheck", "yq"]) assert.deepEqual(genericInstallCommands({ kind: "command", tool: t }), [], t);
     assert.ok(installCommands("promtool").length);
-    assert.match(genericInstallCommands({ kind: "command", tool: "ripgrep" })[0], /apt-get install/);
+    assert.match(genericInstallCommands({ kind: "command", tool: "ripgrep" })[0], /apt-get .*install/);
   });
   it("marks the fallbacks deprecated", async () => {
     const { readFileSync } = await import("node:fs");
@@ -124,5 +124,41 @@ describe("lane image build errors and retry (#6189)", async () => {
     const docker = mk(async () => { calls++; throw longErr(); });
     await assert.rejects(resolveLaneImage({ tools, baseImage: "base:fail", docker, sleep: async () => {} }), (e) => e.code === "lane_tools.build_failed" && /E: apt failed/.test(e.message));
     assert.equal(calls, 2);
+  });
+});
+
+describe("#6265 network discipline and build timeout", async () => {
+  const { CURL_NET, APT_NET, NODE_IPV4, genericInstallCommands, laneImageNow: nowFn } = await import("./lane-tools.mjs");
+  it("every generated download is IPv4-first with a connect timeout and retries", () => {
+    const df = laneToolsDockerfile("base:1", ["promtool@2.54.1", "python@3.12", "postgresql-client@16", "playwright"]);
+    assert.match(df, /curl -fsSL -4 --retry 6 --retry-all-errors --connect-timeout 20 --max-time \d+ https:\/\/github\.com/);
+    assert.equal((df.match(/Acquire::ForceIPv4=true/g) ?? []).length, 4, "update + install for each of the 2 apt recipes");
+    assert.match(df, /Acquire::http::Timeout=30/);
+    assert.match(df, new RegExp(`RUN ${NODE_IPV4} .*npx --yes playwright`));
+    assert.ok(CURL_NET.includes("-4") && APT_NET.includes("Retries"));
+    for (const c of [...installCommands("promtool@2.54.1"), ...installCommands("python@3.12")]) assert.match(c, /-4 --retry|ForceIPv4/);
+  });
+  it("generic pip/npm/apt installs carry retries, timeouts and IPv4", () => {
+    assert.match(genericInstallCommands({ kind: "python-module", tool: "yaml" })[0], /pip install --quiet --retries 5 --timeout 30/);
+    assert.match(genericInstallCommands({ kind: "node-module", tool: "left-pad" })[0], /ipv4first npm install .*--fetch-timeout=\d+ .*left-pad/);
+    assert.match(genericInstallCommands({ kind: "command", tool: "ripgrep" })[0], /ForceIPv4=true/);
+  });
+  it("a hung build is aborted at the timeout, logged, and marked failed (never a hang)", async () => {
+    let signal; const logs = [];
+    const docker = { hasImage: async () => false, build: (d, t, a, o) => { signal = o.signal; return new Promise(() => {}); } }; // never settles
+    const log = { warn: (m) => logs.push(["warn", m]), error: (m) => logs.push(["error", m]), info() {} };
+    const a = { tools: ["shellcheck"], baseImage: "to:1", docker, buildTimeoutMs: 20, log, sleep: async () => {} };
+    await assert.rejects(resolveLaneImage(a), (e) => e.code === "lane_tools.build_failed" && /timed out after 20ms/.test(e.message));
+    assert.equal(signal.aborted, true, "the docker build is killed");
+    assert.ok(logs.some(([l, m]) => l === "error" && /FAILED.*timed out/.test(m)));
+    const b = { ...a, baseImage: "to:2" };
+    await nowFn(b); await new Promise((r) => setTimeout(r, 60));
+    assert.match((await nowFn(b)).failed, /timed out/, "image state is failed, not building");
+  });
+  it("the pulled CI-built variant is tried before any local build", async () => {
+    const order = [];
+    const docker = { hasImage: async () => false, pullVariant: async (t) => { order.push("pull"); return true; }, build: async () => { order.push("build"); } };
+    await resolveLaneImage({ tools: ["python"], baseImage: "pv:6265", docker });
+    assert.deepEqual(order, ["pull"]);
   });
 });

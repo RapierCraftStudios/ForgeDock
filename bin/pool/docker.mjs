@@ -12,9 +12,9 @@ export const SWEEP_TIMEOUT_MS = 10 * 60000;
 const SWEEP_SRC = new URL("./cache-sweep.mjs", import.meta.url);
 
 /** #6189: `keepTail` keeps the END of stderr (a build error's useful part), not the head. */
-function docker(args, { timeoutMs = 120000, keepTail = false } = {}) {
+function docker(args, { timeoutMs = 120000, keepTail = false, signal } = {}) {
   return new Promise((resolve, reject) => {
-    execFile("docker", args, { timeout: timeoutMs, maxBuffer: 16 << 20 }, (err, stdout, stderr) => {
+    execFile("docker", args, { timeout: timeoutMs, maxBuffer: 16 << 20, ...(signal ? { signal } : {}) }, (err, stdout, stderr) => {
       if (err) { const t = String(stderr ?? ""); err.stderr = keepTail ? t.slice(-4000) : t.slice(0, 2000); reject(err); } else resolve(String(stdout).trim());
     });
   });
@@ -105,7 +105,8 @@ export const dockerCli = {
     }
     return res;
   },
-  async build(dir, tag, buildArgs = {}) { return docker(["build", "--progress=plain", "-t", tag, ...Object.entries(buildArgs).flatMap(([k, v]) => ["--build-arg", `${k}=${v}`]), dir], { timeoutMs: 45 * 60000, keepTail: true }); },
+  /** #6265: `opts.signal` kills the build (the lane_tools overall timeout), so a timed-out build never lingers. */
+  async build(dir, tag, buildArgs = {}, opts = {}) { return docker(["build", "--progress=plain", "-t", tag, ...Object.entries(buildArgs).flatMap(([k, v]) => ["--build-arg", `${k}=${v}`]), dir], { timeoutMs: 45 * 60000, keepTail: true, signal: opts.signal }); },
   /** #5696: removes one lane worktree (/cache/work/<id>) from a cache volume. */
   async removeWorkDir(volume, image, workDir) { await docker(["run", "--rm", "--network", "none", "-v", `${volume}:/cache`, "--entrypoint", "sh", image, "-c", 'rm -rf -- "$1"', "sh", workDir], { timeoutMs: SWEEP_TIMEOUT_MS }); },
   /** #5696: removes every /cache/work/* dir of a cache volume except the kept ones (full paths). */
