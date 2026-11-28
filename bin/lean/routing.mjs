@@ -10,6 +10,8 @@
 import { riskClassOf, riskPathHits } from "./review-trigger.mjs";
 
 export const ROUTING_MODES = Object.freeze(["on", "off"]);
+/** #6207: `engine.builder_model_tier`. auto = the size/risk routing below (default); mid/top pin the tier (risk classes stay top) so an A/B can compare them. */
+export const BUILDER_TIERS = Object.freeze(["auto", "mid", "top"]);
 export const DEFAULT_MID_MODEL = "claude-sonnet-5-5";
 /** Deliverables of at most this many non-test files make a small change. */
 export const SMALL_MAX_FILES = 2;
@@ -18,11 +20,19 @@ export const ESCALATE_TRIGGERS = Object.freeze(["precheck", "ci_red", "merge_ci"
 
 const MODEL_RE = /^[A-Za-z0-9._:[\]-]+$/;
 
-/** {mode, midModel}: an unknown mode is on, an invalid model id falls back to the default mid model. */
-export function parseBuilderRouting({ mode, midModel } = {}) {
+/** {mode, midModel, tier}: an unknown mode is on, an invalid model id falls back to the default mid model, an unknown tier is auto. */
+export function parseBuilderRouting({ mode, midModel, tier } = {}) {
   const m = String(mode ?? "").trim().toLowerCase();
   const id = String(midModel ?? "").trim();
-  return { mode: ROUTING_MODES.includes(m) ? m : "on", midModel: MODEL_RE.test(id) ? id : DEFAULT_MID_MODEL };
+  const t = String(tier ?? "").trim().toLowerCase();
+  return { mode: ROUTING_MODES.includes(m) ? m : "on", midModel: MODEL_RE.test(id) ? id : DEFAULT_MID_MODEL, tier: BUILDER_TIERS.includes(t) ? t : "auto" };
+}
+
+/** #6207: the tier of a class under the configured pin; `auto` is the default routing (`dflt`). A pinned mid never takes a risk lane. */
+function pinnedTier(c, cls, dflt) {
+  if (c.tier === "top") return "top";
+  if (c.tier === "mid") return cls === "risk" ? "top" : "mid";
+  return dflt;
 }
 
 const LOCKFILE_RE = /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|poetry\.lock|uv\.lock|Pipfile\.lock|Gemfile\.lock|composer\.lock|go\.sum|[^/]*\.lock)$/i;
@@ -64,7 +74,7 @@ export function routeBuilder({ contract = null, riskPaths = [], cfg = {}, topMod
     : risk.length ? "risk"
       : kinds.every((k) => k !== "code") ? "docs-config-test"
         : kinds.filter((k) => k !== "test").length <= SMALL_MAX_FILES ? "small" : "large";
-  const tier = c.mode === "on" && (cls === "docs-config-test" || cls === "small") ? "mid" : "top";
+  const tier = pinnedTier(c, cls, c.mode === "on" && (cls === "docs-config-test" || cls === "small") ? "mid" : "top");
   return { mode: c.mode, class: cls, tier, model: tier === "mid" ? c.midModel : topModel, risk };
 }
 
@@ -104,8 +114,8 @@ export function provisionalRoute({ title = "", labels = [], namedFiles = [], pri
         : prior ? ["large", "prior attempt"]
           : !paths.length ? ["unscoped", "no named files, no risk or size signal"]
             : kinds.every((k) => k !== "code") ? ["docs-config-test", "named files are docs, config or tests"] : ["small", "few named code files"];
-  const tier = c.mode === "on" && !["risk", "large"].includes(cls) ? "mid" : "top";
-  return { mode: c.mode, class: cls, tier, model: tier === "mid" ? c.midModel : topModel, risk, reason: c.mode === "on" ? reason : "routing off" };
+  const tier = pinnedTier(c, cls, c.mode === "on" && !["risk", "large"].includes(cls) ? "mid" : "top");
+  return { mode: c.mode, class: cls, tier, model: tier === "mid" ? c.midModel : topModel, risk, reason: c.tier !== "auto" ? `builder_model_tier ${c.tier}${cls === "risk" ? " (risk stays top)" : ""}` : c.mode === "on" ? reason : "routing off" };
 }
 
 /**

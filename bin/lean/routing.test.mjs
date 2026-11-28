@@ -8,7 +8,7 @@ const contract = (...paths) => ({ deliverables: paths.map((path, i) => ({ id: `D
 
 describe("parseBuilderRouting (#4394)", () => {
   it("defaults to on with the default mid model; unknown modes are on; invalid ids fall back", () => {
-    assert.deepEqual(parseBuilderRouting(), { mode: "on", midModel: DEFAULT_MID_MODEL });
+    assert.deepEqual(parseBuilderRouting(), { mode: "on", midModel: DEFAULT_MID_MODEL, tier: "auto" });
     assert.equal(DEFAULT_MID_MODEL, "claude-sonnet-5-5");
     assert.equal(parseBuilderRouting({ mode: "OFF" }).mode, "off");
     assert.equal(parseBuilderRouting({ mode: "shadow" }).mode, "on");
@@ -116,5 +116,23 @@ describe("floorRoute (#5810)", () => {
   it("no provisional route (resumed past the contract): the contract route unchanged", () => {
     const base = routeBuilder({ contract: contract("docs/a.md"), topModel: top });
     assert.deepEqual(floorRoute(base, null, top), base);
+  });
+});
+
+describe("builder_model_tier pin (#6207)", () => {
+  const big = { deliverables: ["a.js", "b.js", "c.js", "d.js"].map((path) => ({ path })) };
+  const risk = { deliverables: [{ path: "src/auth/login.js" }] };
+  it("auto is the default routing; an unknown tier is auto", () => {
+    assert.equal(routeBuilder({ contract: big }).tier, "top");
+    assert.equal(parseBuilderRouting({ tier: "bogus" }).tier, "auto");
+  });
+  it("mid pins a large lane to mid but never a risk lane", () => {
+    assert.equal(routeBuilder({ contract: big, cfg: { tier: "mid" } }).tier, "mid");
+    assert.equal(routeBuilder({ contract: risk, cfg: { tier: "mid" } }).tier, "top");
+    assert.equal(provisionalRoute({ title: "x", namedFiles: ["a.js", "b.js", "c.js"], cfg: { tier: "mid" } }).tier, "mid");
+  });
+  it("top pins every lane to top", () => {
+    assert.equal(routeBuilder({ contract: { deliverables: [{ path: "docs/a.md" }] }, cfg: { tier: "top" } }).tier, "top");
+    assert.equal(provisionalRoute({ title: "x", namedFiles: ["docs/a.md"], cfg: { tier: "top" } }).tier, "top");
   });
 });

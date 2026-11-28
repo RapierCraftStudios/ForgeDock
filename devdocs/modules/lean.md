@@ -267,7 +267,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    **Route hand-off** (#5812): the runner reports `endTokens` (the last turn's context). The plan and correction calls record
    it, along with the files planning read and its "Build reads:" reply. At the build, `routeHandoff` (`ceiling.mjs`) compares it
    with `engine.route_handoff_tokens` (`readCoreLimits` → `routeHandoffTokens`; default 40000, capped at half the lane
-   ceiling; 0 = always resume). Above the bound the build does not resume the planning session. It starts fresh with the
+   ceiling; 0 = always resume; #6207: default 0 unless `engine.split_plan: true`). Above the bound the build does not resume the planning session. It starts fresh with the
    implement prompt plus `routeDigestPrompt` (at most 32 KB): deliverables, contract decisions, open non-deliver rows,
    planning's reads and build reads, and the branch state from `restartFacts`. At or under the bound, or when no size was
    reported, the build resumes as before. Every build logs

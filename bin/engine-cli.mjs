@@ -453,6 +453,7 @@ export function readHeavy(cwd = process.cwd()) {
  * #5829: unset context_ceiling_tokens = `engine.context_window_share` (default 0.5) of the routed model's window; `engine.context_restart_cost_usd` is the cost gate's restart estimate.
  * #5346: `engine.context_ceiling_by_size` ("S=..,M=..,L=.."; a size without an entry uses context_ceiling_tokens).
  * #5812: `engine.route_handoff_tokens` (default 40000 in runCore; 0 = always resume): a planning session above it is not resumed by the build, which starts from a digest.
+ * #6207: `engine.split_plan` (default false: one builder session, plan folded in; true = the old plan then build sessions); `engine.builder_model_tier` (auto|mid|top, default auto = size/risk routing).
  * #4392: `engine.turn_budget_s|m|l` (implement turn budget per lane size; defaults 25/60/100, always returned; 0 = off).
  */
 export function readCoreLimits(cwd = process.cwd()) {
@@ -472,6 +473,8 @@ export function readCoreLimits(cwd = process.cwd()) {
       ...(String(y.engine?.context_restart_cost_usd ?? "").trim() !== "" && Number(y.engine.context_restart_cost_usd) >= 0 ? { contextRestartCostUsd: Number(y.engine.context_restart_cost_usd) } : {}),
       ...(parseCeilingBySize(y.engine) ? { contextCeilingBySize: parseCeilingBySize(y.engine) } : {}), // #5346
       ...(/^\d+$/.test(String(y.engine?.route_handoff_tokens ?? "").trim()) ? { routeHandoffTokens: Number(y.engine.route_handoff_tokens) } : {}), // #5812
+      ...(String(y.engine?.split_plan ?? "").trim().toLowerCase() === "true" ? { splitPlan: true } : {}), // #6207: the old two-session plan/build path
+      ...(["auto", "mid", "top"].includes(String(y.engine?.builder_model_tier ?? "").trim().toLowerCase()) ? { builderModelTier: String(y.engine.builder_model_tier).trim().toLowerCase() } : {}), // #6207
       turnBudgets: parseTurnBudgets(y.engine) ?? { ...TURN_BUDGET_DEFAULTS }, // #4392: lanes are budgeted by default
     };
   } catch { return { laneLimits: {}, turnBudgets: { ...TURN_BUDGET_DEFAULTS } }; }
