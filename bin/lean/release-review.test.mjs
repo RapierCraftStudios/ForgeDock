@@ -688,6 +688,33 @@ describe("default flow (v1.0 contract, dcfb86bf): one review pass, nothing found
     const c = def(s); c.state.steps.review = { done: true, result: await reviewStep(c) };
     assert.match((await fixStep(c)).reason, /^review blockers #100; release PR #7 held/);
   });
+  describe("#6178 queueBlockers picks an open batch and checks the add", () => {
+    const mk = (batches, add, calls = []) => realSeam({ repo: "o/r", def: "main", env: {}, cwd: "/tmp", gh: (a) => { calls.push(a); return ""; }, io: { batches: async () => batches, addToBatch: add } });
+    it("skips paused and cancelled batches", async () => {
+      const added = [];
+      const r = await mk([{ id: "p", paused: true }, { id: "c", cancelled: true }, { id: "ok" }], async (id) => { added.push(id); return { added: [100], skipped: [] }; }).queueBlockers({ blockers: [100] });
+      assert.deepEqual(added, ["ok"]); assert.equal(r.batch, "ok");
+    });
+    it("no open batch: nothing is added", async () => {
+      let called = false;
+      const r = await mk([{ id: "p", paused: true }], async () => { called = true; return {}; }).queueBlockers({ blockers: [100] });
+      assert.equal(r.batch, null); assert.equal(called, false);
+    });
+    it("a skipped-only add is not reported as queued", async () => {
+      const r = await mk([{ id: "b" }], async () => ({ added: [], requeued: [], skipped: [{ issue: 100, reason: "owned by x" }] })).queueBlockers({ blockers: [100] });
+      assert.equal(r.batch, null); assert.match(r.error, /#100 owned by x/);
+    });
+    it("holdReleasePr leaves the PR open with a status when nothing was queued", async () => {
+      const calls = [];
+      const r = await mk([], async () => ({}), calls).holdReleasePr({ pr: 7, blockers: [100], guards: [], queued: { batch: null } });
+      assert.equal(r.closed, false); assert.equal(calls[0][1], "comment"); assert.match(calls[0].join(" "), /stays open/);
+    });
+    it("a guard-only hold (no blockers) still closes the PR", async () => {
+      const calls = [];
+      const r = await mk([], async () => ({}), calls).holdReleasePr({ pr: 7, blockers: [], guards: [{ name: "g" }], queued: { batch: null } });
+      assert.equal(r.closed, true); assert.equal(calls[0][1], "close");
+    });
+  });
   it("MEDIUM, LOW and unconfirmed findings never block: GATE_PASS stays a pass", async () => {
     const s = fakeSeam({ fins: [fin({ toFile: [{ id: "u", title: "maybe", severity: "HIGH" }, { id: "m", title: "med", severity: "MEDIUM" }], confirmedIds: ["m"] })] });
     const r = await reviewStep(def(s));
