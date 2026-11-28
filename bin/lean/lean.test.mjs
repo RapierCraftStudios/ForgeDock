@@ -8423,7 +8423,7 @@ describe("#4362 attempt triggers", () => {
         const r = await orig(c);
         return c.role === "builder" && seen.length === 1 ? { ...r, endTokens: planTokens, text: "planned.\nBuild reads: src/foo.js:1-20", toolUses: [{ msg: "m1", name: "Read", path: "src/bar.js" }] } : r;
       };
-      return { w, seen, go: async () => { const dir = tmpDir("core-route-"); const r = await run(w, { dir, contextCeilingTokens: 120000, ...opts }); return { r, log: readLog(dir, 7) }; } };
+      return { w, seen, go: async () => { const dir = tmpDir("core-route-"); const r = await run(w, { dir, contextCeilingTokens: 120000, splitPlan: true, ...opts }); return { r, log: readLog(dir, 7) }; } };
     };
     const big = lane(96000);
     const { r, log } = await big.go();
@@ -8444,6 +8444,12 @@ describe("#4362 attempt triggers", () => {
     await small.go();
     assert.equal(small.seen[1].resume, "sess-1", "a planning session under the bound is resumed (its cache is cheaper)");
     assert.doesNotMatch(small.seen[1].prompt, /Route hand-off/);
+    const single = lane(96000, { splitPlan: false }); // #6207: the default is one builder session: the big plan is resumed, never digested
+    const singleRun = await single.go();
+    assert.equal(single.seen[1].resume, "sess-1", "single-session lane resumes the plan session");
+    assert.equal(singleRun.log.find((e) => e.event === "ROUTE_HANDOFF").mode, "resume");
+    const term = singleRun.log.find((e) => e.event === "RUN_TERMINAL");
+    assert.equal(term.split_plan, false); assert.ok(term.builder_sessions >= 1);
     const off = lane(96000, { routeHandoffTokens: 0 });
     const offRun = await off.go();
     assert.equal(off.seen[1].resume, "sess-1", "0 turns the hand-off off");
