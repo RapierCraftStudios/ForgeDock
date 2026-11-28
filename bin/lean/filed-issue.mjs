@@ -12,7 +12,7 @@ const isOpen = (r) => String(r?.state ?? "").toUpperCase() === "OPEN";
 const numberOf = (out) => Number(/\/issues\/(\d+)/.exec(String(out))?.[1]) || null;
 
 /** The plain alphanumeric token of a marker (`<!-- FORGE:X a.b -->` -> `FORGEXab`): safe as a search query, never a qualifier. */
-export function plainToken(key) { return String(key).replace(/<!--|-->/g, "").replace(/[^A-Za-z0-9]/g, ""); }
+export function plainToken(key) { return String(key).replace(/[^A-Za-z0-9]/g, ""); }
 
 /** Issues whose body carries `key`, newest first. Tries a plain-token search, then the unfiltered list; empty on failure. */
 export async function findFiledIssues({ ghc, repo, key }) {
