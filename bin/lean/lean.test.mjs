@@ -7095,7 +7095,7 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
   });
 
   it("#5448 a declared baseline runs when a shared path changes and a failing one blocks the merge", async () => {
-    const mk = (rc) => { const w = world({ changed: ["shared/content/a.js", "src/foo.js", "test/foo.test.js"] }); w.ran = []; const f = w.io.runCommand; w.io.runCommand = async (a) => { w.ran.push(a.command); return a.command === "make stealth-baseline" ? { rc, output: "stealth drift" } : f ? f(a) : { rc: 0, output: "" }; }; return w; };
+    const mk = (rc) => { const w = world({ changed: ["shared/content/a.js", "src/foo.js", "test/foo.test.js"] }); w.ran = []; const f = w.io.runCommand; w.io.runCommand = async (a) => { w.ran.push(a.command); return a.command === "make stealth-baseline" ? { rc: /basered-/.test(String(a.cwd)) ? 0 : rc, output: "stealth drift" } : f ? f(a) : { rc: 0, output: "" }; }; return w; };
     const b = [{ when: "shared/content/**", run: "make stealth-baseline" }];
     const ok = mk(0); await run(ok, { verify: { baselines: b } });
     assert.ok(ok.ran.includes("make stealth-baseline"), "baseline ran for the shared change");
