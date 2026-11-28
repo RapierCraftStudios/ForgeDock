@@ -8,7 +8,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mergeRecords, readMergeLedgers, queueByCause, spendIncrements, versionAt, weekOf, weeklyScorecard } from "./weekly.mjs";
-import { blames, laneIssueOf, linkEscapes } from "./escapes.mjs";
+import { blames, gatherEscapes, laneIssueOf, linkEscapes } from "./escapes.mjs";
 
 const T0 = Date.parse("2026-11-23T00:00:00Z"), M = 60000;
 
@@ -103,5 +103,17 @@ describe("escape linker", () => {
     assert.deepEqual(r.links.map((l) => l.number), [110, 120]);
     assert.equal(r.reopened, 1); assert.equal(r.escaped, true);
     assert.equal(linkEscapes({ lanePrs: [lane], candPrs: [], candIssues: [] })[0].escaped, false);
+  });
+  it("counts reopens when a paginated events page is empty", async () => {
+    const pr = { number: 100, title: "feat: x", body: "", headRefName: "feat/issue-50-lean", mergedAt: "2026-11-01T00:00:00Z" };
+    const pages = (raw) => async (args) => {
+      if (args[0] === "api") return raw;
+      return JSON.stringify(args[1] === "list" && args.includes("merged") ? [pr] : []);
+    };
+    const re = (t) => ({ event: "reopened", created_at: t }), other = { event: "closed", created_at: "2026-11-01T00:00:00Z" };
+    const count = async (raw) => (await gatherEscapes({ repo: "o/r", now: Date.parse("2026-11-10T00:00:00Z"), gh: pages(raw) })).records[0].reopened;
+    assert.equal(await count(`${JSON.stringify([])}\n${JSON.stringify([re("2026-11-02T00:00:00Z"), other])}`), 1);
+    assert.equal(await count(`${JSON.stringify([re("2026-11-02T00:00:00Z")])}\n${JSON.stringify([])}`), 1);
+    assert.equal(await count(`${JSON.stringify([])}\n${JSON.stringify([])}`), 0);
   });
 });
