@@ -48,6 +48,8 @@ export const dockerCli = {
     const out = await docker(["ps", "-a", ...[].concat(label).flatMap((l) => ["--filter", `label=${l}`]), "--format", "{{.Names}}"], { timeoutMs: 20000 });
     return out ? out.split("\n").filter(Boolean) : [];
   },
+  /** #6234: names of every running container on the daemon (any owner); the DNS repair restarts dockerd only when this is empty. */
+  async listRunning() { const out = await docker(["ps", "--format", "{{.Names}}"], { timeoutMs: 20000 }); return out ? out.split("\n").filter(Boolean) : []; },
   async removeVolume(name) { try { await docker(["volume", "rm", "-f", name], { timeoutMs: 120000 }); } catch (e) { if (!/no such volume/i.test(e.stderr ?? "")) throw e; } },
   /** #5881: `label` (one or a list) restricts the list to volumes carrying it, e.g. this agent's. */
   async listVolumes(prefix, label = []) {

@@ -31,7 +31,7 @@ import { namedPaths, isTrustedIssueComment, prodFailureSignal } from "./prefilte
 import { writeStatus, postUpsert, postKeyed, isKeyedPost, isStatusPost, isUpsertPost, hasSection, clearPipelineLabels, IN_PLACE_MARKERS, commentId, contractKey } from "./statuscomment.mjs";
 import { decidePost } from "./commentstate.mjs"; // #5979
 import { repeatSignature, countIdentical, shouldPark, summaryComment } from "./failure-stop.mjs"; // #5979
-import { baseHealth, fetchBaseChecks, baseRedComment, hasAdmitComment, classifyDryRun, renderStamp, stampable, inputOf, fingerprintStop, stopReason, admitEvent } from "./admit.mjs"; // #6206
+import { baseHealth, fetchBaseChecks, baseRedComment, hasAdmitComment, classifyDryRun, renderStamp, stampable, isNonStoppable, inputOf, fingerprintStop, stopReason, admitEvent } from "./admit.mjs"; // #6206
 import { checksAt, mergeCheckEntries, CHECKS_FILE } from "./postdeploy-check.mjs";
 import { matchBaselines, baselineFailures, foldRegression } from "./baselines.mjs";
 import { readRollouts, detectNewOffKeys, rolloutModes, liveDeferralBlocks } from "./activation.mjs";
@@ -899,7 +899,7 @@ export async function runCore(o) {
       }
       // #5979: the second identical failure (same code and normalised detail as an earlier NEEDS_HUMAN/PARKED of this issue) parks with one summary, no recovery
       const sig = repeatSignature(code, why);
-      const stoppable = code !== OUTCOME_CODES.BUILDER_BLOCKED && code !== OUTCOME_CODES.FAILURE_REPEATED && !ENV_ENGINE_OWNED_CODES.includes(code);
+      const stoppable = !isNonStoppable(code); // #6231: the one non-stoppable list (admit.mjs)
       const identical = stoppable ? countIdentical(allComments(), sig, (c) => c?.__mine === true || isTrustedIssueComment(c)) + 1 : 1;
       if (shouldPark(identical)) {
         try { await post("FORGE:PARKED", summaryComment({ attempts: identical, code, detail: why, sig: `${sig}${await admitStamp(code)}` })); } catch (e) { labelFailed("comment", e); }
@@ -2363,7 +2363,9 @@ export async function runCore(o) {
         try { required = (await io.baseRequiredChecks(lane)) ?? []; } catch { /* unreadable: no evidence */ }
         if (required.length) { try { rows = await fetchBaseChecks({ gh: ghc, repo, sha: head }); } catch { rows = null; } }
         if (rows) {
-          const h = baseHealth({ checks: rows, required, issueText: `${iss?.title ?? ""}\n${iss?.body ?? ""}` });
+          const cs = allComments().filter(trustedC);
+          const contractText = cs.filter((c) => String(c?.body ?? "").startsWith("<!-- FORGE:CONTRACT -->")).map((c) => parseContractComment(String(c.body))?.text ?? "").pop() ?? "";
+          const h = baseHealth({ checks: rows, required, issue: { text: `${iss?.title ?? ""}\n${iss?.body ?? ""}`, contractText, labels: iss?.labels ?? [], linkedBaseRed: cs.some((c) => /<!--\s*FORGE:BASE_RED\b/.test(String(c?.body ?? ""))) } }); // #6232: whole-token name, contract files, label or link
           if (h.red) {
             const key = `base.red ${base}@${head.slice(0, 12)}`;
             if (!hasAdmitComment(allComments(), key)) { try { await post("FORGE:ADMIT_PROBE", baseRedComment({ base, sha: head, failing: h.failing })); } catch (e) { T.anomalies.push(`Admit probe comment not posted: ${String(e?.message ?? e).slice(0, 160)}`); } }
@@ -2375,7 +2377,8 @@ export async function runCore(o) {
         }
       }
       if (io.claudeAuthProbe && !smartRotator && !sandboxCred) { // 2. environment: the claude login answers (`claude auth status`, no model call)
-        let a = null; try { a = await io.claudeAuthProbe({}); } catch { /* no verdict */ }
+        let a = null; try { a = await io.claudeAuthProbe({ env: { ...(io.env ?? process.env) } }); } catch { /* no verdict */ } // #6233: the lane's own env (CLAUDE_CONFIG_DIR, API key)
+        if (a?.warning) T.anomalies.push(`Admit probe: ${a.warning}`); // unknown verdict: fail open, record it
         if (a && a.ok === false) {
           const detail = "claude CLI login does not answer (expired or invalid); deferred before any builder session until the login is fixed";
           await rec({ outcome: "env_auth", code: OUTCOME_CODES.BACKEND_AUTH, detail });

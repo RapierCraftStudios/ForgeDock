@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { failingRequired, baseHealth, baseRedComment, hasAdmitComment, classifyDryRun, renderStamp, stampable, inputOf, fingerprintStop, admitEvent, fetchBaseChecks } from "./admit.mjs";
+import { failingRequired, baseHealth, baseRedComment, hasAdmitComment, classifyDryRun, renderStamp, stampable, isNonStoppable, NON_STOPPABLE_CODES, inputOf, fingerprintStop, admitEvent, fetchBaseChecks } from "./admit.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 
 const run = (name, conclusion, extra = {}) => ({ name, conclusion, url: `https://x/${name}`, completed_at: "2026-11-28T10:00:00Z", ...extra });
@@ -75,4 +75,46 @@ test("inputOf ignores labels, follows title/body/decisions/contract", () => {
 
 test("admitEvent always records zero builder spend", () => {
   assert.equal(admitEvent({ outcome: "base_red", code: "base.red" }).builder_spend_usd, 0);
+});
+
+// #6231: one non-stoppable list for the stamp writer, the stop reader and lean.mjs.
+test("transient and infrastructure codes are never stamped and never stop admission (#6231)", () => {
+  const input = "a".repeat(16), base = "b".repeat(40);
+  for (const code of ["engine.error", "sandbox.transient", "sandbox.lost", "sandbox.auth", "backend.auth", "env.setup_failed", "gh.unavailable", "net.transient", "lane.mismatch", "lease.held", "rate_limited", "base.red"]) {
+    assert.ok(isNonStoppable(code), code);
+    assert.ok(!stampable(code), code);
+    assert.equal(fingerprintStop({ comments: [stamped(code, base, input)], base, input }), null, code); // an old stamp of such a code (written by an earlier engine) never stops either
+  }
+  assert.ok(NON_STOPPABLE_CODES.has("engine.error"));
+  for (const code of ["ci.red", "review.failed", "build.acceptance_failed"]) assert.ok(stampable(code) && !isNonStoppable(code), code);
+});
+
+// #6232: whole-token check names, contract/deliverable files, label or link.
+const redRow = [{ name: "test", conclusion: "failure", summary: "FAIL bin/lean/foo.test.mjs\n at bin/lean/foo.mjs:3" }];
+const req = ["test"];
+test("base.red: a check name matches as a whole token, not a substring (#6232)", () => {
+  assert.equal(baseHealth({ checks: redRow, required: req, issueText: "handle the latest contest of attestation" }).red, true);
+  assert.equal(baseHealth({ checks: redRow, required: req, issueText: "the test check is red" }).red, false);
+});
+test("base.red: an issue whose frozen contract touches the failing files, or is labelled or linked as the fix, is admitted (#6232)", () => {
+  const issue = (x) => ({ text: "refactor the planner", ...x });
+  assert.equal(baseHealth({ checks: redRow, required: req, issue: issue({}) }).red, true); // a bystander is still deferred
+  assert.equal(baseHealth({ checks: redRow, required: req, issue: issue({ contractText: JSON.stringify({ deliverables: ["bin/lean/foo.mjs"] }) }) }).red, false);
+  assert.equal(baseHealth({ checks: redRow, required: req, issue: issue({ contractText: JSON.stringify({ files: ["bin/lean/other.mjs"] }) }) }).red, false); // same directory: the check's scope
+  assert.equal(baseHealth({ checks: redRow, required: req, issue: issue({ contractText: JSON.stringify({ files: ["docs/readme.md"] }) }) }).red, true);
+  assert.equal(baseHealth({ checks: redRow, required: req, issue: issue({ labels: [{ name: "base-red" }] }) }).red, false);
+  assert.equal(baseHealth({ checks: redRow, required: req, issue: issue({ linkedBaseRed: true }) }).red, false);
+});
+
+// #6233: only the documented logged-out signal is a login failure; anything else unknown fails open with a warning.
+import { classifyAuthStatus } from "./effects.mjs";
+test("classifyAuthStatus: logged-out is ok:false, success ok:true, other non-zero or no run is unknown (#6233)", () => {
+  assert.equal(classifyAuthStatus({ status: 0, out: '{"loggedIn": true}' }).ok, true);
+  assert.equal(classifyAuthStatus({ status: 1, out: '{"loggedIn": false}' }).ok, false);
+  assert.equal(classifyAuthStatus({ status: 1, out: "Not logged in. Run claude login" }).ok, false);
+  const other = classifyAuthStatus({ status: 2, out: "unexpected flag" });
+  assert.equal(other.ok, null); assert.match(other.warning, /exited 2/);
+  assert.equal(classifyAuthStatus({ status: 1, out: "ECONNREFUSED proxy" }).ok, null); // a non-logged-out failure is not backend.auth
+  assert.equal(classifyAuthStatus({ error: Object.assign(new Error("x"), { code: "ENOENT" }), status: null }).ok, null);
+  assert.equal(classifyAuthStatus({ status: null }).ok, null);
 });

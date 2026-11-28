@@ -35,19 +35,39 @@ export function failingRequired({ checks = [], required = [] } = {}) {
     .map((c) => ({ name: String(c.name), conclusion: String(c.conclusion ?? c.state), url: c.url ?? c.html_url ?? "", summary: String(c.summary ?? "").slice(0, 600) }));
 }
 
-/** True when the issue text names the failing check or a file the check's output names: the issue is then the fix (or about it), not a bystander. */
-export function touchedByIssue(fail, issueText) {
-  const text = String(issueText ?? "").toLowerCase();
-  if (!text) return false;
-  if (text.includes(String(fail.name).toLowerCase())) return true;
+const esc = (x) => String(x).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** #6232: `needle` as a whole token of `text` (not inside a longer word, name or path): `test` does not match `latest` or `tests/foo`. Both lowercased by the caller. */
+export const hasToken = (text, needle) => Boolean(needle) && new RegExp(`(?<![a-z0-9_./-])${esc(needle)}(?![a-z0-9_-]|\\.[a-z0-9])`).test(text);
+const BASE_RED_LABEL = /^(base[-. _]?red|fix(es)?[-: ]base[-. _]?red)$/i;
+const dirOf = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
+
+/**
+ * True when the issue is the fix for (or about) the failing check, not a bystander. `issue`: a string (title and body) or
+ * {text, contractText, labels, linkedBaseRed}. It is the fix when any of:
+ *  - its text names the failing check as a whole token (substrings do not count: `test` is not in `latest`),
+ *  - its text, frozen contract or deliverables name a file (or sit in the directory of a file) the check's output names,
+ *  - it is labelled base-red, or linked as the base-red cause (a trusted FORGE:BASE_RED comment).
+ */
+export function touchedByIssue(fail, issue) {
+  const o = typeof issue === "string" || issue == null ? { text: issue } : issue;
+  if ((o.labels ?? []).some((l) => BASE_RED_LABEL.test(String(l?.name ?? l)))) return true;
+  if (o.linkedBaseRed) return true;
+  const text = String(o.text ?? "").toLowerCase(), contract = String(o.contractText ?? "").toLowerCase();
+  if (!text && !contract) return false;
+  if (hasToken(text, String(fail.name).toLowerCase())) return true;
   const { src, tests } = baseRedPaths([{ command: "", output: fail.summary }]);
-  return [...src, ...tests].some((p) => text.includes(p.toLowerCase()));
+  return [...src, ...tests].map((p) => p.toLowerCase()).some((p) => {
+    if (hasToken(text, p) || hasToken(contract, p)) return true;
+    const d = dirOf(p); // the check's scope: a contract file in the same directory is the fix's territory
+    return d.includes("/") && (text.includes(`${d}/`) || contract.includes(`${d}/`));
+  });
 }
 
 /** Base health verdict: red only for a failing required check this issue does not touch. */
-export function baseHealth({ checks, required, issueText } = {}) {
+export function baseHealth({ checks, required, issueText, issue } = {}) {
   const failing = failingRequired({ checks, required });
-  const foreign = failing.filter((f) => !touchedByIssue(f, issueText));
+  const who = issue ?? issueText;
+  const foreign = failing.filter((f) => !touchedByIssue(f, who));
   return { red: foreign.length > 0, failing: foreign, touched: failing.filter((f) => !foreign.includes(f)) };
 }
 
@@ -91,9 +111,23 @@ export function inputOf({ iss, comments = [], trusted = () => true, engineVersio
   return computeInputHash({ title: iss?.title ?? "", body: iss?.body ?? "", labels: [], decisions, engineVersion, contractHash: frozenContractHash(comments, trusted) });
 }
 
-/** Codes a repeat cannot help: the engine's own environment recovery, a human block, a deferral. Parks of these never stop admission. */
-const NO_STOP = new Set([...ENV_ENGINE_OWNED_CODES, OUTCOME_CODES.BUILDER_BLOCKED, OUTCOME_CODES.FAILURE_REPEATED, OUTCOME_CODES.BASE_RED, OUTCOME_CODES.BASE_CONFLICT]);
-export const stampable = (code) => !NO_STOP.has(code);
+/**
+ * #6231: codes a repeat cannot help or that are transient/infrastructure: the engine's own environment recovery, a human block, a deferral,
+ * the engine, the sandbox, the backend login, the network and gh. A park of these is never stamped and never stops admission or counts as a
+ * repeat: after the operator fixes the cause a rerun must be admitted. The ONE list, used by the stamp writer, the stop reader and lean.mjs.
+ */
+export const NON_STOPPABLE_CODES = Object.freeze(new Set([
+  ...ENV_ENGINE_OWNED_CODES, OUTCOME_CODES.BUILDER_BLOCKED, OUTCOME_CODES.FAILURE_REPEATED, OUTCOME_CODES.BASE_RED, OUTCOME_CODES.BASE_CONFLICT,
+  OUTCOME_CODES.ENGINE_ERROR, OUTCOME_CODES.ENV_SETUP_FAILED, OUTCOME_CODES.ENV_LANE_LIMIT, OUTCOME_CODES.ENV_ENGINE_SKEW,
+  OUTCOME_CODES.BACKEND_AUTH, OUTCOME_CODES.BACKEND_CLI_FAILED, OUTCOME_CODES.QUOTA_EXHAUSTED, OUTCOME_CODES.RATE_LIMITED, OUTCOME_CODES.HOST_BUSY,
+  OUTCOME_CODES.GH_UNAVAILABLE, OUTCOME_CODES.GH_AUTH, OUTCOME_CODES.NET_TRANSIENT, OUTCOME_CODES.MERGE_TRANSIENT, OUTCOME_CODES.PUSH_TRANSIENT,
+  OUTCOME_CODES.RUN_INTERRUPTED, OUTCOME_CODES.LEASE_HELD, OUTCOME_CODES.CLI_IDLE, OUTCOME_CODES.CLI_TIMEOUT, OUTCOME_CODES.CLI_HOST_KILLED,
+  OUTCOME_CODES.PATH_SWITCH_CONFLICT,
+]));
+/** Families that are transient or infrastructure by prefix: sandbox.*, lane.*, engine.*, infra.*, backend.*, net.*, gh.*, and deferred/dependency holds. */
+const NON_STOPPABLE_PREFIX = /^(sandbox|lane|engine|infra|backend|net|gh|dependency|pool|deferred)[.:_]/;
+export const isNonStoppable = (code) => NON_STOPPABLE_CODES.has(code) || NON_STOPPABLE_PREFIX.test(String(code ?? ""));
+export const stampable = (code) => Boolean(code) && !isNonStoppable(code);
 
 /**
  * The failure-fingerprint stop: the newest trusted NEEDS_HUMAN/PARKED comment (after the last trusted FORGE:DECISION) carries a stamp whose base head and
