@@ -46,7 +46,7 @@
   },
   "bin/lean/conformance.mjs": {
     "no-use-before-define": {
-      "count": 17
+      "count": 16
     }
   },
   "bin/lean/conformance.test.mjs": {
