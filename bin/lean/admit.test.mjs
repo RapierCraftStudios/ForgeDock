@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { failingRequired, baseHealth, baseRedComment, hasAdmitComment, classifyDryRun, renderStamp, stampable, isNonStoppable, NON_STOPPABLE_CODES, inputOf, fingerprintStop, admitEvent, fetchBaseChecks } from "./admit.mjs";
+import { failingRequired, baseHealth, baseRedComment, hasAdmitComment, classifyDryRun, renderStamp, stampable, isNonStoppable, NON_STOPPABLE_CODES, REPEAT_COUNTED_CODES, repeatCounted, inputOf, fingerprintStop, admitEvent, fetchBaseChecks } from "./admit.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 
 const run = (name, conclusion, extra = {}) => ({ name, conclusion, url: `https://x/${name}`, completed_at: "2026-11-28T10:00:00Z", ...extra });
@@ -87,6 +87,14 @@ test("transient and infrastructure codes are never stamped and never stop admiss
   }
   assert.ok(NON_STOPPABLE_CODES.has("engine.error"));
   for (const code of ["ci.red", "review.failed", "build.acceptance_failed"]) assert.ok(stampable(code) && !isNonStoppable(code), code);
+});
+
+// #6243: deterministic crash/timeout codes stay unstamped but their identical repeats still count toward the summary park.
+test("REPEAT_COUNTED_CODES stay non-stampable yet count as repeats (#6243)", () => {
+  assert.ok(REPEAT_COUNTED_CODES.size >= 5);
+  for (const code of REPEAT_COUNTED_CODES) { assert.ok(isNonStoppable(code) && !stampable(code), code); assert.ok(repeatCounted(code), code); }
+  for (const code of ["engine.error", "cli.timeout", "cli.idle", "backend.cli_failed", "run.interrupted"]) assert.ok(repeatCounted(code), code);
+  for (const code of ["rate_limited", "quota.exhausted", "net.transient", "gh.unavailable", "lease.held", "host.busy", "base.red"]) assert.ok(!repeatCounted(code), code);
 });
 
 // #6232: whole-token check names, contract/deliverable files, label or link.
