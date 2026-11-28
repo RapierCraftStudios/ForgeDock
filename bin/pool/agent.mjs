@@ -11,7 +11,8 @@ import { basename, dirname, join } from "node:path";
 import { cpus, hostname } from "node:os";
 import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
 import { repoRoot, versionOf, laneImageTag, laneBuildArgs } from "./version.mjs";
-import { provideLaneImage } from "./lane-image.mjs";
+import { provideLaneImage, withIpv4Fallback } from "./lane-image.mjs";
+import { ensureDaemonDns } from "./docker-dns.mjs";
 import { jsonStore } from "./store.mjs";
 import { makeWarm } from "./warm.mjs";
 import { resolveLaneImage, laneImageNow, laneToolsTag, isLaneToolsTagOf } from "./lane-tools.mjs";
@@ -179,10 +180,12 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const agentId = String(cfg.agent_id ?? cfg.name ?? hostname()).toLowerCase().replace(/[^a-z0-9_.-]/g, "-").slice(0, 60);
   const AGENT = agentLabel(agentId);
   const OWN = [LABEL, AGENT];
+  // #6195: a dockerd DNS failure triggers a daemon.json dns repair; docker restarts only while no sandbox is active.
+  const pinOpts = { ensureDns: () => ensureDaemonDns({ idle: () => activeRecs().length === 0, restart: () => run("systemctl", ["restart", "docker"], { timeout: 120000 }), log }) };
   /** Images a sandbox may need are pulled ahead of time, never inside a launch request (which has a short timeout). */
   async function prepullImages() {
     if (await docker.hasImage?.(dindImage)) { prepull.error = null; return; }
-    try { await docker.pull(dindImage); prepull.error = null; return; }
+    try { await withIpv4Fallback(() => docker.pull(dindImage), { ...pinOpts, log }); prepull.error = null; return; }
     catch (e) { log.warn?.(`pull ${dindImage} failed (${String(e.stderr || e.message).slice(0, 160)}); fetching it from the router`); }
     // Fallback: the router host pulls the image and streams it (some hosts' daemons cannot reach the registry).
     const file = join(stateDir, "image.tar");
@@ -1062,7 +1065,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
         const nextImage = cfg.image && cfg.image !== "computeshare-lane:1" ? cfg.image : laneImageTag(want.version);
         log.info?.(`rebuilding ${nextImage} (${running.version}/${running.image} -> ${want.version}/${want.image})`);
         // #6166: present (pre-seeded) -> pull the published image -> local build only as the fallback
-        const how = await provideLaneImage({ docker, image: nextImage, version: want.version, recipe: want.image, publishable: nextImage === laneImageTag(want.version), log,
+        const how = await provideLaneImage({ docker, image: nextImage, version: want.version, recipe: want.image, publishable: nextImage === laneImageTag(want.version), log, pinOpts,
           build: () => buildWithRetry(() => docker.build(join(next, "pool", "image"), nextImage, laneBuildArgs(want.version, want.image)), { log }) }); // #5919
         log.info?.(`${nextImage}: ${how}`);
       }
@@ -1233,7 +1236,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
 
   /** Build the lane image for the running ForgeDock version when this host does not have it yet. */
   async function ensureImage() {
-    await provideLaneImage({ docker, image, version: running.version, recipe: running.image, publishable: image === laneImageTag(running.version), log,
+    await provideLaneImage({ docker, image, version: running.version, recipe: running.image, publishable: image === laneImageTag(running.version), log, pinOpts,
       build: () => docker.build(join(cfg.code_root ?? repoRoot, "pool", "image"), image, laneBuildArgs(running.version, running.image)) });
     await pruneLaneImages();
   }
