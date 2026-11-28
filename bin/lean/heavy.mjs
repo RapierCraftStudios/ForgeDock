@@ -30,6 +30,8 @@ import { lowerPriority } from "./hostload.mjs";
 
 export const HEAVY_DEFAULTS = Object.freeze({ enabled: true, max: null, step_mem_mb: 2048, reserve_mb: 1024, ramp_s: 60, max_wait_s: 1800 });
 export const HEAVY_POLL_MS = 2000;
+export const HEAVY_ERROR_BUDGET_MS = 120000; // #6235: how long an erroring or unreachable agent is retried before the step is deferred
+export const HEAVY_DEFER_CODE = 75; // EX_TEMPFAIL: the step did not run because no heavy token could be leased
 const LOCK_WAIT_MS = 2000, EMPTY_LOCK_STALE_MS = 5000;
 
 const PMS = new Set(["npm", "pnpm", "yarn", "bun"]);
@@ -255,26 +257,34 @@ export async function acquireHeavy(h, entry = {}, { pollMs = HEAVY_POLL_MS, slee
 
 /**
  * #6047: remote-token backend, chosen when CS_HEAVY_BASE (the pool agent's per-sandbox /heavy route) is set. Acquire polls
- * while the agent denies, renews the lease on a timer, release is best effort; an unreachable or erroring agent, or a wait past
- * `maxWaitMs`, fails open (the step runs, `failOpen: true`). `fetchFn` returns {status, json()}.
+ * while the agent denies and renews the lease on a timer; release is best effort. #6235: fails CLOSED. Under elastic accounting a
+ * lane is charged only its base, so a step that runs without a token can overcommit host memory. An unreachable or erroring agent is
+ * retried with backoff for `errorBudgetMs`; that budget, or a wait past `maxWaitMs`, returns `{denied: true, reason}` and the
+ * caller defers the step (it does not run). `fetchFn` returns {status, json()}.
  */
-export async function acquireRemote({ base, credToken = "", fetchFn = (u, o) => fetch(u, o), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now(), pollMs = 5000, renewMs = 60000, maxWaitMs = HEAVY_DEFAULTS.max_wait_s * 1000, setTimer = setInterval, clearTimer = clearInterval } = {}) {
+export async function acquireRemote({ base, credToken = "", fetchFn = (u, o) => fetch(u, o), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now(), pollMs = 5000, renewMs = 60000, maxWaitMs = HEAVY_DEFAULTS.max_wait_s * 1000, errorBudgetMs = HEAVY_ERROR_BUDGET_MS, setTimer = setInterval, clearTimer = clearInterval } = {}) {
   const call = async (action, body) => {
     const r = await fetchFn(`${base}/${action}`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${credToken}` }, body: JSON.stringify(body ?? {}), signal: AbortSignal.timeout(10000) });
     if (r.status !== 200) throw new Error(`heavy ${action}: HTTP ${r.status}`);
     return r.json();
   };
   const t0 = now(), open = { waitMs: 0, queued: 0, holders: 1, release: () => {} };
+  let errSince = null, errN = 0;
   for (;;) {
     let r;
-    try { r = await call("acquire"); } catch { return { ...open, waitMs: now() - t0, failOpen: true }; }
+    try { r = await call("acquire"); errSince = null; errN = 0; } catch (e) {
+      errSince ??= now();
+      if (now() - errSince >= errorBudgetMs || now() - t0 >= maxWaitMs) return { ...open, waitMs: now() - t0, denied: true, reason: `heavy gate unavailable: ${e?.message ?? e}` };
+      await sleep(Math.min(15000, 1000 * 2 ** Math.min(errN++, 4)));
+      continue;
+    }
     if (r?.granted && r.token) {
       const token = r.token, timer = setTimer(() => { call("renew", { token }).catch(() => {}); }, renewMs);
       timer?.unref?.();
       let released = false;
       return { ...open, waitMs: now() - t0, token, release: () => { if (released) return; released = true; clearTimer(timer); call("release", { token }).catch(() => {}); } };
     }
-    if (now() - t0 >= maxWaitMs) return { ...open, waitMs: now() - t0, failOpen: true, timedOut: true };
+    if (now() - t0 >= maxWaitMs) return { ...open, waitMs: now() - t0, denied: true, timedOut: true, reason: `no heavy token after ${Math.round((now() - t0) / 1000)}s` };
     await sleep(Math.min(pollMs, Math.max(1, Number(r?.retry_after_s) * 1000 || pollMs)));
   }
 }
@@ -427,9 +437,13 @@ export async function runWrapped(argv, { env: env0 = process.env, open = openHea
   const hostP = host ?? defaultHost();
   const priority = Number.isFinite(Number(env.FORGE_LANE_PRIORITY)) && String(env.FORGE_LANE_PRIORITY).trim() !== "" ? Number(env.FORGE_LANE_PRIORITY) : DEFAULT_PRIORITY;
   const phase = env.FORGE_LANE_PHASE || "step";
-  const useRemote = Boolean(env.CS_HEAVY_BASE); // #6047: the pool agent's token semaphore; fail-open, else the local file semaphore
+  const useRemote = Boolean(env.CS_HEAVY_BASE); // #6047: the pool agent's token semaphore (#6235: fail closed), else the local file semaphore
   const g = useRemote ? await remote({ base: env.CS_HEAVY_BASE, credToken: env.CS_CRED_TOKEN ?? "", maxWaitMs: c.max_wait_s * 1000 })
     : await acquireHeavy(open(env.FORGEDOCK_SCHED_DIR || schedDir(env), { env, host: hostP }), { issue: Number(env.FORGE_LANE_ISSUE) || null, phase, priority, mb: c.step_mem_mb });
+  if (g.denied && env.FORGE_HEAVY_FAIL_OPEN !== "1") { // #6235: never run a heavy step ungated under elastic accounting; the caller retries or defers
+    process.stderr.write(`forgedock heavy: ${name} deferred, ${g.reason ?? "no heavy token"} (exit ${HEAVY_DEFER_CODE}; FORGE_HEAVY_FAIL_OPEN=1 runs it ungated)\n`);
+    return { code: HEAVY_DEFER_CODE, signal: null };
+  }
   if (env.FORGE_HEAVY_WAITS) { try { appendFileSync(env.FORGE_HEAVY_WAITS, JSON.stringify({ phase, name, waitMs: g.waitMs, queued: g.queued }) + "\n"); } catch { /* metrics are best effort */ } }
   let cores = 1; try { cores = hostP.cores() || 1; } catch { /* 1 */ }
   cores = quotaCores({ cores, read, env }); // #6047: the container's CPU quota, never the VM
