@@ -84,6 +84,7 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
     if (hop) e.hop = hop;
     if (typeof r.data?.code === "string" && r.data.code.startsWith("pool.")) e.poolCode = r.data.code; // #5985: the pool's refusal code reaches the deferral row
     if (r.data?.live && typeof r.data.live === "object") e.live = { load_per_core: r.data.live.load_per_core, mem_available_gb: r.data.live.mem_available_gb };
+    if (typeof r.data?.agent === "string") e.agent = r.data.agent.replace(/[^\x20-\x7e]/g, "").slice(0, 64); // #6267: the host that refused
     if (reason) e.reason = reason;
     if ([500, 502, 503, 504].includes(r.status)) e.transient = true; // #4672: a router restart or gateway blip, retried by the lane poll; #5095: 500 too
     if (r.status === 429 || r.status === 503) e.retryable = true;
@@ -177,7 +178,8 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
         const r = await call("GET", `/status${q}`);
         reached = true;
         if (r.ok) { const { free, online, total } = r.data ?? {}; const agents = (Array.isArray(r.data?.agents) ? r.data.agents : []).filter((a) => typeof a?.engine_version === "string").map((a) => ({ name: a.name, ok: a.ok === true, paused: a.paused === true, engine_version: a.engine_version })); // R6: per-agent lane engines
-          out = { ...(ok(free) ? { free } : {}), ...(ok(online) ? { online } : {}), ...(ok(total) ? { total } : {}), ...(agents.length ? { agents } : {}) }; }
+          const hosts = (Array.isArray(r.data?.agents) ? r.data.agents : []).filter((a) => typeof a?.name === "string").map((a) => ({ name: a.name, ok: a.ok === true, paused: a.paused === true, at_limit: a.host_mem_low === true || a.host_disk_low === true || a.disk_capped === true })); // #6267: per-host limits
+          out = { ...(ok(free) ? { free } : {}), ...(ok(online) ? { online } : {}), ...(ok(total) ? { total } : {}), ...(agents.length ? { agents } : {}), ...(hosts.length ? { hosts } : {}) }; }
       } catch (e) { out = {}; lastErr = e; }
       if (out.online === undefined || out.load_per_core === undefined) {
         // #4788: a router without /status liveness: online = agents answering and not paused, as bin/pool/router.mjs status() does.

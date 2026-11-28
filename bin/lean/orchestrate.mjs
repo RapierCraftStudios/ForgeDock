@@ -145,6 +145,7 @@ import { normalizeStacking, planAdmissible, stackAdmissible } from "./stacking.m
 import { lackedTools } from "./toolplace.mjs";
 import { openPrerequisites } from "./prereq.mjs";
 import { makeController, classifyRepo, formatConcurrency } from "./concurrency.mjs";
+import { GH_TRANSIENT_RE } from "./retry.mjs";
 import { admitInput, breach, recordFailure, blockerSignature, markEscalated, NO_NEW_INPUT } from "./attempts.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
@@ -1035,6 +1036,12 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       netTransients.set(n, k);
       r = { ...r, terminalReason: "deferred", code: OUTCOME_CODES.NET_TRANSIENT, retryInSeconds: Math.round(transientRetryDelayMs(k) / 1000), detail: r.detail };
     }
+    // #6264: a dependency that stayed unreadable from a network/transport error (retried in the lane) is not a verdict: requeued with backoff like any transient; a persistent non-network failure stays dependency-unreadable.
+    if (!cancelled && r?.terminalReason === "dependency-unreadable" && GH_TRANSIENT_RE.test(String(r?.detail ?? ""))) {
+      const k = (netTransients.get(n) ?? 0) + 1;
+      netTransients.set(n, k);
+      r = { ...r, terminalReason: "deferred", code: OUTCOME_CODES.NET_TRANSIENT, retryInSeconds: Math.round(transientRetryDelayMs(k) / 1000), detail: r.detail };
+    }
     // #5241: the lane ended: its lease goes with it. #5654: also an interrupted or engine-error end, which is requeued at once
     if (releaseLease && (cancelled || (r?.terminalReason ?? "engine-error") === "engine-error" || (r?.terminalReason === "deferred" && r?.code === "run.interrupted"))) { try { await releaseLease(n, rec); } catch { /* best effort: the lease expires */ } }
     // #4304: the pre-filter runs once per issue; a recovery pass's row adds the earlier attempt's cost, which already holds it.
@@ -1192,7 +1199,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       }
       if (r?.code === "sandbox.capacity") {
         capWait.refused(n, r.reason ?? null);
-        concEmit(conc.refused({ issue: n, code: r.code, reason: r.reason, live: r.live ?? null })); // #5985
+        let hostsNow = null; try { hostsNow = remote?.capacity?.()?.hosts ?? null; } catch { hostsNow = null; }
+        concEmit(conc.refused({ issue: n, code: r.code, reason: r.reason, live: r.live ?? null, host: r.agent ?? null, hosts: hostsNow })); // #5985; #6267: another host with room keeps K
         if (r.detail) capReasons.set(n, String(r.detail).slice(0, 300));
         // #5112: counted for the fallback_local capacity fallback; #5746: a host-busy refusal is not pool capacity
         if (!/host[ _-]?busy|headroom/i.test(String(r.detail ?? ""))) capDefers.set(n, (capDefers.get(n) ?? 0) + 1);

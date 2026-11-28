@@ -4,7 +4,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { makeController, classifyRepo, conditionCleared, formatConcurrency, poolReason, REFUSAL_HOLD_MS } from "./concurrency.mjs";
+import { makeController, hostHasRoom, classifyRepo, conditionCleared, formatConcurrency, poolReason, REFUSAL_HOLD_MS } from "./concurrency.mjs";
 
 const green = { load_per_core: 0.4, mem_available_gb: 12 };
 const mk = (o = {}) => { const c = { t: 1_000_000 }; return { c, ctl: makeController({ ceiling: 8, now: () => c.t, ...o }) }; };
@@ -20,7 +20,7 @@ describe("controller (#5985)", () => {
     c.t += REFUSAL_HOLD_MS;
     assert.equal(ctl.observe(green).change, "increase");
     assert.equal(ctl.operating(), 5);
-    for (let i = 0; i < 10; i++) ctl.observe(green);
+    for (let i = 0; i < 3; i++) { c.t += REFUSAL_HOLD_MS; ctl.observe(green); }
     assert.equal(ctl.operating(), 8);
     assert.equal(ctl.limiting(), "ceiling");
     for (let i = 0; i < 6; i++) { c.t += 2000; ctl.refused({ code: "pool.host_mem" }); }
@@ -122,5 +122,45 @@ describe("heavy lanes in orchestrate (#5985)", () => {
     assert.equal(heavy.max, 2, "ceiling 6, heavy cap ceil(6/3)");
     assert.equal(light.max, 6);
     assert.ok(heavy.events.some((e) => e.event === "concurrency" && e.change === "heavy-cap"));
+  });
+});
+
+describe("per-host refusals and the ramp (#6267)", () => {
+  const hosts = (o = {}) => [{ name: "mrdubey", ok: true, at_limit: true }, { name: "legion", ok: true, at_limit: false, ...o }];
+  it("a host_mem refusal from one host leaves K alone while another eligible host has room; the issue is still held", () => {
+    const { ctl } = mk();
+    assert.equal(ctl.refused({ issue: 1, code: "pool.host_mem", reason: "host_mem", live: null, host: "mrdubey", hosts: hosts() }), null);
+    assert.equal(ctl.operating(), 8);
+    assert.equal(ctl.limiting(), "ceiling");
+    assert.equal(ctl.holding(1, { mem_available_gb: 1 }), true, "a placement fact for that host: the lane waits");
+    for (const code of ["pool.host_load", "pool.projected_peak", "pool.disk_low"]) assert.equal(mk().ctl.refused({ code, host: "mrdubey", hosts: hosts() }), null, code);
+  });
+  it("lowers K when every eligible host is at its limit, when the other host is paused or offline, or when no host sample exists", () => {
+    for (const hs of [hosts({ at_limit: true }), hosts({ paused: true }), hosts({ ok: false }), null, []]) {
+      const { ctl } = mk();
+      const e = ctl.refused({ code: "pool.host_mem", host: "mrdubey", hosts: hs });
+      assert.equal(e?.change, "decrease", JSON.stringify(hs));
+      assert.equal(ctl.operating(), 4);
+    }
+  });
+  it("the refuser itself never counts as the host with room", () => {
+    assert.equal(hostHasRoom([{ name: "mrdubey", ok: true, at_limit: false }], "mrdubey"), false);
+    assert.equal(hostHasRoom(hosts(), "mrdubey"), true);
+  });
+  it("a non-resource high load still halves with room elsewhere (unchanged)", () => {
+    const { ctl } = mk();
+    assert.ok(ctl.refused({ live: { load_per_core: 2 }, hosts: hosts() }));
+  });
+  it("after one decrease K steps up at most once per holdMs/RECOVER_HOLDS, not 8 times in one second", () => {
+    const { c, ctl } = mk({ ceiling: 20 });
+    ctl.refused({ code: "pool.host_mem" });
+    assert.equal(ctl.operating(), 10);
+    c.t += REFUSAL_HOLD_MS;
+    let ups = 0;
+    for (let i = 0; i < 8; i++) { if (ctl.observe(green)) ups++; c.t += 100; }
+    assert.equal(ups, 1, "one step in 0.8 s");
+    c.t += REFUSAL_HOLD_MS / 3;
+    assert.equal(ctl.observe(green).change, "increase");
+    assert.equal(ctl.operating(), 12);
   });
 });

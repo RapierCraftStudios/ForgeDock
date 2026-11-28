@@ -407,6 +407,11 @@ describe("remote capacity (GET /status, #4540)", () => {
     for (const r of [{ status: 404 }, { status: 200, body: "nope" }, { status: 200, body: '{"free":"2"}' }, { status: 200, body: '{"free":-1}' }]) assert.equal(await mk(r).capacity(), null);
     await assert.rejects(() => mk(new Error("down")).capacity(), (e) => e.unreachable === true && /pool router unreachable/.test(e.message));
   });
+  it("#6267: /status agents report per-host limits (memory/disk) as hosts[]", async () => {
+    const body = JSON.stringify({ free: 2, online: 2, total: 2, agents: [{ name: "mrdubey", ok: true, paused: false, host_mem_low: true }, { name: "legion", ok: true, paused: false }] });
+    const c = await mk({ status: 200, body }).capacity();
+    assert.deepEqual(c.hosts, [{ name: "mrdubey", ok: true, paused: false, at_limit: true }, { name: "legion", ok: true, paused: false, at_limit: false }]);
+  });
   it("#4788: no online on /status: derived from /agents (ok && !paused); an unreadable /agents stays unknown", async () => {
     const mkA = (status, agents) => httpTransport({ endpoint: "https://pool.example/v1", fetchFn: async (url) => {
       const body = url.endsWith("/agents") ? agents : "";

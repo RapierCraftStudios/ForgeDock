@@ -1487,6 +1487,8 @@ export async function runCore(o) {
   }
 
   /** Live-checks a builder block (#4124). Dependency issues are re-read, so a closed or unknown number is not a block. */
+  // #6264: a dependency read retries a transient gh failure (graphql i/o timeout, error connecting to api.github.com) with backoff; only what stays unreadable ends the lane.
+  const readIssue = (n) => retrying(() => ghc(["issue", "view", String(n), "-R", repo, "--json", "state,labels"]), { transient: GH_TRANSIENT_RE, attempts: 4, sleep: sleepFn, random });
   async function resolveBlock(r) {
     const b = classifyBlock(r, issue);
     if (b.kind !== "dependency") return b;
@@ -1494,7 +1496,7 @@ export async function runCore(o) {
     const lanePrs = lane ? laneMergedPrs(lane, io) : null;
     for (const d of b.issues) {
       let v;
-      try { v = JSON.parse(String(await ghc(["issue", "view", String(d), "-R", repo, "--json", "state,labels"]))); } catch (e) {
+      try { v = JSON.parse(String(await readIssue(d))); } catch (e) {
         return { kind: "unreadable", detail: `dependency #${d} named by the builder could not be read: ${String(e?.message ?? e).slice(0, 200)}` };
       }
       // #4153 / #4337: a decomposed parent, open or closed, resolves to its open sub-issues; it is satisfied once they all
@@ -1505,7 +1507,7 @@ export async function runCore(o) {
       const recs = [];
       if (!subs) recs.push([d, { ...v, state: "OPEN" }]);
       else for (const n of subs) {
-        try { recs.push([n, JSON.parse(String(await ghc(["issue", "view", String(n), "-R", repo, "--json", "state,labels"])))]); } catch (e) {
+        try { recs.push([n, JSON.parse(String(await readIssue(n)))]); } catch (e) {
           return { kind: "unreadable", detail: `sub-issue #${n} of decomposed dependency #${d} could not be read: ${String(e?.message ?? e).slice(0, 200)}` };
         }
       }
@@ -1648,7 +1650,11 @@ export async function runCore(o) {
   // ---- admission: Depends-on refusal, then lease ----
   {
     let dep = null;
-    try { dep = await openDependency(issue, io, { lane }); } catch (e) { dep = { unreadable: true, detail: `issue ${issue} **Depends on** check failed: ${e?.message || e}` }; }
+    for (let i = 0; i < 4; i++) { // #6264: the admission read retries a transient gh failure with backoff before the lane ends unreadable
+      try { dep = await openDependency(issue, io, { lane }); } catch (e) { dep = { unreadable: true, detail: `issue ${issue} **Depends on** check failed: ${e?.message || e}` }; }
+      if (!dep?.unreadable || !GH_TRANSIENT_RE.test(String(dep.detail ?? "")) || i === 3) break;
+      await sleepFn(1000 * 2 ** i + Math.floor(random() * 250));
+    }
     if (dep?.unreadable) return { terminalReason: "dependency-unreadable", code: OUTCOME_CODES.DEPENDENCY_UNREADABLE, detail: dep.detail };
     if (dep?.satisfied?.length) { // #4686: open on GitHub, but its PR is already on this lane
       const names = dep.satisfied.map((x) => `#${x.issue} (PR #${x.pr}, merge commit ${x.sha.slice(0, 12)} on origin/${lane})`).join(", ");

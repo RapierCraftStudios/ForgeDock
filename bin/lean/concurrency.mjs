@@ -18,6 +18,12 @@ const fin = (v) => typeof v === "number" && Number.isFinite(v);
 /** `host_load` from a refusal reason/code (`pool.host_load` or `host_load`); "" when it is not a pool reason. */
 export const poolReason = (v) => { const m = /^(?:pool\.)?(host_load|host_mem|projected_peak|disk(?:_low|_cap)?)$/.exec(String(v ?? "")); return m ? m[1].replace(/^disk_.*/, "disk") : ""; };
 
+/**
+ * #6267: true when the pool sample (`hosts: [{name, ok, paused, at_limit}]`) shows an eligible host other than `host` (the refuser) below its
+ * limits, so a resource refusal from `host` need not lower the batch's K. No sample (null/empty) = unknown = false: the batch-wide rule holds.
+ */
+export const hostHasRoom = (hosts, host = null) => Array.isArray(hosts) && hosts.some((h) => h && h.ok !== false && h.paused !== true && h.at_limit !== true && (host === null || h.name !== host));
+
 /** The named condition a refusal waits on: true = cleared, false = still holding, null = unknown (no figures, or no named condition). */
 export function conditionCleared(reason, cap, { memFloorGb = MEM_FLOOR_GB } = {}) {
   const r = poolReason(reason);
@@ -49,10 +55,12 @@ export function makeController({ ceiling, heavyCap = null, now = Date.now, memFl
     heavyLimit: () => hcap(),
     limiting(klass = "light") { return klass === "heavy" && hcap() < Math.min(top, k) ? "heavy cap" : k < top ? factor : "ceiling"; },
     /** A launch was refused. Halves on a `pool.*` reason or load above 1.5/core. Returns the event, or null when nothing moved. */
-    refused({ issue = null, code = "", reason = "", live = null } = {}) {
+    refused({ issue = null, code = "", reason = "", live = null, host = null, hosts = null } = {}) {
       const r = poolReason(reason) || poolReason(code);
       const hot = fin(live?.load_per_core) && live.load_per_core > LOAD_HALVE;
       if (issue !== null && r) held.set(issue, { at: now(), reason: r });
+      // #6267: one host's resource refusal is a placement fact for that host; the batch's K drops only when no other eligible host has room.
+      if (r && hostHasRoom(hosts, host)) return null;
       if (!r && !hot) return null;
       const t = now();
       if (t - lastRefusal < 1000) return null; // one storm of simultaneous refusals is one halving
@@ -69,7 +77,8 @@ export function makeController({ ceiling, heavyCap = null, now = Date.now, memFl
       // #6204: recover to the ceiling after pressure clears: green load grows after holdMs; a load between green and the halve line (never
       // a halving cause) grows after RECOVER_HOLDS holds of quiet, so a host that sits at 1.0-1.5/core no longer pins K at its low point for hours.
       const quiet = now() - lastRefusal, calm = cap.load_per_core < LOAD_GREEN ? quiet >= holdMs : cap.load_per_core < LOAD_HALVE && quiet >= holdMs * RECOVER_HOLDS;
-      if (cap.mem_available_gb > memFloorGb + MEM_HEADROOM_GB && calm && (cap.load_per_core < LOAD_GREEN || now() - lastGrow >= holdMs / RECOVER_HOLDS)) {
+      // #6267: every step up, green or not, waits holdMs/RECOVER_HOLDS since the last one (8 steps landed within 1 s after one decrease).
+      if (cap.mem_available_gb > memFloorGb + MEM_HEADROOM_GB && calm && now() - lastGrow >= holdMs / RECOVER_HOLDS) {
         lastGrow = now();
         const before = k; k += 1;
         if (k >= top) factor = "ceiling";
