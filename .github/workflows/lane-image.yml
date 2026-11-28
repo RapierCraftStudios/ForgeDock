@@ -21,8 +21,9 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
         run: |
-          echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::version must be X.Y.Z"; exit 1; }
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          # bash =~ on the whole string: grep is line-wise and would pass "1.2.3<newline>EVIL=1" (env injection via GITHUB_ENV)
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version must be X.Y.Z"; exit 1; }
+          printf 'VERSION=%s\n' "$VERSION" >> "$GITHUB_ENV"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: v${{ env.VERSION }}
